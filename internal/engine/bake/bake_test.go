@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter-go/internal/engine/mvt"
+	"github.com/beetlebugorg/chartplotter-go/internal/engine/portrayal"
 	"github.com/beetlebugorg/chartplotter-go/internal/engine/tile"
+	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
 	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
 	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
@@ -277,4 +279,41 @@ func TestSoundingGrouping(t *testing.T) {
 	if !found {
 		t.Fatal("no soundings layer found in any tile")
 	}
+}
+
+func TestSectorLights(t *testing.T) {
+	// expandSector: a sector -> 2 dashed legs + OUTLW underlay + coloured arc.
+	anchor := mustLatLon(38.97, -76.49)
+	strokes := expandSector(anchor, sp(0, 90, "LITRD"), 14)
+	if len(strokes) != 4 {
+		t.Fatalf("sector strokes = %d, want 4", len(strokes))
+	}
+	if !strokes[0].dashed || strokes[0].colorToken != "CHBLK" {
+		t.Error("leg 0 should be dashed CHBLK")
+	}
+	if strokes[2].colorToken != "OUTLW" || strokes[2].widthPx != 4 {
+		t.Error("stroke 2 should be 4px OUTLW underlay")
+	}
+	if strokes[3].colorToken != "LITRD" || strokes[3].widthPx != 2 || strokes[3].dashed {
+		t.Error("stroke 3 should be 2px solid LITRD arc")
+	}
+	// Screen-fixed: lat span ~halves per zoom level.
+	r14 := expandSector(anchor, sp(0, 0, "LITYW"), 14) // ring
+	r15 := expandSector(anchor, sp(0, 0, "LITYW"), 15)
+	span := func(s []sectorStroke) float64 { return absf(s[len(s)-1].points[0].Lat - anchor.Lat) }
+	if ratio := span(r14) / span(r15); ratio < 1.9 || ratio > 2.1 {
+		t.Errorf("ring radius ratio z14/z15 = %.3f, want ~2", ratio)
+	}
+}
+
+func mustLatLon(lat, lon float64) geo.LatLon { return geo.LatLon{Lat: lat, Lon: lon} }
+func sp(start, end float64, color string) portrayal.SectorParams {
+	return portrayal.SectorParams{StartAngleDeg: start, EndAngleDeg: end, ColorToken: color}
+}
+
+func absf(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

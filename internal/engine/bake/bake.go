@@ -12,9 +12,10 @@
 // only the finest cell's chart). A normalized-world bbox reject prunes far
 // primitives before projection.
 //
-// Ported from chartplotter/src/bake.zig. Remaining vs the Zig: sector-light
-// tessellation, OBSTRN/WRECKS danger-depth carriage, grouping a sounding
-// number's digit glyphs into one feature.
+// Ported from chartplotter/src/bake.zig (+ sectorlights.zig): SCAMIN z-min,
+// native bands + best-available suppression, sounding-number grouping,
+// OBSTRN/WRECKS danger-depth carriage, and per-zoom sector-light tessellation
+// into the lines layer.
 package bake
 
 import (
@@ -142,10 +143,25 @@ type routed struct {
 	attrs []mvt.KeyValue
 }
 
+// sectorPrim is a LIGHTS06 sector light. Its geometry (dashed legs, OUTLW-backed
+// coloured arc / ring) is screen-px sized, so it is tessellated per zoom at emit
+// time into the lines layer rather than stored as fixed lat/lon geometry.
+type sectorPrim struct {
+	anchor   geo.LatLon
+	params   portrayal.SectorParams
+	class    string
+	drawPrio int
+	cat      int
+	band     Band
+	zMin     uint32
+	natMax   uint32
+}
+
 // Baker accumulates routed primitives from many cells, then tiles them.
 type Baker struct {
-	prims []routed
-	bbox  geo.BoundingBox
+	prims   []routed
+	sectors []sectorPrim
+	bbox    geo.BoundingBox
 }
 
 // New returns an empty Baker.
@@ -279,7 +295,11 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 	case portrayal.SymbolCall:
 		b.routeSymbol(v, common, r)
 	case portrayal.SectorLight:
-		// Sector-light tessellation is not yet ported.
+		b.bbox.ExtendPoint(v.Anchor)
+		b.sectors = append(b.sectors, sectorPrim{
+			anchor: v.Anchor, params: v.Sector, class: class,
+			drawPrio: drawPrio, cat: cat, band: band, zMin: zMin, natMax: zr.Max,
+		})
 	}
 }
 
@@ -318,17 +338,29 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 			MinLat: unnormY(r.wMaxY), MinLon: r.wMinX*360 - 180,
 			MaxLat: unnormY(r.wMinY), MaxLon: r.wMaxX*360 - 180,
 		}
-		for z := r.zMin; z <= r.zMax; z++ {
-			rng := tile.RangeForBbox(z, bb, extent)
-			for x := rng.XMin; x <= rng.XMax; x++ {
-				for y := rng.YMin; y <= rng.YMax; y++ {
-					key := uint64(z)<<40 | uint64(x)<<20 | uint64(y)
-					if _, ok := seen[key]; ok {
-						continue
-					}
-					seen[key] = struct{}{}
-					out = append(out, tile.TileCoord{Z: z, X: x, Y: y})
+		out = addRange(out, seen, bb, r.zMin, r.zMax, extent)
+	}
+	// Sector lights anchor a small screen-px figure; their own anchor tile (plus
+	// the bbox reject margin in EmitTile) covers the spill.
+	for i := range b.sectors {
+		sp := &b.sectors[i]
+		bb := geo.BoundingBox{MinLat: sp.anchor.Lat, MinLon: sp.anchor.Lon, MaxLat: sp.anchor.Lat, MaxLon: sp.anchor.Lon}
+		out = addRange(out, seen, bb, sp.zMin, sp.natMax, extent)
+	}
+	return out
+}
+
+func addRange(out []tile.TileCoord, seen map[uint64]struct{}, bb geo.BoundingBox, zMin, zMax, extent uint32) []tile.TileCoord {
+	for z := zMin; z <= zMax; z++ {
+		rng := tile.RangeForBbox(z, bb, extent)
+		for x := rng.XMin; x <= rng.XMax; x++ {
+			for y := rng.YMin; y <= rng.YMax; y++ {
+				key := uint64(z)<<40 | uint64(x)<<20 | uint64(y)
+				if _, ok := seen[key]; ok {
+					continue
 				}
+				seen[key] = struct{}{}
+				out = append(out, tile.TileCoord{Z: z, X: x, Y: y})
 			}
 		}
 	}
@@ -422,10 +454,136 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 		}
 	}
 
+	// Sector lights: tessellate per zoom into the lines layer. Their screen-px
+	// geometry can spill into neighbouring tiles, so reject with a margin sized to
+	// the largest radius (the ring's 26 mm).
+	margin := (26.0*float64(portrayal.DefaultPxPerSymbolUnit)*100.0 + buffer) / float64(extent) / n
+	for i := range b.sectors {
+		sp := &b.sectors[i]
+		if coord.Z < sp.zMin || coord.Z > sp.natMax {
+			continue
+		}
+		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		if ax < tnx0-margin || ax > tnx1+margin || ay < tny0-margin || ay > tny1+margin {
+			continue
+		}
+		for _, st := range expandSector(sp.anchor, sp.params, coord.Z) {
+			runs := tile.ClipLine(projectRing(st.points, proj), rect)
+			paths := make([][]mvt.IPoint, 0, len(runs))
+			for _, run := range runs {
+				if len(run) >= 2 {
+					paths = append(paths, quantizeRing(run))
+				}
+			}
+			if len(paths) == 0 {
+				continue
+			}
+			dash := "solid"
+			if st.dashed {
+				dash = "dashed"
+			}
+			tb.Layer("lines").AddLines(paths, []mvt.KeyValue{
+				{Key: "class", Value: mvt.StringVal(sp.class)},
+				{Key: "color_token", Value: mvt.StringVal(st.colorToken)},
+				{Key: "width_px", Value: mvt.IntVal(int64(st.widthPx + 0.5))},
+				{Key: "dash", Value: mvt.StringVal(dash)},
+				{Key: "cat", Value: mvt.IntVal(int64(sp.cat))},
+				{Key: "bnd", Value: mvt.IntVal(int64(sp.band))},
+				{Key: "draw_prio", Value: mvt.IntVal(int64(sp.drawPrio))},
+			})
+		}
+	}
+
 	if tb.IsEmpty() {
 		return nil
 	}
 	return tb.Encode()
+}
+
+// sectorStroke is one tessellated piece of sector geometry: a lat/lon polyline
+// plus the S-52 pen token + width the lines layer carries.
+type sectorStroke struct {
+	points     []geo.LatLon
+	colorToken string
+	widthPx    float32
+	dashed     bool
+}
+
+// expandSector tessellates a LIGHTS06 sector at anchor into lat/lon line strokes
+// sized for integer zoom z (screen-px radii). Ported from sectorlights.zig: a
+// ring is one OUTLW-backed coloured circle (26 mm); a sector is two dashed CHBLK
+// legs (25 mm) plus an OUTLW-backed coloured arc (20 mm). SECTR1/2 are from
+// seaward, so bearings are reversed +180.
+func expandSector(anchor geo.LatLon, p portrayal.SectorParams, z uint32) []sectorStroke {
+	worldPx := 256.0 * math.Pow(2, float64(z))
+	ax, ay := normX(anchor.Lon)*worldPx, normY(anchor.Lat)*worldPx
+	pxPerMM := float64(portrayal.DefaultPxPerSymbolUnit) * 100.0
+	color := p.ColorToken
+	if color == "" {
+		color = "LITRD"
+	}
+
+	sweep := p.EndAngleDeg - p.StartAngleDeg
+	isRing := math.Abs(sweep) < 1e-6 || math.Abs(math.Abs(sweep)-360) < 1e-6
+	if isRing {
+		return emitArc(nil, ax, ay, worldPx, 26.0, color, 0, 360, pxPerMM)
+	}
+	a1 := p.StartAngleDeg + 180.0
+	a2 := p.EndAngleDeg + 180.0
+	if a2 <= a1 {
+		a2 += 360.0
+	}
+	legLen := 25.0 * pxPerMM
+	var out []sectorStroke
+	out = emitLeg(out, ax, ay, worldPx, a1, legLen)
+	out = emitLeg(out, ax, ay, worldPx, a2, legLen)
+	out = emitArc(out, ax, ay, worldPx, 20.0, color, a1, a2, pxPerMM)
+	return out
+}
+
+func bearingToScreen(deg float64) (float64, float64) {
+	r := deg * math.Pi / 180.0
+	return math.Sin(r), -math.Cos(r) // y grows southward: north=(0,-1), east=(1,0)
+}
+
+func sunproject(x, y, worldPx float64) geo.LatLon {
+	return geo.LatLon{Lat: unnormY(y / worldPx), Lon: x/worldPx*360 - 180}
+}
+
+func emitLeg(out []sectorStroke, ax, ay, worldPx, bearingDeg, lenPx float64) []sectorStroke {
+	if lenPx <= 0 {
+		return out
+	}
+	dx, dy := bearingToScreen(bearingDeg)
+	pts := []geo.LatLon{
+		sunproject(ax, ay, worldPx),
+		sunproject(ax+dx*lenPx, ay+dy*lenPx, worldPx),
+	}
+	return append(out, sectorStroke{points: pts, colorToken: "CHBLK", widthPx: 1, dashed: true})
+}
+
+func emitArc(out []sectorStroke, ax, ay, worldPx, radiusMM float64, color string, a1, a2, pxPerMM float64) []sectorStroke {
+	radius := radiusMM * pxPerMM
+	sweep := a2 - a1
+	if radius <= 0 || sweep <= 0 {
+		return out
+	}
+	n := int(math.Ceil(sweep / 3.0))
+	if n < 8 {
+		n = 8
+	}
+	pts := make([]geo.LatLon, n+1)
+	for i := range pts {
+		brg := a1 + sweep*float64(i)/float64(n)
+		dx, dy := bearingToScreen(brg)
+		pts[i] = sunproject(ax+dx*radius, ay+dy*radius, worldPx)
+	}
+	// OUTLW underlay (4 px) beneath, then the coloured arc (2 px) on top.
+	pts2 := make([]geo.LatLon, len(pts))
+	copy(pts2, pts)
+	out = append(out, sectorStroke{points: pts, colorToken: "OUTLW", widthPx: 4, dashed: false})
+	out = append(out, sectorStroke{points: pts2, colorToken: color, widthPx: 2, dashed: false})
+	return out
 }
 
 // anyCoarserOverlaps reports whether a strictly-coarser-band eligible primitive's
