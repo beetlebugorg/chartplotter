@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/alecthomas/kong v1.12.1
+	github.com/dhconnelly/rtreego v1.2.0
 	github.com/spf13/afero v1.15.0
 )
 
