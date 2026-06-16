@@ -12,6 +12,8 @@ import (
 
 	"github.com/alecthomas/kong"
 
+	"github.com/beetlebugorg/chartplotter-go/internal/engine/assets"
+	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
 	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
 )
 
@@ -19,7 +21,27 @@ import (
 var version = "dev"
 
 type cli struct {
-	Version versionCmd `cmd:"" help:"Print version and embedded-asset info."`
+	Version    versionCmd    `cmd:"" help:"Print version and embedded-asset info."`
+	EmitAssets emitAssetsCmd `cmd:"" name:"emit-assets" help:"Generate S-52 client assets (colortables.json, ...) into a directory."`
+}
+
+type emitAssetsCmd struct {
+	Dir string `arg:"" type:"path" help:"Output directory."`
+}
+
+func (c emitAssetsCmd) Run() error {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		return err
+	}
+	files, err := assets.Emit(lib, c.Dir)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		fmt.Println("wrote", f)
+	}
+	return nil
 }
 
 type versionCmd struct{}
