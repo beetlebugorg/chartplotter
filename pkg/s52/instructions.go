@@ -493,11 +493,22 @@ func parseTE(args string) (*TXInstruction, error) {
 		return nil, fmt.Errorf("TE instruction requires 10 arguments, got %d", len(parts))
 	}
 
-	// Skip format string (parts[0]), use attribute name (parts[1]) as the text
-	// Then join remaining params as if it were TX
+	// Build the base TX from the remaining params, using the attribute name as a
+	// fallback text. Then preserve the format string + attribute list so the
+	// portrayal layer can do S-52 §8.3.3.3 printf substitution rather than
+	// dropping the format (which the Zig reference does, e.g. "clr op %4.1lf").
 	txArgs := parts[1] + "," + strings.Join(parts[2:], ",")
-
-	return parseTX(txArgs)
+	tx, err := parseTX(txArgs)
+	if err != nil {
+		return nil, err
+	}
+	tx.Format = strings.Trim(parts[0], "'\"")
+	for _, a := range strings.Split(strings.Trim(parts[1], "'\""), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			tx.FormatAttrs = append(tx.FormatAttrs, a)
+		}
+	}
+	return tx, nil
 }
 
 func parseCS(args string) (*CSInstruction, error) {

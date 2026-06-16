@@ -241,13 +241,24 @@ func (w *walker) emitText(tx *s52.TextInstruction, g geom) {
 	if tx == nil {
 		return
 	}
-	text := tx.Text
-	if tx.IsAttributeReference {
+	var text string
+	switch {
+	case tx.Format != "":
+		// TE: substitute attribute values into the C-printf format (S-52
+		// §8.3.3.3). A missing referenced attribute suppresses the whole label.
+		s, ok := formatSubstitute(w.attrs, tx.Format, tx.FormatAttrs)
+		if !ok || s == "" {
+			return
+		}
+		text = s
+	case tx.IsAttributeReference:
 		v, ok := lookupAttributeText(w.attrs, tx.Text)
 		if !ok || v == "" {
 			return // missing mandatory field -> label not drawn (S-52)
 		}
 		text = v
+	default:
+		text = tx.Text
 	}
 	if text == "" {
 		return
@@ -428,13 +439,14 @@ func mapHJust(h int) HAlign {
 }
 
 func mapVJust(v int) VAlign {
+	// S-52 §8.3.3.2 VJUST: 2 centre, 3 top, else (incl. 1) bottom (matches dai.zig).
 	switch v {
-	case 1:
-		return VAlignBottom
 	case 2:
 		return VAlignMiddle
-	default:
+	case 3:
 		return VAlignTop
+	default:
+		return VAlignBottom
 	}
 }
 
@@ -443,6 +455,99 @@ func maxF32(a, b float32) float32 {
 		return a
 	}
 	return b
+}
+
+// formatSubstitute substitutes attribute values into a TE/TX C-printf format
+// string (S-52 §8.3.3.3 — e.g. "clr op %4.1lf" with VERCOP -> "clr op 12.3").
+// Handles %[flags][width][.precision][l|h|L]conv; width/flags only affect
+// fixed-pitch padding so they are ignored, precision is honoured for floats.
+// Returns ok=false when a referenced attribute is absent — per S-52 a label with
+// a missing mandatory field is not drawn. Ported from primitive.zig.
+func formatSubstitute(attrs map[string]interface{}, format string, attrNames []string) (string, bool) {
+	var out strings.Builder
+	attrIdx := 0
+	i := 0
+	for i < len(format) {
+		if format[i] != '%' || i+1 >= len(format) {
+			out.WriteByte(format[i])
+			i++
+			continue
+		}
+		if format[i+1] == '%' {
+			out.WriteByte('%')
+			i += 2
+			continue
+		}
+		// Scan the printf spec: flags, width, .precision, length, conv.
+		j := i + 1
+		for j < len(format) && strings.IndexByte("-+ #0", format[j]) >= 0 {
+			j++
+		}
+		for j < len(format) && format[j] >= '0' && format[j] <= '9' {
+			j++
+		}
+		precision := -1
+		if j < len(format) && format[j] == '.' {
+			j++
+			p := 0
+			for j < len(format) && format[j] >= '0' && format[j] <= '9' {
+				p = p*10 + int(format[j]-'0')
+				j++
+			}
+			precision = p
+		}
+		for j < len(format) && (format[j] == 'l' || format[j] == 'h' || format[j] == 'L') {
+			j++
+		}
+		if j >= len(format) {
+			out.WriteString(format[i:]) // malformed trailing spec -> keep literal
+			break
+		}
+		switch conv := format[j]; conv {
+		case 's', 'c', 'd', 'i', 'u', 'x', 'f', 'e', 'g':
+			if attrIdx >= len(attrNames) {
+				return "", false
+			}
+			acr := attrNames[attrIdx]
+			attrIdx++
+			val, ok := lookupAttributeText(attrs, acr)
+			if !ok {
+				return "", false
+			}
+			appendConverted(&out, val, conv, precision)
+		default:
+			out.WriteString(format[i : j+1]) // unknown conversion -> literal
+		}
+		i = j + 1
+	}
+	return out.String(), true
+}
+
+// appendConverted appends val formatted per the printf conversion: floats honour
+// precision, integer conversions round, everything else passes through.
+func appendConverted(out *strings.Builder, val string, conv byte, precision int) {
+	switch conv {
+	case 'f', 'e', 'g':
+		x, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+		if err != nil {
+			out.WriteString(val)
+			return
+		}
+		if precision >= 0 {
+			out.WriteString(strconv.FormatFloat(x, 'f', precision, 64))
+		} else {
+			out.WriteString(strconv.FormatFloat(x, 'g', -1, 64))
+		}
+	case 'd', 'i', 'u', 'x':
+		x, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+		if err != nil {
+			out.WriteString(val)
+			return
+		}
+		out.WriteString(strconv.FormatInt(int64(math.Round(x)), 10))
+	default:
+		out.WriteString(val)
+	}
 }
 
 // stringifyScalar renders a scalar attribute value as label text. Integer-valued

@@ -539,6 +539,13 @@ type TextInstruction struct {
 	Color                string
 	Display              int
 	IsAttributeReference bool
+
+	// TE (formatted text) only: the C-printf format string (e.g. "clr op %4.1lf")
+	// and the attribute acronyms substituted into it, in order. Empty for TX.
+	// Preserved so the portrayal layer can run S-52 §8.3.3.3 substitution instead
+	// of discarding the format. See ParseTextInstruction / parseTE.
+	Format      string
+	FormatAttrs []string
 }
 
 // FontSpec represents font specifications
