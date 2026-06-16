@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter-go/internal/engine/mvt"
+	"github.com/beetlebugorg/chartplotter-go/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter-go/internal/engine/portrayal"
 	"github.com/beetlebugorg/chartplotter-go/internal/engine/tile"
 	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
@@ -303,6 +304,18 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 		}
 	}
 	return out
+}
+
+// BakePMTiles bakes every resident tile into a PMTiles archive builder (empty
+// tiles dropped, identical tiles deduped). Call WriteTo/Finish on the result.
+func (b *Baker) BakePMTiles(extent uint32, buffer float64) *pmtiles.Builder {
+	pb := pmtiles.New()
+	for _, c := range b.TileCoords(extent) {
+		if data := b.EmitTile(c, extent, buffer); data != nil {
+			pb.AddTile(uint8(c.Z), c.X, c.Y, data)
+		}
+	}
+	return pb
 }
 
 // EmitTile bakes the merged MVT for one tile, or nil if it has no features.

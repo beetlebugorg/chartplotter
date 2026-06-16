@@ -217,3 +217,25 @@ func decodeLayers(data []byte) map[string]*decLayer {
 	}
 	return out
 }
+
+func TestBakePMTilesArchive(t *testing.T) {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		t.Fatalf("load lib: %v", err)
+	}
+	chart, err := s57.Parse(goldenCell)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	b := New()
+	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	pb := b.BakePMTiles(mvt.ExtentDefault, 64)
+	if pb.Count() == 0 {
+		t.Fatal("archive has no tiles")
+	}
+	arc := pb.Finish()
+	if string(arc[0:7]) != "PMTiles" || arc[7] != 3 {
+		t.Fatal("not a valid PMTiles v3 archive")
+	}
+	t.Logf("archive: %d tiles, %d bytes", pb.Count(), len(arc))
+}
