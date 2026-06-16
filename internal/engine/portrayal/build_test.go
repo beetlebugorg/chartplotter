@@ -117,3 +117,43 @@ func TestSoundingDepthCarried(t *testing.T) {
 	}
 	t.Skip("no SOUNDG features in golden cell")
 }
+
+func TestDangerDepth(t *testing.T) {
+	lib := loadLib(t)
+	chart, err := s57.Parse(goldenCell)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	mariner := s52.DefaultMarinerSettings()
+	var checked int
+	for _, f := range chart.Features() {
+		cls := f.ObjectClass()
+		if cls != "OBSTRN" && cls != "WRECKS" {
+			continue
+		}
+		if _, ok := f.Attribute("VALSOU"); !ok {
+			continue
+		}
+		fb, ok := BuildFeature(lib, mariner, &f)
+		if !ok {
+			continue
+		}
+		for _, p := range fb.Primitives {
+			sc, ok := p.(SymbolCall)
+			if !ok {
+				continue
+			}
+			checked++
+			if sc.SymbolName != "DANGER01" {
+				t.Errorf("%s w/ VALSOU: symbol %q, want DANGER01", cls, sc.SymbolName)
+			}
+			if sc.DeepSymbolName != "DANGER02" {
+				t.Errorf("%s: deep symbol %q, want DANGER02", cls, sc.DeepSymbolName)
+			}
+			if math.IsNaN(float64(sc.DangerDepthM)) {
+				t.Errorf("%s: danger depth not set", cls)
+			}
+		}
+	}
+	t.Logf("checked %d sounded OBSTRN/WRECKS danger symbols", checked)
+}
