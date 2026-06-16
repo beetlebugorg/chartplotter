@@ -4,13 +4,22 @@
 // zooms. Colour stays an S-52 token string — the client restyles Day/Dusk/Night
 // for free.
 //
-// Ported (core) from chartplotter/src/bake.zig. Deferred refinements vs the Zig:
-// per-feature SCAMIN z-min, DISPLAYBASE down-fill, cross-cell best-available
-// suppression, the world-space grid index, sector-light tessellation, and
-// grouping a sounding number's digit glyphs into a single feature.
+// This is the single-archive (provisioned) bake the Zig reference calls
+// `spec_display`: a feature's display z-min comes from SCAMIN (S-52 §10.4.2,
+// defaulting to z0 so coverage never goes blank on zoom-out), and where cells of
+// different scales overlap, emitTile applies best-available-data suppression both
+// ways (below the native bands only the coarsest cell's blanket shows; above them
+// only the finest cell's chart). A normalized-world bbox reject prunes far
+// primitives before projection.
+//
+// Ported from chartplotter/src/bake.zig. Remaining vs the Zig: sector-light
+// tessellation, OBSTRN/WRECKS danger-depth carriage, grouping a sounding
+// number's digit glyphs into one feature.
 package bake
 
 import (
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter-go/internal/engine/mvt"
@@ -20,6 +29,8 @@ import (
 	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
 	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
 )
+
+const maxBandZ uint32 = 18
 
 // ZoomRange is a baked [min,max] Web-Mercator zoom span.
 type ZoomRange struct{ Min, Max uint32 }
@@ -78,17 +89,55 @@ func BandForScale(cscl uint32) Band {
 	}
 }
 
-// routed is one primitive ready to tile: its target layer, geometry (lat/lon),
-// bbox, baked zoom span, and the pre-built MVT attributes (minus geometry).
+// scaminZoom maps an S-52 SCAMIN (1:N denominator) to the lowest Web-Mercator
+// zoom whose display-scale denominator is <= SCAMIN — where the object first
+// becomes visible (OGC/equator scale set). Clamped to the baked zoom span.
+func scaminZoom(scamin uint32) uint32 {
+	if scamin == 0 {
+		return 0
+	}
+	const denomZ0 = 559_082_264.029 // 1:N at z0, equator, OGC 0.28 mm px
+	s := float64(scamin)
+	if denomZ0 <= s {
+		return 0
+	}
+	z := math.Ceil(math.Log2(denomZ0 / s))
+	if z >= float64(maxBandZ) {
+		return maxBandZ
+	}
+	if z < 0 {
+		return 0
+	}
+	return uint32(z)
+}
+
+// specZMin is the single-archive display z-min: DISPLAYBASE objects and objects
+// without SCAMIN have no minimum display scale (z0); SCAMIN raises it. Coarse-tile
+// pile-up is bounded by emitTile's best-available suppression.
+func specZMin(displayCategory int, scamin uint32) uint32 {
+	if displayCategory == s52.DisplayBase {
+		return 0
+	}
+	if scamin != 0 {
+		return scaminZoom(scamin)
+	}
+	return 0
+}
+
+// routed is one primitive ready to tile: target layer, geometry (lat/lon), the
+// normalized-world bbox (for the spatial reject + overlap test), the display and
+// native zoom spans, and the pre-built MVT attributes (minus geometry).
 type routed struct {
 	layer string
 	kind  mvt.GeomType
 	rings [][]geo.LatLon // polygon
 	line  []geo.LatLon   // linestring
 	point geo.LatLon     // point
-	bbox  geo.BoundingBox
-	zMin  uint32
-	zMax  uint32
+
+	wMinX, wMinY, wMaxX, wMaxY float64 // normalized world bbox [0,1]
+	zMin, zMax                 uint32  // display zoom span
+	natMin, natMax             uint32  // native band zoom span (for suppression)
+
 	attrs []mvt.KeyValue
 }
 
@@ -99,15 +148,13 @@ type Baker struct {
 }
 
 // New returns an empty Baker.
-func New() *Baker {
-	return &Baker{bbox: geo.EmptyBox()}
-}
+func New() *Baker { return &Baker{bbox: geo.EmptyBox()} }
 
 // Bounds is the union lat/lon bbox of every ingested cell's primitives.
 func (b *Baker) Bounds() geo.BoundingBox { return b.bbox }
 
 // AddCell expands every feature of a parsed cell into routed primitives at the
-// cell's scale band.
+// cell's scale band, with per-feature SCAMIN display z-min.
 func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.MarinerSettings) {
 	band := BandForScale(uint32(chart.CompilationScale()))
 	zr := band.ZoomRange()
@@ -118,19 +165,25 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		if !ok {
 			continue
 		}
+		scamin := intAttr(f.Attributes(), "SCAMIN")
+		zMin := specZMin(fb.DisplayCategory, scamin)
 		class := f.ObjectClass()
 		for _, p := range fb.Primitives {
-			b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr)
+			b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin)
 		}
 	}
 }
 
-func (b *Baker) add(r routed) {
-	b.bbox.ExtendBox(r.bbox)
+func (b *Baker) add(r routed, bb geo.BoundingBox) {
+	b.bbox.ExtendBox(bb)
+	r.wMinX = normX(bb.MinLon)
+	r.wMaxX = normX(bb.MaxLon)
+	r.wMinY = normY(bb.MaxLat) // north -> smaller y
+	r.wMaxY = normY(bb.MinLat) // south -> larger y
 	b.prims = append(b.prims, r)
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32) {
 	bnd := int64(band)
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
@@ -141,61 +194,54 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		}
 		return append(base, extra...)
 	}
+	r := routed{zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
 
 	switch v := p.(type) {
 	case portrayal.FillPolygon:
-		b.add(routed{
-			layer: "areas", kind: mvt.GeomPolygon, rings: v.Rings, bbox: ringsBbox(v.Rings),
-			zMin: zr.Min, zMax: zr.Max,
-			attrs: common(mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)}),
-		})
+		r.layer, r.kind, r.rings = "areas", mvt.GeomPolygon, v.Rings
+		r.attrs = common(mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)})
+		b.add(r, ringsBbox(v.Rings))
 	case portrayal.PatternFill:
-		b.add(routed{
-			layer: "area_patterns", kind: mvt.GeomPolygon, rings: v.Rings, bbox: ringsBbox(v.Rings),
-			zMin: zr.Min, zMax: zr.Max,
-			attrs: common(mvt.KeyValue{Key: "pattern_name", Value: mvt.StringVal(v.PatternName)}),
-		})
+		r.layer, r.kind, r.rings = "area_patterns", mvt.GeomPolygon, v.Rings
+		r.attrs = common(mvt.KeyValue{Key: "pattern_name", Value: mvt.StringVal(v.PatternName)})
+		b.add(r, ringsBbox(v.Rings))
 	case portrayal.StrokeLine:
-		b.add(routed{
-			layer: "lines", kind: mvt.GeomLineString, line: v.Points, bbox: ptsBbox(v.Points),
-			zMin: zr.Min, zMax: zr.Max,
-			attrs: common(
-				mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
-				mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(v.WidthPx + 0.5))},
-				mvt.KeyValue{Key: "dash", Value: mvt.StringVal(dashName(v.Dash))},
-			),
-		})
+		r.layer, r.kind, r.line = "lines", mvt.GeomLineString, v.Points
+		r.attrs = common(
+			mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
+			mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(v.WidthPx + 0.5))},
+			mvt.KeyValue{Key: "dash", Value: mvt.StringVal(dashName(v.Dash))},
+		)
+		b.add(r, ptsBbox(v.Points))
 	case portrayal.LinePattern:
-		b.add(routed{
-			layer: "complex_lines", kind: mvt.GeomLineString, line: v.Points, bbox: ptsBbox(v.Points),
-			zMin: zr.Min, zMax: zr.Max,
-			attrs: common(mvt.KeyValue{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)}),
-		})
+		r.layer, r.kind, r.line = "complex_lines", mvt.GeomLineString, v.Points
+		r.attrs = common(mvt.KeyValue{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)})
+		b.add(r, ptsBbox(v.Points))
 	case portrayal.DrawText:
-		b.add(routed{
-			layer: "text", kind: mvt.GeomPoint, point: v.Anchor, bbox: ptBbox(v.Anchor),
-			zMin: zr.Min, zMax: zr.Max,
-			attrs: common(
-				mvt.KeyValue{Key: "text", Value: mvt.StringVal(v.Text)},
-				mvt.KeyValue{Key: "font_size_px", Value: mvt.FloatVal(v.FontSizePx)},
-				mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
-				mvt.KeyValue{Key: "halign", Value: mvt.StringVal(halignName(v.HAlign))},
-				mvt.KeyValue{Key: "valign", Value: mvt.StringVal(valignName(v.VAlign))},
-				mvt.KeyValue{Key: "offset_x", Value: mvt.FloatVal(v.OffsetXPx)},
-				mvt.KeyValue{Key: "offset_y", Value: mvt.FloatVal(v.OffsetYPx)},
-				mvt.KeyValue{Key: "halo_color_token", Value: mvt.StringVal(haloTextColor(v.Halo))},
-				mvt.KeyValue{Key: "halo_width", Value: mvt.FloatVal(haloTextWidth(v.Halo))},
-			),
-		})
+		r.layer, r.kind, r.point = "text", mvt.GeomPoint, v.Anchor
+		r.attrs = common(
+			mvt.KeyValue{Key: "text", Value: mvt.StringVal(v.Text)},
+			mvt.KeyValue{Key: "font_size_px", Value: mvt.FloatVal(v.FontSizePx)},
+			mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
+			mvt.KeyValue{Key: "halign", Value: mvt.StringVal(halignName(v.HAlign))},
+			mvt.KeyValue{Key: "valign", Value: mvt.StringVal(valignName(v.VAlign))},
+			mvt.KeyValue{Key: "offset_x", Value: mvt.FloatVal(v.OffsetXPx)},
+			mvt.KeyValue{Key: "offset_y", Value: mvt.FloatVal(v.OffsetYPx)},
+			mvt.KeyValue{Key: "halo_color_token", Value: mvt.StringVal(haloTextColor(v.Halo))},
+			mvt.KeyValue{Key: "halo_width", Value: mvt.FloatVal(haloTextWidth(v.Halo))},
+		)
+		b.add(r, ptBbox(v.Anchor))
 	case portrayal.SymbolCall:
-		b.routeSymbol(v, common, zr)
+		b.routeSymbol(v, common, r)
 	case portrayal.SectorLight:
-		// Sector tessellation is deferred; skip for now.
+		// Sector-light tessellation is not yet ported.
 	}
 }
 
-func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue) []mvt.KeyValue, zr ZoomRange) {
+func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue) []mvt.KeyValue, r routed) {
+	r.kind, r.point = mvt.GeomPoint, v.Anchor
 	if strings.HasPrefix(v.SymbolName, "SOUNDG") || strings.HasPrefix(v.SymbolName, "SOUNDS") {
+		r.layer = "soundings"
 		attrs := common(
 			mvt.KeyValue{Key: "symbol_names", Value: mvt.StringVal(v.SymbolName)},
 			mvt.KeyValue{Key: "scale", Value: mvt.FloatVal(v.Scale)},
@@ -207,9 +253,11 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 				mvt.KeyValue{Key: "sym_g", Value: mvt.StringVal(soundingVariant(v.SymbolName, 'G'))},
 			)
 		}
-		b.add(routed{layer: "soundings", kind: mvt.GeomPoint, point: v.Anchor, bbox: ptBbox(v.Anchor), zMin: zr.Min, zMax: zr.Max, attrs: attrs})
+		r.attrs = attrs
+		b.add(r, ptBbox(v.Anchor))
 		return
 	}
+	r.layer = "point_symbols"
 	attrs := common(
 		mvt.KeyValue{Key: "symbol_name", Value: mvt.StringVal(v.SymbolName)},
 		mvt.KeyValue{Key: "rotation_deg", Value: mvt.FloatVal(v.RotationDeg)},
@@ -225,17 +273,23 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 			mvt.KeyValue{Key: "sym_deep", Value: mvt.StringVal(v.DeepSymbolName)},
 		)
 	}
-	b.add(routed{layer: "point_symbols", kind: mvt.GeomPoint, point: v.Anchor, bbox: ptBbox(v.Anchor), zMin: zr.Min, zMax: zr.Max, attrs: attrs})
+	r.attrs = attrs
+	b.add(r, ptBbox(v.Anchor))
 }
 
-// TileCoords enumerates every tile (across each primitive's band zooms) that the
-// resident primitives touch.
+// TileCoords enumerates every tile (across each primitive's display zooms) that
+// the resident primitives touch.
 func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 	seen := map[uint64]struct{}{}
 	var out []tile.TileCoord
-	for _, r := range b.prims {
+	for i := range b.prims {
+		r := &b.prims[i]
+		bb := geo.BoundingBox{
+			MinLat: unnormY(r.wMaxY), MinLon: r.wMinX*360 - 180,
+			MaxLat: unnormY(r.wMinY), MaxLon: r.wMaxX*360 - 180,
+		}
 		for z := r.zMin; z <= r.zMax; z++ {
-			rng := tile.RangeForBbox(z, r.bbox, extent)
+			rng := tile.RangeForBbox(z, bb, extent)
 			for x := rng.XMin; x <= rng.XMax; x++ {
 				for y := rng.YMin; y <= rng.YMax; y++ {
 					key := uint64(z)<<40 | uint64(x)<<20 | uint64(y)
@@ -252,24 +306,52 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 }
 
 // EmitTile bakes the merged MVT for one tile, or nil if it has no features.
+// band_z is coord.Z (the per-primitive in-band test zoom).
 func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []byte {
 	tb := mvt.NewTileBuilder(extent)
 	proj := tile.NewProjector(coord, extent)
 	rect := tile.RectForTile(extent, buffer)
 	e := float64(extent)
-	var clip tile.Clipper
+	bandZ := coord.Z
 
+	// Spatial reject in normalized-world coords, then in-display-range filter.
+	n := math.Pow(2, float64(coord.Z))
+	bufN := (buffer / float64(extent)) / n
+	tnx0, tnx1 := float64(coord.X)/n-bufN, float64(coord.X+1)/n+bufN
+	tny0, tny1 := float64(coord.Y)/n-bufN, float64(coord.Y+1)/n+bufN
+
+	var eligible []int
+	var finestNat uint32
 	for i := range b.prims {
 		r := &b.prims[i]
 		if coord.Z < r.zMin || coord.Z > r.zMax {
 			continue
 		}
+		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
+			continue
+		}
+		eligible = append(eligible, i)
+		if r.natMax != math.MaxUint32 && r.natMax > finestNat {
+			finestNat = r.natMax
+		}
+	}
+
+	for _, i := range eligible {
+		r := &b.prims[i]
+		// Best-available suppression: below its native band, yield only where no
+		// coarser cell covers; above its native band, only the finest shows.
+		if bandZ < r.natMin && b.anyCoarserOverlaps(eligible, r) {
+			continue
+		}
+		if bandZ > r.natMax && r.natMax < finestNat {
+			continue
+		}
 		switch r.kind {
 		case mvt.GeomPolygon:
 			var outRings [][]mvt.IPoint
+			var clip tile.Clipper
 			for _, ring := range r.rings {
-				proj4 := projectRing(ring, proj)
-				clipped := clip.Polygon(proj4, rect)
+				clipped := clip.Polygon(projectRing(ring, proj), rect)
 				if len(clipped) < 3 {
 					continue
 				}
@@ -279,11 +361,7 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 				tb.Layer(r.layer).AddPolygon(outRings, r.attrs)
 			}
 		case mvt.GeomLineString:
-			projPts := projectRing(r.line, proj)
-			runs := tile.ClipLine(projPts, rect)
-			if len(runs) == 0 {
-				continue
-			}
+			runs := tile.ClipLine(projectRing(r.line, proj), rect)
 			paths := make([][]mvt.IPoint, 0, len(runs))
 			for _, run := range runs {
 				if len(run) >= 2 {
@@ -308,7 +386,34 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 	return tb.Encode()
 }
 
+// anyCoarserOverlaps reports whether a strictly-coarser-band eligible primitive's
+// world bbox overlaps r (AABB only). Gates down-fill suppression.
+func (b *Baker) anyCoarserOverlaps(eligible []int, r *routed) bool {
+	for _, qi := range eligible {
+		q := &b.prims[qi]
+		if q.natMin >= r.natMin {
+			continue // not coarser than r
+		}
+		if q.wMinX <= r.wMaxX && q.wMaxX >= r.wMinX && q.wMinY <= r.wMaxY && q.wMaxY >= r.wMinY {
+			return true
+		}
+	}
+	return false
+}
+
 // -- helpers -----------------------------------------------------------------
+
+func normX(lon float64) float64 { return (lon + 180.0) / 360.0 }
+
+func normY(lat float64) float64 {
+	sin := math.Sin(lat * math.Pi / 180.0)
+	return 0.5 - math.Log((1.0+sin)/(1.0-sin))/(4.0*math.Pi)
+}
+
+func unnormY(y float64) float64 {
+	// Inverse of normY: solve for latitude (Web-Mercator).
+	return math.Atan(math.Sinh((0.5-y)*2.0*math.Pi)) * 180.0 / math.Pi
+}
 
 func projectRing(ring []geo.LatLon, proj tile.Projector) []tile.FPoint {
 	out := make([]tile.FPoint, len(ring))
@@ -346,6 +451,32 @@ func ptsBbox(pts []geo.LatLon) geo.BoundingBox {
 
 func ptBbox(p geo.LatLon) geo.BoundingBox {
 	return geo.BoundingBox{MinLat: p.Lat, MinLon: p.Lon, MaxLat: p.Lat, MaxLon: p.Lon}
+}
+
+func intAttr(attrs map[string]interface{}, key string) uint32 {
+	v, ok := attrs[key]
+	if !ok {
+		return 0
+	}
+	switch t := v.(type) {
+	case int:
+		if t > 0 {
+			return uint32(t)
+		}
+	case int64:
+		if t > 0 {
+			return uint32(t)
+		}
+	case float64:
+		if t > 0 {
+			return uint32(t)
+		}
+	case string:
+		if n, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil && n > 0 {
+			return uint32(n)
+		}
+	}
+	return 0
 }
 
 func dashName(d portrayal.Dash) string {
