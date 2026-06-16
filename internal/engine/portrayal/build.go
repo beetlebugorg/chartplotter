@@ -18,10 +18,12 @@ const maxCSPDepth = 4
 var nan32 = float32(math.NaN())
 
 // FeatureBuild is the result of expanding one feature: its viewport-independent
-// Primitive stream plus the S-52 display priority that buckets it.
+// Primitive stream plus the S-52 display priority (buckets draw order) and
+// display category (base/standard/other; the client's detail filter).
 type FeatureBuild struct {
 	Primitives      []Primitive
 	DisplayPriority int
+	DisplayCategory int
 }
 
 // geom is the portrayal-space geometry handed to the instruction walk. It mirrors
@@ -82,11 +84,11 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 			}
 			b.emit(set.Instructions, pg, 0)
 		}
-		return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority}, true
+		return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}, true
 	}
 
 	b.emit(set.Instructions, geometryOf(g), 0)
-	return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority}, true
+	return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}, true
 }
 
 type walker struct {
