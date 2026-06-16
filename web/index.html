@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>chartplotter — WASM S-52 ENC plotter</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    chart-plotter-app { display: block; height: 100%; width: 100%; }
+  </style>
+  <!-- <chart-plotter-app> is the chart-management shell: discover charts on the
+       map (NOAA catalog cell boxes over an offline GSHHG coastline), get chart
+       data in, manage what's installed, and set S-52 mariner options.
+       Charts come from a static PMTiles archive (baked ONCE; every S-52 mariner
+       setting is then applied client-side). Two ways to get one in:
+         • drop a `.pmtiles` (e.g. from `zig build bake -Dzip=ENC.zip -Dout=…`), or
+         • drop a NOAA `.zip` / `.000` → unzipped + baked to a `.pmtiles` in-browser.
+       The archive is persisted (IndexedDB) and reloaded on the next visit.
+       Optional `pmtiles="<url>"` ships a hosted default archive (rendered when
+       nothing local is stored).
+       Prereqs in this dir: chartplotter.wasm (`zig build wasm`),
+       colortables/sprite/linestyles/patterns + glyphs (`chartplotter --emit-assets web`),
+       vendor/maplibre-gl.*, basemap/coastline.geojson (`scripts/fetch-basemap.sh`),
+       and optionally catalog.json (`chartplotter --catalog-json …`). -->
+  <script type="module" src="./chartplotter-app.mjs"></script>
+</head>
+<body>
+  <!-- `pmtiles="charts.pmtiles"` renders the hosted default archive (baked by
+       scripts/serve.sh / `zig build bake`) when nothing local is stored. Absent
+       file → app just starts at the empty state. -->
+  <chart-plotter-app pmtiles="charts.pmtiles" center="-76.4875,38.975" zoom="11"></chart-plotter-app>
+
+  <!-- Embedding just the renderer (no management UI) stays a one-liner — point
+       it at a prebaked archive:
+       <script type="module" src="./chartplotter.mjs"></script>
+       <chart-plotter pmtiles="charts.pmtiles"></chart-plotter> -->
+</body>
+</html>

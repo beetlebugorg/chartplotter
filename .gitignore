@@ -1,0 +1,18 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Generated tile archives / runtime chart state (never committed)
+*.pmtiles
+web/.cellcache-*.000
+web/charts-user.*
+web/charts-index.json
+web/chartplotter.wasm
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
