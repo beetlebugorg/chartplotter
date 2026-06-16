@@ -10,102 +10,106 @@ import (
 //
 // geometryType must be "P" (point), "L" (line), or "A" (area)
 func (l *Library) LookupFeature(objectClass string, geometryType string, attributes map[string]interface{}, mariner *MarinerSettings) *InstructionSet {
-	// Ensure mariner settings exist
 	if mariner == nil {
 		mariner = DefaultMarinerSettings()
 	}
 
-	// Step 1: Gather all LUT entries with matching object class and table name
+	instructionStr, selectedEntry := l.selectInstruction(objectClass, geometryType, attributes, mariner)
+	if instructionStr == "" {
+		return nil
+	}
+
+	// Parse instructions, then expand CS procedures (one-shot, attribute-only
+	// context). The Zig-faithful portrayal walk instead uses LookupFeatureRaw +
+	// its own recursive CS dispatch; this path stays for callers that want the
+	// flattened instruction list.
+	instructions := l.expandCSInstructions(parseInstructions(instructionStr), attributes, mariner)
+	return l.makeInstructionSet(objectClass, instructions, selectedEntry)
+}
+
+// selectInstruction runs the S-52 LUPT selection (object class + geometry +
+// table-name/mariner filter, first-all-attributes-match, then failsafe) and
+// returns the chosen raw instruction string and the entry it came from. Shared
+// by LookupFeature and LookupFeatureRaw so both select identically.
+func (l *Library) selectInstruction(objectClass, geometryType string, attributes map[string]interface{}, mariner *MarinerSettings) (string, *LookupTable) {
 	var candidates []*LookupTable
 	var failsafe *LookupTable
 
 	for _, lupt := range l.lookupTables {
-		if lupt.ObjectClass == objectClass {
-			// Filter by geometry type
-			if lupt.GeometryType != "" && lupt.GeometryType != geometryType {
-				continue
-			}
-			// Filter by table name based on geometry type and mariner settings
-			matches := l.matchesTableName(lupt, mariner)
-			if !matches {
-				continue
-			}
-
-			candidates = append(candidates, lupt)
-			// Track failsafe entry (empty attributes and has instructions)
-			// Prefer entries with valid instructions over malformed ones
-			if len(lupt.Attributes) == 0 && len(lupt.Instructions) > 0 {
-				if failsafe == nil || len(failsafe.Instructions) == 0 {
-					failsafe = lupt
-				}
+		if lupt.ObjectClass != objectClass {
+			continue
+		}
+		if lupt.GeometryType != "" && lupt.GeometryType != geometryType {
+			continue
+		}
+		if !l.matchesTableName(lupt, mariner) {
+			continue
+		}
+		candidates = append(candidates, lupt)
+		if len(lupt.Attributes) == 0 && len(lupt.Instructions) > 0 {
+			if failsafe == nil || len(failsafe.Instructions) == 0 {
+				failsafe = lupt
 			}
 		}
 	}
 
 	if len(candidates) == 0 {
-		return nil // No LUT entry for this object class
+		return "", nil
 	}
-
-	// Step 2: Find the right instruction string
-	var instructionStr string
 
 	if len(candidates) == 1 {
-		if len(candidates[0].Instructions) > 0 {
-			instructionStr = candidates[0].Instructions[0].RawCommand
+		entry := candidates[0]
+		if len(entry.Instructions) > 0 {
+			return entry.Instructions[0].RawCommand, entry
 		}
-	} else {
-		// Step 3: Search for FIRST entry where ALL attributes match
-		bestMatch := l.findFirstAttributeMatch(candidates, attributes)
-		if bestMatch != nil && len(bestMatch.Instructions) > 0 {
-			instructionStr = bestMatch.Instructions[0].RawCommand
-		} else if failsafe != nil && len(failsafe.Instructions) > 0 {
-			// Step 4: Use failsafe entry
-			instructionStr = failsafe.Instructions[0].RawCommand
-		}
+		return "", entry
 	}
 
-	if instructionStr == "" {
-		return nil
+	bestMatch := l.findFirstAttributeMatch(candidates, attributes)
+	if bestMatch != nil && len(bestMatch.Instructions) > 0 {
+		return bestMatch.Instructions[0].RawCommand, bestMatch
 	}
-
-	// Parse instructions
-	instructions := parseInstructions(instructionStr)
-
-	// If mariner settings provided, expand CS instructions
-	if mariner != nil {
-		instructions = l.expandCSInstructions(instructions, attributes, mariner)
+	if failsafe != nil && len(failsafe.Instructions) > 0 {
+		return failsafe.Instructions[0].RawCommand, failsafe
 	}
-
-	// Get the selected entry for metadata
-	var selectedEntry *LookupTable
-	if len(candidates) == 1 {
-		selectedEntry = candidates[0]
-	} else {
-		bestMatch := l.findFirstAttributeMatch(candidates, attributes)
-		if bestMatch != nil {
-			selectedEntry = bestMatch
-		} else if failsafe != nil {
-			selectedEntry = failsafe
-		}
+	if bestMatch != nil {
+		return "", bestMatch
 	}
+	return "", failsafe
+}
 
-	// Return structured instruction set with metadata
-	result := &InstructionSet{
-		Instructions: instructions,
-	}
+// makeInstructionSet attaches the LUPT metadata (display priority/category) to a
+// parsed instruction list, applying the SOUNDG display-category override.
+func (l *Library) makeInstructionSet(objectClass string, instructions []Instruction, selectedEntry *LookupTable) *InstructionSet {
+	result := &InstructionSet{Instructions: instructions}
 	if selectedEntry != nil {
 		result.DisplayPriority = selectedEntry.DisplayPriority
 		result.DisplayCategory = stringToDisplayCategory(selectedEntry.DisplayCategory)
 		result.RadarPriority = selectedEntry.RadarOverlay
 
-		// SOUNDG (soundings) are fundamental navigation data
-		// Override DAI classification if it's marked as DisplayOther
-		// Soundings should default to DisplayStandard like other navigation data
+		// SOUNDG are fundamental navigation data; promote a DisplayOther
+		// classification to DisplayStandard like other navigation data.
 		if objectClass == "SOUNDG" && result.DisplayCategory == DisplayOther {
 			result.DisplayCategory = DisplayStandard
 		}
 	}
 	return result
+}
+
+// LookupFeatureRaw is like LookupFeature but returns the matched LUPT
+// instructions WITHOUT expanding CS procedures (CS stays as *CSInstruction).
+// The portrayal walk uses this so it can run the S-52 instruction walk itself —
+// recursive CS dispatch and per-sounding-point expansion — matching the Zig
+// reference. Returns nil if no LUPT entry matches.
+func (l *Library) LookupFeatureRaw(objectClass, geometryType string, attributes map[string]interface{}, mariner *MarinerSettings) *InstructionSet {
+	if mariner == nil {
+		mariner = DefaultMarinerSettings()
+	}
+	instructionStr, selectedEntry := l.selectInstruction(objectClass, geometryType, attributes, mariner)
+	if instructionStr == "" {
+		return nil
+	}
+	return l.makeInstructionSet(objectClass, parseInstructions(instructionStr), selectedEntry)
 }
 
 // GetLookupEntry returns the full lookup table entry for a feature
