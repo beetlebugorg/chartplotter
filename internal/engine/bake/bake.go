@@ -169,10 +169,54 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		scamin := intAttr(f.Attributes(), "SCAMIN")
 		zMin := specZMin(fb.DisplayCategory, scamin)
 		class := f.ObjectClass()
-		for _, p := range fb.Primitives {
-			b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin)
+		prims := fb.Primitives
+		for pi := 0; pi < len(prims); pi++ {
+			// A sounding number (SOUNDG03) emits one digit glyph per column, all at
+			// the same anchor (the glyph art carries the column shift). Group a
+			// number's consecutive same-anchor digit glyphs into ONE soundings
+			// feature so the client renders the whole number and declutter treats
+			// it as a single unit (matches bake.zig).
+			if sc, ok := prims[pi].(portrayal.SymbolCall); ok && isSoundingName(sc.SymbolName) {
+				names := []string{sc.SymbolName}
+				for pi+1 < len(prims) {
+					nsc, ok := prims[pi+1].(portrayal.SymbolCall)
+					if !ok || !isSoundingName(nsc.SymbolName) || nsc.Anchor != sc.Anchor {
+						break
+					}
+					names = append(names, nsc.SymbolName)
+					pi++
+				}
+				b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin)
+				continue
+			}
+			b.route(prims[pi], class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin)
 		}
 	}
+}
+
+// routeSoundingGroup emits one soundings feature for a whole sounding number
+// (the comma-joined digit-glyph list), carrying depth + both palette variants so
+// the client runs SNDFRM04's safety-depth split live.
+func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32) {
+	joined := strings.Join(names, ",")
+	r := routed{layer: "soundings", kind: mvt.GeomPoint, point: sc.Anchor, zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
+	attrs := []mvt.KeyValue{
+		{Key: "class", Value: mvt.StringVal(class)},
+		{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
+		{Key: "cat", Value: mvt.IntVal(int64(cat))},
+		{Key: "bnd", Value: mvt.IntVal(int64(band))},
+		{Key: "symbol_names", Value: mvt.StringVal(joined)},
+		{Key: "scale", Value: mvt.FloatVal(sc.Scale)},
+	}
+	if !isNaN32(sc.SoundingDepthM) {
+		attrs = append(attrs,
+			mvt.KeyValue{Key: "depth", Value: mvt.FloatVal(sc.SoundingDepthM)},
+			mvt.KeyValue{Key: "sym_s", Value: mvt.StringVal(soundingVariant(joined, 'S'))},
+			mvt.KeyValue{Key: "sym_g", Value: mvt.StringVal(soundingVariant(joined, 'G'))},
+		)
+	}
+	r.attrs = attrs
+	b.add(r, ptBbox(sc.Anchor))
 }
 
 func (b *Baker) add(r routed, bb geo.BoundingBox) {
@@ -239,25 +283,10 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 	}
 }
 
+// routeSymbol routes a non-sounding SY symbol to point_symbols. Sounding digits
+// are grouped in AddCell, so they never reach here.
 func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue) []mvt.KeyValue, r routed) {
 	r.kind, r.point = mvt.GeomPoint, v.Anchor
-	if strings.HasPrefix(v.SymbolName, "SOUNDG") || strings.HasPrefix(v.SymbolName, "SOUNDS") {
-		r.layer = "soundings"
-		attrs := common(
-			mvt.KeyValue{Key: "symbol_names", Value: mvt.StringVal(v.SymbolName)},
-			mvt.KeyValue{Key: "scale", Value: mvt.FloatVal(v.Scale)},
-		)
-		if !isNaN32(v.SoundingDepthM) {
-			attrs = append(attrs,
-				mvt.KeyValue{Key: "depth", Value: mvt.FloatVal(v.SoundingDepthM)},
-				mvt.KeyValue{Key: "sym_s", Value: mvt.StringVal(soundingVariant(v.SymbolName, 'S'))},
-				mvt.KeyValue{Key: "sym_g", Value: mvt.StringVal(soundingVariant(v.SymbolName, 'G'))},
-			)
-		}
-		r.attrs = attrs
-		b.add(r, ptBbox(v.Anchor))
-		return
-	}
 	r.layer = "point_symbols"
 	attrs := common(
 		mvt.KeyValue{Key: "symbol_name", Value: mvt.StringVal(v.SymbolName)},
@@ -555,14 +584,22 @@ func haloSymWidth(h *portrayal.SymbolHalo) float32 {
 	return h.ExtraWidthPx
 }
 
-// soundingVariant swaps a sounding glyph's palette letter: SOUNDS14 <-> SOUNDG14
-// (S = bold/shallow, G = faint/deep), so the client runs SNDFRM04's safety-depth
-// split live.
-func soundingVariant(name string, letter byte) string {
-	if len(name) >= 6 && strings.HasPrefix(name, "SOUND") {
-		return name[:5] + string(letter) + name[6:]
+func isSoundingName(name string) bool {
+	return strings.HasPrefix(name, "SOUNDG") || strings.HasPrefix(name, "SOUNDS")
+}
+
+// soundingVariant forces every SOUND? glyph token in a comma-joined sounding name
+// list to the given palette letter (S = bold/shallow, G = faint/deep), so the
+// client runs SNDFRM04's safety-depth split live. Matches soundingVariant in
+// bake.zig.
+func soundingVariant(names string, letter byte) string {
+	parts := strings.Split(names, ",")
+	for i, p := range parts {
+		if len(p) >= 6 && strings.HasPrefix(p, "SOUND") {
+			parts[i] = p[:5] + string(letter) + p[6:]
+		}
 	}
-	return name
+	return strings.Join(parts, ",")
 }
 
 func isNaN32(f float32) bool { return f != f }

@@ -239,3 +239,42 @@ func TestBakePMTilesArchive(t *testing.T) {
 	}
 	t.Logf("archive: %d tiles, %d bytes", pb.Count(), len(arc))
 }
+
+func TestSoundingGrouping(t *testing.T) {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		t.Fatalf("load lib: %v", err)
+	}
+	chart, err := s57.Parse(goldenCell)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	b := New()
+	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+
+	// Find a tile carrying soundings and confirm the grouped attributes.
+	var found bool
+	for _, c := range b.TileCoords(mvt.ExtentDefault) {
+		data := b.EmitTile(c, mvt.ExtentDefault, 64)
+		if data == nil {
+			continue
+		}
+		layers := decodeLayers(data)
+		s := layers["soundings"]
+		if s == nil || len(s.feats) == 0 {
+			continue
+		}
+		found = true
+		if !s.firstFeatureHasStringKey("symbol_names") {
+			t.Error("soundings feature missing symbol_names")
+		}
+		if !s.firstFeatureHasStringKey("sym_s") || !s.firstFeatureHasStringKey("sym_g") {
+			t.Error("soundings feature missing sym_s/sym_g palette variants")
+		}
+		t.Logf("soundings present at %v: %d features", c, len(s.feats))
+		break
+	}
+	if !found {
+		t.Fatal("no soundings layer found in any tile")
+	}
+}
