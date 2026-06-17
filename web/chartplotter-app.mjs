@@ -174,11 +174,13 @@ export class ChartPlotterApp extends HTMLElement {
     if (!el || !this._map) return;
     const z = this._map.getZoom(), c = this._map.getCenter();
     const band = bandForZoom(z);
+    // Fixed-width fields (+ tabular-nums in CSS) so scale/zoom don't reflow the
+    // bar as their digit counts change.
     el.innerHTML =
       `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
-      `<span>${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
+      `<span class="hud-band">${BAND_LABEL[band]}</span>` +
       `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span>` +
-      `<span class="hud-sep">·</span><span>z${z.toFixed(1)}</span></span>`;
+      `<span class="hud-z">z${z.toFixed(1)}</span></span>`;
   }
 
 
@@ -1237,14 +1239,16 @@ export class ChartPlotterApp extends HTMLElement {
         .modal-card .agree-body li { margin:5px 0; }
         .modal-card a { color:#1565c0; }
         .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
-        /* Live band·scale·zoom readout (left of the statusbar), one line. */
+        /* Live band·scale·zoom readout (left of the statusbar), one line. Each
+           field has a fixed width + tabular figures so the bar never reflows. */
         .sb-readout { flex:none; }
-        .sb-readout .hud-main { display:inline-flex; align-items:center; gap:6px; font-weight:600; font-size:12px; white-space:nowrap; }
-        .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); }
-        .sb-readout .hud-scale { color:#1565c0; }
-        .sb-readout .hud-sep { color:#c7ccd2; font-weight:400; }
-        /* In-view band pills (right of readout); each opens a cell-list popup. */
-        .sb-bands { display:flex; align-items:center; gap:8px; min-width:0; }
+        .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+        .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
+        .sb-readout .hud-band { display:inline-block; min-width:62px; }
+        .sb-readout .hud-scale { color:#1565c0; display:inline-block; min-width:92px; }
+        .sb-readout .hud-z { display:inline-block; min-width:42px; color:#6b7280; }
+        /* In-view band pills, right-aligned; each opens a cell-list popup. */
+        .sb-bands { display:flex; align-items:center; gap:8px; min-width:0; margin-left:auto; }
         .sb-band-wrap { position:relative; flex:none; }
         .sb-band { display:inline-flex; align-items:center; gap:5px; font:600 11px/1 system-ui,sans-serif; color:#384049;
           background:#fff; border:1px solid rgba(0,0,0,.14); border-radius:13px; padding:4px 9px; cursor:pointer; white-space:nowrap; }
@@ -1254,7 +1258,7 @@ export class ChartPlotterApp extends HTMLElement {
         .sb-band .sb-miss { color:#1565c0; font-weight:700; }
         .sb-band.has-missing { border-color:rgba(21,101,192,.5); }
         /* Cell-list popup above a band pill (hover on desktop; tap to pin on touch). */
-        .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); left:0; z-index:10;
+        .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
           background:#fff; border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
           box-shadow:0 6px 22px rgba(0,0,0,.22); width:max-content; max-width:280px; }
         .band-pop::before { content:""; position:absolute; left:0; right:0; bottom:-6px; height:6px; } /* hover bridge over the gap */
