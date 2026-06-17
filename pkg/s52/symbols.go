@@ -180,6 +180,7 @@ func convertSymbol(internal *Symbol) *Symbol {
 		ID:          internal.ID,
 		Description: internal.Description,
 		ColorRef:    internal.ColorRef,
+		Colors:      internal.Colors,
 		BoundingBox: BoundingBox{
 			MinX: internal.BoundingBox.MinX,
 			MinY: internal.BoundingBox.MinY,
@@ -190,7 +191,11 @@ func convertSymbol(internal *Symbol) *Symbol {
 			X: internal.PivotPoint.X,
 			Y: internal.PivotPoint.Y,
 		},
-		Primitives: parseHPGLtoPrimitives(internal.VectorCommands),
+		// VectorCommands carry the raw HP-GL ops (role, stroke width, points,
+		// rings, and ;FP markers on circles) the offline atlas rasteriser needs;
+		// Primitives is the higher-level summary used elsewhere.
+		VectorCommands: internal.VectorCommands,
+		Primitives:     parseHPGLtoPrimitives(internal.VectorCommands),
 	}
 
 	return symbol

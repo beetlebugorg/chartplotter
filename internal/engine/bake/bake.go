@@ -113,9 +113,11 @@ func scaminZoom(scamin uint32) uint32 {
 	return uint32(z)
 }
 
-// specZMin is the single-archive display z-min: DISPLAYBASE objects and objects
-// without SCAMIN have no minimum display scale (z0); SCAMIN raises it. Coarse-tile
-// pile-up is bounded by emitTile's best-available suppression.
+// specZMin is the single-archive (provisioned/uploaded) display z-min: per S-52
+// §10.4.2 a DISPLAYBASE object is always shown and an object without SCAMIN has
+// no minimum display scale, so both float to z0; SCAMIN raises it. Coarse-tile
+// pile-up is bounded by EmitTile's best-available suppression (a finer cell
+// yields only where no coarser cell covers it). Matches bake.zig specZMin.
 func specZMin(displayCategory int, scamin uint32) uint32 {
 	if displayCategory == s52.DisplayBase {
 		return 0
@@ -126,15 +128,39 @@ func specZMin(displayCategory int, scamin uint32) uint32 {
 	return 0
 }
 
+// displayZMin is the per-band display z-min (bake.zig displayZMin): a feature is
+// gated to its own scale band (no down-fill to z0). Used by the per-band
+// district archives, NOT the single provisioned archive. Kept for that path.
+//
+//   - DISPLAYBASE (always drawn once in-band, exempt from SCAMIN): the band min.
+//   - SCAMIN (a 1:N denominator): can only RAISE the min (finer zoom), clamped
+//     to ≥ the band min.
+//   - No SCAMIN: the band min (S-52 §10.3.4 default).
+func displayZMin(displayCategory int, scamin, bandMin uint32) uint32 {
+	if displayCategory == s52.DisplayBase {
+		return bandMin
+	}
+	if scamin != 0 {
+		if z := BandForScale(scamin).ZoomRange().Min; z > bandMin {
+			return z
+		}
+	}
+	return bandMin
+}
+
 // routed is one primitive ready to tile: target layer, geometry (lat/lon), the
 // normalized-world bbox (for the spatial reject + overlap test), the display and
 // native zoom spans, and the pre-built MVT attributes (minus geometry).
 type routed struct {
 	layer string
 	kind  mvt.GeomType
-	rings [][]geo.LatLon // polygon
-	line  []geo.LatLon   // linestring
-	point geo.LatLon     // point
+	// Geometry pre-projected to normalized-world coordinates (X,Y in [0,1],
+	// Web-Mercator) ONCE at add time, so per-tile emit is a cheap affine
+	// transform (Projector.ProjectNorm) instead of recomputing log/sin/tan for
+	// every tile a primitive appears in.
+	nrings [][]tile.FPoint // polygon
+	nline  []tile.FPoint   // linestring
+	npoint tile.FPoint     // point
 
 	wMinX, wMinY, wMaxX, wMaxY float64 // normalized world bbox [0,1]
 	zMin, zMax                 uint32  // display zoom span
@@ -215,12 +241,12 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 // the client runs SNDFRM04's safety-depth split live.
 func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32) {
 	joined := strings.Join(names, ",")
-	r := routed{layer: "soundings", kind: mvt.GeomPoint, point: sc.Anchor, zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
+	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
 	attrs := []mvt.KeyValue{
 		{Key: "class", Value: mvt.StringVal(class)},
 		{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
-		{Key: "cat", Value: mvt.IntVal(int64(cat))},
-		{Key: "bnd", Value: mvt.IntVal(int64(band))},
+		{Key: "cat", Value: mvt.IntVal(catRank(cat))},
+		{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
 		{Key: "symbol_names", Value: mvt.StringVal(joined)},
 		{Key: "scale", Value: mvt.FloatVal(sc.Scale)},
 	}
@@ -235,6 +261,28 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 	b.add(r, ptBbox(sc.Anchor))
 }
 
+// catRank maps the S-52 display category (DisplayBase/Standard/Other = 6/7/8)
+// to the client's category-filter rank (0/1/2). The frontend's categoryFilter
+// tests `cat ∈ {0,1,2}`, so the raw enum values would filter every feature out.
+// Port of bake.zig categoryRank.
+func catRank(displayCategory int) int64 {
+	switch displayCategory {
+	case s52.DisplayBase:
+		return 0
+	case s52.DisplayStandard:
+		return 1
+	default: // DisplayOther
+		return 2
+	}
+}
+
+// bndAlwaysShown is the S-52 boundary-symbolization tag the client's
+// boundaryFilter always passes (2 = style-independent). The plain/symbolized
+// split (bnd 0/1, a SYMINS refinement for area boundaries) is not yet produced
+// by the portrayal, so every feature is tagged always-shown — emitting the
+// scale band here (as before) made boundaryFilter reject every feature.
+const bndAlwaysShown int64 = 2
+
 func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.bbox.ExtendBox(bb)
 	r.wMinX = normX(bb.MinLon)
@@ -245,13 +293,12 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 }
 
 func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32) {
-	bnd := int64(band)
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
 			{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
-			{Key: "cat", Value: mvt.IntVal(int64(cat))},
-			{Key: "bnd", Value: mvt.IntVal(bnd)},
+			{Key: "cat", Value: mvt.IntVal(catRank(cat))},
+			{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
 		}
 		return append(base, extra...)
 	}
@@ -259,15 +306,15 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 
 	switch v := p.(type) {
 	case portrayal.FillPolygon:
-		r.layer, r.kind, r.rings = "areas", mvt.GeomPolygon, v.Rings
+		r.layer, r.kind, r.nrings = "areas", mvt.GeomPolygon, normRings(v.Rings)
 		r.attrs = common(mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)})
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.PatternFill:
-		r.layer, r.kind, r.rings = "area_patterns", mvt.GeomPolygon, v.Rings
+		r.layer, r.kind, r.nrings = "area_patterns", mvt.GeomPolygon, normRings(v.Rings)
 		r.attrs = common(mvt.KeyValue{Key: "pattern_name", Value: mvt.StringVal(v.PatternName)})
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.StrokeLine:
-		r.layer, r.kind, r.line = "lines", mvt.GeomLineString, v.Points
+		r.layer, r.kind, r.nline = "lines", mvt.GeomLineString, normPts(v.Points)
 		r.attrs = common(
 			mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
 			mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(v.WidthPx + 0.5))},
@@ -275,11 +322,11 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		)
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.LinePattern:
-		r.layer, r.kind, r.line = "complex_lines", mvt.GeomLineString, v.Points
+		r.layer, r.kind, r.nline = "complex_lines", mvt.GeomLineString, normPts(v.Points)
 		r.attrs = common(mvt.KeyValue{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)})
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.DrawText:
-		r.layer, r.kind, r.point = "text", mvt.GeomPoint, v.Anchor
+		r.layer, r.kind, r.npoint = "text", mvt.GeomPoint, normPt(v.Anchor)
 		r.attrs = common(
 			mvt.KeyValue{Key: "text", Value: mvt.StringVal(v.Text)},
 			mvt.KeyValue{Key: "font_size_px", Value: mvt.FloatVal(v.FontSizePx)},
@@ -306,7 +353,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 // routeSymbol routes a non-sounding SY symbol to point_symbols. Sounding digits
 // are grouped in AddCell, so they never reach here.
 func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue) []mvt.KeyValue, r routed) {
-	r.kind, r.point = mvt.GeomPoint, v.Anchor
+	r.kind, r.npoint = mvt.GeomPoint, normPt(v.Anchor)
 	r.layer = "point_symbols"
 	attrs := common(
 		mvt.KeyValue{Key: "symbol_name", Value: mvt.StringVal(v.SymbolName)},
@@ -396,6 +443,7 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 
 	var eligible []int
 	var finestNat uint32
+	minNatMin := uint32(math.MaxUint32)
 	for i := range b.prims {
 		r := &b.prims[i]
 		if coord.Z < r.zMin || coord.Z > r.zMax {
@@ -408,13 +456,21 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 		if r.natMax != math.MaxUint32 && r.natMax > finestNat {
 			finestNat = r.natMax
 		}
+		if r.natMin < minNatMin {
+			minNatMin = r.natMin
+		}
 	}
 
+	var scratch []tile.FPoint // reused per-ring projection buffer
+	var clip tile.Clipper     // reused across all polygons in this tile
 	for _, i := range eligible {
 		r := &b.prims[i]
 		// Best-available suppression: below its native band, yield only where no
-		// coarser cell covers; above its native band, only the finest shows.
-		if bandZ < r.natMin && b.anyCoarserOverlaps(eligible, r) {
+		// coarser cell covers; above its native band, only the finest shows. A
+		// prim already at the coarsest native band on this tile can't be
+		// suppressed (nothing is coarser), so skip the O(eligible) overlap scan —
+		// for a single-band/single-cell bake this elides it entirely.
+		if bandZ < r.natMin && r.natMin > minNatMin && b.anyCoarserOverlaps(eligible, r) {
 			continue
 		}
 		if bandZ > r.natMax && r.natMax < finestNat {
@@ -423,9 +479,9 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 		switch r.kind {
 		case mvt.GeomPolygon:
 			var outRings [][]mvt.IPoint
-			var clip tile.Clipper
-			for _, ring := range r.rings {
-				clipped := clip.Polygon(projectRing(ring, proj), rect)
+			for _, ring := range r.nrings {
+				scratch = projectNormRing(ring, proj, scratch)
+				clipped := clip.Polygon(scratch, rect)
 				if len(clipped) < 3 {
 					continue
 				}
@@ -435,7 +491,8 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 				tb.Layer(r.layer).AddPolygon(outRings, r.attrs)
 			}
 		case mvt.GeomLineString:
-			runs := tile.ClipLine(projectRing(r.line, proj), rect)
+			scratch = projectNormRing(r.nline, proj, scratch)
+			runs := tile.ClipLine(scratch, rect)
 			paths := make([][]mvt.IPoint, 0, len(runs))
 			for _, run := range runs {
 				if len(run) >= 2 {
@@ -446,7 +503,7 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 				tb.Layer(r.layer).AddLines(paths, r.attrs)
 			}
 		case mvt.GeomPoint:
-			p := proj.Project(r.point)
+			p := proj.ProjectNorm(r.npoint)
 			if p.X < 0 || p.X >= e || p.Y < 0 || p.Y >= e {
 				continue
 			}
@@ -487,8 +544,8 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 				{Key: "color_token", Value: mvt.StringVal(st.colorToken)},
 				{Key: "width_px", Value: mvt.IntVal(int64(st.widthPx + 0.5))},
 				{Key: "dash", Value: mvt.StringVal(dash)},
-				{Key: "cat", Value: mvt.IntVal(int64(sp.cat))},
-				{Key: "bnd", Value: mvt.IntVal(int64(sp.band))},
+				{Key: "cat", Value: mvt.IntVal(catRank(sp.cat))},
+				{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
 				{Key: "draw_prio", Value: mvt.IntVal(int64(sp.drawPrio))},
 			})
 		}
@@ -621,6 +678,43 @@ func projectRing(ring []geo.LatLon, proj tile.Projector) []tile.FPoint {
 		out[i] = proj.Project(p)
 	}
 	return out
+}
+
+// normPt / normPts / normRings pre-project geometry to normalized-world
+// coordinates ([0,1] Web-Mercator) once, so per-tile emit is a cheap affine
+// transform (see Projector.ProjectNorm).
+func normPt(ll geo.LatLon) tile.FPoint {
+	return tile.FPoint{X: normX(ll.Lon), Y: normY(ll.Lat)}
+}
+
+func normPts(pts []geo.LatLon) []tile.FPoint {
+	out := make([]tile.FPoint, len(pts))
+	for i, p := range pts {
+		out[i] = normPt(p)
+	}
+	return out
+}
+
+func normRings(rings [][]geo.LatLon) [][]tile.FPoint {
+	out := make([][]tile.FPoint, len(rings))
+	for i, r := range rings {
+		out[i] = normPts(r)
+	}
+	return out
+}
+
+// projectNormRing affine-projects a normalized-world ring into tile-pixel space,
+// writing into scratch (grown as needed) to avoid per-call allocation. The
+// returned slice aliases scratch and is valid until the next call.
+func projectNormRing(npts []tile.FPoint, proj tile.Projector, scratch []tile.FPoint) []tile.FPoint {
+	if cap(scratch) < len(npts) {
+		scratch = make([]tile.FPoint, len(npts))
+	}
+	scratch = scratch[:len(npts)]
+	for i, n := range npts {
+		scratch[i] = proj.ProjectNorm(n)
+	}
+	return scratch
 }
 
 func quantizeRing(pts []tile.FPoint) []mvt.IPoint {

@@ -26,105 +26,48 @@ func (s *Symbol) GetPolygonMode() bool {
 
 // Note: Point and Rectangle are imported via geometry package and aliased in interfaces.go
 
-// isDigit checks if a byte is a digit
-func isDigit(b byte) bool {
-	return b >= '0' && b <= '9'
-}
-
 // ParseSYMD parses the SYMD field which contains symbol metadata and geometry.
 // Format: SYMBOLIDV[PIVX][PIVY][BBW][BBH][MINX][MINY]
 // Example: BCNGEN01V007500075000300005150060000300
 // Where each bracketed value is a 5-digit number in DAI units (1/100 mm)
 // Reference: specs/s52-dai-format.md section "SYMD Record"
 func (s *Symbol) ParseSYMD(symd string) error {
-	if len(symd) < 39 { // 9 chars ID + 30 chars data minimum
+	// S-52 PresLib §11.6.3 SYMD field — FIXED layout (no version field):
+	//   [0:8)   SYNM symbol name
+	//   [8]     SYDF graphic type 'V' (vector) / 'R' (raster — skipped)
+	//   [9:14)  SYCL pivot column      [14:19) SYRW pivot row
+	//   [19:24) SYHL bbox width        [24:29) SYVL bbox height
+	//   [29:34) SBXC bbox upper-left col   [34:39) SBXR bbox upper-left row
+	// Any trailing bytes beyond 39 are ignored (some records carry extras).
+	// Matches dai.zig setSymd — the authoritative reference. The old
+	// "optional 2-digit version" heuristic mis-fired on records whose data
+	// section ran 32 chars, stripping the first two pivot digits.
+	if len(symd) < 39 {
 		return fmt.Errorf("SYMD too short: %s", symd)
 	}
-
-	// Symbol ID format: Variable length + 'V' + optional 2-digit version
-	// Look for 'V' that leaves exactly 30 chars for geometry data
-	vIndex := -1
-	hasVersion := false
-
-	// Try to find 'V' with version (Vnn format)
-	for i := 6; i < len(symd)-30 && i < 12; i++ {
-		if symd[i] == 'V' && i+2 < len(symd) && isDigit(symd[i+1]) && isDigit(symd[i+2]) {
-			// Check if we have exactly 30 chars after V+version
-			if len(symd[i+3:]) == 30 {
-				vIndex = i
-				hasVersion = true
-				break
-			}
-		}
+	if symd[8] != 'V' {
+		return fmt.Errorf("SYMD not a vector symbol (graphic type %q): %s", symd[8:9], symd)
 	}
 
-	// If not found, try to find 'V' without version
-	if vIndex == -1 {
-		for i := 6; i < len(symd)-30 && i < 12; i++ {
-			if symd[i] == 'V' {
-				// Check if we have exactly 30 chars after V
-				if len(symd[i+1:]) == 30 {
-					vIndex = i
-					hasVersion = false
-					break
-				}
-			}
-		}
-	}
-
-	if vIndex == -1 {
-		return fmt.Errorf("no valid vector type marker 'V' found in SYMD: %s", symd)
-	}
-
-	// Extract symbol ID (without 'V' and version for compatibility)
-	s.ID = symd[:vIndex]
+	s.ID = strings.TrimSpace(symd[0:8])
 	s.Type = "V"
 
-	// Store version info in metadata if present
-	var vectorData string
-	if hasVersion {
-		s.Metadata["full_id"] = symd[:vIndex+3]
-		s.Metadata["version"] = symd[vIndex+1 : vIndex+3]
-		vectorData = symd[vIndex+3:]
-	} else {
-		s.Metadata["full_id"] = symd[:vIndex+1]
-		s.Metadata["version"] = "00" // Default version
-		vectorData = symd[vIndex+1:]
+	// parse5 mirrors dai.zig parseFixed5: a 5-char field is parsed as an
+	// unsigned integer; anything that fails (incl. a literal negative like the
+	// "-2146" some records carry in the pivot field) becomes 0.
+	parse5 := func(lo, hi int) float64 {
+		v, err := strconv.ParseUint(strings.TrimSpace(symd[lo:hi]), 10, 16)
+		if err != nil {
+			return 0
+		}
+		return float64(v)
 	}
-	if len(vectorData) < 30 { // Need at least 30 characters for 6 5-digit numbers
-		return fmt.Errorf("SYMD vector data too short: %s", vectorData)
-	}
-
-	// Parse 5-digit values: pivot_x, pivot_y, bb_width, bb_height, min_x, min_y
-	pivotX, err := strconv.ParseFloat(vectorData[0:5], 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse pivot X from SYMD: %v", err)
-	}
-
-	pivotY, err := strconv.ParseFloat(vectorData[5:10], 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse pivot Y from SYMD: %v", err)
-	}
-
-	bbWidth, err := strconv.ParseFloat(vectorData[10:15], 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse bounding box width from SYMD: %v", err)
-	}
-
-	bbHeight, err := strconv.ParseFloat(vectorData[15:20], 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse bounding box height from SYMD: %v", err)
-	}
-
-	minX, err := strconv.ParseFloat(vectorData[20:25], 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse min X from SYMD: %v", err)
-	}
-
-	minY, err := strconv.ParseFloat(vectorData[25:30], 64)
-	if err != nil {
-		return fmt.Errorf("failed to parse min Y from SYMD: %v", err)
-	}
+	pivotX := parse5(9, 14)
+	pivotY := parse5(14, 19)
+	bbWidth := parse5(19, 24)
+	bbHeight := parse5(24, 29)
+	minX := parse5(29, 34)
+	minY := parse5(34, 39)
 
 	// Store the parsed geometry data (all in DAI units)
 	s.PivotPoint = Point{X: pivotX, Y: pivotY}
@@ -135,10 +78,12 @@ func (s *Symbol) ParseSYMD(symd string) error {
 		MaxY: minY + bbHeight,
 	}
 
-	s.Metadata = map[string]string{
-		"vector_data": vectorData,
-		"raw_symd":    symd,
+	if s.Metadata == nil {
+		s.Metadata = make(map[string]string)
 	}
+	s.Metadata["full_id"] = symd[0:9]
+	s.Metadata["version"] = "00"
+	s.Metadata["raw_symd"] = symd
 
 	return nil
 }

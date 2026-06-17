@@ -21,8 +21,13 @@ import (
 var version = "dev"
 
 type cli struct {
-	Version    versionCmd    `cmd:"" help:"Print version and embedded-asset info."`
-	EmitAssets emitAssetsCmd `cmd:"" name:"emit-assets" help:"Generate S-52 client assets (colortables.json, ...) into a directory."`
+	Version     versionCmd     `cmd:"" help:"Print version and embedded-asset info."`
+	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-52 client assets (colortables.json, ...) into a directory."`
+	EmitPmtiles emitPmtilesCmd `cmd:"" name:"emit-pmtiles" help:"Bake S-57 cells into a PMTiles archive."`
+	BakeZip     bakeZipCmd     `cmd:"" name:"bake-zip" help:"Bake all base cells in a NOAA ENC zip into a PMTiles archive."`
+	CatalogJSON catalogJSONCmd `cmd:"" name:"catalog-json" help:"Distil NOAA ENCProdCat.xml into a compact catalog.json."`
+	Provision   provisionCmd   `cmd:"" name:"provision" help:"Download NOAA cells and bake charts-user.pmtiles."`
+	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend + provisioning API."`
 }
 
 type emitAssetsCmd struct {

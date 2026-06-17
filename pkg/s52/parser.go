@@ -182,7 +182,7 @@ func (p *Parser) parseDAI(data *ParseData) error {
 				return err
 			}
 
-		case "PATD", "PXPO", "PVCT":
+		case "PATD", "PXPO", "PVCT", "PCRF":
 			if err := p.parsePatternRecord(record, data); err != nil {
 				return err
 			}
@@ -529,6 +529,11 @@ func (p *Parser) parsePatternRecord(record *Record, data *ParseData) error {
 		// Pattern vector commands
 		if len(record.Fields) >= 1 {
 			return data.currentPattern.ParsePVCT(record.Fields[0])
+		}
+	case "PCRF":
+		// Pattern color reference (role -> token), same layout as LCRF/SCRF.
+		if len(record.Fields) >= 1 {
+			return data.currentPattern.ParsePCRF(record.Fields[0])
 		}
 	}
 

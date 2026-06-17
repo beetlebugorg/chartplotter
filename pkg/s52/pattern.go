@@ -152,6 +152,20 @@ func (p *Pattern) ParsePVCT(pvct string) error {
 	return nil
 }
 
+// ParsePCRF parses the PCRF field: pattern color reference, mapping color roles
+// (single char) to S-52 color tokens (5 chars), repeated. Same layout as
+// LCRF/SCRF. S-52 Section 11.5: Pattern Color Reference.
+func (p *Pattern) ParsePCRF(pcrf string) error {
+	p.ColorRef = pcrf
+	colors := ParsedColors{Roles: make(map[rune]string)}
+	for i := 0; i+6 <= len(pcrf); i += 6 {
+		role := rune(pcrf[i])
+		colors.Roles[role] = pcrf[i+1 : i+6]
+	}
+	p.Colors = colors
+	return nil
+}
+
 // GetTileDimensions returns the pattern tile dimensions in DAI units.
 func (p *Pattern) GetTileDimensions() (width, height int) {
 	return p.TileWidth, p.TileHeight

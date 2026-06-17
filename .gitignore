@@ -8,6 +8,7 @@ coverage.*
 # Generated tile archives / runtime chart state (never committed)
 *.pmtiles
 web/.cellcache-*.000
+web/.regioncache-*.zip
 web/charts-user.*
 web/charts-index.json
 web/chartplotter.wasm

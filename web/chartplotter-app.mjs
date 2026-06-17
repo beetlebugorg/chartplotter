@@ -49,6 +49,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
     this._provisioned = new Set();      // NOAA-downloaded cells; filled from the on-disk manifest on boot (the source of truth)
+    this._dlRegions = new Set();        // installed NOAA region numbers (from the manifest)
     this._districts = [];               // hosted per-district archives (charts-index.json)
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = loadJSON(LS_MARINER, {});
@@ -62,7 +63,6 @@ export class ChartPlotterApp extends HTMLElement {
       delete this._mariner.displayCategory;
     }
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
-    this._bandsOn = new Set(BANDS);     // bands selected in the open region's detail
     this._region = null;                // the region currently open in the drawer (null = list)
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
@@ -239,6 +239,7 @@ export class ChartPlotterApp extends HTMLElement {
       // provisioned set instead of showing phantom charts that no longer exist.
       if (r.status === 404) {
         this._provisioned = new Set(); // no provisioned archive on disk → nothing installed
+        this._dlRegions = new Set();
         const src = loadJSON(LS_SOURCE, null);
         if (src && src.type === "url") localStorage.removeItem(LS_SOURCE);
         return null;
@@ -247,6 +248,7 @@ export class ChartPlotterApp extends HTMLElement {
       const j = await r.json();
       if (!Array.isArray(j.cells)) return null;
       this._provisioned = new Set(j.cells);
+      this._dlRegions = new Set(Array.isArray(j.regions) ? j.regions : []);
       return j;
     } catch { return null; } // network error → keep what we have, try again next boot
   }
@@ -431,46 +433,45 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
   }
 
-  // Assign every catalog cell to its nearest region anchor — a non-overlapping
-  // partition so charts are browsed/downloaded by named cruising area. Builds
-  // `this._regions` (each with its member cell names + union bbox).
+  // Group catalog cells into NOAA's official ENC regions (the catalog `rg`
+  // numbers). A cell joins every region in its `rg` list, so a region holds the
+  // complete set NOAA ships for that area (no centroid partition that splits a
+  // bay). Each region's MAP EXTENT comes from its LOCAL cells (coastal and
+  // finer); the wide-area overview/general cells span whole oceans and would
+  // balloon the box.
   _buildRegions() {
-    const regions = REGION_ANCHORS.map(([name, lon, lat, coast]) => ({ name, lon, lat, coast, cells: [], bb: null }));
-    const nearest = (lon, lat) => {
-      let best = regions[0], bd = Infinity;
-      for (const r of regions) { const dl = lon - r.lon, da = lat - r.lat, d = dl * dl + da * da; if (d < bd) { bd = d; best = r; } }
-      return best;
-    };
+    const byNum = new Map(); // rg number -> region
     for (const c of this._catalog) {
       if (!Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      const [w, s, e, n] = c.bb;
-      const r = nearest((w + e) / 2, (s + n) / 2);
-      r.cells.push(c.n);
-      // The region's display extent comes from its LOCAL cells (coastal and
-      // finer) — a wide-area overview/general cell that happens to centre here
-      // would otherwise balloon the box far beyond the cruising area.
-      if (bandForScale(c.s) !== "overview" && bandForScale(c.s) !== "general") {
-        if (!r.bb) r.bb = [w, s, e, n];
-        else r.bb = [Math.min(r.bb[0], w), Math.min(r.bb[1], s), Math.max(r.bb[2], e), Math.max(r.bb[3], n)];
+      const local = bandForScale(c.s) !== "overview" && bandForScale(c.s) !== "general";
+      for (const num of (c.rg || [])) {
+        let r = byNum.get(num);
+        if (!r) {
+          const [name, coast] = NOAA_REGIONS[num] || ["Region " + num, "Other"];
+          r = { num, name, coast, cells: [], bb: null };
+          byNum.set(num, r);
+        }
+        r.cells.push(c.n);
+        if (local) {
+          const [w, s, e, n] = c.bb;
+          if (!r.bb) r.bb = [w, s, e, n];
+          else r.bb = [Math.min(r.bb[0], w), Math.min(r.bb[1], s), Math.max(r.bb[2], e), Math.max(r.bb[3], n)];
+        }
       }
     }
-    // Fallback for a region with only coarse cells: use the anchor point.
-    for (const r of regions) if (!r.bb && r.cells.length) r.bb = [r.lon - 0.5, r.lat - 0.5, r.lon + 0.5, r.lat + 0.5];
-    this._regions = regions.filter((r) => r.cells.length);
+    const regions = [...byNum.values()];
+    for (const r of regions) if (!r.bb && r.cells.length) {
+      const c = this._byName.get(r.cells[0]); if (c && c.bb) r.bb = [...c.bb];
+    }
+    this._regions = regions.filter((r) => r.cells.length).sort((a, b) => a.num - b.num);
   }
 
-  // Cells to download for a region at the chosen bands: its assigned members,
-  // plus the coarse (overview/general) cells covering the region — shared
-  // backdrop so a region is never missing its wide-area context.
-  _regionCells(region, bands) {
-    const out = new Map();
-    for (const n of region.cells) { const c = this._byName.get(n); if (c && bands.has(bandForScale(c.s))) out.set(n, c); }
-    for (const c of this._catalog) {
-      const b = bandForScale(c.s);
-      if ((b === "overview" || b === "general") && bands.has(b) && Array.isArray(c.bb) && c.bb.length === 4 &&
-        c.bb[0] <= region.lon && c.bb[2] >= region.lon && c.bb[1] <= region.lat && c.bb[3] >= region.lat) out.set(c.n, c);
-    }
-    return [...out.values()];
+  // A region's map extent: the union bbox of its LOCAL (coastal-and-finer) cells
+  // — the area drawn/framed on the map. (The region's overview/general cells
+  // span whole oceans, so they're excluded from the box.) Falls back to a small
+  // box if a region somehow has only coarse cells.
+  _regionFootprint(region) {
+    return region.bb || null;
   }
 
   // The Charts drawer body: the region list, or (once one is picked) that
@@ -497,24 +498,22 @@ export class ChartPlotterApp extends HTMLElement {
     this._renderRegionList("");
   }
 
-  _regionHave(r) { return r.cells.reduce((s, n) => s + (this.stateOf(n) === "installed" ? 1 : 0), 0); }
-
   _renderRegionList(q) {
     const el = this.shadowRoot.getElementById("region-list");
     if (!el) return;
     const needle = (q || "").trim().toLowerCase();
     const all = (this._regions || []).filter((r) => !needle || r.name.toLowerCase().includes(needle) || r.coast.toLowerCase().includes(needle));
     const row = (r) => {
-      const have = this._regionHave(r), full = have >= r.cells.length;
-      const dot = `<span class="rdot ${have ? (full ? "full" : "partial") : "none"}"></span>`;
-      const meta = have ? `${have} chart${have > 1 ? "s" : ""}` : "available";
+      const inst = this._dlRegions.has(r.num);
+      const dot = `<span class="rdot ${inst ? "full" : "none"}"></span>`;
+      const meta = inst ? "downloaded" : "available";
       return `<button class="region-row" data-region="${r.name}">${dot}<span class="region-name">${r.name}</span><span class="region-meta">${meta}</span></button>`;
     };
     let html = "";
-    const downloaded = all.filter((r) => this._regionHave(r) > 0).sort((a, b) => a.name.localeCompare(b.name));
+    const downloaded = all.filter((r) => this._dlRegions.has(r.num)).sort((a, b) => a.name.localeCompare(b.name));
     if (downloaded.length) html += `<div class="region-group">Downloaded</div>` + downloaded.map(row).join("");
     for (const coast of COAST_ORDER) {
-      const rs = all.filter((r) => r.coast === coast && this._regionHave(r) === 0).sort((a, b) => a.name.localeCompare(b.name));
+      const rs = all.filter((r) => r.coast === coast && !this._dlRegions.has(r.num)).sort((a, b) => a.name.localeCompare(b.name));
       if (rs.length) html += `<div class="region-group">${coast}</div>` + rs.map(row).join("");
     }
     el.innerHTML = html || `<div class="region-empty">No regions match “${q}”.</div>`;
@@ -526,7 +525,6 @@ export class ChartPlotterApp extends HTMLElement {
     const r = (this._regions || []).find((x) => x.name === name);
     if (!r) return;
     this._region = r;
-    this._bandsOn = new Set(BANDS);
     // make sure we're on the Charts surface (e.g. when opened from the pill)
     this._section = "charts";
     this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
@@ -537,8 +535,13 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   _frameRegion(r) {
-    if (!r.bb || !this._map) return;
-    const [w, s, e, n] = r.bb;
+    if (!this._map) return;
+    // Highlight (and frame to) the region's coarse-cell footprint — the same
+    // area whose cells the download grabs, so "what's highlighted" == "what's
+    // downloaded".
+    const bb = this._regionFootprint(r);
+    if (!bb) return;
+    const [w, s, e, n] = bb;
     const src = this._map.getSource("focus");
     if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } }] });
     this._map.fitBounds([[w, s], [e, n]], { padding: 50, duration: 600 });
@@ -546,61 +549,79 @@ export class ChartPlotterApp extends HTMLElement {
 
   _renderRegionDetail(el) {
     const r = this._region;
+    // A region downloads as ONE NOAA bundle zip (every scale together), so this
+    // is whole-region, not a per-band pick. Show the chart count + per-band
+    // breakdown for context.
     const per = {};
+    let count = 0;
     for (const n of r.cells) {
       const c = this._byName.get(n); if (!c) continue;
-      const b = bandForScale(c.s); (per[b] ??= { count: 0 }).count++;
+      const b = bandForScale(c.s); (per[b] ??= { count: 0 }).count++; count++;
     }
-    const chips = BANDS.filter((b) => per[b]).map((b) =>
-      `<label class="band-chip${this._bandsOn.has(b) ? "" : " off"}" data-band="${b}"><span class="sw" style="background:${BAND_COLOR[b]}"></span>${BAND_LABEL[b]} (${per[b].count})</label>`).join("");
-    const need = this._regionCells(r, this._bandsOn).filter((c) => this.stateOf(c.n) === "catalog");
-    const have = this._regionHave(r);
-    const bytes = need.reduce((s, c) => s + (c.zs || 0), 0);
-    const status = have ? `<div class="region-status">✓ ${have} of ${r.cells.length} charts downloaded</div>` : "";
-    let actions = need.length
-      ? `<button class="add-dl" id="region-dl">⬇ Download ${need.length} chart${need.length > 1 ? "s" : ""} · ${fmtMB(bytes)}</button>`
-      : `<div class="empty">All charts at the chosen scales are downloaded.</div>`;
-    if (have) actions += `<button class="linkbtn danger" id="region-remove">Remove this region from device</button>`;
+    const breakdown = BANDS.filter((b) => per[b]).map((b) =>
+      `<span class="band-chip" data-band="${b}"><span class="sw" style="background:${BAND_COLOR[b]}"></span>${BAND_LABEL[b]} (${per[b].count})</span>`).join("");
+    const installed = this._dlRegions.has(r.num);
+    const status = installed ? `<div class="region-status">✓ ${r.name} is downloaded</div>` : "";
+    const actions = installed
+      ? `<button class="linkbtn danger" id="region-remove">Remove this region from device</button>`
+      : `<button class="add-dl" id="region-dl">⬇ Download ${count} chart${count !== 1 ? "s" : ""}</button>`;
     el.innerHTML = `
       <div class="add-head"><button id="region-back" class="btn">← All regions</button></div>
       ${status}
-      <p class="add-hint">Choose chart scales — every chart for the region downloads together.</p>
-      <div class="band-row">${chips}</div>
+      <p class="add-hint">The whole region downloads together (every chart scale), straight from NOAA.</p>
+      <div class="band-row">${breakdown}</div>
       <div class="add-sel">${actions}</div>`;
     el.querySelector("#region-back").onclick = () => { this._region = null; this._clearFocus(); this.renderCharts(); };
-    el.querySelectorAll(".band-chip").forEach((c) => (c.onclick = () => {
-      const b = c.dataset.band;
-      if (this._bandsOn.has(b)) this._bandsOn.delete(b); else this._bandsOn.add(b);
-      this.renderCharts();
-    }));
     el.querySelector("#region-dl")?.addEventListener("click", () => this.downloadRegion());
     el.querySelector("#region-remove")?.addEventListener("click", () => this.removeRegion());
   }
 
-  // Download the open region's missing charts (selected bands). The server
-  // re-bakes the WHOLE provisioned set, so pass the cumulative cell list as a
-  // background task; progress comes from polling.
+  // Download the open region: add it to the installed-region set and provision
+  // the union via NOAA's per-region bundle zips (one big, authoritative download
+  // per region, server-side). The server re-bakes from cached zips, so adding a
+  // region doesn't re-download the ones you already have.
   async downloadRegion() {
     const r = this._region;
     if (!r) return;
-    const pick = this._regionCells(r, this._bandsOn).filter((c) => this.stateOf(c.n) === "catalog");
-    if (!pick.length) return;
-    const all = [...new Set([...this._provisioned, ...pick.map((c) => c.n)])];
-    const bytes = pick.reduce((s, c) => s + (c.zs || 0), 0);
-    await this._startProvision(all, { name: r.name, verb: "Downloading", bytes });
+    const nums = new Set([...this._dlRegions, r.num]);
+    await this._startProvisionRegions([...nums], { name: r.name, verb: "Downloading" });
   }
 
-  // Remove the open region's charts: re-bake the provisioned set minus this
-  // region's cells (the on-disk manifest then reflects the smaller set). If it
-  // was the last region, delete the archive outright (no "bake empty" path).
+  // Region numbers the user has downloaded — authoritative from the manifest.
+  _installedRegions() { return new Set(this._dlRegions); }
+
   async removeRegion() {
     const r = this._region;
     if (!r) return;
-    const drop = new Set(r.cells);
-    const rest = [...this._provisioned].filter((n) => !drop.has(n));
-    if (rest.length === this._provisioned.size) return; // nothing of this region installed
-    if (!rest.length) return this._deleteAllCharts(r.name);
-    await this._startProvision(rest, { name: r.name, verb: "Removing" });
+    if (!this._dlRegions.has(r.num)) return; // not installed
+    const remaining = [...this._dlRegions].filter((n) => n !== r.num);
+    if (!remaining.length) return this._deleteAllCharts(r.name);
+    await this._startProvisionRegions(remaining, { name: r.name, verb: "Removing" });
+  }
+
+  // Start a background provision of the given NOAA region numbers (POST
+  // {regions:[…]}); progress comes from polling GET /api/tasks.
+  async _startProvisionRegions(regions, meta) {
+    this._taskMeta = meta || null;
+    this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: regions.length, cells: regions.length, cell: "" };
+    this._renderTaskUI();
+    try {
+      const res = await fetch("api/provision", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ regions }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    } catch (e) {
+      console.error("[provision]", e);
+      this._task = { kind: "provision", status: "error", error: "start" };
+      this._taskMeta = { ...(meta || {}), errMsg: "Is the chartplotter server running?" };
+      this._renderTaskUI();
+      this._clearTaskSoon(3500);
+      return;
+    }
+    this._startPolling();
   }
 
   // Remove the LAST region: there's no "bake empty", so delete the provisioned
@@ -1424,35 +1445,34 @@ function bandForScale(s) {
 // max + a small legibility allowance.
 const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
 
-// Curated cruising regions. Every catalog cell is assigned to the NEAREST anchor
-// (by bbox centre) → a non-overlapping partition that accounts for all cells, so
-// charts are browsed/downloaded by named area rather than picked cell-by-cell.
-// Pacific anchors use antimeridian-wrapped longitudes (< -180) to match the cells.
-// [name, lon, lat, coast].
-const REGION_ANCHORS = [
-  ["Downeast Maine", -67.8, 44.5, "Northeast"], ["Penobscot Bay & Casco Bay", -69.3, 43.9, "Northeast"],
-  ["New Hampshire & Mass. Bay", -70.7, 42.9, "Northeast"], ["Cape Cod & the Islands", -70.1, 41.4, "Northeast"],
-  ["Narragansett & Buzzards Bay", -71.3, 41.4, "Northeast"], ["Long Island Sound", -72.7, 41.1, "Northeast"],
-  ["New York Harbor & Hudson", -73.9, 40.6, "Mid-Atlantic"], ["New Jersey Coast", -74.2, 39.5, "Mid-Atlantic"],
-  ["Delaware Bay", -75.1, 38.9, "Mid-Atlantic"], ["Chesapeake Bay", -76.2, 38.2, "Mid-Atlantic"],
-  ["North Carolina & Outer Banks", -76.2, 35.2, "Southeast"], ["Charleston & Georgia Coast", -80.3, 32.2, "Southeast"],
-  ["Northeast Florida", -81.2, 29.9, "Southeast"], ["South Florida & Miami", -80.2, 26.4, "Southeast"],
-  ["Florida Keys", -81.5, 24.7, "Southeast"], ["Tampa Bay & SW Florida", -82.8, 27.3, "Gulf of Mexico"],
-  ["Florida Panhandle", -85.8, 29.8, "Gulf of Mexico"], ["Alabama & Mississippi", -88.4, 30.2, "Gulf of Mexico"],
-  ["Louisiana & the Delta", -90.6, 29.2, "Gulf of Mexico"], ["Texas Coast", -96.2, 28.0, "Gulf of Mexico"],
-  ["Lake Ontario & Erie", -78.5, 42.8, "Great Lakes"], ["Lake Huron", -83.0, 44.5, "Great Lakes"],
-  ["Lake Michigan", -86.5, 43.5, "Great Lakes"], ["Lake Superior", -88.0, 47.3, "Great Lakes"],
-  ["San Diego & South Coast", -117.4, 32.8, "California"], ["Los Angeles & Channel Islands", -119.2, 33.7, "California"],
-  ["Central California", -121.3, 36.0, "California"], ["San Francisco Bay", -122.4, 37.8, "California"],
-  ["Northern California", -124.0, 40.4, "California"], ["Oregon Coast", -124.2, 44.2, "Pacific Northwest"],
-  ["Columbia River & WA Coast", -124.1, 46.6, "Pacific Northwest"], ["Puget Sound", -122.6, 47.9, "Pacific Northwest"],
-  ["Southeast Alaska", -134.5, 57.2, "Alaska"], ["Prince William Sound & Cook Inlet", -149.5, 60.2, "Alaska"],
-  ["Kodiak & Alaska Peninsula", -154.0, 57.5, "Alaska"], ["Aleutian Islands", -178.0, 52.5, "Alaska"],
-  ["Bering Sea & Western Alaska", -165.0, 62.0, "Alaska"], ["Arctic Alaska", -156.0, 71.0, "Alaska"],
-  ["Hawaiian Islands", -157.5, 21.0, "Pacific Islands"], ["Guam & Northern Marianas", -215.2, 14.5, "Pacific Islands"],
-  ["American Samoa", -170.7, -14.3, "Pacific Islands"], ["Puerto Rico & U.S. Virgin Islands", -66.0, 18.2, "Caribbean"],
-];
 const COAST_ORDER = ["Northeast", "Mid-Atlantic", "Southeast", "Gulf of Mexico", "Great Lakes", "California", "Pacific Northwest", "Alaska", "Pacific Islands", "Caribbean"];
+
+// NOAA's official ENC regions (catalog `rg` numbers) — name from
+// charts.noaa.gov/MCD/images/list.txt, plus a coast bucket for grouping the
+// browser list. A region's cells are exactly the catalog cells whose `rg`
+// includes its number, so a body of water (e.g. the Chesapeake) is never split.
+const NOAA_REGIONS = {
+  2: ["Block Island, RI to the Canadian Border", "Northeast"],
+  3: ["New York to Nantucket and Cape May, New Jersey", "Northeast"],
+  4: ["Chesapeake and Delaware Bays", "Mid-Atlantic"],
+  6: ["Norfolk, VA to Florida — The Intracoastal Waterway", "Mid-Atlantic"],
+  7: ["Florida East Coast and the Keys", "Southeast"],
+  8: ["Florida West Coast and the Keys", "Gulf of Mexico"],
+  10: ["Puerto Rico and US Virgin Islands", "Caribbean"],
+  12: ["Southern California — Point Arena to Mexican Border", "California"],
+  13: ["Lake Michigan", "Great Lakes"],
+  14: ["San Francisco to Cape Flattery", "California"],
+  15: ["Pacific Northwest — Puget Sound to Canadian Border", "Pacific Northwest"],
+  17: ["Mobile, AL to Mexican Border", "Gulf of Mexico"],
+  22: ["Lake Superior and Lake Huron", "Great Lakes"],
+  24: ["Lake Erie (US Waters)", "Great Lakes"],
+  26: ["Lake Ontario (US Waters)", "Great Lakes"],
+  30: ["Southeast Alaska", "Alaska"],
+  32: ["South Central Alaska", "Alaska"],
+  34: ["Alaska — The Aleutians and Bristol Bay", "Alaska"],
+  36: ["Alaska — Norton Sound to Beaufort Sea", "Alaska"],
+  40: ["Hawaiian Islands", "Pacific Islands"],
+};
 
 // The finest band whose source paints at zoom z (Band.zoomRange mins in bake.zig:
 // overview 0, general 7, coastal 9, approach 11, harbor 13, berthing 16).

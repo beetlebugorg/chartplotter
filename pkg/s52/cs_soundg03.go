@@ -177,8 +177,12 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 		leadingDigit := int(displayDepth)
 		symbols = append(symbols, fmt.Sprintf("%s1%d", prefix, leadingDigit))
 
-		// Extract fraction: round to avoid floating point errors (e.g., 0.7*10 = 6.9999)
-		fraction := int((displayDepth-float64(leadingDigit))*10.0 + 0.5)
+		// First decimal digit, TRUNCATED (SNDFRM04 algs 1/2: "truncate all
+		// digits after the decimal; do not round up"). The +1e-6 only absorbs FP
+		// error (0.7*10 = 6.9999…→7); it never reaches 10, so the glyph index
+		// stays 0–9 (rounding here produced an invalid "SOUNDS510" for X.95+).
+		// Matches s52/csp/soundg03.zig truncFraction.
+		fraction := int((displayDepth-float64(leadingDigit))*10.0 + 1e-6)
 		if fraction > 0 && !suppressFraction {
 			symbols = append(symbols, fmt.Sprintf("%s5%d", prefix, fraction))
 		}
@@ -189,8 +193,8 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 		tensDigit := depthInt / 10
 		onesDigit := depthInt % 10
 
-		// Extract fraction: round to avoid floating point errors
-		fraction := int((displayDepth-float64(depthInt))*10.0 + 0.5)
+		// First decimal digit, TRUNCATED (see Algorithm 1 note) — never 10.
+		fraction := int((displayDepth-float64(depthInt))*10.0 + 1e-6)
 
 		symbols = append(symbols, fmt.Sprintf("%s2%d", prefix, tensDigit))
 		symbols = append(symbols, fmt.Sprintf("%s1%d", prefix, onesDigit))

@@ -67,6 +67,17 @@ func (p Projector) Project(ll geo.LatLon) FPoint {
 	}
 }
 
+// ProjectNorm projects a point already in normalized-world coordinates (X,Y in
+// [0,1], Web-Mercator) into this tile's pixel space. This is a cheap affine
+// transform — no log/sin/tan — so callers that project the same geometry into
+// many tiles should normalize once (lon/lat → [0,1]) and use this per tile.
+func (p Projector) ProjectNorm(n FPoint) FPoint {
+	return FPoint{
+		X: n.X*p.worldSize - p.originX,
+		Y: n.Y*p.worldSize - p.originY,
+	}
+}
+
 // Quantize rounds a clipped tile-local coordinate to an integer MVT vertex.
 func Quantize(p FPoint) IPoint {
 	return IPoint{X: int32(math.Round(p.X)), Y: int32(math.Round(p.Y))}

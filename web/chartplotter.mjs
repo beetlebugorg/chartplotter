@@ -24,7 +24,11 @@
 // same way the dev index.html does — colour is never baked, so Day/Dusk/Night
 // is a restyle. This module supersedes index.html as the shipped surface.
 
-import { EngineClient } from "./engine-client.mjs";
+// NOTE: in-browser baking (the TinyGo WASM EngineClient) is NOT part of the Go
+// build — all tile generation is a server-side task (`chartplotter provision` /
+// POST /api/provision). The browser only renders pre-baked archives. The
+// `bakePmtiles`/`_engineClient` methods below therefore throw; the optional
+// in-browser import-bake path is Phase 9.
 import { ChartStore } from "./chart-store.mjs";
 import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 
@@ -537,22 +541,19 @@ export class ChartPlotter extends HTMLElement {
   // prebaked-only viewer never spins up the worker, loads the wasm, or parses
   // the catalog.
   _engineClient() {
-    if (!this._engine) {
-      const assets = this._assets;
-      this._engine = new EngineClient(
-        new URL(assets + "chart-worker.mjs", location.href).href,
-        new URL(assets + "chartplotter.wasm", location.href).href,
-        new URL((this.getAttribute("catalog-url") || assets + "catalog.json"), location.href).href,
-      );
-    }
-    return this._engine;
+    throw new Error(
+      "in-browser baking is not available in this build — tiles are baked " +
+      "server-side (chartplotter provision / POST /api/provision)",
+    );
   }
 
-  // Bake every tile covering `names` into one static .pmtiles (bake-once),
-  // reporting progress; resolves to the archive bytes (Uint8Array). The caller
-  // persists it and calls setArchive() to render it. Spins up the engine lazily.
+  // In-browser baking is not part of the Go build (see the import note at the
+  // top): all tile generation is a server-side task. This throws so the (rare)
+  // bare-component charts="…" / in-browser .zip-import paths fail loudly rather
+  // than silently; the primary flows render a hosted/provisioned archive via
+  // pmtiles="…" or setArchive(). Restoring this is Phase 9 (TinyGo WASM).
   bakePmtiles(names, onProgress) {
-    return this._engineClient().bakePmtiles(names, onProgress);
+    return Promise.reject(new Error("in-browser baking unavailable; use server provisioning"));
   }
 
   // Names of every locally stored chart.
