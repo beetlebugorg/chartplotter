@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/iso8211"
+	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 )
 
 // BenchmarkParse benchmarks parsing a real S-57 chart

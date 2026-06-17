@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/iso8211"
+	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 	"github.com/spf13/afero"
 )
 

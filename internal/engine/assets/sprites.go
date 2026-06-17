@@ -8,10 +8,10 @@ import (
 	"math"
 	"sort"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
-// Sprite / pattern atlas exporter. Port of sprites.zig: every PresLib symbol
+// Sprite / pattern atlas exporter: every PresLib symbol
 // (and pattern tile) is run through the HP-GL interpreter, rasterised with AA,
 // shelf-packed into one 512-px-wide RGBA atlas, and described by JSON the
 // MapLibre client references as Icon sub-rects. Pen colours resolve to the Day
@@ -104,8 +104,7 @@ func buildPatternAtlas(lib *s52.Library) (atlas, error) {
 
 // rasterizePattern renders one Pattern into a seamless tile. Pattern
 // VectorCommands are already normalised so the bbox upper-left is at the origin;
-// the registration pivot is therefore the bbox centre (w/2, h/2). Port of
-// sprites.zig rasterizePattern.
+// the registration pivot is therefore the bbox centre (w/2, h/2).
 func rasterizePattern(pat *s52.Pattern, day map[string]rcolor, scale float32, skipped *int) (raster, bool) {
 	roles := pat.Colors.Roles
 	// Pivot = bbox centre, in the normalised coordinate space.
@@ -200,7 +199,7 @@ func packInto(rasters []raster, skipped int) atlas {
 }
 
 // toJSON renders the atlas description (_meta + per-name cells), names sorted.
-// Matches the Zig float formatting (px_per_unit plain, pivots %.2f).
+// Float formatting: px_per_unit plain, pivots %.2f.
 func (a atlas) toJSON() []byte {
 	names := make([]string, 0, len(a.cells))
 	for n := range a.cells {
@@ -260,7 +259,7 @@ func PatternAtlas(lib *s52.Library) (jsonBytes, pngBytes []byte, err error) {
 	return a.toJSON(), pngBytes, nil
 }
 
-// fmtNum formats a float without trailing zeros (matches Zig {d} for px_per_unit).
+// fmtNum formats a float without trailing zeros (used for px_per_unit).
 func fmtNum(v float64) string {
 	s := fmt.Sprintf("%g", v)
 	return s

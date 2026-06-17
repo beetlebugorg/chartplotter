@@ -1,4 +1,4 @@
-module github.com/beetlebugorg/chartplotter-go
+module github.com/beetlebugorg/chartplotter
 
 go 1.26.3
 

@@ -3,7 +3,7 @@ package parser
 import (
 	"encoding/binary"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/iso8211"
+	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 )
 
 // vectorPointer represents a pointer to another spatial record

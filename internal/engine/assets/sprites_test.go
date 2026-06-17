@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
 // compareAtlasJSON checks that the generated atlas JSON has the same key set as
@@ -26,12 +26,12 @@ func compareAtlasJSON(t *testing.T, refPath string, got []byte) {
 		t.Fatalf("reference not valid JSON: %v", err)
 	}
 
-	// The shipped web/sprite.json predates the current authoritative Zig
-	// (s52/src/dai.zig + portrayal/symbol_render.zig). A few symbols whose art
-	// is a CI (circle) inside polygon mode without an explicit FP — or carries
-	// an out-of-range pivot — render at a slightly different size than that
-	// stale reference. The generator faithfully matches the current Zig source
-	// ("port the Zig"), so these are allowlisted; everything else must match.
+	// The shipped web/sprite.json predates the current authoritative symbol
+	// definitions. A few symbols whose art is a CI (circle) inside polygon mode
+	// without an explicit FP — or carries an out-of-range pivot — render at a
+	// slightly different size than that stale reference. The generator
+	// faithfully matches the current source, so these are allowlisted;
+	// everything else must match.
 	allow := map[string]bool{"NEWOBJ01": true, "EMNEWOB1": true, "FSHHAV01": true}
 
 	missing, extra, mismatch := 0, 0, 0

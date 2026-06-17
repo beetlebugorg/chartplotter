@@ -2,7 +2,7 @@
 // Range support) plus the /api onboarding surface the chart-manager UI drives:
 // POST /api/provision starts a background download+bake job, GET /api/tasks
 // reports its progress, DELETE /api/charts removes the provisioned archive.
-// Port of the serve/handleApi path in main.zig (see CHARTS-UI-SPEC §3).
+// Implements the serve/handleApi path (see CHARTS-UI-SPEC §3).
 package server
 
 import (

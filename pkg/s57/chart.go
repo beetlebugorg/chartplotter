@@ -1,7 +1,7 @@
 package s57
 
 import (
-	"github.com/beetlebugorg/chartplotter-go/internal/s57/parser"
+	"github.com/beetlebugorg/chartplotter/internal/s57/parser"
 	"github.com/dhconnelly/rtreego"
 )
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestXMLToJSON mirrors the chartcat.zig "extracts fields and bbox" test.
+// TestXMLToJSON checks field and bbox extraction.
 func TestXMLToJSON(t *testing.T) {
 	xml := `<EncProductCatalog><Header><date_valid>2026-06-13</date_valid></Header>
 <cell><name>US5MD1MC</name><lname>Annapolis Harbor</lname><cscale>12000</cscale>

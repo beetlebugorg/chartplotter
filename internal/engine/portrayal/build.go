@@ -6,15 +6,15 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
-// maxCSPDepth bounds recursive CS dispatch (mirrors primitive.zig max_csp_depth).
+// maxCSPDepth bounds recursive CS dispatch.
 const maxCSPDepth = 4
 
-// NaN marks "no depth" on sounding/danger fields, matching the Zig sentinel.
+// NaN marks "no depth" on sounding/danger fields (the sentinel value).
 var nan32 = float32(math.NaN())
 
 // FeatureBuild is the result of expanding one feature: its viewport-independent
@@ -27,7 +27,7 @@ type FeatureBuild struct {
 }
 
 // geom is the portrayal-space geometry handed to the instruction walk. It mirrors
-// the Zig s57.Geometry union (point / soundings / line / area). currentDepthM is
+// the s57 geometry union (point / soundings / line / area). currentDepthM is
 // the per-point sounding depth (NaN otherwise), used by SOUNDG03 + carried on the
 // emitted symbol so the client can do SNDFRM04 without a re-bake.
 type geom struct {
@@ -50,8 +50,7 @@ const (
 
 // BuildFeature runs the S-52 expand step (lookup + CSP + instruction walk) for
 // one feature and returns its lat/lon Primitive stream. ok is false when the
-// PresLib has no lookup entry for the feature's class/geometry. Mirrors
-// portrayal/primitive.zig buildFeaturePrimitives.
+// PresLib has no lookup entry for the feature's class/geometry.
 func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature) (FeatureBuild, bool) {
 	if mariner == nil {
 		mariner = s52.DefaultMarinerSettings()
@@ -70,8 +69,7 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 
 	// Multi-point soundings: SOUNDG carries one depth per coordinate (the z of
 	// each [lon,lat,depth]). Run the instruction set once per point with that
-	// depth, exactly like the Zig per-point loop, so SOUNDG03 emits a digit
-	// chain per sounding.
+	// depth, once per point, so SOUNDG03 emits a digit chain per sounding.
 	if objClass == "SOUNDG" && g.Type == s57.GeometryTypePoint {
 		for _, c := range g.Coordinates {
 			if len(c) < 2 {
@@ -103,8 +101,7 @@ const (
 )
 
 // FeatureBuildPass is one boundary-symbolization pass: the built primitives plus
-// the bnd tag the baker stamps on every primitive of the pass. Mirrors bake.zig
-// Pass.
+// the bnd tag the baker stamps on every primitive of the pass.
 type FeatureBuildPass struct {
 	Build FeatureBuild
 	Bnd   int
@@ -116,7 +113,7 @@ type FeatureBuildPass struct {
 // style-variant area — a distinct SYMBOLIZED_BOUNDARIES lookup, or one routing
 // through RESARE04 (the only CSP that reads the boundary style) — gets TWO
 // passes, plain (bnd=0) and symbolized (bnd=1), so the client toggles boundary
-// style live with no re-bake. Mirrors bake.zig boundaryPasses.
+// style live with no re-bake.
 func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature) []FeatureBuildPass {
 	if mariner == nil {
 		mariner = s52.DefaultMarinerSettings()
@@ -271,7 +268,7 @@ type walker struct {
 }
 
 // emit walks one instruction list against geometry g, appending Primitives.
-// Mirrors emitInstructions in primitive.zig.
+// Mirrors the instruction-emit walk.
 func (w *walker) emit(list []s52.Instruction, g geom, depth int) {
 	for _, ins := range list {
 		switch in := ins.(type) {
@@ -633,7 +630,7 @@ func mapHJust(h int) HAlign {
 }
 
 func mapVJust(v int) VAlign {
-	// S-52 §8.3.3.2 VJUST: 2 centre, 3 top, else (incl. 1) bottom (matches dai.zig).
+	// S-52 §8.3.3.2 VJUST: 2 centre, 3 top, else (incl. 1) bottom.
 	switch v {
 	case 2:
 		return VAlignMiddle
@@ -656,7 +653,7 @@ func maxF32(a, b float32) float32 {
 // Handles %[flags][width][.precision][l|h|L]conv; width/flags only affect
 // fixed-pitch padding so they are ignored, precision is honoured for floats.
 // Returns ok=false when a referenced attribute is absent — per S-52 a label with
-// a missing mandatory field is not drawn. Ported from primitive.zig.
+// a missing mandatory field is not drawn.
 func formatSubstitute(attrs map[string]interface{}, format string, attrNames []string) (string, bool) {
 	var out strings.Builder
 	attrIdx := 0
@@ -745,7 +742,7 @@ func appendConverted(out *strings.Builder, val string, conv byte, precision int)
 }
 
 // stringifyScalar renders a scalar attribute value as label text. Integer-valued
-// floats drop the decimal, matching the Zig lookupAttributeText "{d}" output.
+// floats drop the decimal, matching the lookup attribute-text "{d}" output.
 func stringifyScalar(v interface{}) string {
 	switch t := v.(type) {
 	case string:

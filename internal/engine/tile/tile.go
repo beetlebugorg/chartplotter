@@ -6,14 +6,12 @@
 // [x*extent, (x+1)*extent) window, and a lat/lon maps to a tile-local coordinate
 // by subtracting that origin. Geometry is then clipped to [-buffer, extent+buffer]
 // (the MVT render buffer) so a mark just off the tile edge still rasterises.
-//
-// Ported from chartplotter/src/tile.zig.
 package tile
 
 import (
 	"math"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
 )
 
 // FPoint is a tile-local coordinate before quantization.
@@ -35,7 +33,7 @@ func worldXpx(lon, worldSize float64) float64 {
 }
 
 // latToWebMercatorPx is the portrayal projector's Web-Mercator y (origin at the
-// north edge), matching viewport.zig so tiles align with the renderer.
+// north edge), matching the viewport projection so tiles align with the renderer.
 func latToWebMercatorPx(latDeg, worldPx float64) float64 {
 	latRad := latDeg * math.Pi / 180.0
 	sinLat := math.Sin(latRad)

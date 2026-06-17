@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/server"
+	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
 // provisionCmd downloads the named NOAA cells (URLs from DIR/catalog.json) and

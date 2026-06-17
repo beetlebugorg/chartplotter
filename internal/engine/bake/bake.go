@@ -4,18 +4,17 @@
 // zooms. Colour stays an S-52 token string — the client restyles Day/Dusk/Night
 // for free.
 //
-// This is the single-archive (provisioned) bake the Zig reference calls
-// `spec_display`: a feature's display z-min comes from SCAMIN (S-52 §10.4.2,
+// This is the single-archive (provisioned) "spec display" bake: a feature's
+// display z-min comes from SCAMIN (S-52 §10.4.2,
 // defaulting to z0 so coverage never goes blank on zoom-out), and where cells of
 // different scales overlap, emitTile applies best-available-data suppression both
 // ways (below the native bands only the coarsest cell's blanket shows; above them
 // only the finest cell's chart). A normalized-world bbox reject prunes far
 // primitives before projection.
 //
-// Ported from chartplotter/src/bake.zig (+ sectorlights.zig): SCAMIN z-min,
-// native bands + best-available suppression, sounding-number grouping,
-// OBSTRN/WRECKS danger-depth carriage, and per-zoom sector-light tessellation
-// into the lines layer.
+// Covers: SCAMIN z-min, native bands + best-available suppression,
+// sounding-number grouping, OBSTRN/WRECKS danger-depth carriage, and per-zoom
+// sector-light tessellation into the lines layer.
 package bake
 
 import (
@@ -23,13 +22,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/mvt"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/pmtiles"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/portrayal"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/tile"
-	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
+	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
+	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 const maxBandZ uint32 = 18
@@ -95,8 +94,8 @@ func BandForScale(cscl uint32) Band {
 // where the object first becomes visible: the zoom whose DISPLAY-scale
 // denominator (at the cell's latitude) is nearest SCAMIN. S-52 §8.4 gates on the
 // display scale, so we use the cell's latitude (not the equator) and round to
-// the nearest integer zoom — otherwise (equator + round-up, as bake.zig does)
-// features pop in ~1 zoom late at mid/high latitudes (e.g. a 1:22k harbour
+// the nearest integer zoom — otherwise (equator + round-up) features pop in
+// ~1 zoom late at mid/high latitudes (e.g. a 1:22k harbour
 // sounding wouldn't show until 1:13k instead of ~1:26k). Clamped to the zoom span.
 func scaminZoom(scamin uint32, lat float64) uint32 {
 	if scamin == 0 {
@@ -121,7 +120,7 @@ func scaminZoom(scamin uint32, lat float64) uint32 {
 // §10.4.2 a DISPLAYBASE object is always shown and an object without SCAMIN has
 // no minimum display scale, so both float to z0; SCAMIN raises it. Coarse-tile
 // pile-up is bounded by EmitTile's best-available suppression (a finer cell
-// yields only where no coarser cell covers it). Matches bake.zig specZMin.
+// yields only where no coarser cell covers it).
 func specZMin(displayCategory int, scamin uint32, lat float64) uint32 {
 	if displayCategory == s52.DisplayBase {
 		return 0
@@ -132,7 +131,7 @@ func specZMin(displayCategory int, scamin uint32, lat float64) uint32 {
 	return 0
 }
 
-// displayZMin is the per-band display z-min (bake.zig displayZMin): a feature is
+// displayZMin is the per-band display z-min: a feature is
 // gated to its own scale band (no down-fill to z0). Used by the per-band
 // district archives, NOT the single provisioned archive. Kept for that path.
 //
@@ -226,7 +225,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 				// the same anchor (the glyph art carries the column shift). Group a
 				// number's consecutive same-anchor digit glyphs into ONE soundings
 				// feature so the client renders the whole number and declutter treats
-				// it as a single unit (matches bake.zig).
+				// it as a single unit.
 				if sc, ok := prims[pi].(portrayal.SymbolCall); ok && isSoundingName(sc.SymbolName) {
 					names := []string{sc.SymbolName}
 					for pi+1 < len(prims) {
@@ -274,7 +273,6 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 // catRank maps the S-52 display category (DisplayBase/Standard/Other = 6/7/8)
 // to the client's category-filter rank (0/1/2). The frontend's categoryFilter
 // tests `cat ∈ {0,1,2}`, so the raw enum values would filter every feature out.
-// Port of bake.zig categoryRank.
 func catRank(displayCategory int) int64 {
 	switch displayCategory {
 	case s52.DisplayBase:
@@ -610,8 +608,8 @@ type sectorStroke struct {
 }
 
 // expandSector tessellates a LIGHTS06 sector at anchor into lat/lon line strokes
-// sized for integer zoom z (screen-px radii). Ported from sectorlights.zig: a
-// ring is one OUTLW-backed coloured circle (26 mm); a sector is two dashed CHBLK
+// sized for integer zoom z (screen-px radii). A ring is one OUTLW-backed
+// coloured circle (26 mm); a sector is two dashed CHBLK
 // legs (25 mm) plus an OUTLW-backed coloured arc (20 mm). SECTR1/2 are from
 // seaward, so bearings are reversed +180.
 func expandSector(anchor geo.LatLon, p portrayal.SectorParams, z uint32) []sectorStroke {
@@ -792,7 +790,7 @@ func ptBbox(p geo.LatLon) geo.BoundingBox {
 
 // depthVals returns a depth area's DRVAL1/DRVAL2 (metres) for the client's live
 // SEABED01 shading, or (NaN, NaN) for non-depth areas (so route() omits them).
-// DRVAL2 falls back to DRVAL1 when absent. Mirrors bake.zig's is_depth gate.
+// DRVAL2 falls back to DRVAL1 when absent. Mirrors the is_depth gate.
 func depthVals(attrs map[string]interface{}, class string) (float32, float32) {
 	if class != "DEPARE" && class != "DRGARE" {
 		return nan32f, nan32f
@@ -926,8 +924,7 @@ func isSoundingName(name string) bool {
 
 // soundingVariant forces every SOUND? glyph token in a comma-joined sounding name
 // list to the given palette letter (S = bold/shallow, G = faint/deep), so the
-// client runs SNDFRM04's safety-depth split live. Matches soundingVariant in
-// bake.zig.
+// client runs SNDFRM04's safety-depth split live.
 func soundingVariant(names string, letter byte) string {
 	parts := strings.Split(names, ",")
 	for i, p := range parts {

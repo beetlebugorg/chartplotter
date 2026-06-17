@@ -3,13 +3,13 @@ package bake
 import (
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/mvt"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/portrayal"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/tile"
-	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
+	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 const goldenCell = "../../../testdata/US4MD81M.000"

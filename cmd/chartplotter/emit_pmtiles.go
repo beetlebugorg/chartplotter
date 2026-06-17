@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/bake"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 // emitPmtilesCmd bakes one or more S-57 base cells (.000) into a single static
-// PMTiles v3 archive. Port of `chartplotter --emit-pmtiles` (main.zig).
+// PMTiles v3 archive. Implements the `emit-pmtiles` command.
 type emitPmtilesCmd struct {
 	Out   string   `arg:"" type:"path" help:"Output PMTiles archive."`
 	Cells []string `arg:"" type:"existingfile" name:"cell" help:"S-57 base cell(s) (CELL.000)."`

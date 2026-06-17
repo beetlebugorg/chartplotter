@@ -5,12 +5,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
 // TestColorTablesMatchCopied checks the generated colortables.json equals the
-// Zig-generated reference shipped in web/.
+// reference shipped in web/.
 func TestColorTablesMatchCopied(t *testing.T) {
 	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
 	if err != nil {

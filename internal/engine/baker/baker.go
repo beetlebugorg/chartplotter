@@ -13,14 +13,14 @@ import (
 
 	"github.com/spf13/afero"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/bake"
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/pmtiles"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
+	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
-// MVT bake parameters (match the Zig defaults).
+// MVT bake parameters (default values).
 const (
 	MVTExtent uint32  = 4096
 	MVTBuffer float64 = 64

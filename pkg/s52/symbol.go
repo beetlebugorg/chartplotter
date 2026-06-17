@@ -39,7 +39,7 @@ func (s *Symbol) ParseSYMD(symd string) error {
 	//   [19:24) SYHL bbox width        [24:29) SYVL bbox height
 	//   [29:34) SBXC bbox upper-left col   [34:39) SBXR bbox upper-left row
 	// Any trailing bytes beyond 39 are ignored (some records carry extras).
-	// Matches dai.zig setSymd — the authoritative reference. The old
+	// This fixed-offset layout is authoritative. The old
 	// "optional 2-digit version" heuristic mis-fired on records whose data
 	// section ran 32 chars, stripping the first two pivot digits.
 	if len(symd) < 39 {
@@ -52,7 +52,7 @@ func (s *Symbol) ParseSYMD(symd string) error {
 	s.ID = strings.TrimSpace(symd[0:8])
 	s.Type = "V"
 
-	// parse5 mirrors dai.zig parseFixed5: a 5-char field is parsed as an
+	// parse5 reads a fixed 5-char field: it is parsed as an
 	// unsigned integer; anything that fails (incl. a literal negative like the
 	// "-2146" some records carry in the pivot field) becomes 0.
 	parse5 := func(lo, hi int) float64 {

@@ -1,11 +1,10 @@
 // S-52 color system management with CIE xyY colorimetric support.
 //
-// Colors come from the PresLib DAI as CIE xyY. Conversion to sRGB matches the
-// Zig reference renderer (s52/src/color.zig): the xyY values are treated as D65
-// directly (no Illuminant-C -> D65 chromatic adaptation), linear sRGB is clamped
-// to [0,1] before gamma encoding, and 8-bit values are rounded. This keeps the
-// generated colortables.json and the symbol/pattern atlases pixel-identical to
-// the reference demo. See colors_fidelity_test.go.
+// Colors come from the PresLib DAI as CIE xyY. Conversion to sRGB: the xyY
+// values are treated as D65 directly (no Illuminant-C -> D65 chromatic
+// adaptation), linear sRGB is clamped to [0,1] before gamma encoding, and 8-bit
+// values are rounded. This keeps the generated colortables.json and the
+// symbol/pattern atlases pixel-stable. See colors_fidelity_test.go.
 package s52
 
 import (
@@ -252,9 +251,8 @@ func (db *ColorDatabase) GetColor(token string, mode string) (Color, error) {
 // Implements Bradford chromatic adaptation from Illuminant C to D65 as specified.
 // Reference: specs/DAI_TO_SVG_RENDERING_SPEC.md section "Color System"
 func (color Color) ConvertToRGB() (r, g, b float64) {
-	// Match the Zig chartplotter conversion (s52/src/color.zig cieToSrgb) so the
-	// generated colortables.json — and the symbol/pattern atlases — are visually
-	// identical to the reference renderer. The PresLib xyY values are treated as
+	// This conversion keeps the generated colortables.json — and the
+	// symbol/pattern atlases — visually consistent. The PresLib xyY values are treated as
 	// D65 directly (NO Illuminant-C -> D65 Bradford adaptation), and the linear
 	// RGB is clamped to [0,1] BEFORE gamma encoding. Returns gamma-encoded sRGB
 	// in [0,1]; ConvertToHex rounds to 8-bit.
@@ -312,7 +310,7 @@ func (color Color) ConvertToHex() string {
 	// Reference: specs/DAI_TO_SVG_RENDERING_SPEC.md section "Applying Colors by Role"
 	r, g, b := color.ConvertToRGB()
 
-	// Round to nearest 8-bit (Zig encodeSrgb uses *255 + 0.5), then clamp.
+	// Round to nearest 8-bit (*255 + 0.5), then clamp.
 	to8 := func(v float64) int {
 		n := int(v*255.0 + 0.5)
 		if n < 0 {

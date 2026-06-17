@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	s57 "github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	s57 "github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 // Viewport represents the visible area of the chart

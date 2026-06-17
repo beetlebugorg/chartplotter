@@ -20,8 +20,8 @@ func (l *Library) LookupFeature(objectClass string, geometryType string, attribu
 	}
 
 	// Parse instructions, then expand CS procedures (one-shot, attribute-only
-	// context). The Zig-faithful portrayal walk instead uses LookupFeatureRaw +
-	// its own recursive CS dispatch; this path stays for callers that want the
+	// context). The portrayal walk instead uses LookupFeatureRaw + its own
+	// recursive CS dispatch; this path stays for callers that want the
 	// flattened instruction list.
 	instructions := l.expandCSInstructions(parseInstructions(instructionStr), attributes, mariner)
 	return l.makeInstructionSet(objectClass, instructions, selectedEntry)
@@ -99,8 +99,8 @@ func (l *Library) makeInstructionSet(objectClass string, instructions []Instruct
 // LookupFeatureRaw is like LookupFeature but returns the matched LUPT
 // instructions WITHOUT expanding CS procedures (CS stays as *CSInstruction).
 // The portrayal walk uses this so it can run the S-52 instruction walk itself —
-// recursive CS dispatch and per-sounding-point expansion — matching the Zig
-// reference. Returns nil if no LUPT entry matches.
+// recursive CS dispatch and per-sounding-point expansion. Returns nil if no
+// LUPT entry matches.
 func (l *Library) LookupFeatureRaw(objectClass, geometryType string, attributes map[string]interface{}, mariner *MarinerSettings) *InstructionSet {
 	if mariner == nil {
 		mariner = DefaultMarinerSettings()

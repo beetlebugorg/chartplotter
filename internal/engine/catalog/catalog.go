@@ -1,7 +1,7 @@
 // Package catalog distils NOAA's ENCProdCat.xml product catalog (~10 MB, ~7k
-// cells) into the compact catalog.json the chart-manager frontend loads. Port
-// of chartcat.zig — a small in-place tag scanner (the catalog is flat and
-// regular, so a full XML parser would be overkill).
+// cells) into the compact catalog.json the chart-manager frontend loads.
+// A small in-place tag scanner (the catalog is flat and regular, so a full
+// XML parser would be overkill).
 package catalog
 
 import (
@@ -63,7 +63,7 @@ func writeJSONStr(w *bytes.Buffer, s string) {
 
 // XMLToJSON parses the product-catalog XML and streams a compact JSON document
 // to w: {"date":"…","cells":[{n,l,s,e,u,d,z,zs,cg,rg,bb:[W,S,E,N]}…]}. Returns
-// the cell count. Port of chartcat.zig xmlToJson.
+// the cell count.
 func XMLToJSON(xml string, out io.Writer) (int, error) {
 	var w bytes.Buffer
 	w.WriteString("{\"date\":")
@@ -172,9 +172,10 @@ func XMLToJSON(xml string, out io.Writer) (int, error) {
 		}
 		w.WriteByte(']')
 		if west <= east {
-			// %.6f uses IEEE round-half-to-even; Zig's {d:.6} rounds half-away,
-			// so ~45/7136 cells differ by 1 in the 6th bbox decimal (~0.1 m) on
-			// exact-half inputs like "-123.5022195". Functionally identical.
+			// %.6f uses IEEE round-half-to-even; a round-half-away formatter
+			// would differ by 1 in the 6th bbox decimal (~0.1 m) on ~45/7136
+			// cells with exact-half inputs like "-123.5022195". Functionally
+			// identical.
 			fmt.Fprintf(&w, ",\"bb\":[%.6f,%.6f,%.6f,%.6f]", west, south, east, north)
 		} else {
 			w.WriteString(",\"bb\":null")

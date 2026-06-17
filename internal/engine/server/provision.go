@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
 // ProvisionResult is the outcome of a provision run (the JSON contract shared by
@@ -87,8 +87,7 @@ type catalogDoc struct {
 // ProvisionCore resolves each named cell's NOAA zip URL from dir/catalog.json,
 // downloads it (server-side — no browser CORS), caches the extracted base cell
 // at dir/.cellcache-<CELL>.000, native-bakes them all into
-// dir/charts-user.pmtiles, and writes the dir/charts-user.json sidecar. Port of
-// main.zig provisionCore.
+// dir/charts-user.pmtiles, and writes the dir/charts-user.json sidecar.
 func ProvisionCore(dir string, names []string, p *ProgressSink) (ProvisionResult, error) {
 	catBytes, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
 	if err != nil {
@@ -301,7 +300,7 @@ type pmtInfo struct {
 }
 
 // pmtilesInfo reads a PMTiles archive's 127-byte header (tile count, zoom range,
-// data bounds). Mirrors main.zig pmtilesInfo.
+// data bounds).
 func pmtilesInfo(path string) (pmtInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {

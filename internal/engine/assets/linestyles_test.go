@@ -6,12 +6,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
 // TestLinestylesMatchReference compares generated linestyles.json against the
-// Zig reference output shipped in web/linestyles.json (structural equality of
+// reference output shipped in web/linestyles.json (structural equality of
 // the parsed JSON, so key ordering/whitespace don't matter).
 func TestLinestylesMatchReference(t *testing.T) {
 	ref, err := os.ReadFile("../../../web/linestyles.json")

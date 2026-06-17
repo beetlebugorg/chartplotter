@@ -6,12 +6,12 @@ import (
 	"io"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
 // bakeZipCmd extracts every S-57 base cell (.000) from a NOAA ENC zip and bakes
 // them into one PMTiles archive. S-57 update files (.001, .002, …) are counted
-// but not applied. Port of `chartplotter --bake-zip` (main.zig bakeZip).
+// but not applied. Implements the `bake-zip` command.
 type bakeZipCmd struct {
 	Out string `arg:"" type:"path" help:"Output PMTiles archive."`
 	Zip string `arg:"" type:"existingfile" help:"NOAA ENC zip (one or many cells)."`

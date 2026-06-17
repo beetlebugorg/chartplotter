@@ -496,7 +496,7 @@ func parseTE(args string) (*TXInstruction, error) {
 	// Build the base TX from the remaining params, using the attribute name as a
 	// fallback text. Then preserve the format string + attribute list so the
 	// portrayal layer can do S-52 §8.3.3.3 printf substitution rather than
-	// dropping the format (which the Zig reference does, e.g. "clr op %4.1lf").
+	// dropping the format (e.g. "clr op %4.1lf").
 	txArgs := parts[1] + "," + strings.Join(parts[2:], ",")
 	tx, err := parseTX(txArgs)
 	if err != nil {

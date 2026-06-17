@@ -3,8 +3,6 @@
 // world position (float64), Point is a projected screen position (float32).
 // Collapsing them would silently conflate "where on Earth" with "where on the
 // page" and change precision, so they stay distinct.
-//
-// Ported from geo/src/geo.zig in the Zig chartplotter.
 package geo
 
 import "math"

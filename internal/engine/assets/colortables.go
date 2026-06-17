@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
 // schemes is the set emitted to colortables.json (the client resolves tokens

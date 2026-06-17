@@ -1,5 +1,5 @@
 // Minimal protobuf wire-format writer for the MVT encoder: varints,
-// length-delimited fields, packed uint32, and fixed32. Ported from pbf.zig.
+// length-delimited fields, packed uint32, and fixed32.
 package mvt
 
 // wireType is the protobuf wire type (low 3 bits of a tag).

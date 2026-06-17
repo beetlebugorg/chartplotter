@@ -4,12 +4,11 @@
 // *token* strings; the tile engine projects/clips/encodes the Primitives into
 // MVT and the browser resolves Day/Dusk/Night from colortables.json.
 //
-// Ported from chartplotter/src/portrayal/ (primitive.zig) in the Zig
-// chartplotter. The legacy page-space DrawCommand projection path is NOT ported
-// — the tile engine (internal/engine/bake) projects the Primitive IR directly.
+// The legacy page-space DrawCommand projection path is not used — the tile
+// engine (internal/engine/bake) projects the Primitive IR directly.
 package portrayal
 
-import "github.com/beetlebugorg/chartplotter-go/pkg/geo"
+import "github.com/beetlebugorg/chartplotter/pkg/geo"
 
 // DefaultPxPerSymbolUnit is screen px per 0.01-mm PresLib symbol unit at 100%
 // zoom — the nominal S-52 feature scale shared by the symbol/linestyle renderers
@@ -45,7 +44,7 @@ const (
 )
 
 // Primitive is one viewport-independent draw step. The concrete types below are
-// the closed set of variants (the Zig `Primitive` tagged union). Consumers
+// the closed set of variants (the Primitive tagged union). Consumers
 // (the bake step) type-switch over them.
 type Primitive interface {
 	isPrimitive()
@@ -138,9 +137,8 @@ type SectorLight struct {
 	Sector SectorParams
 }
 
-// SectorParams carries the S-52 LIGHTS06 sector parameters. Mirrors the Zig
-// s52 SectorInstruction; populated from the s52 SectorInstruction the CS
-// procedure emits.
+// SectorParams carries the S-52 LIGHTS06 sector parameters. Populated from the
+// s52 SectorInstruction the CS procedure emits.
 type SectorParams struct {
 	StartAngleDeg float64 // SECTR1, 0=North, clockwise
 	EndAngleDeg   float64 // SECTR2, 0=North, clockwise

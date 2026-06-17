@@ -6,13 +6,13 @@ import (
 	"math"
 	"sort"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/portrayal"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
 // featureScale is screen px per 0.01-mm PresLib symbol unit — the identical
 // scale the portrayal backend uses, so the dash period lands at the same screen
-// dimension as the SC symbol marks it interleaves with. (linestyles.zig:feature_scale)
+// dimension as the SC symbol marks it interleaves with.
 const featureScale = float64(portrayal.DefaultPxPerSymbolUnit)
 
 // onRun is one drawn run within a single pattern period, in screen px relative
@@ -39,8 +39,7 @@ type lsPattern struct {
 // its PD "on" runs (px, relative to bbox.x), the embedded SC symbol placements,
 // the first PD pen's colour token, and the stroke width active at the first PD.
 // Polygon/arc ops are ignored — the dash array is only the line part. Returns
-// false for a degenerate (zero-width / sub-px) linestyle. Port of
-// linestyles.zig analyze().
+// false for a degenerate (zero-width / sub-px) linestyle.
 func analyzeLinestyle(ls *s52.Linestyle) (lsPattern, bool) {
 	if ls.BBoxWidth == 0 {
 		return lsPattern{}, false
@@ -62,7 +61,7 @@ func analyzeLinestyle(ls *s52.Linestyle) (lsPattern, bool) {
 		switch {
 		case cmd.Type == "PD":
 			// Each PD command carries a polyline; walk consecutive point pairs,
-			// mirroring the Zig per-segment pen_down_to handling.
+			// mirroring the per-segment pen_down_to handling.
 			pts := cmd.Points
 			for j := 0; j+1 < len(pts); j++ {
 				a := (math.Min(pts[j].X, pts[j+1].X) - bboxX) * featureScale
@@ -74,7 +73,7 @@ func analyzeLinestyle(ls *s52.Linestyle) (lsPattern, bool) {
 				}
 				if !haveColor {
 					colorToken = ls.Colors.Roles[cmd.Role]
-					// sw=1 → 0.32 mm = 32 units; matches complexline.zig.
+					// sw=1 → 0.32 mm = 32 units.
 					widthPx = float64(cmd.StrokeWidth) * 32.0 * featureScale
 					haveColor = true
 				}
@@ -103,7 +102,7 @@ func analyzeLinestyle(ls *s52.Linestyle) (lsPattern, bool) {
 // dashArray converts sorted on-runs over [0, period] into a flat portrayal dash
 // array: [on,off,on,off,…], starting with an "on" entry (a leading 0 is
 // inserted when the pattern opens with a gap) and padded to even length so the
-// pattern repeats cleanly. Port of linestyles.zig dashArray().
+// pattern repeats cleanly.
 func dashArray(p lsPattern) []float64 {
 	var out []float64
 	pos := 0.0 // end of the last consumed run
@@ -156,8 +155,7 @@ func dashArray(p lsPattern) []float64 {
 }
 
 // LinestylesJSON renders linestyles.json. Linestyles are emitted in sorted id
-// order for deterministic output, matching the Zig float formatting (%.3f).
-// Port of linestyles.zig toJson().
+// order for deterministic output, using %.3f float formatting.
 func LinestylesJSON(lib *s52.Library) ([]byte, error) {
 	ids := lib.ListLineStyles()
 	sort.Strings(ids)
@@ -200,7 +198,7 @@ func LinestylesJSON(lib *s52.Library) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// f3 formats a float with 3 decimals (matches Zig {d:.3}).
+// f3 formats a float with 3 decimals (%.3f).
 func f3(v float64) string { return fmt.Sprintf("%.3f", v) }
 
 func clampf(v, lo, hi float64) float64 {

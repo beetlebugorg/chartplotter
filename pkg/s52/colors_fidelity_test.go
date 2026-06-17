@@ -3,15 +3,14 @@ package s52
 import (
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
-// TestColorTablesMatchZig pins the xyY->sRGB conversion to the Zig reference
-// renderer (s52/src/color.zig). The frontend's colortables.json was generated
-// by that renderer; these tokens are a representative spot-check across the
-// three viewing schemes. If this drifts, Day/Dusk/Night colours will no longer
-// match the reference demo.
-func TestColorTablesMatchZig(t *testing.T) {
+// TestColorTablesMatchReference pins the xyY->sRGB conversion. The frontend's
+// colortables.json was generated from this conversion; these tokens are a
+// representative spot-check across the three viewing schemes. If this drifts,
+// Day/Dusk/Night colours will no longer match.
+func TestColorTablesMatchReference(t *testing.T) {
 	lib, err := LoadLibraryFromBytes(preslib.DAI)
 	if err != nil {
 		t.Fatalf("LoadLibraryFromBytes: %v", err)

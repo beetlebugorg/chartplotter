@@ -6,14 +6,12 @@
 //
 // Callers hand geometry already in tile-local integer coordinates (see package
 // tile). Crucially, colour is carried as a string *token* attribute, never RGB.
-//
-// Ported from chartplotter/src/mvt.zig.
 package mvt
 
 import (
 	"math"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/tile"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
 )
 
 func boolToU64(b bool) uint64 {

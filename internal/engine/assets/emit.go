@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
 // Emit writes the six generated S-52 asset files into dir, returning the list

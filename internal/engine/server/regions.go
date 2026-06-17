@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
 // DefaultCacheDir is chartplotter's XDG cache root for the per-region download

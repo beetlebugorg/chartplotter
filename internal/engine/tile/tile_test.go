@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/geo"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
 )
 
 func TestProjectorInsideTileMonotonic(t *testing.T) {

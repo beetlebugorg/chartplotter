@@ -3,7 +3,7 @@ package s52
 import (
 	"testing"
 
-	s57 "github.com/beetlebugorg/chartplotter-go/pkg/s57"
+	s57 "github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 // mockProjection is a simple projection for testing

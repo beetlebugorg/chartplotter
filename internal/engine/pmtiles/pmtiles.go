@@ -8,7 +8,6 @@
 // content-deduped (identical tiles stored once). Output is a deterministic
 // function of the (tile-id -> bytes) set, independent of insertion order.
 //
-// Ported from chartplotter/src/pmtiles.zig.
 // Spec: https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md
 package pmtiles
 

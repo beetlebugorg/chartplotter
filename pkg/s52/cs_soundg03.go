@@ -181,7 +181,6 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 		// digits after the decimal; do not round up"). The +1e-6 only absorbs FP
 		// error (0.7*10 = 6.9999…→7); it never reaches 10, so the glyph index
 		// stays 0–9 (rounding here produced an invalid "SOUNDS510" for X.95+).
-		// Matches s52/csp/soundg03.zig truncFraction.
 		fraction := int((displayDepth-float64(leadingDigit))*10.0 + 1e-6)
 		if fraction > 0 && !suppressFraction {
 			symbols = append(symbols, fmt.Sprintf("%s5%d", prefix, fraction))

@@ -12,9 +12,9 @@ import (
 
 	"github.com/alecthomas/kong"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/assets"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -52,7 +52,7 @@ func (c emitAssetsCmd) Run() error {
 type versionCmd struct{}
 
 func (versionCmd) Run() error {
-	fmt.Printf("chartplotter-go %s\n", version)
+	fmt.Printf("chartplotter %s\n", version)
 	fmt.Printf("embedded S-52 PresLib DAI: %d bytes\n", len(preslib.DAI))
 	return nil
 }

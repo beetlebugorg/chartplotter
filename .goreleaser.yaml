@@ -1,0 +1,77 @@
+# GoReleaser configuration for chartplotter.
+# Docs: https://goreleaser.com
+version: 2
+
+project_name: chartplotter
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: chartplotter
+    main: ./cmd/chartplotter
+    binary: chartplotter
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # No 32-bit / niche targets: the tile baker is memory-hungry.
+
+archives:
+  - id: chartplotter
+    formats: [tar.gz]
+    # Windows gets a .zip instead of a tarball.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: beetlebugorg
+    name: chartplotter
+  draft: false
+  prerelease: auto

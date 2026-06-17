@@ -5,13 +5,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/beetlebugorg/chartplotter-go/pkg/s52"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
-// Software anti-aliased rasteriser for the sprite / pattern atlases. Port of
-// the rasteriser in sprites.zig + the HP-GL interpreter in
-// portrayal/symbol_render.zig. Geometry is computed in float32 to mirror the
-// Zig (so cell sizes and pivots match the reference atlas to 2 dp).
+// Software anti-aliased rasteriser for the sprite / pattern atlases, paired
+// with the HP-GL symbol interpreter. Geometry is computed in float32 so cell
+// sizes and pivots match the reference atlas to 2 dp.
 
 const (
 	pxPerUnit      = 0.08 // device px per 0.01-mm symbol unit (8 px/mm)
@@ -40,8 +39,7 @@ type drawCmd struct {
 
 // renderOps walks a symbol/pattern's HP-GL VectorCommands into draw commands,
 // projecting each point as (p-pivot)*scale (no rotation; anchor at origin).
-// Port of symbol_render.zig renderPass. roles maps pen role -> colour token;
-// day maps token -> RGB.
+// roles maps pen role -> colour token; day maps token -> RGB.
 func renderOps(vcmds []s52.VectorCommand, pivotX, pivotY float64, roles map[rune]string, day map[string]rcolor, scale float32) []drawCmd {
 	project := func(px, py float64) rpoint {
 		return rpoint{x: float32(px-pivotX) * scale, y: float32(py-pivotY) * scale}
@@ -137,7 +135,7 @@ func renderOps(vcmds []s52.VectorCommand, pivotX, pivotY float64, roles map[rune
 }
 
 // strokeWidthPx maps an HP-GL SW value to supersampled px: sw=1 -> 0.32 mm ->
-// 32 units; width_px = sw*32*scale. (symbol_render.zig)
+// 32 units; width_px = sw*32*scale.
 func strokeWidthPx(sw int, scale float32) float32 {
 	if sw <= 0 {
 		sw = 1
@@ -155,8 +153,8 @@ type raster struct {
 }
 
 // cellFromCommands crops a draw-command list (supersampled px, registration
-// point at origin) to a tight RGBA cell with a pivot at that origin. Port of
-// sprites.zig cellFromCommands. Returns false for an empty/over-large cell.
+// point at origin) to a tight RGBA cell with a pivot at that origin. Returns
+// false for an empty/over-large cell.
 func cellFromCommands(name string, cmds []drawCmd, skipped *int) (raster, bool) {
 	if len(cmds) == 0 {
 		return raster{}, false

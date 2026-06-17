@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter-go/internal/engine/catalog"
+	"github.com/beetlebugorg/chartplotter/internal/engine/catalog"
 )
 
 // catalogJSONCmd distils NOAA's ENCProdCat.xml into a compact catalog.json the
