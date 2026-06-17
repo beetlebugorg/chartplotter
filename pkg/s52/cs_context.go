@@ -7,6 +7,10 @@ package s52
 // This context-based design simplifies procedure signatures and provides convenient
 // helper methods for common operations like type-safe attribute access.
 type CSContext struct {
+	// ObjectClass is the S-57 object-class acronym (e.g. "DEPARE", "DRGARE").
+	// Some CS procedures (DEPARE03's dredged-area branch) key on it. "" if unset.
+	ObjectClass string
+
 	// Attributes contains S-57 feature attributes (e.g., DRVAL1, VALSOU, CATLIT)
 	Attributes map[string]interface{}
 

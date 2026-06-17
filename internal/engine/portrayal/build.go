@@ -220,6 +220,7 @@ func (w *walker) emit(list []s52.Instruction, g geom, depth int) {
 				continue
 			}
 			ctx := s52.NewCSContext(w.csAttrs(g), goGeomType(w.geomCode), nil, w.mariner)
+			ctx.ObjectClass = w.feature.ObjectClass()
 			generated, err := w.lib.ExecuteCS(in.ProcedureName, ctx)
 			if err != nil {
 				continue
@@ -290,7 +291,30 @@ func (w *walker) emitLinePatternOne(linestyleName string, pts []geo.LatLon) {
 	if len(pts) < 2 {
 		return
 	}
-	w.out = append(w.out, LinePattern{Points: clonePts(pts), LinestyleName: linestyleName})
+	w.out = append(w.out, LinePattern{Points: clonePts(pts), LinestyleName: linestyleName, ColorToken: w.linestyleColor(linestyleName)})
+}
+
+// linestyleColor resolves a complex linestyle's primary pen colour token — the
+// first PD run's LCRF-mapped pen, mirroring linestyles.json. "" if none.
+func (w *walker) linestyleColor(name string) string {
+	ls, err := w.lib.GetLineStyle(name)
+	if err != nil || ls == nil {
+		return ""
+	}
+	for i := range ls.VectorCommands {
+		c := &ls.VectorCommands[i]
+		if c.Type != "PD" {
+			continue
+		}
+		// Match linestyles.go: take the pen from the first PD that actually draws
+		// (a segment with distinct endpoints), so the token equals linestyles.json.
+		for j := 0; j+1 < len(c.Points); j++ {
+			if c.Points[j] != c.Points[j+1] {
+				return ls.Colors.Roles[c.Role]
+			}
+		}
+	}
+	return ""
 }
 
 func (w *walker) emitSymbol(symbolName string, rotationDeg float32, g geom) {

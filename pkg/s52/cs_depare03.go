@@ -22,7 +22,7 @@ func NewDEPARE03(csctx *CSContext, lib *Library) *DEPARE03 {
 		drval1:        csctx.GetFloat("DRVAL1", -1.0),
 		drval2:        csctx.GetFloat("DRVAL2", 0.0),
 		quapos:        csctx.GetInt("QUAPOS", 0),
-		isDredgedArea: csctx.Has("DRGARE"),
+		isDredgedArea: csctx.ObjectClass == "DRGARE",
 	}
 }
 

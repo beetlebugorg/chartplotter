@@ -323,7 +323,11 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.LinePattern:
 		r.layer, r.kind, r.nline = "complex_lines", mvt.GeomLineString, normPts(v.Points)
-		r.attrs = common(mvt.KeyValue{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)})
+		extra := []mvt.KeyValue{{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)}}
+		if v.ColorToken != "" {
+			extra = append(extra, mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)})
+		}
+		r.attrs = common(extra...)
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.DrawText:
 		r.layer, r.kind, r.npoint = "text", mvt.GeomPoint, normPt(v.Anchor)

@@ -103,6 +103,10 @@ type PatternFill struct {
 type LinePattern struct {
 	Points        []geo.LatLon
 	LinestyleName string
+	// ColorToken is the linestyle's primary pen colour token (first PD pen,
+	// LCRF-resolved). Baked onto the complex_lines feature so the client colours
+	// the dash run; "" when the linestyle has no drawn pen.
+	ColorToken string
 }
 
 // DrawText is a text label (TX/TE instruction). OffsetXPx/OffsetYPx are the
