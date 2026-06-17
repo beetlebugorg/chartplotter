@@ -39,10 +39,11 @@ chartplotter bake-zip charts.pmtiles US4MD81M.zip
 
 ## Step 2: Serve the viewer
 
-Start the built-in server and point it at the web frontend:
+The web frontend is built into the binary, so you do not need any files on disk.
+Start the server:
 
 ```sh
-chartplotter serve --assets web --port 8080
+chartplotter serve --port 8080
 ```
 
 Open `http://127.0.0.1:8080` in your browser. The chart appears.
@@ -50,21 +51,18 @@ Open `http://127.0.0.1:8080` in your browser. The chart appears.
 Switch between Day, Dusk, and Night in the viewer. The map restyles right away
 because the engine stores color names, not fixed colors.
 
+The server writes everything it bakes to your XDG cache directory
+(`~/.cache/chartplotter`). It never writes into the binary's embedded assets. To
+develop the frontend, serve the assets from a directory instead with
+`chartplotter serve --assets web`.
+
 ## Step 3 (optional): Let the viewer download charts
 
 Instead of baking by hand, you can let the server download and bake regions on
-demand.
-
-First, distil the NOAA product catalog one time:
+demand. The NOAA catalog is built into the binary, so just start the server:
 
 ```sh
-chartplotter catalog-json ENCProdCat.xml web/catalog.json
-```
-
-Then start the server:
-
-```sh
-chartplotter serve --assets web
+chartplotter serve
 ```
 
 Pick a region in the viewer. The server downloads the cells, bakes them in the

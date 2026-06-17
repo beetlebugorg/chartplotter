@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/web"
 )
 
 // ProvisionResult is the outcome of a provision run (the JSON contract shared by
@@ -89,9 +90,15 @@ type catalogDoc struct {
 // at dir/.cellcache-<CELL>.000, native-bakes them all into
 // dir/charts-user.pmtiles, and writes the dir/charts-user.json sidecar.
 func ProvisionCore(dir string, names []string, p *ProgressSink) (ProvisionResult, error) {
+	// Prefer a catalog.json on disk (the CLI `provision DIR` case); otherwise fall
+	// back to the catalog embedded in the binary, so a single-file `serve` can
+	// resolve cell URLs without any files on disk.
 	catBytes, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
 	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("read catalog.json: %w", err)
+		catBytes, err = web.Assets.ReadFile("catalog.json")
+		if err != nil {
+			return ProvisionResult{}, fmt.Errorf("read catalog.json: %w", err)
+		}
 	}
 	var cat catalogDoc
 	if err := json.Unmarshal(catBytes, &cat); err != nil {
@@ -162,7 +169,10 @@ func ProvisionCore(dir string, names []string, p *ProgressSink) (ProvisionResult
 	}
 	pb := baker.BakeToPMTiles(b, func(done, total int) { p.onImport(done, total) })
 
-	out := filepath.Join(dir, "charts-user.pmtiles")
+	out := filepath.Join(dir, userPMTiles)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ProvisionResult{}, err
+	}
 	f, err := os.Create(out)
 	if err != nil {
 		return ProvisionResult{}, err
@@ -351,7 +361,7 @@ func writeUserManifest(dir string, names []string, regions []int, info pmtInfo) 
 		fmt.Fprintf(&b, "%d", num)
 	}
 	fmt.Fprintf(&b, `],"bounds":[%.5f,%.5f,%.5f,%.5f]}`, info.w, info.s, info.e, info.n)
-	_ = os.WriteFile(filepath.Join(dir, "charts-user.json"), b.Bytes(), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, userManifest), b.Bytes(), 0o644)
 }
 
 func trimCellExt(name string) string {

@@ -64,6 +64,10 @@ A few choices shape the whole project:
 - **One archive is the source of truth.** A baked region is a single `.pmtiles`
   file. Long downloads and bakes run as background tasks that the viewer watches
   through `/api/tasks`.
+- **The binary is self-contained.** The web frontend, the S-52 client assets,
+  the basemap, and the NOAA catalog are embedded in the program, so
+  `chartplotter serve` runs from a single file. Everything baked from a user
+  action is written to the XDG cache directory, never into the embedded assets.
 
 ## Code layout
 

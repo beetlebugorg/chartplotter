@@ -97,7 +97,9 @@ directory, and prints a JSON result.
 
 ## serve
 
-Serve the web frontend and the provisioning API.
+Serve the web frontend and the provisioning API. The frontend is built into the
+binary, so the server needs no files on disk. Everything it bakes is written to
+the cache directory, never into the embedded assets.
 
 ```sh
 chartplotter serve [flags]
@@ -107,8 +109,8 @@ chartplotter serve [flags]
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address to bind. |
 | `--port` | `8080` | Port to bind. |
-| `--assets DIR` | `web` | Directory of static assets to serve. |
-| `--cache DIR` | XDG cache | Directory for downloaded region zips and baked archives. |
+| `--assets DIR` | embedded | Serve static assets from this directory instead of the built-in embedded bundle. Use this when you develop the frontend. |
+| `--cache DIR` | XDG cache | Directory for downloaded region zips and baked archives. Defaults to `~/.cache/chartplotter`. |
 | `--clear-cache` | off | Delete the cached zips and archives on startup for a clean slate. |
 
 When you bind to a loopback address (`127.0.0.1`, `localhost`, or `::1`), the

@@ -44,8 +44,9 @@ tiles, so there is no heavy WebAssembly pipeline to ship.
 - **Bake once, never re-bake.** Mariner settings — depth shading, soundings,
   contours, and safety-depth danger highlighting — come from attributes baked
   into the tiles. The viewer applies them live.
-- **Ships as one binary.** The S-52 presentation library is built into the
-  program. The only data you supply is the ENC cells you bake.
+- **Ships as one binary.** The S-52 presentation library *and* the web frontend
+  are built into the program. `chartplotter serve` needs no files on disk — the
+  only data you supply is the ENC cells you bake.
 - **Includes a provisioning server.** A built-in HTTP server downloads NOAA
   cells, bakes them in the background, and serves the web frontend with
   byte-range support.
@@ -77,27 +78,32 @@ bin/chartplotter version
 
 ## 🚀 Getting Started
 
-Bake an ENC cell into a tile archive and serve the viewer:
+The frontend is built into the binary, so a single file is all you need. Start
+the server and open the viewer:
 
 ```sh
-# 1. Bake one or more S-57 cells into a single offline archive.
-chartplotter emit-pmtiles charts.pmtiles US4MD81M.000
-
-# 2. Or bake every base cell inside a NOAA ENC zip.
-chartplotter bake-zip charts.pmtiles US4MD81M.zip
-
-# 3. Serve the web frontend and the provisioning API.
-chartplotter serve --assets web --port 8080
-# open http://127.0.0.1:8080
+chartplotter serve
+# open http://127.0.0.1:8080 → pick a region → it downloads and bakes → the chart appears
 ```
 
-To let the viewer download and bake regions on demand, distil the NOAA catalog
-once, then run the server:
+The server writes everything it bakes to your XDG cache directory
+(`~/.cache/chartplotter`), never into the binary's assets.
+
+You can also bake S-57 cells yourself into a standalone archive:
 
 ```sh
-chartplotter catalog-json ENCProdCat.xml web/catalog.json
+# Bake one or more cells.
+chartplotter emit-pmtiles charts.pmtiles US4MD81M.000
+
+# Or bake every base cell inside a NOAA ENC zip.
+chartplotter bake-zip charts.pmtiles US4MD81M.zip
+```
+
+To develop the frontend, serve the assets from disk instead of the embedded
+bundle:
+
+```sh
 chartplotter serve --assets web
-# pick a region in the UI → the server downloads and bakes it → the chart appears
 ```
 
 ## ⛶ Commands

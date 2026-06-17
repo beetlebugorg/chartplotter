@@ -27,11 +27,12 @@ func (c provisionCmd) Run() error {
 }
 
 // serveCmd hosts the web frontend (static files + Range) and the /api
-// onboarding surface. Port of `chartplotter --serve`.
+// onboarding surface. By default it serves the frontend embedded in the binary,
+// so a single file is all you need to run.
 type serveCmd struct {
 	Host       string `default:"127.0.0.1" help:"Bind host."`
 	Port       int    `default:"8080" help:"Bind port."`
-	Assets     string `default:"web" type:"existingdir" help:"Directory of static assets to serve."`
+	Assets     string `type:"existingdir" help:"Serve static assets from this directory instead of the built-in embedded bundle (for development)."`
 	Cache      string `help:"Cache dir for per-region zips + baked .pmtiles (default: XDG cache)."`
 	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached region zips + baked archives for a clean slate."`
 }
@@ -60,6 +61,10 @@ func (c serveCmd) Run() error {
 	if allowRemote {
 		remoteNote = ", remote OK"
 	}
-	fmt.Printf("chartplotter → http://%s/  (assets=%s, cache=%s%s)\n", addr, c.Assets, cacheDir, remoteNote)
+	assetsDesc := "embedded"
+	if c.Assets != "" {
+		assetsDesc = c.Assets
+	}
+	fmt.Printf("chartplotter → http://%s/  (assets=%s, cache=%s%s)\n", addr, assetsDesc, cacheDir, remoteNote)
 	return http.ListenAndServe(addr, srv)
 }

@@ -17,21 +17,29 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/beetlebugorg/chartplotter/web"
 )
 
-// Server hosts assetsDir (static web assets) + the per-region chart archives
-// from cacheDir, and the API. The zero value is not usable; use New.
+// Server hosts the static web assets, the per-region chart archives from
+// cacheDir, and the API. Static assets come from the embedded bundle (web.Assets)
+// by default; if assetsDir is non-empty, on-disk files there take precedence and
+// anything missing falls back to the embedded copy. All writes from user actions
+// (provisioned archives, manifests, download caches) go to cacheDir — never the
+// asset bundle. The zero value is not usable; use New.
 type Server struct {
-	assetsDir   string
+	assetsDir   string // optional on-disk asset override (dev); "" → embedded only
 	cacheDir    string // XDG cache root; regions/<NN>.pmtiles served at /charts/<NN>.pmtiles
 	allowRemote bool
 	task        task
 }
 
-// New returns a Server serving static assets from assetsDir and baked region
-// archives from cacheDir. allowRemote is true when the bind host is not loopback
-// (the operator opted into network exposure), which skips the per-request
-// Host-header DNS-rebind check on /api.
+// New returns a Server. Pass an empty assetsDir to serve the embedded asset
+// bundle (the single-file default); pass a directory to override it from disk
+// during development. cacheDir is the XDG cache root for baked archives and the
+// destination for every user-initiated write. allowRemote is true when the bind
+// host is not loopback (the operator opted into network exposure), which skips
+// the per-request Host-header DNS-rebind check on /api.
 func New(assetsDir, cacheDir string, allowRemote bool) *Server {
 	return &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote}
 }
@@ -68,6 +76,14 @@ func (w *logResponseWriter) WriteHeader(code int) {
 }
 
 const jsonCT = "application/json"
+
+// User-provisioned data filenames. These are written by a user action (a UI
+// provision) and therefore live in the XDG cache dir, never in the read-only
+// asset bundle.
+const (
+	userPMTiles  = "charts-user.pmtiles"
+	userManifest = "charts-user.json"
+)
 
 func apiErr(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", jsonCT)
@@ -263,9 +279,10 @@ func (s *Server) sink() *ProgressSink {
 	}
 }
 
-// runProvisionJob runs ProvisionCore (explicit cell list).
+// runProvisionJob runs ProvisionCore (explicit cell list). The bake is written
+// to the XDG cache dir — a user action never writes into the asset bundle.
 func (s *Server) runProvisionJob(names []string) {
-	if _, err := ProvisionCore(s.assetsDir, names, s.sink()); err != nil {
+	if _, err := ProvisionCore(s.cacheDir, names, s.sink()); err != nil {
 		s.task.finishErr(sanitizeErr(err))
 		return
 	}
@@ -301,9 +318,11 @@ func sanitizeErr(err error) string {
 	}, msg)
 }
 
-// serveAsset serves a static file from assetsDir, honouring HTTP Range (via
+// serveAsset serves a static frontend file, honouring HTTP Range (via
 // http.ServeContent) and adding permissive CORS so the pmtiles:// protocol can
-// fetch byte ranges.
+// fetch byte ranges. User-provisioned data is served from the XDG cache dir; the
+// rest comes from an on-disk --assets override (if set and present) or the
+// embedded bundle.
 func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Path
 	if rel == "" || rel == "/" {
@@ -314,12 +333,29 @@ func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	s.serveFile(w, r, filepath.Join(s.assetsDir, filepath.FromSlash(rel)), rel)
+	name := strings.TrimPrefix(rel, "/")
+
+	// A user-provisioned archive/manifest lives in the XDG cache, not the bundle.
+	if name == userPMTiles || name == userManifest {
+		s.serveFile(w, r, filepath.Join(s.cacheDir, name), rel)
+		return
+	}
+
+	// A --assets directory (dev) overrides the embedded bundle when the file is
+	// present on disk; otherwise fall back to the embedded copy.
+	if s.assetsDir != "" {
+		full := filepath.Join(s.assetsDir, filepath.FromSlash(name))
+		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
+			s.serveFile(w, r, full, rel)
+			return
+		}
+	}
+	s.serveEmbedded(w, r, name, rel)
 }
 
-// serveFile streams a file with HTTP Range + permissive CORS (so the pmtiles://
-// protocol can fetch byte ranges). `rel` is the request path (used for the MIME
-// type + cache policy).
+// serveFile streams an on-disk file with HTTP Range + permissive CORS (so the
+// pmtiles:// protocol can fetch byte ranges). `rel` is the request path (used
+// for the MIME type + cache policy).
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, full, rel string) {
 	f, err := os.Open(full)
 	if err != nil {
@@ -332,20 +368,47 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, full, rel str
 		http.NotFound(w, r)
 		return
 	}
+	setAssetHeaders(w, rel)
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+}
 
+// serveEmbedded streams a file from the embedded asset bundle. Embedded files
+// have no modification time, so revalidation is driven by Cache-Control only.
+func (s *Server) serveEmbedded(w http.ResponseWriter, r *http.Request, name, rel string) {
+	f, err := web.Assets.Open(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	rs, ok := f.(io.ReadSeeker)
+	if !ok { // every embed.FS file is seekable; guard defensively
+		http.Error(w, "asset not seekable", http.StatusInternalServerError)
+		return
+	}
+	setAssetHeaders(w, rel)
+	http.ServeContent(w, r, fi.Name(), time.Time{}, rs)
+}
+
+// setAssetHeaders writes the Range/CORS/cache headers shared by the on-disk and
+// embedded asset paths. The app code + manifests must always reflect the latest
+// build/bake, so HTML/JS/JSON revalidate (otherwise a cached chartplotter-app.mjs
+// keeps the old region logic after an update). Tiles/atlases are large and change
+// only via a fresh provision (cache-busted by ?t=), so they may cache.
+func setAssetHeaders(w http.ResponseWriter, rel string) {
 	w.Header().Set("Content-Type", mimeFor(rel))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Expose-Headers", "content-range,accept-ranges,content-length")
-	// The app code + manifest must always reflect the latest build/bake, so tell
-	// the browser to revalidate (otherwise a cached chartplotter-app.mjs keeps
-	// the old region logic after an update). Tiles/atlases are large and change
-	// only via a fresh provision (cache-busted by ?t=), so they may cache.
 	switch strings.ToLower(filepath.Ext(rel)) {
 	case ".html", ".js", ".mjs", ".json":
 		w.Header().Set("Cache-Control", "no-cache")
 	}
-	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
 }
 
 // mimeFor maps a path's extension to a content type. Explicit for the types the
