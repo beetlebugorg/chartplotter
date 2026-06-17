@@ -150,11 +150,11 @@ export class ChartPlotterApp extends HTMLElement {
     // (show the pill + start polling). A finished/idle task is ignored.
     this._reattachTask();
 
-    // Persist the view so a refresh resumes where you were; re-assess chart
-    // coverage at the new centre (caps max zoom to the finest installed chart).
+    // Persist the view so a refresh resumes where you were; refresh the coverage
+    // panel's in-view cell list for the new viewport.
     map.on("moveend", () => { this.saveView(); this._assessCoverage(); });
 
-    // Live zoom/scale readout (HUD).
+    // Live zoom/scale/band readout (top of the coverage panel).
     this._updateHud();
     map.on("move", () => this._updateHud());
   }
@@ -164,7 +164,7 @@ export class ChartPlotterApp extends HTMLElement {
   // at the centre latitude), and the active NOAA band for this zoom (the source
   // that paints here — see CHART_BANDS in chartplotter.mjs).
   _updateHud() {
-    const el = this.shadowRoot.getElementById("hud");
+    const el = this.shadowRoot.getElementById("cov-readout");
     if (!el || !this._map) return;
     const z = this._map.getZoom(), c = this._map.getCenter();
     const band = bandForZoom(z);
@@ -752,33 +752,65 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.querySelectorAll(".chart-card.focus").forEach((el) => el.classList.remove("focus"));
   }
 
-  // On view change, cap the max zoom to the finest INSTALLED chart over the
-  // screen centre, so you can't zoom past the available detail into an overscale
-  // blur (the chart would blank to the no-data pattern). Charts are added by
-  // region (the Charts drawer), so there's no per-point "finer chart here" prompt.
+  // On view change, refresh the lower-right coverage panel. Zoom is no longer
+  // capped per-location: the map's fixed maxZoom (18 — the berthing band max)
+  // applies everywhere, so the deepest zoom is the SAME everywhere (berthing).
+  // Where the view's finer charts aren't downloaded, deep zoom reads as the S-52
+  // no-data hatch and the panel flags those cells so you can go grab them.
   _assessCoverage() {
-    if (!this._map || !this._catalog.length) return;
     if (this._addMode) return; // picking owns the map
-    if (!this._provisioned.size && !this._installed.size) { this._applyMaxZoom(null); return; }
-    const c = this._map.getCenter();
-    const scaleOf = (x) => x.s || 1e12;
-    let finestInstalled = null;
-    const covers = (bb) => c.lng >= bb[0] && c.lng <= bb[2] && c.lat >= bb[1] && c.lat <= bb[3];
-    for (const x of this._catalog) {
-      if (!Array.isArray(x.bb) || x.bb.length !== 4 || !covers(x.bb)) continue;
-      if (this.stateOf(x.n) === "installed" && (!finestInstalled || scaleOf(x) < scaleOf(finestInstalled))) finestInstalled = x;
-    }
-    this._applyMaxZoom(finestInstalled);
+    this._renderCoverageCells();
   }
 
-  // Cap zoom-in to the finest installed chart's baked band max — the deepest zoom
-  // its tiles actually exist at. Past that the chart can't render, so capping
-  // there KEEPS the chart on screen instead of losing it. Nothing installed here
-  // → basemap zooms free.
-  _applyMaxZoom(cell) {
-    if (!this._map) return;
-    const mz = cell ? BAND_MAXZOOM[bandForScale(cell.s)] : 18;
-    if (this._map.getMaxZoom() !== mz) this._map.setMaxZoom(mz);
+  // List the catalog cells intersecting the current viewport in the coverage
+  // panel, grouped by band (finest first). Downloaded cells show plain; cells
+  // that aren't downloaded are flagged and tap-to-download (jump to their NOAA
+  // region). This is the same surface that makes overscale obvious: zoom past
+  // your downloaded detail and the finer in-view cells here light up as missing.
+  _renderCoverageCells() {
+    const el = this.shadowRoot.getElementById("cov-cells");
+    if (!el || !this._map) return;
+    if (!this._catalog.length) { el.innerHTML = ""; return; }
+    const b = this._map.getBounds();
+    const vw = b.getWest(), ve = b.getEast(), vs = b.getSouth(), vn = b.getNorth();
+    const inView = (bb) => Array.isArray(bb) && bb.length === 4 && !(bb[2] < vw || bb[0] > ve || bb[3] < vs || bb[1] > vn);
+    const byBand = {};
+    for (const c of this._catalog) {
+      if (!inView(c.bb)) continue;
+      (byBand[bandForScale(c.s)] ??= []).push(c);
+    }
+    const CAP = 30; // keep the panel bounded at low zoom (oceans of cells)
+    let html = "", total = 0;
+    for (const band of [...BANDS].reverse()) { // berthing -> overview (finest first)
+      const cells = byBand[band];
+      if (!cells || !cells.length) continue;
+      cells.sort((a, z) => a.n.localeCompare(z.n));
+      total += cells.length;
+      const chips = cells.slice(0, CAP).map((c) => {
+        const have = this.stateOf(c.n) === "installed";
+        const hint = `${c.l || c.n} · 1:${(c.s || 0).toLocaleString()} · ${have ? "downloaded" : "tap to download"}`;
+        return `<button class="cov-cell${have ? "" : " missing"}" data-name="${c.n}" title="${hint}">${c.n}</button>`;
+      }).join("");
+      const more = cells.length > CAP ? `<span class="cov-more">+${cells.length - CAP}</span>` : "";
+      html += `<div class="cov-band"><span class="cov-band-tag" style="background:${BAND_COLOR[band]}">${BAND_LABEL[band]}</span><span class="cov-chips">${chips}${more}</span></div>`;
+    }
+    el.innerHTML = total ? html : `<div class="cov-empty">No charts cover this view.</div>`;
+    el.querySelectorAll(".cov-cell").forEach((btn) => {
+      const name = btn.dataset.name;
+      btn.onclick = btn.classList.contains("missing") ? () => this._downloadCellRegion(name) : () => this.focusChart(name);
+    });
+  }
+
+  // A not-downloaded in-view cell was tapped: open its NOAA region in the Charts
+  // drawer (the region bundle that covers it) so it can be downloaded. Falls back
+  // to the Charts list if the cell's region can't be resolved.
+  _downloadCellRegion(name) {
+    const c = this._byName.get(name);
+    for (const num of (c && c.rg) || []) {
+      const reg = (this._regions || []).find((r) => r.num === num);
+      if (reg) return this.openRegion(reg.name);
+    }
+    this.openCharts();
   }
 
   // -- import (drop a .zip / .000, unzip in-browser → OPFS) ----------------
@@ -1146,13 +1178,15 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button.sel { background:#1565c0; color:#fff; }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
-        /* NOAA attribution — required reference to the chart origin, lower-right. */
-        #noaa-attr { position:absolute; right:10px; bottom:8px; z-index:5; font:11px/1.4 system-ui,sans-serif;
-          color:#5a6068; background:rgba(255,255,255,.82); border-radius:5px; padding:2px 8px;
-          box-shadow:0 1px 4px rgba(0,0,0,.1); backdrop-filter:blur(3px); }
-        #noaa-attr a, #noaa-attr .attr-link { color:#1565c0; text-decoration:none; cursor:pointer; }
-        #noaa-attr a:hover, #noaa-attr .attr-link:hover { text-decoration:underline; }
-        #noaa-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
+        /* Merged lower-right panel: live readout + in-view cells + NOAA attribution. */
+        #coverage-panel { position:absolute; right:12px; bottom:12px; z-index:5; width:min(300px,calc(100% - 24px));
+          background:rgba(255,255,255,.94); border:1px solid rgba(0,0,0,.06); border-radius:10px;
+          box-shadow:0 2px 10px rgba(0,0,0,.14); backdrop-filter:blur(5px); overflow:hidden;
+          display:flex; flex-direction:column; }
+        #cov-attr { font:11px/1.4 system-ui,sans-serif; color:#5a6068; padding:5px 11px; border-top:1px solid rgba(0,0,0,.06); }
+        #cov-attr a, #cov-attr .attr-link { color:#1565c0; text-decoration:none; cursor:pointer; }
+        #cov-attr a:hover, #cov-attr .attr-link:hover { text-decoration:underline; }
+        #cov-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
         /* NOAA ENC user-agreement gate (shown before the first download). */
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
           background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
@@ -1164,15 +1198,28 @@ export class ChartPlotterApp extends HTMLElement {
         .modal-card .agree-body li { margin:5px 0; }
         .modal-card a { color:#1565c0; }
         .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
-        /* Scale/zoom readout — a light card at the map's bottom-right (above the attribution). */
-        #hud { position:absolute; right:12px; bottom:34px; z-index:5; background:rgba(255,255,255,.93);
-          color:#2a2f35; border:1px solid rgba(0,0,0,.06); border-radius:10px; padding:7px 12px;
-          box-shadow:0 2px 10px rgba(0,0,0,.14); pointer-events:none; backdrop-filter:blur(5px); text-align:right; }
-        #hud .hud-main { display:flex; align-items:center; gap:7px; font-weight:600; font-size:13px; line-height:1.2; }
-        #hud .hud-dot { width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); }
-        #hud .hud-scale { color:#1565c0; }
-        #hud .hud-sep { color:#c7ccd2; font-weight:400; }
-        #hud .hud-sub { margin-top:2px; font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8a9098; }
+        /* Live scale/zoom/band readout (top of the panel). */
+        #cov-readout { color:#2a2f35; padding:7px 12px; text-align:right; }
+        #cov-readout .hud-main { display:flex; align-items:center; justify-content:flex-end; gap:7px; font-weight:600; font-size:13px; line-height:1.2; }
+        #cov-readout .hud-dot { width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); }
+        #cov-readout .hud-scale { color:#1565c0; }
+        #cov-readout .hud-sep { color:#c7ccd2; font-weight:400; }
+        #cov-readout .hud-sub { margin-top:2px; font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8a9098; }
+        /* In-view cells, grouped by band. Scrolls when many are in view. */
+        #cov-cells { max-height:38vh; overflow-y:auto; padding:0 10px 6px; }
+        #cov-cells:empty { display:none; }
+        .cov-band { display:flex; gap:6px; align-items:flex-start; padding:4px 0; border-top:1px solid rgba(0,0,0,.05); }
+        .cov-band-tag { flex:none; margin-top:1px; color:#fff; font:600 10px/1.5 system-ui,sans-serif; padding:0 6px; border-radius:9px; }
+        .cov-chips { display:flex; flex-wrap:wrap; gap:4px; }
+        .cov-cell { font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; padding:1px 6px; border-radius:5px;
+          border:1px solid rgba(0,0,0,.12); background:#eef1f4; color:#384049; cursor:pointer; }
+        .cov-cell:hover { border-color:#1565c0; color:#1565c0; }
+        .cov-cell.missing { background:repeating-linear-gradient(45deg,#fff,#fff 4px,#f3f4f6 4px,#f3f4f6 8px);
+          color:#8a9098; border-style:dashed; }
+        .cov-cell.missing::after { content:" ↓"; color:#1565c0; }
+        .cov-cell.missing:hover { color:#1565c0; border-color:#1565c0; }
+        .cov-more { font:11px/1.5 system-ui,sans-serif; color:#8a9098; align-self:center; }
+        .cov-empty { font:12px/1.4 system-ui,sans-serif; color:#8a9098; padding:4px 2px; }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
         #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:#fafafa;
@@ -1243,11 +1290,14 @@ export class ChartPlotterApp extends HTMLElement {
         </button>
       </div>
       <div id="search"><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
-      <div id="hud"></div>
-      <div id="noaa-attr">
-        <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
-        · <button id="attr-terms" class="attr-link" type="button">Terms</button>
-        · not for navigation
+      <div id="coverage-panel">
+        <div id="cov-readout"></div>
+        <div id="cov-cells"></div>
+        <div id="cov-attr">
+          <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
+          · <button id="attr-terms" class="attr-link" type="button">Terms</button>
+          · not for navigation
+        </div>
       </div>
       <div id="agree" class="modal" hidden>
         <div class="modal-card">
@@ -1477,12 +1527,6 @@ function bandForScale(s) {
   if (n <= 2300000) return "general";
   return "overview";
 }
-
-// Top baked zoom per band (Band.zoomRange max in bake.zig). A chart shouldn't be
-// displayed much past this (it'd be "overscale" — magnified beyond its surveyed
-// detail), so the view's max zoom is capped to the finest installed chart's band
-// max + a small legibility allowance.
-const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
 
 const COAST_ORDER = ["Northeast", "Mid-Atlantic", "Southeast", "Gulf of Mexico", "Great Lakes", "California", "Pacific Northwest", "Alaska", "Pacific Islands", "Caribbean"];
 
