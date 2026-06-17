@@ -327,6 +327,7 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   async _startProvision(cells, meta) {
+    if (this._taskRunning()) return; // one provision job at a time (server is single-flight)
     this._taskMeta = meta || null;
     // Optimistic running state so the pill appears instantly (the first poll
     // replaces it with the server's truth).
@@ -408,6 +409,11 @@ export class ChartPlotterApp extends HTMLElement {
 
   _drawerOpen() { return this.shadowRoot.getElementById("drawer").classList.contains("open"); }
 
+  // True while a provision (download/remove) job is in flight. The server runs
+  // ONE job at a time, so this gates starting another — you can't download again
+  // mid-download.
+  _taskRunning() { return !!this._task && this._task.status === "running"; }
+
   // Clear the pill after `ms`, but only if the task is still terminal (a new job
   // started in the meantime must not be wiped).
   _clearTaskSoon(ms) {
@@ -453,6 +459,13 @@ export class ChartPlotterApp extends HTMLElement {
       }
     }
     this._setProgress(d ? { label: d.label, sub: d.sub, frac: d.frac } : null);
+    // Keep the open region's action buttons in step with the job state (a
+    // running job disables Download/Remove); the detail has no text input to
+    // disturb, so a re-render is safe.
+    if (this._region && this._section === "charts" && this._drawerOpen()) {
+      const cb = this.shadowRoot.getElementById("charts-body");
+      if (cb) this._renderRegionDetail(cb);
+    }
     // A running download means charts are inbound — don't show the empty-state
     // welcome over the map (and restore it if the task failed with no coverage).
     this.updateEmptyState();
@@ -586,10 +599,11 @@ export class ChartPlotterApp extends HTMLElement {
     const breakdown = BANDS.filter((b) => per[b]).map((b) =>
       `<span class="band-chip" data-band="${b}"><span class="sw" style="background:${BAND_COLOR[b]}"></span>${BAND_LABEL[b]} (${per[b].count})</span>`).join("");
     const installed = this._dlRegions.has(r.num);
+    const busy = this._taskRunning(); // a download/remove is already in flight
     const status = installed ? `<div class="region-status">✓ ${r.name} is downloaded</div>` : "";
     const actions = installed
-      ? `<button class="linkbtn danger" id="region-remove">Remove this region from device</button>`
-      : `<button class="add-dl" id="region-dl">⬇ Download ${count} chart${count !== 1 ? "s" : ""}</button>`;
+      ? `<button class="linkbtn danger" id="region-remove"${busy ? " disabled" : ""}>Remove this region from device</button>`
+      : `<button class="add-dl" id="region-dl"${busy ? " disabled" : ""}>${busy ? "Downloading…" : `⬇ Download ${count} chart${count !== 1 ? "s" : ""}`}</button>`;
     el.innerHTML = `
       <div class="add-head"><button id="region-back" class="btn">← All regions</button></div>
       ${status}
@@ -628,6 +642,7 @@ export class ChartPlotterApp extends HTMLElement {
   // Start a background provision of the given NOAA region numbers (POST
   // {regions:[…]}); progress comes from polling GET /api/tasks.
   async _startProvisionRegions(regions, meta) {
+    if (this._taskRunning()) return; // one provision job at a time (server is single-flight)
     this._taskMeta = meta || null;
     this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: regions.length, cells: regions.length, cell: "" };
     this._renderTaskUI();
@@ -1069,6 +1084,9 @@ export class ChartPlotterApp extends HTMLElement {
         .add-dl { display:block; width:100%; box-sizing:border-box; background:#1565c0; color:#fff; border:none;
           border-radius:8px; padding:11px; font:inherit; font-weight:600; cursor:pointer; }
         .add-dl:hover { background:#1257a8; }
+        .add-dl:disabled { background:#9fb6cf; cursor:default; }
+        .add-dl:disabled:hover { background:#9fb6cf; }
+        .linkbtn:disabled { color:#9aa0a6; cursor:default; text-decoration:none; }
         /* region browser */
         .region-search { width:100%; box-sizing:border-box; border:1px solid #cfcfcf; border-radius:8px; padding:9px 12px; font:inherit; margin-bottom:10px; }
         .region-search:focus { outline:none; border-color:#1565c0; }
