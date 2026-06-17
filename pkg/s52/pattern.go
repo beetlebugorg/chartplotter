@@ -219,10 +219,15 @@ func (p *Pattern) NormalizeCoordinates() {
 	for i := range p.VectorCommands {
 		cmd := &p.VectorCommands[i]
 
-		// Offset all points
-		for j := range cmd.Points {
-			cmd.Points[j].X += offsetX
-			cmd.Points[j].Y += offsetY
+		// Offset all points. CI is the exception: handleCircle stores the
+		// circle radius in Points[0] (as {radius, 0}), not a coordinate, so
+		// translating it corrupts the radius — its centre lives in cmd.Center
+		// (offset below) instead.
+		if cmd.Type != "CI" {
+			for j := range cmd.Points {
+				cmd.Points[j].X += offsetX
+				cmd.Points[j].Y += offsetY
+			}
 		}
 
 		// Offset center point (for circles, arcs)
