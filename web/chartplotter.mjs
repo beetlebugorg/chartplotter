@@ -767,36 +767,42 @@ export class ChartPlotter extends HTMLElement {
     // Linestyle symbols are drawn at the S-52 feature scale (the size the atlas
     // marks were rasterised for); the sprite atlas is px_per_unit = _atlasPpu.
     const symSize = FEATURE_SCALE / this._atlasPpu;
+    // One dashed-stroke LINE layer per linestyle (each carries its own dash +
+    // colour), plus ONE data-driven SYMBOL layer for the embedded marks. (Per-
+    // linestyle symbol layers — hundreds once band-expanded — overwhelm the
+    // symbol-placement pass and starve other symbols like buoys/soundings.)
+    const symNames = [];
+    const symMatch = ["match", ["get", "linestyle_name"]];
     for (const name in this._linestyles) {
       const ls = this._linestyles[name];
       const w = Math.max(0.6, ls.width_px || 1);
       const dash = (ls.dash && ls.dash.length ? ls.dash : [1]).map((d) => Math.max(0.01, d / w));
-      // The dashed stroke of the complex line.
       layers.push({
         id: "lc-line-" + name, type: "line", source: "chart", "source-layer": "complex_lines",
         filter: ["==", ["get", "linestyle_name"], name],
         paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], w], "line-dasharray": dash },
       });
-      // The linestyle's embedded symbol along the line — what makes a SYMBOLIZED
-      // boundary (e.g. RESARE's EMAREMG1) visibly different from a plain one. The
-      // baker emits only the polyline (no per-zoom marks), so place the symbol
-      // client-side with symbol-placement:line at the linestyle's period. A
-      // multi-symbol period can't reproduce its exact intra-period layout this
-      // way (a known overscale/zoom tradeoff), so we draw the primary symbol.
       const sym = (ls.symbols || [])[0];
-      if (sym && sym.n) {
-        layers.push({
-          id: "lc-sym-" + name, type: "symbol", source: "chart", "source-layer": "complex_lines",
-          filter: ["==", ["get", "linestyle_name"], name],
-          layout: {
-            "symbol-placement": "line",
-            "symbol-spacing": Math.max(2, ls.period_px || 16),
-            "icon-image": sym.n, "icon-size": symSize,
-            "icon-rotate": sym.r || 0, "icon-rotation-alignment": "map",
-            "icon-allow-overlap": true, "icon-ignore-placement": true,
-          },
-        });
-      }
+      if (sym && sym.n) { symNames.push(name); symMatch.push(name, sym.n); }
+    }
+    // The linestyle's embedded symbol along the line — what makes a SYMBOLIZED
+    // boundary (e.g. RESARE's EMAREMG1) visibly different from a plain one. The
+    // baker emits only the polyline (no per-zoom marks), so place the primary
+    // symbol client-side with symbol-placement:line. icon-image is data-driven
+    // (linestyle → its mark); a multi-symbol period can't reproduce its exact
+    // intra-period layout this way (a known tradeoff).
+    if (symNames.length) {
+      symMatch.push(""); // linestyles without a mark → no icon
+      layers.push({
+        id: "lc-marks", type: "symbol", source: "chart", "source-layer": "complex_lines",
+        filter: ["in", ["get", "linestyle_name"], ["literal", symNames]],
+        layout: {
+          "symbol-placement": "line", "symbol-spacing": 40,
+          "icon-image": symMatch, "icon-size": symSize,
+          "icon-rotation-alignment": "map",
+          "icon-allow-overlap": true, "icon-ignore-placement": true,
+        },
+      });
     }
     return layers;
   }
