@@ -35,10 +35,7 @@ func (l *Library) selectInstruction(objectClass, geometryType string, attributes
 	var candidates []*LookupTable
 	var failsafe *LookupTable
 
-	for _, lupt := range l.lookupTables {
-		if lupt.ObjectClass != objectClass {
-			continue
-		}
+	for _, lupt := range l.candidatesForClass(objectClass) {
 		if lupt.GeometryType != "" && lupt.GeometryType != geometryType {
 			continue
 		}
@@ -65,7 +62,7 @@ func (l *Library) selectInstruction(objectClass, geometryType string, attributes
 		return "", entry
 	}
 
-	bestMatch := l.findFirstAttributeMatch(candidates, attributes)
+	bestMatch := l.findBestAttributeMatch(candidates, attributes)
 	if bestMatch != nil && len(bestMatch.Instructions) > 0 {
 		return bestMatch.Instructions[0].RawCommand, bestMatch
 	}
@@ -118,21 +115,19 @@ func (l *Library) GetLookupEntry(objectClass string, attributes map[string]inter
 	var candidates []*LookupTable
 	var failsafe *LookupTable
 
-	for _, lupt := range l.lookupTables {
-		if lupt.ObjectClass == objectClass {
-			candidates = append(candidates, lupt)
-			// Select failsafe: FIRST entry with no attributes and valid display category
-			// Skip entries with malformed DISC records (empty DisplayCategory)
-			if len(lupt.Attributes) == 0 && len(lupt.Instructions) > 0 {
-				if failsafe == nil {
-					// Take first valid failsafe (has instructions and preferably has DisplayCategory)
-					if lupt.DisplayCategory != "" {
-						failsafe = lupt
-					}
-				} else if failsafe.DisplayCategory == "" && lupt.DisplayCategory != "" {
-					// Upgrade from invalid to valid DisplayCategory
+	for _, lupt := range l.candidatesForClass(objectClass) {
+		candidates = append(candidates, lupt)
+		// Select failsafe: FIRST entry with no attributes and valid display category
+		// Skip entries with malformed DISC records (empty DisplayCategory)
+		if len(lupt.Attributes) == 0 && len(lupt.Instructions) > 0 {
+			if failsafe == nil {
+				// Take first valid failsafe (has instructions and preferably has DisplayCategory)
+				if lupt.DisplayCategory != "" {
 					failsafe = lupt
 				}
+			} else if failsafe.DisplayCategory == "" && lupt.DisplayCategory != "" {
+				// Upgrade from invalid to valid DisplayCategory
+				failsafe = lupt
 			}
 		}
 	}
@@ -145,7 +140,7 @@ func (l *Library) GetLookupEntry(objectClass string, attributes map[string]inter
 		return convertLookupTable(candidates[0])
 	}
 
-	bestMatch := l.findFirstAttributeMatch(candidates, attributes)
+	bestMatch := l.findBestAttributeMatch(candidates, attributes)
 	if bestMatch != nil {
 		return convertLookupTable(bestMatch)
 	}
@@ -157,18 +152,47 @@ func (l *Library) GetLookupEntry(objectClass string, attributes map[string]inter
 	return nil
 }
 
-// findFirstAttributeMatch finds the first LUT entry where ALL attributes match
-func (l *Library) findFirstAttributeMatch(candidates []*LookupTable, attributes map[string]interface{}) *LookupTable {
+// candidatesForClass returns the lookup tables for an object class, using the
+// pre-built per-class index when available (O(1) map hit + the class's small
+// slice) and falling back to a linear filter over lookupTables for hand-built
+// Library values (tests) that never ran buildLibrary. Both paths preserve
+// lookupTables' order, so selection is identical.
+func (l *Library) candidatesForClass(objectClass string) []*LookupTable {
+	if l.lookupByClass != nil {
+		return l.lookupByClass[objectClass]
+	}
+	var out []*LookupTable
+	for _, lupt := range l.lookupTables {
+		if lupt.ObjectClass == objectClass {
+			out = append(out, lupt)
+		}
+	}
+	return out
+}
+
+// findBestAttributeMatch finds the MOST-SPECIFIC LUT entry whose attribute
+// conditions all match the feature. S-52 §10.3.3 selects the entry with the
+// greatest number of matching attribute conditions, not merely the first that
+// matches: candidates arrive in DAI/file order, so a less-specific entry that
+// sorts earlier must not shadow a more-specific one (e.g. a BOY*/BCN* entry with
+// CAT+COLOUR). Every returned candidate fully matches, so its matched-condition
+// count equals len(Attributes); strict ">" keeps the FIRST entry on ties.
+func (l *Library) findBestAttributeMatch(candidates []*LookupTable, attributes map[string]interface{}) *LookupTable {
+	var best *LookupTable
+	bestCount := 0
 	for _, candidate := range candidates {
 		if len(candidate.Attributes) == 0 {
 			continue
 		}
-
-		if l.matchesAllAttributes(candidate, attributes) {
-			return candidate // Return FIRST match per S-52 spec
+		if !l.matchesAllAttributes(candidate, attributes) {
+			continue
+		}
+		if len(candidate.Attributes) > bestCount {
+			best = candidate
+			bestCount = len(candidate.Attributes)
 		}
 	}
-	return nil
+	return best
 }
 
 // matchesAllAttributes checks if all LUT attribute conditions match the object

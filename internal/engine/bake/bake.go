@@ -49,8 +49,9 @@ const (
 	BandBerthing
 )
 
-// ZoomRange returns the band's baked [minzoom, maxzoom]; min is also the
-// SCAMIN/CSCL display z-min.
+// ZoomRange returns the band's native [minzoom, maxzoom] — the scale range the
+// band's cells are compiled for. Adjacent bands overlap by one zoom at the
+// endpoints. Used for SCAMIN/CSCL context and the frontend's overzoom envelope.
 func (b Band) ZoomRange() ZoomRange {
 	switch b {
 	case BandOverview:
@@ -116,35 +117,30 @@ func scaminZoom(scamin uint32, lat float64) uint32 {
 	return uint32(z)
 }
 
-// specZMin is the single-archive (provisioned/uploaded) display z-min: per S-52
-// §10.4.2 a DISPLAYBASE object is always shown and an object without SCAMIN has
-// no minimum display scale, so both float to z0; SCAMIN raises it. Coarse-tile
-// pile-up is bounded by EmitTile's best-available suppression (a finer cell
-// yields only where no coarser cell covers it).
-func specZMin(displayCategory int, scamin uint32, lat float64) uint32 {
-	if displayCategory == s52.DisplayBase {
-		return 0
-	}
-	if scamin != 0 {
-		return scaminZoom(scamin, lat)
-	}
-	return 0
-}
-
-// displayZMin is the per-band display z-min: a feature is
-// gated to its own scale band (no down-fill to z0). Used by the per-band
-// district archives, NOT the single provisioned archive. Kept for that path.
+// bandZMin is the spec-resolution display z-min for the merged provisioned
+// archive: a feature is gated to its native scale band rather than floated to z0.
+// This replaces the old float-to-z0 "spec display" z-min, which made every cell —
+// a harbor cell included — eligible at every coarse zoom, piling most of all the
+// cells' prims onto each coarse tile (the source of the import halt + memory
+// blow-up). With band-gating, a coarse tile only sees the few coarse-band cells;
+// best-available suppression and the frontend fan still compose bands across the
+// band-overlap zooms exactly as before, so tiles stay complete.
 //
-//   - DISPLAYBASE (always drawn once in-band, exempt from SCAMIN): the band min.
-//   - SCAMIN (a 1:N denominator): can only RAISE the min (finer zoom), clamped
-//     to ≥ the band min.
-//   - No SCAMIN: the band min (S-52 §10.3.4 default).
-func displayZMin(displayCategory int, scamin, bandMin uint32) uint32 {
+// Note this is identical to the old z-min for any feature WITH SCAMIN (both use
+// scaminZoom) — e.g. soundings. It changes only features WITHOUT SCAMIN (and
+// DISPLAYBASE), which previously floated to z0 and now sit at their band min.
+// Per S-52 the visible result is unchanged wherever coverage is complete: a coarse
+// zoom shows the scale-appropriate (coarser) cell anyway.
+//
+//   - DISPLAYBASE: the band min (always shown in-band; SCAMIN never removes base).
+//   - SCAMIN present: max(bandMin, scaminZoom) — SCAMIN can only RAISE the min.
+//   - no SCAMIN: the band min (S-52 §10.3.4 default).
+func bandZMin(displayCategory int, scamin, bandMin uint32, lat float64) uint32 {
 	if displayCategory == s52.DisplayBase {
 		return bandMin
 	}
 	if scamin != 0 {
-		if z := BandForScale(scamin).ZoomRange().Min; z > bandMin {
+		if z := scaminZoom(scamin, lat); z > bandMin {
 			return z
 		}
 	}
@@ -191,6 +187,13 @@ type sectorPrim struct {
 type Baker struct {
 	prims   []routed
 	sectors []sectorPrim
+	// emitIndex is an inverted tile→prim-index map (packed z<<40|x<<20|y → prim
+	// indices) built once by BuildEmitIndex before the (possibly parallel) emit
+	// loop. When present, EmitTileInto iterates only the prims that touch a tile
+	// instead of scanning all of b.prims — turning the whole bake from
+	// O(#tiles × #prims) into O(Σ prims-on-tile). nil ⇒ EmitTileInto falls back to
+	// the full scan (the EmitTile convenience path / tests). Read-only after build.
+	emitIndex map[uint64][]int32
 	bbox      geo.BoundingBox
 	curCell   string // dataset name of the cell currently being added (stamped on each feature)
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
@@ -234,7 +237,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
-			zMin := specZMin(fb.DisplayCategory, scamin, cellLat)
+			zMin := bandZMin(fb.DisplayCategory, scamin, zr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
 			prims := fb.Primitives
@@ -455,6 +458,50 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 	return out
 }
 
+// BuildEmitIndex builds the inverted tile→prim index (b.emitIndex) for the given
+// extent and clip buffer, so EmitTileInto can iterate only the prims that touch a
+// tile rather than scanning every b.prims entry. Call once after all cells are
+// added and before the emit loop; the index is read-only thereafter (safe for the
+// parallel EmitTileInto workers). The index keys each tile a prim's
+// buffer-expanded bbox covers across its display-zoom span, so it is a strict
+// superset of EmitTileInto's in-tile reject — the reject still runs and trims the
+// boundary-tile over-inclusion, so behaviour is identical to the full scan.
+func (b *Baker) BuildEmitIndex(extent uint32, buffer float64) {
+	idx := make(map[uint64][]int32, len(b.prims))
+	bufFrac := buffer / float64(extent)
+	for i := range b.prims {
+		r := &b.prims[i]
+		for z := r.zMin; z <= r.zMax; z++ {
+			n := math.Pow(2, float64(z))
+			last := int64(n) - 1
+			bufN := bufFrac / n
+			// A prim is eligible on tile x iff its bbox intersects the tile window
+			// expanded by the render buffer: x ∈ [ceil((wMin-buf)·n)-1, floor((wMax+buf)·n)].
+			xMin := clampTile(int64(math.Ceil((r.wMinX-bufN)*n))-1, last)
+			xMax := clampTile(int64(math.Floor((r.wMaxX+bufN)*n)), last)
+			yMin := clampTile(int64(math.Ceil((r.wMinY-bufN)*n))-1, last)
+			yMax := clampTile(int64(math.Floor((r.wMaxY+bufN)*n)), last)
+			for x := xMin; x <= xMax; x++ {
+				for y := yMin; y <= yMax; y++ {
+					key := uint64(z)<<40 | uint64(x)<<20 | uint64(y)
+					idx[key] = append(idx[key], int32(i))
+				}
+			}
+		}
+	}
+	b.emitIndex = idx
+}
+
+func clampTile(v, last int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	if v > last {
+		return last
+	}
+	return v
+}
+
 // sectorRadiusNorm is the LIGHTS06 sector figure's maximum extent (the 26 mm
 // ring) in normalized-world units at zoom z. The geometry is laid out in a
 // 256-px-per-tile space (see expandSector's worldPx), so the spill is a fixed
@@ -485,6 +532,7 @@ func addRange(out []tile.TileCoord, seen map[uint64]struct{}, bb geo.BoundingBox
 func (b *Baker) BakePMTiles(extent uint32, buffer float64) *pmtiles.Builder {
 	pb := pmtiles.New()
 	var ts TileScratch
+	b.BuildEmitIndex(extent, buffer)
 	for _, c := range b.TileCoords(extent) {
 		if data := b.EmitTileInto(c, extent, buffer, &ts); data != nil {
 			pb.AddTile(uint8(c.Z), c.X, c.Y, data)
@@ -533,13 +581,13 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	eligible := ts.eligible[:0]
 	var finestNat uint32
 	minNatMin := uint32(math.MaxUint32)
-	for i := range b.prims {
+	consider := func(i int) {
 		r := &b.prims[i]
 		if coord.Z < r.zMin || coord.Z > r.zMax {
-			continue
+			return
 		}
 		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
-			continue
+			return
 		}
 		eligible = append(eligible, i)
 		if r.natMax != math.MaxUint32 && r.natMax > finestNat {
@@ -547,6 +595,18 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		}
 		if r.natMin < minNatMin {
 			minNatMin = r.natMin
+		}
+	}
+	if b.emitIndex != nil {
+		// Indexed path: only the prims whose buffer-expanded bbox covers this tile.
+		key := uint64(coord.Z)<<40 | uint64(coord.X)<<20 | uint64(coord.Y)
+		for _, ci := range b.emitIndex[key] {
+			consider(int(ci))
+		}
+	} else {
+		// Fallback (EmitTile / tests, no prebuilt index): scan all prims.
+		for i := range b.prims {
+			consider(i)
 		}
 	}
 
@@ -563,7 +623,14 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		if bandZ < r.natMin && r.natMin > minNatMin && b.anyCoarserOverlaps(eligible, r) {
 			continue
 		}
-		if bandZ > r.natMax && r.natMax < finestNat {
+		// Symmetric up-direction gate: a coarse prim shown above its native band is
+		// suppressed only where a strictly-finer eligible prim actually *overlaps*
+		// it — not merely because some finer cell touches the tile. Without the
+		// overlap test a coarse feature (e.g. a light the finer cell doesn't carry)
+		// vanishes wherever a finer cell shares its tile. The r.natMax < finestNat
+		// short-circuit means a prim already at the finest band on the tile pays no
+		// scan, mirroring the down path's minNatMin guard.
+		if bandZ > r.natMax && r.natMax < finestNat && b.anyFinerOverlaps(eligible, r) {
 			continue
 		}
 		switch r.kind {
@@ -744,6 +811,22 @@ func (b *Baker) anyCoarserOverlaps(eligible []int, r *routed) bool {
 		q := &b.prims[qi]
 		if q.natMin >= r.natMin {
 			continue // not coarser than r
+		}
+		if q.wMinX <= r.wMaxX && q.wMaxX >= r.wMinX && q.wMinY <= r.wMaxY && q.wMaxY >= r.wMinY {
+			return true
+		}
+	}
+	return false
+}
+
+// anyFinerOverlaps reports whether a strictly-finer-band eligible primitive's
+// world bbox overlaps r (AABB only). Gates up-direction suppression — the mirror
+// of anyCoarserOverlaps. A finer band has the larger native-max zoom.
+func (b *Baker) anyFinerOverlaps(eligible []int, r *routed) bool {
+	for _, qi := range eligible {
+		q := &b.prims[qi]
+		if q.natMax <= r.natMax {
+			continue // not finer than r
 		}
 		if q.wMinX <= r.wMaxX && q.wMaxX >= r.wMinX && q.wMinY <= r.wMaxY && q.wMaxY >= r.wMinY {
 			return true

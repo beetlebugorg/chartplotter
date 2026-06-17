@@ -92,6 +92,58 @@ func TestLookupFeature_MultipleEntriesWithFailsafe(t *testing.T) {
 	}
 }
 
+// TestMostSpecificMatch verifies S-52 §10.3.3 selection: among entries that all
+// match, the one with the GREATEST number of attribute conditions wins — even
+// when a less-specific entry sorts earlier (the BOY*/BCN* CAT+COLOUR shadowing
+// case). The less-specific entry is listed FIRST to prove it no longer shadows.
+func TestMostSpecificMatch(t *testing.T) {
+	lib := &Library{
+		lookupTables: []*LookupTable{
+			{ // less specific — 1 condition, listed first
+				ObjectClass: "BOYLAT",
+				Attributes:  []AttributeCondition{{Attribute: "CATBOY", Value: "1"}},
+				Instructions: []RawInstruction{
+					{RawCommand: "SY(LESS)"},
+				},
+			},
+			{ // more specific — 2 conditions
+				ObjectClass: "BOYLAT",
+				Attributes: []AttributeCondition{
+					{Attribute: "CATBOY", Value: "1"},
+					{Attribute: "COLOUR", Value: "3"},
+				},
+				Instructions: []RawInstruction{
+					{RawCommand: "SY(MORE)"},
+				},
+			},
+		},
+	}
+
+	// Feature matches BOTH entries; the more-specific must win.
+	result := lib.LookupFeature("BOYLAT", "P", map[string]interface{}{
+		"CATBOY": "1",
+		"COLOUR": "3",
+	}, nil)
+	if result == nil || len(result.Instructions) == 0 {
+		t.Fatalf("expected instruction, got %v", result)
+	}
+	if got := result.Instructions[0].String(); got != "SY(MORE)" {
+		t.Errorf("most-specific selection failed: got %q, want SY(MORE)", got)
+	}
+
+	// Feature matches only the less-specific entry → that one wins.
+	result = lib.LookupFeature("BOYLAT", "P", map[string]interface{}{
+		"CATBOY": "1",
+		"COLOUR": "9",
+	}, nil)
+	if result == nil || len(result.Instructions) == 0 {
+		t.Fatalf("expected instruction, got %v", result)
+	}
+	if got := result.Instructions[0].String(); got != "SY(LESS)" {
+		t.Errorf("expected less-specific SY(LESS), got %q", got)
+	}
+}
+
 // TestMatchesAttribute tests attribute matching logic
 func TestMatchesAttribute(t *testing.T) {
 	lib := &Library{}

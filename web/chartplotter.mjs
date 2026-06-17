@@ -468,7 +468,7 @@ export class ChartPlotter extends HTMLElement {
     setIf("danger-boundary", "line-color", this.token("CHBLK", "#000000"));
     setIf("contour-labels", "text-color", this.contourLabelColor());
     setIf("contour-labels", "text-halo-color", this.textHaloColor());
-    for (const name2 in this._linestyles) setIf("lc-line-" + name2, "line-color", this.colorExpr("color_token"));
+    for (const g of this._linestyleGroups()) setIf(g.id, "line-color", this.colorExpr("color_token"));
     for (const v of TEXT_VARIANTS) {
       setIf(v.id, "text-color", this.textColor());
       setIf(v.id, "text-halo-color", this.textHaloColor());
@@ -808,27 +808,47 @@ export class ChartPlotter extends HTMLElement {
   iconSizeForScale() {
     return ["/", ["coalesce", ["get", "scale"], this._atlasPpu], this._atlasPpu];
   }
+  // Linestyles that render identically — same line-width and same
+  // (width-normalized) dash array — collapsed into one group each. MapLibre's
+  // `line-dasharray` is NOT a data-driven property, so a distinct dash still needs
+  // its own layer; but the ~55 linestyles share far fewer distinct (dash,width)
+  // pairs, so grouping cuts the per-band line-layer count several-fold. Members of
+  // a group are selected by `in` on linestyle_name. Deterministic: groups are
+  // numbered in first-seen order of this._linestyles, so the ids that
+  // complexLineLayers() builds match the ones setScheme() restyles.
+  _linestyleGroups() {
+    const byKey = new Map();
+    for (const name in this._linestyles) {
+      const ls = this._linestyles[name];
+      const w = Math.max(0.6, ls.width_px || 1);
+      const dash = (ls.dash && ls.dash.length ? ls.dash : [1]).map((d) => Math.max(0.01, d / w));
+      const key = w + "|" + dash.join(",");
+      let g = byKey.get(key);
+      if (!g) { g = { id: "lc-line-" + byKey.size, dash, w, names: [] }; byKey.set(key, g); }
+      g.names.push(name);
+    }
+    return [...byKey.values()];
+  }
   complexLineLayers() {
     const layers = [];
     // Linestyle symbols are drawn at the S-52 feature scale (the size the atlas
     // marks were rasterised for); the sprite atlas is px_per_unit = _atlasPpu.
     const symSize = FEATURE_SCALE / this._atlasPpu;
-    // One dashed-stroke LINE layer per linestyle (each carries its own dash +
-    // colour), plus ONE data-driven SYMBOL layer for the embedded marks. (Per-
-    // linestyle symbol layers — hundreds once band-expanded — overwhelm the
+    // One dashed-stroke LINE layer per distinct (dash,width) group (see
+    // _linestyleGroups), plus ONE data-driven SYMBOL layer for the embedded marks.
+    // (Per-linestyle symbol layers — hundreds once band-expanded — overwhelm the
     // symbol-placement pass and starve other symbols like buoys/soundings.)
+    for (const g of this._linestyleGroups()) {
+      layers.push({
+        id: g.id, type: "line", source: "chart", "source-layer": "complex_lines",
+        filter: ["in", ["get", "linestyle_name"], ["literal", g.names]],
+        paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], g.w], "line-dasharray": g.dash },
+      });
+    }
     const symNames = [];
     const symMatch = ["match", ["get", "linestyle_name"]];
     for (const name in this._linestyles) {
-      const ls = this._linestyles[name];
-      const w = Math.max(0.6, ls.width_px || 1);
-      const dash = (ls.dash && ls.dash.length ? ls.dash : [1]).map((d) => Math.max(0.01, d / w));
-      layers.push({
-        id: "lc-line-" + name, type: "line", source: "chart", "source-layer": "complex_lines",
-        filter: ["==", ["get", "linestyle_name"], name],
-        paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], w], "line-dasharray": dash },
-      });
-      const sym = (ls.symbols || [])[0];
+      const sym = (this._linestyles[name].symbols || [])[0];
       if (sym && sym.n) { symNames.push(name); symMatch.push(name, sym.n); }
     }
     // The linestyle's embedded symbol along the line — what makes a SYMBOLIZED

@@ -55,15 +55,23 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 	if mariner == nil {
 		mariner = s52.DefaultMarinerSettings()
 	}
-	objClass := f.ObjectClass()
-	g := f.Geometry()
-	attrs := f.Attributes()
-
-	geomCode := geometryCode(g.Type)
-	set := lib.LookupFeatureRaw(objClass, geomCode, attrs, mariner)
+	set := lib.LookupFeatureRaw(f.ObjectClass(), geometryCode(f.Geometry().Type), f.Attributes(), mariner)
 	if set == nil {
 		return FeatureBuild{}, false
 	}
+	return buildFromSet(lib, mariner, f, set), true
+}
+
+// buildFromSet runs the S-52 instruction walk for a feature against an
+// already-resolved LUPT InstructionSet. BuildFeature is the lookup+walk wrapper;
+// BuildFeaturePasses calls this directly to REUSE the raw lookups it already
+// performed for the plain/symbolized diff, instead of re-resolving them inside a
+// second BuildFeature call (the 3–4×-per-area-feature lookup cost).
+func buildFromSet(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, set *s52.InstructionSet) FeatureBuild {
+	objClass := f.ObjectClass()
+	g := f.Geometry()
+	attrs := f.Attributes()
+	geomCode := geometryCode(g.Type)
 
 	b := &walker{lib: lib, mariner: mariner, feature: f, attrs: attrs, geomCode: geomCode}
 
@@ -82,13 +90,13 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 			}
 			b.emit(set.Instructions, pg, 0)
 		}
-		return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}, true
+		return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}
 	}
 
 	pg := geometryOf(g)
 	b.emit(set.Instructions, pg, 0)
 	b.out = applyDangerDepth(b.out, objClass, attrs, pg)
-	return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}, true
+	return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}
 }
 
 // Boundary-symbolization tags (S-52 §8.6.1) stamped on each primitive's baked
@@ -118,33 +126,33 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 	if mariner == nil {
 		mariner = s52.DefaultMarinerSettings()
 	}
+	objClass := f.ObjectClass()
+	geomCode := geometryCode(f.Geometry().Type)
+	attrs := f.Attributes()
+
 	mPlain := *mariner
 	mPlain.SymbolizedBoundaries = false
-	buildP, ok := BuildFeature(lib, &mPlain, f)
-	if !ok {
+	// One plain lookup, reused for the build below (no second internal lookup).
+	setP := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mPlain)
+	if setP == nil {
 		return nil
 	}
+	buildP := buildFromSet(lib, &mPlain, f, setP)
 	one := []FeatureBuildPass{{Build: buildP, Bnd: BndCommon}}
 	if f.Geometry().Type != s57.GeometryTypePolygon {
 		return one
 	}
 	mSym := *mariner
 	mSym.SymbolizedBoundaries = true
-	objClass := f.ObjectClass()
-	geomCode := geometryCode(f.Geometry().Type)
-	attrs := f.Attributes()
-	setP := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mPlain)
 	setS := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mSym)
-	if setP == nil || setS == nil {
+	if setS == nil {
 		return one
 	}
 	if !instructionSetsDiffer(setP, setS) && !routesToResare(setP) {
 		return one
 	}
-	buildS, ok := BuildFeature(lib, &mSym, f)
-	if !ok {
-		return one
-	}
+	// Symbolized boundaries differ — build the second pass, reusing setS.
+	buildS := buildFromSet(lib, &mSym, f, setS)
 	return []FeatureBuildPass{
 		{Build: buildP, Bnd: BndPlain},
 		{Build: buildS, Bnd: BndSymbolized},

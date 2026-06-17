@@ -26,7 +26,13 @@ type Library struct {
 	linestyles   map[string]*Linestyle
 	patterns     map[string]*Pattern
 	lookupTables []*LookupTable // Use slice for deterministic iteration order
-	colorDB      *ColorDatabase
+	// lookupByClass indexes lookupTables by object class so per-feature selection
+	// is O(entries-for-class) instead of O(all-entries). Built once at load,
+	// preserving lookupTables' (sorted/file) order within each class so selection
+	// is identical to the linear scan. nil for hand-built Library values (tests):
+	// candidatesForClass then falls back to a linear filter.
+	lookupByClass map[string][]*LookupTable
+	colorDB       *ColorDatabase
 
 	// Cached color maps for fast lookup (prevents map allocations on every GetColor call)
 	dayColorCache   map[string]*Color
@@ -106,13 +112,21 @@ func buildLibrary(parseResult *ParseResult, colorDB *ColorDatabase) (*Library, e
 		lookupSlice = append(lookupSlice, parseResult.LookupTables[key])
 	}
 
+	// Index by object class once, preserving lookupSlice order within each class
+	// (so per-feature selection scans only that class's entries, in file order).
+	lookupByClass := make(map[string][]*LookupTable)
+	for _, lupt := range lookupSlice {
+		lookupByClass[lupt.ObjectClass] = append(lookupByClass[lupt.ObjectClass], lupt)
+	}
+
 	lib := &Library{
-		symbols:      parseResult.Symbols,
-		linestyles:   parseResult.Linestyles,
-		patterns:     parseResult.Patterns,
-		lookupTables: lookupSlice,
-		colorDB:      colorDB,
-		depthUnit:    DepthUnitFeet, // Default to feet
+		symbols:       parseResult.Symbols,
+		linestyles:    parseResult.Linestyles,
+		patterns:      parseResult.Patterns,
+		lookupTables:  lookupSlice,
+		lookupByClass: lookupByClass,
+		colorDB:       colorDB,
+		depthUnit:     DepthUnitFeet, // Default to feet
 	}
 
 	// Build color caches once at load time to avoid repeated map allocations

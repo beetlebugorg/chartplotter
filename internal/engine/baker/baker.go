@@ -84,6 +84,11 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 	total := len(coords)
 	encoded := make([][]byte, total)
 
+	// Build the inverted tile→prim index once (single-threaded) so each parallel
+	// worker's EmitTileInto iterates only on-tile prims instead of scanning all
+	// of b.prims. Read-only after this point, so concurrent reads are safe.
+	b.BuildEmitIndex(MVTExtent, MVTBuffer)
+
 	workers := runtime.NumCPU()
 	if workers > total {
 		workers = total

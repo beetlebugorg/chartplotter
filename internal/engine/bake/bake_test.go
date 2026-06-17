@@ -1,6 +1,7 @@
 package bake
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
@@ -242,6 +243,48 @@ func TestBakePMTilesArchive(t *testing.T) {
 	t.Logf("archive: %d tiles, %d bytes", pb.Count(), len(arc))
 }
 
+// TestEmitIndexEquivalence asserts the inverted tile→prim index (BuildEmitIndex)
+// produces byte-identical tiles to the full-scan fallback for every tile —
+// across two overlapping cells of different bands (so suppression is exercised).
+func TestEmitIndexEquivalence(t *testing.T) {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		t.Fatalf("load lib: %v", err)
+	}
+	build := func() *Baker {
+		b := New()
+		for _, cell := range []string{goldenCell, "../../../testdata/US5MD1MC.000"} {
+			chart, err := s57.Parse(cell)
+			if err != nil {
+				t.Fatalf("parse %s: %v", cell, err)
+			}
+			b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+		}
+		return b
+	}
+
+	const buf = 64.0
+	scan := build() // emitIndex nil → full scan
+	indexed := build()
+	indexed.BuildEmitIndex(mvt.ExtentDefault, buf)
+
+	coords := scan.TileCoords(mvt.ExtentDefault)
+	var checked int
+	for _, c := range coords {
+		var ts1, ts2 TileScratch
+		a := scan.EmitTileInto(c, mvt.ExtentDefault, buf, &ts1)
+		b := indexed.EmitTileInto(c, mvt.ExtentDefault, buf, &ts2)
+		if !bytes.Equal(a, b) {
+			t.Fatalf("tile %v differs: scan=%d bytes indexed=%d bytes", c, len(a), len(b))
+		}
+		checked++
+	}
+	t.Logf("verified %d tiles byte-identical (full scan vs indexed)", checked)
+	if checked == 0 {
+		t.Fatal("no tiles checked")
+	}
+}
+
 func TestSoundingGrouping(t *testing.T) {
 	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
 	if err != nil {
@@ -303,6 +346,52 @@ func TestSectorLights(t *testing.T) {
 	span := func(s []sectorStroke) float64 { return absf(s[len(s)-1].points[0].Lat - anchor.Lat) }
 	if ratio := span(r14) / span(r15); ratio < 1.9 || ratio > 2.1 {
 		t.Errorf("ring radius ratio z14/z15 = %.3f, want ~2", ratio)
+	}
+}
+
+// TestUpSuppressionGeometryAware exercises the up-direction best-available gate
+// (bake.go EmitTileInto): a coarse prim shown above its native band must survive
+// where no strictly-finer prim overlaps it (the disappearing-light bug), and only
+// be suppressed where a finer prim genuinely covers its location. The single-
+// archive bake caps zMax at natMax so this branch is latent; here we set zMax >
+// natMax to simulate an overzoomed coarse prim and drive the branch directly.
+func TestUpSuppressionGeometryAware(t *testing.T) {
+	coastal := BandCoastal.ZoomRange() // {9,11}
+	harbor := BandHarbor.ZoomRange()   // {13,16}
+	base := geo.LatLon{Lat: 38.97, Lon: -76.49}
+
+	mk := func(b *Baker, ll geo.LatLon, layer string, zr ZoomRange, zMax uint32) {
+		r := routed{layer: layer, kind: mvt.GeomPoint, npoint: normPt(ll),
+			zMin: zr.Min, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
+		r.attrs = []mvt.KeyValue{{Key: "class", Value: mvt.StringVal("X")}}
+		b.add(r, ptBbox(ll))
+	}
+	// The z13 tile carrying base — both prims land on it (offsets « tile width).
+	rng := tile.RangeForBbox(13, ptBbox(base), mvt.ExtentDefault)
+	coord := tile.TileCoord{Z: 13, X: rng.XMin, Y: rng.YMin}
+
+	// A: finer feature elsewhere on the tile (disjoint bbox) → coarse survives.
+	bA := New()
+	mk(bA, base, "point_symbols", coastal, 18) // coarse light, overzoomed past z11
+	mk(bA, geo.LatLon{Lat: base.Lat + 0.0008, Lon: base.Lon + 0.0008}, "soundings", harbor, harbor.Max)
+	layersA := decodeLayers(bA.EmitTile(coord, mvt.ExtentDefault, 64))
+	if layersA["point_symbols"] == nil {
+		t.Error("A: coarse overzoomed light suppressed even though no finer prim overlaps it")
+	}
+	if layersA["soundings"] == nil {
+		t.Error("A: finer prim missing")
+	}
+
+	// B: finer feature at the SAME location (overlapping bbox) → coarse suppressed.
+	bB := New()
+	mk(bB, base, "point_symbols", coastal, 18)
+	mk(bB, base, "soundings", harbor, harbor.Max)
+	layersB := decodeLayers(bB.EmitTile(coord, mvt.ExtentDefault, 64))
+	if layersB["point_symbols"] != nil {
+		t.Error("B: coarse light should be suppressed where a finer prim overlaps it")
+	}
+	if layersB["soundings"] == nil {
+		t.Error("B: finer prim missing")
 	}
 }
 
