@@ -120,6 +120,11 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 			pb.AddTile(uint8(c.Z), c.X, c.Y, encoded[i])
 		}
 	}
+	// Override the tile-derived bounds (the spec-display z0 world tile would make
+	// them global) with the real cell-union extent so clients frame to the charts.
+	if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
+		pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
+	}
 	return pb
 }
 

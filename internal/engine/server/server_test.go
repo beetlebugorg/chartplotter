@@ -27,7 +27,12 @@ func TestProvisionCoreFromCache(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "catalog.json"), []byte(cat), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".cellcache-US4MD81M.000"), data, 0o644); err != nil {
+	// Stage the cell in the canonical ALL_ENCs.zip layout (ENC_ROOT/<CELL>/<CELL>.000).
+	encDir := filepath.Join(dir, "ENC_ROOT", "US4MD81M")
+	if err := os.MkdirAll(encDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(encDir, "US4MD81M.000"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,6 +59,36 @@ func TestProvisionCoreFromCache(t *testing.T) {
 	}
 	if len(m.Cells) != 1 || m.Cells[0] != "US4MD81M" || len(m.Bounds) != 4 {
 		t.Errorf("manifest wrong: %+v", m)
+	}
+	// Bounds must be the cell's real extent, not the degenerate full-world bbox
+	// (the z0 spec-display tile would otherwise make them global).
+	if m.Bounds[0] <= -179 || m.Bounds[2] >= 179 || m.Bounds[1] <= -84 || m.Bounds[3] >= 84 {
+		t.Errorf("bounds look like the whole world, expected the cell extent: %v", m.Bounds)
+	}
+}
+
+// TestProvisionCoreLegacyCache verifies the pre-ENC_ROOT flat cache
+// (dir/.cellcache-<CELL>.000) is still honoured so an upgrade doesn't force a
+// re-download of cells already on disk.
+func TestProvisionCoreLegacyCache(t *testing.T) {
+	data, err := os.ReadFile(goldenCell)
+	if err != nil {
+		t.Skipf("golden cell unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	cat := `{"date":"x","cells":[{"n":"US4MD81M","z":"http://0.0.0.0/never.zip"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "catalog.json"), []byte(cat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".cellcache-US4MD81M.000"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ProvisionCore(dir, []string{"US4MD81M"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cells != 1 || res.Tiles == 0 {
+		t.Fatalf("legacy-cache provision failed: %+v", res)
 	}
 }
 

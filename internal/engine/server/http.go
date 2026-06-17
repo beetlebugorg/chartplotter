@@ -140,8 +140,18 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 // cache's regions dir, honouring HTTP Range.
 func (s *Server) serveRegion(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/charts/")
+	if strings.ContainsAny(name, "/\\") {
+		http.NotFound(w, r)
+		return
+	}
+	// The map-selected (cell-list) bake + its manifest live in the XDG cache,
+	// served under /charts/ alongside the per-region archives.
+	if name == userPMTiles || name == userManifest {
+		s.serveFile(w, r, filepath.Join(s.cacheDir, name), name)
+		return
+	}
 	num, ok := regionNumFromPMTiles(name)
-	if !ok || strings.ContainsAny(name, "/\\") {
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}

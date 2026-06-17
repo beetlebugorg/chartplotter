@@ -87,8 +87,9 @@ type catalogDoc struct {
 
 // ProvisionCore resolves each named cell's NOAA zip URL from dir/catalog.json,
 // downloads it (server-side — no browser CORS), caches the extracted base cell
-// at dir/.cellcache-<CELL>.000, native-bakes them all into
-// dir/charts-user.pmtiles, and writes the dir/charts-user.json sidecar.
+// in NOAA's ALL_ENCs.zip layout at dir/ENC_ROOT/<CELL>/<CELL>.000, native-bakes
+// them all into dir/charts-user.pmtiles, and writes the dir/charts-user.json
+// sidecar.
 func ProvisionCore(dir string, names []string, p *ProgressSink) (ProvisionResult, error) {
 	// Prefer a catalog.json on disk (the CLI `provision DIR` case); otherwise fall
 	// back to the catalog embedded in the binary, so a single-file `serve` can
@@ -173,15 +174,24 @@ func ProvisionCore(dir string, names []string, p *ProgressSink) (ProvisionResult
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return ProvisionResult{}, err
 	}
-	f, err := os.Create(out)
+	// Write to a temp file then rename, so concurrent tile reads of the live
+	// charts-user.pmtiles never observe a half-written archive (the map keeps
+	// requesting tiles while a re-provision bakes). Matches the region path.
+	tmp := out + ".tmp"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
 	if err := pb.WriteArchive(f); err != nil {
 		f.Close()
+		os.Remove(tmp)
 		return ProvisionResult{}, err
 	}
 	f.Close()
+	if err := os.Rename(tmp, out); err != nil {
+		os.Remove(tmp)
+		return ProvisionResult{}, err
+	}
 
 	info, err := pmtilesInfo(out)
 	if err != nil {
@@ -243,12 +253,19 @@ func extractBaseCells(zipBytes []byte, dst map[string][]byte) (int, error) {
 	return n, nil
 }
 
-// loadCellCached returns the base-cell bytes for name, cached at
-// dir/.cellcache-<name>.000 so re-baking doesn't re-download. name is already
-// validated (validCell), so it's a safe filename component.
+// loadCellCached returns the base-cell bytes for name, cached in NOAA's
+// ALL_ENCs.zip layout at dir/ENC_ROOT/<CELL>/<CELL>.000 so re-baking doesn't
+// re-download — and so an ALL_ENCs.zip the user extracted into the cache dir is
+// recognised as-is (a standard, interoperable ENC root). name is already
+// validated (validCell), so it's a safe path component.
 func loadCellCached(client *http.Client, dir, name, url string) (data []byte, hit bool, err error) {
-	cpath := filepath.Join(dir, ".cellcache-"+name+".000")
+	cpath := filepath.Join(dir, "ENC_ROOT", name, name+".000")
 	if b, e := os.ReadFile(cpath); e == nil {
+		return b, true, nil
+	}
+	// Honour a legacy flat cache (dir/.cellcache-<name>.000) so an upgrade doesn't
+	// force a re-download of everything already on disk.
+	if b, e := os.ReadFile(filepath.Join(dir, ".cellcache-"+name+".000")); e == nil {
 		return b, true, nil
 	}
 	// Retry transient download failures (NOAA occasionally 5xx / resets under
@@ -264,8 +281,11 @@ func loadCellCached(client *http.Client, dir, name, url string) (data []byte, hi
 		}
 		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 	}
-	// Cache best-effort; a write failure just means we re-fetch next time.
-	_ = os.WriteFile(cpath, b, 0o644)
+	// Cache best-effort (ENC_ROOT/<CELL>/<CELL>.000); a write failure just means
+	// we re-fetch next time.
+	if e := os.MkdirAll(filepath.Dir(cpath), 0o755); e == nil {
+		_ = os.WriteFile(cpath, b, 0o644)
+	}
 	return b, false, nil
 }
 
@@ -361,7 +381,12 @@ func writeUserManifest(dir string, names []string, regions []int, info pmtInfo) 
 		fmt.Fprintf(&b, "%d", num)
 	}
 	fmt.Fprintf(&b, `],"bounds":[%.5f,%.5f,%.5f,%.5f]}`, info.w, info.s, info.e, info.n)
-	_ = os.WriteFile(filepath.Join(dir, userManifest), b.Bytes(), 0o644)
+	// Atomic write so a concurrent boot/poll read never sees partial JSON.
+	dst := filepath.Join(dir, userManifest)
+	tmp := dst + ".tmp"
+	if os.WriteFile(tmp, b.Bytes(), 0o644) == nil {
+		_ = os.Rename(tmp, dst)
+	}
 }
 
 func trimCellExt(name string) string {

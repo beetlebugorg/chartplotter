@@ -115,8 +115,15 @@ func rasterizePattern(pat *s52.Pattern, day map[string]rcolor, scale float32, sk
 		return raster{}, false
 	}
 
-	twUnits := maxInt(pat.SpacingX, pat.TileWidth)
-	thUnits := maxInt(pat.SpacingY, pat.TileHeight)
+	// S-52 §11.5.3: PAMI (SpacingX/Y) is the minimum distance between symbol
+	// COVERS (the gap between adjacent bounding boxes), NOT the centre-to-centre
+	// pitch — confirmed by patterns like NODATA03 whose PAMI (1 mm) is far
+	// smaller than the symbol (6 mm), impossible if PAMI were the pitch. So the
+	// tile period is the cover plus the gap. The old max(PAMI, cover) under-spaced
+	// every pattern (≈45% too dense for the M_QUAL/CATZOC quality overlays, whose
+	// 17 mm symbol exceeds their 14 mm PAMI, making them overlap).
+	twUnits := pat.TileWidth + pat.SpacingX
+	thUnits := pat.TileHeight + pat.SpacingY
 	if twUnits == 0 || thUnits == 0 {
 		return raster{}, false
 	}

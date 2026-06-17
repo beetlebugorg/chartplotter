@@ -27,6 +27,8 @@ const LS_MARINER = "chartplotter:mariner";
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
 const LS_AGREE = "chartplotter:enc-agreement"; // NOAA ENC User Agreement acceptance
+const LS_AREACELLS = "chartplotter:areacells"; // names of cells picked by drag-a-box area selection
+const LS_SELBANDS = "chartplotter:selbands"; // navigational-purpose bands enabled in the map selector
 // NOAA's ENC distribution pages + the User Agreement that must be displayed and
 // accepted before downloading ENCs (charts.noaa.gov/ENCs/ENCs.shtml §3).
 const NOAA_ENC_URL = "https://www.charts.noaa.gov/ENCs/ENCs.shtml";
@@ -57,6 +59,9 @@ export class ChartPlotterApp extends HTMLElement {
     this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
     this._regionArchives = [];          // [{num,file,bounds}] — one pmtiles per installed region
     this._districts = [];               // hosted per-district archives (charts-index.json)
+    this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
+    this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
+    this._selBands = this._loadSelBands(); // navigational-purpose bands enabled in the selector (Set of band slugs)
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = loadJSON(LS_MARINER, {});
     // Migrate the old single-value display category (base|standard|other) to
@@ -70,7 +75,8 @@ export class ChartPlotterApp extends HTMLElement {
     }
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
     this._agreed = localStorage.getItem(LS_AGREE) === "1"; // NOAA ENC agreement accepted
-    this._region = null;                // the region currently open in the drawer (null = list)
+    this._areaCells = new Set();        // cell names picked by drag-a-box area selection (union)
+    this._loadAreaCells();
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
     // which verb) the server doesn't know. `_poll` is the polling interval handle.
@@ -137,13 +143,14 @@ export class ChartPlotterApp extends HTMLElement {
     this._resolveReady();
     // Apply persisted display prefs.
     if (this._scheme !== "day") this._plotter.setScheme(this._scheme);
+    this.setAttribute("data-scheme", this._scheme);
     if (Object.keys(this._mariner).length) {
       try { this._plotter.setMariner(this._mariner); } catch (e) { console.warn(e); }
     }
     await this._catalogReady;
-    this._buildRegions();
     this.addCatalogOverlay(map);
     await this.restoreArchive();
+    await this._seedAreaCells();
     this.updateEmptyState();
     this.renderCharts();
     this._assessCoverage();
@@ -212,9 +219,15 @@ export class ChartPlotterApp extends HTMLElement {
       // XDG cache, listed by GET /api/charts. Render exactly that set (+ blob).
       const regions = await this._loadManifest();
       await this._applyArchives();
-      if (regions && regions.length) {
+      // _applyArchives sets _hasArchive for ANY coverage — region archives, the
+      // map-selected bake, or a restored import — so key the loaded/empty state
+      // off that, not just regions (otherwise box-selected charts read as "no
+      // charts" and the welcome card stays up).
+      if (this._hasArchive) {
         loaded = true;
-        if (!loadJSON(LS_VIEW, null)) this._frameRegionArchives(regions);
+        const frames = [...(regions || [])];
+        if (this._userBake && this._userBake.bounds && !this._isWorldBounds(this._userBake.bounds)) frames.push({ bounds: this._userBake.bounds });
+        if (frames.length && !loadJSON(LS_VIEW, null)) this._frameRegionArchives(frames);
       }
     }
     if (loaded) { this.updateEmptyState(); return; }
@@ -262,10 +275,39 @@ export class ChartPlotterApp extends HTMLElement {
     const urls = (this._regionArchives || []).map((x) => `charts/${x.file}?t=${Date.now()}`);
     await this._plotter.loadRegions(urls);
     if (urls.length) this._hasArchive = true;
-    const src = loadJSON(LS_SOURCE, null);
-    if (src && src.type === "blob") {
-      try { const b = await archiveGet(); if (b) await this._plotter.addArchive(b); } catch (e) { console.warn(e); }
+    // loadRegions() RESET every band, so re-add imported/uploaded archives too —
+    // otherwise a box-select (or region add/remove) re-applying coverage would
+    // drop them from the map. Prefer the in-memory copies (survive even when too
+    // large to persist to IndexedDB); fall back to the persisted blob on a fresh
+    // reload where the in-memory list is empty.
+    if (this._importedArchives.length) {
+      for (const a of this._importedArchives) {
+        try { await this._plotter.addArchive(a); this._hasArchive = true; } catch (e) { console.warn(e); }
+      }
+    } else {
+      const src = loadJSON(LS_SOURCE, null);
+      if (src && src.type === "blob") {
+        try { const b = await archiveGet(); if (b) { await this._plotter.addArchive(b); this._importedArchives.push(b); this._hasArchive = true; } } catch (e) { console.warn(e); }
+      }
     }
+    // loadRegions() RESETS every band source, so the drag-a-box bake
+    // (charts-user.pmtiles, a separate single archive) must be APPENDED here to
+    // survive alongside the region archives. Defensive: ignore an absent file.
+    try {
+      const r = await fetch("charts/charts-user.json?t=" + Date.now());
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.cells) && j.cells.length) {
+          await this._plotter.addArchive("charts/charts-user.pmtiles?t=" + Date.now(), "all");
+          this._userBake = { cells: j.cells, bounds: Array.isArray(j.bounds) ? j.bounds : null };
+          this._hasArchive = true;
+        } else {
+          this._userBake = null;
+        }
+      } else {
+        this._userBake = null;
+      }
+    } catch {}
   }
 
   // Fetch + render a hosted archive (incremental, via HTTP Range), framing to
@@ -292,15 +334,15 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
   }
 
-  // -- Charts: one region-centric surface (browse + download + view existing) --
-  // Open the Charts drawer to the region browser (the one chart surface).
+  // -- Charts: the map selector + "on this device" coverage manager ---------
+  // Open the Charts drawer (and the all-cells map overlay).
   openCharts() {
-    this._region = null;
     this._section = "charts";
     this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
     this.shadowRoot.getElementById("empty").hidden = true;
-    this.setDrawerOpen(true);
     this.renderCharts();
+    this._setCellOverlay(true);
+    this.setDrawerOpen(true);
   }
 
   // -- background provision task (server-owned, client-observed) -----------
@@ -443,61 +485,24 @@ export class ChartPlotterApp extends HTMLElement {
         el.hidden = false;
         el.classList.toggle("error", !!d.error);
         el.innerHTML = `<span class="dlp-spin"></span><span class="dlp-txt">${d.pill}${pct}</span>`;
-        el.onclick = () => { const n = (this._taskMeta || {}).name; if (n) this.openRegion(n); else this.openCharts(); };
+        el.onclick = () => this.openCharts();
       }
     }
     this._setProgress(d ? { label: d.label, sub: d.sub, frac: d.frac } : null);
-    // Keep the open region's action buttons in step with the job state (a
-    // running job disables Download/Remove); the detail has no text input to
-    // disturb, so a re-render is safe.
-    if (this._region && this._section === "charts" && this._drawerOpen()) {
-      const cb = this.shadowRoot.getElementById("charts-body");
-      if (cb) this._renderRegionDetail(cb);
+    // Keep the Charts panel's action buttons in step with the job state without a
+    // full re-render each poll tick (which would flicker / collapse the import
+    // panel) — just disable Download/Remove while a job runs. The completed-state
+    // re-render happens in _onTaskDone.
+    if (this._section === "charts" && this._drawerOpen()) {
+      const busy = this._taskRunning();
+      const dl = this.shadowRoot.getElementById("area-dl");
+      if (dl) { dl.disabled = busy; if (busy) dl.textContent = "Downloading…"; }
+      const rm = this.shadowRoot.getElementById("owned-remove");
+      if (rm) rm.disabled = busy;
     }
     // A running download means charts are inbound — don't show the empty-state
     // welcome over the map (and restore it if the task failed with no coverage).
     this.updateEmptyState();
-  }
-
-  // Group catalog cells into NOAA's official ENC regions (the catalog `rg`
-  // numbers). A cell joins every region in its `rg` list, so a region holds the
-  // complete set NOAA ships for that area (no centroid partition that splits a
-  // bay). Each region's MAP EXTENT comes from its LOCAL cells (coastal and
-  // finer); the wide-area overview/general cells span whole oceans and would
-  // balloon the box.
-  _buildRegions() {
-    const byNum = new Map(); // rg number -> region
-    for (const c of this._catalog) {
-      if (!Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      const local = bandForScale(c.s) !== "overview" && bandForScale(c.s) !== "general";
-      for (const num of (c.rg || [])) {
-        let r = byNum.get(num);
-        if (!r) {
-          const [name, coast] = NOAA_REGIONS[num] || ["Region " + num, "Other"];
-          r = { num, name, coast, cells: [], bb: null };
-          byNum.set(num, r);
-        }
-        r.cells.push(c.n);
-        if (local) {
-          const [w, s, e, n] = c.bb;
-          if (!r.bb) r.bb = [w, s, e, n];
-          else r.bb = [Math.min(r.bb[0], w), Math.min(r.bb[1], s), Math.max(r.bb[2], e), Math.max(r.bb[3], n)];
-        }
-      }
-    }
-    const regions = [...byNum.values()];
-    for (const r of regions) if (!r.bb && r.cells.length) {
-      const c = this._byName.get(r.cells[0]); if (c && c.bb) r.bb = [...c.bb];
-    }
-    this._regions = regions.filter((r) => r.cells.length).sort((a, b) => a.num - b.num);
-  }
-
-  // A region's map extent: the union bbox of its LOCAL (coastal-and-finer) cells
-  // — the area drawn/framed on the map. (The region's overview/general cells
-  // span whole oceans, so they're excluded from the box.) Falls back to a small
-  // box if a region somehow has only coarse cells.
-  _regionFootprint(region) {
-    return region.bb || null;
   }
 
   // The Charts drawer body: the region list, or (once one is picked) that
@@ -506,11 +511,11 @@ export class ChartPlotterApp extends HTMLElement {
   renderCharts() {
     const el = this.shadowRoot.getElementById("charts-body");
     if (!el) return;
-    this.shadowRoot.getElementById("dtitle").textContent = this._region ? this._region.name : "Charts";
-    if (this._region) return this._renderRegionDetail(el);
+    this.shadowRoot.getElementById("dtitle").textContent = "Charts";
     el.innerHTML = `
-      <input id="region-search" class="region-search" type="search" placeholder="Search a region…" autocomplete="off" spellcheck="false">
-      <div id="region-list" class="region-list"></div>
+      ${this._renderAreaSelect()}
+      ${this._renderBandToggles()}
+      ${this._renderOwned()}
       <details class="import-more">
         <summary>Import from a file</summary>
         <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
@@ -518,162 +523,259 @@ export class ChartPlotterApp extends HTMLElement {
         <div id="import-log" class="muted"></div>
         <div id="archive-list"></div>
       </details>`;
-    const si = el.querySelector("#region-search");
-    si.oninput = () => this._renderRegionList(si.value);
+    this._wireAreaSelect();
+    this._wireBandToggles();
+    this.shadowRoot.getElementById("owned-remove")?.addEventListener("click", () => this._removeDownloaded());
     this._wireImport();
-    this._renderRegionList("");
   }
 
-  _renderRegionList(q) {
-    const el = this.shadowRoot.getElementById("region-list");
-    if (!el) return;
-    const needle = (q || "").trim().toLowerCase();
-    const all = (this._regions || []).filter((r) => !needle || r.name.toLowerCase().includes(needle) || r.coast.toLowerCase().includes(needle));
-    const row = (r) => {
-      const inst = this._dlRegions.has(r.num);
-      const dot = `<span class="rdot ${inst ? "full" : "none"}"></span>`;
-      const meta = inst ? "downloaded" : "available";
-      return `<button class="region-row" data-region="${r.name}">${dot}<span class="region-name">${r.name}</span><span class="region-meta">${meta}</span></button>`;
-    };
-    let html = "";
-    const downloaded = all.filter((r) => this._dlRegions.has(r.num)).sort((a, b) => a.name.localeCompare(b.name));
-    if (downloaded.length) html += `<div class="region-group">Downloaded</div>` + downloaded.map(row).join("");
-    for (const coast of COAST_ORDER) {
-      const rs = all.filter((r) => r.coast === coast && !this._dlRegions.has(r.num)).sort((a, b) => a.name.localeCompare(b.name));
-      if (rs.length) html += `<div class="region-group">${coast}</div>` + rs.map(row).join("");
+  // Navigational-purpose band on/off chips — control which cells the selector
+  // shows on the map and grabs into a box (turn off Overview/General for a small,
+  // fast package of just the detailed charts).
+  _renderBandToggles() {
+    const chips = BANDS.map((b) =>
+      `<button class="band-chip${this._selBands.has(b) ? "" : " off"}" data-band="${b}"><span class="sw" style="background:${BAND_COLOR[b]}"></span>${BAND_LABEL[b]}</button>`).join("");
+    return `<div class="region-group">Bands to include</div><div class="band-row" style="margin-bottom:14px">${chips}</div>`;
+  }
+  _wireBandToggles() {
+    this.shadowRoot.querySelectorAll(".band-chip[data-band]").forEach((b) => (b.onclick = () => this._toggleBand(b.dataset.band)));
+  }
+
+  // Selected cells that are in an enabled band — the set actually downloaded.
+  _effectiveAreaCells() {
+    const out = [];
+    for (const n of this._areaCells) { const c = this._byName.get(n); if (c && this._bandOn(c)) out.push(n); }
+    return out;
+  }
+
+  // "On this device": the map-selected bake (charts-user) + any imported files,
+  // so it's always clear what coverage you actually have.
+  _renderOwned() {
+    const u = this._userBake;
+    const imp = this._importedArchives.length;
+    if (!u && !imp) return "";
+    let rows = "";
+    if (u) {
+      let bytes = 0;
+      for (const n of u.cells) { const c = this._byName.get(n); if (c && typeof c.zs === "number") bytes += c.zs; }
+      const mb = bytes ? ` · ~${(bytes / 1e6).toFixed(1)} MB` : "";
+      const busy = this._taskRunning();
+      rows += `<div class="owned-row"><div><b>Map selection</b><div class="muted">${u.cells.length} chart${u.cells.length !== 1 ? "s" : ""}${mb}</div></div>` +
+        `<button class="linkbtn danger" id="owned-remove"${busy ? " disabled" : ""}>Remove</button></div>`;
     }
-    el.innerHTML = html || `<div class="region-empty">No regions match “${q}”.</div>`;
-    el.querySelectorAll(".region-row").forEach((b) => (b.onclick = () => this.openRegion(b.dataset.region)));
+    if (imp) rows += `<div class="owned-row"><div><b>Imported files</b><div class="muted">${imp} archive${imp !== 1 ? "s" : ""} loaded</div></div></div>`;
+    return `<div class="region-group">On this device</div>${rows}`;
   }
 
-  // Open a region: outline its extent on the map, frame it, show its detail.
-  openRegion(name) {
-    const r = (this._regions || []).find((x) => x.name === name);
-    if (!r) return;
-    this._region = r;
-    // make sure we're on the Charts surface (e.g. when opened from the pill)
-    this._section = "charts";
-    this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
-    this.shadowRoot.getElementById("empty").hidden = true;
-    this.setDrawerOpen(true);
-    this._frameRegion(r);
-    this.renderCharts();
-  }
-
-  _frameRegion(r) {
-    if (!this._map) return;
-    // Highlight (and frame to) the region's coarse-cell footprint — the same
-    // area whose cells the download grabs, so "what's highlighted" == "what's
-    // downloaded".
-    const bb = this._regionFootprint(r);
-    if (!bb) return;
-    const [w, s, e, n] = bb;
-    const src = this._map.getSource("focus");
-    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } }] });
-    this._map.fitBounds([[w, s], [e, n]], { padding: 50, duration: 600 });
-  }
-
-  _renderRegionDetail(el) {
-    const r = this._region;
-    // A region downloads as ONE NOAA bundle zip (every scale together), so this
-    // is whole-region, not a per-band pick. Show the chart count + per-band
-    // breakdown for context.
-    const per = {};
-    let count = 0;
-    for (const n of r.cells) {
-      const c = this._byName.get(n); if (!c) continue;
-      const b = bandForScale(c.s); (per[b] ??= { count: 0 }).count++; count++;
-    }
-    const breakdown = BANDS.filter((b) => per[b]).map((b) =>
-      `<span class="band-chip" data-band="${b}"><span class="sw" style="background:${BAND_COLOR[b]}"></span>${BAND_LABEL[b]} (${per[b].count})</span>`).join("");
-    const installed = this._dlRegions.has(r.num);
-    const busy = this._taskRunning(); // a download/remove is already in flight
-    const status = installed ? `<div class="region-status">✓ ${r.name} is downloaded</div>` : "";
-    const actions = installed
-      ? `<button class="linkbtn danger" id="region-remove"${busy ? " disabled" : ""}>Remove this region from device</button>`
-      : `<button class="add-dl" id="region-dl"${busy ? " disabled" : ""}>${busy ? "Downloading…" : `⬇ Download ${count} chart${count !== 1 ? "s" : ""}`}</button>`;
-    el.innerHTML = `
-      <div class="add-head"><button id="region-back" class="btn">← All regions</button></div>
-      ${status}
-      <p class="add-hint">The whole region downloads together (every chart scale), straight from NOAA.</p>
-      <div class="band-row">${breakdown}</div>
-      <div class="add-sel">${actions}</div>`;
-    el.querySelector("#region-back").onclick = () => { this._region = null; this._clearFocus(); this.renderCharts(); };
-    el.querySelector("#region-dl")?.addEventListener("click", () => this.downloadRegion());
-    el.querySelector("#region-remove")?.addEventListener("click", () => this.removeRegion());
-  }
-
-  // Download the open region: add it to the installed-region set and provision
-  // the union via NOAA's per-region bundle zips (one big, authoritative download
-  // per region, server-side). The server re-bakes from cached zips, so adding a
-  // region doesn't re-download the ones you already have.
-  async downloadRegion() {
-    const r = this._region;
-    if (!r) return;
-    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
-    // One pmtiles per region: provision ONLY the new region (the server bakes
-    // just it; already-baked regions are a no-op).
-    await this._startProvisionRegions([r.num], { name: r.name, verb: "Downloading" });
-  }
-
-  // Region numbers the user has downloaded — authoritative from the manifest.
-  _installedRegions() { return new Set(this._dlRegions); }
-
-  // Remove a region = delete its own archive (DELETE /api/charts/<NN>) and
-  // re-apply the remaining set. No re-bake, no download — instant.
-  async removeRegion() {
-    const r = this._region;
-    if (!r) return;
-    if (!this._dlRegions.has(r.num) || this._taskRunning()) return;
-    this._taskMeta = { name: r.name, verb: "Removing" };
-    this._task = { kind: "remove", status: "running", phase: "import", done: 0, total: 0 };
-    this._renderTaskUI();
-    try {
-      const res = await fetch(`api/charts/${r.num}`, { method: "DELETE" });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
-    } catch (e) {
-      console.error("[remove]", e);
-      this._task = { kind: "remove", status: "error", error: "delete" };
-      this._taskMeta = { name: r.name, verb: "Removing", errMsg: "Couldn’t remove region" };
-      this._renderTaskUI();
-      this._clearTaskSoon(3000);
-      return;
-    }
-    await this._loadManifest();
-    await this._applyArchives();
-    this.updateEmptyState();
-    this._assessCoverage();
+  // Remove the downloaded map-selection bake (DELETE /api/charts) and reset the
+  // local selection so the UI returns to a clean slate.
+  async _removeDownloaded() {
+    if (this._taskRunning()) return;
+    await this._deleteAllCharts("Downloaded charts");
+    this._areaCells.clear();
+    this._saveAreaCells();
+    this._userBake = null;
+    this._refreshCellSel();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-    this._task = { status: "done", _flourish: true };
-    this._renderTaskUI();
-    this._clearTaskSoon(1200);
   }
 
-  // Start a background provision of the given NOAA region numbers (POST
-  // {regions:[…]}); progress comes from polling GET /api/tasks.
-  async _startProvisionRegions(regions, meta) {
-    if (this._taskRunning()) return; // one provision job at a time (server is single-flight)
-    this._taskMeta = meta || null;
-    this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: regions.length, cells: regions.length, cell: "" };
+  // -- Drag-a-box custom area selection ------------------------------------
+  // Pick your OWN region by dragging a rectangle on the map: every NOAA cell
+  // whose bbox intersects the box joins `_areaCells` (deduped — drag more boxes
+  // and they accumulate without re-downloading overlaps). Downloading bakes the
+  // whole union into ONE charts-user.pmtiles, so you get a small package fast.
+
+  _loadAreaCells() {
+    const arr = loadJSON(LS_AREACELLS, null);
+    if (Array.isArray(arr)) for (const n of arr) this._areaCells.add(n);
+  }
+  _saveAreaCells() {
+    try { localStorage.setItem(LS_AREACELLS, JSON.stringify(Array.from(this._areaCells))); } catch {}
+  }
+  // Seed the set from the server's existing bake so the summary reflects it even
+  // on a fresh browser. Union with whatever was in localStorage.
+  async _seedAreaCells() {
+    try {
+      const r = await fetch("charts/charts-user.json?t=" + Date.now());
+      if (!r.ok) return;
+      const j = await r.json();
+      if (j && Array.isArray(j.cells) && j.cells.length) {
+        for (const n of j.cells) this._areaCells.add(n);
+        this._saveAreaCells();
+      }
+    } catch {}
+  }
+
+  // Selector bands (navigational purpose) the user has enabled. Default: all.
+  _loadSelBands() {
+    const arr = loadJSON(LS_SELBANDS, null);
+    return new Set(Array.isArray(arr) && arr.length ? arr.filter((b) => BANDS.includes(b)) : BANDS);
+  }
+  _saveSelBands() {
+    try { localStorage.setItem(LS_SELBANDS, JSON.stringify(Array.from(this._selBands))); } catch {}
+  }
+  _bandOn(c) { return this._selBands.has(bandForScale(c.s)); }
+  // Toggle a band on/off → repaint the cell overlay (it only shows enabled bands)
+  // and re-render the panel (the selection summary counts enabled cells only).
+  _toggleBand(b) {
+    if (this._selBands.has(b)) this._selBands.delete(b); else this._selBands.add(b);
+    this._saveSelBands();
+    this._setCellOverlay(true);
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+  }
+
+  // Arm the on-map drag-a-box selector (Charts mode already shows every cell).
+  // Disables pan for one drag, draws a live rectangle + amber preview of the
+  // cells it covers, and on release adds them to the selection. The drawer stays
+  // open (the map is visible beside it). Re-entrant: cancels a prior arm first.
+  _enterAreaSelect() {
+    if (!this._map) return;
+    this._cancelAreaSelect();
+    this._setCellOverlay(true); // ensure the all-cells overlay is up
+    const map = this._map.getContainer();
+    const prevCursor = map.style.cursor;
+    map.style.cursor = "crosshair";
+    this._map.dragPan.disable();
+
+    let box = null, start = null;
+    const ptOf = (ev) => {
+      const t = ev.touches ? ev.touches[0] : ev;
+      const r = map.getBoundingClientRect();
+      return [t.clientX - r.left, t.clientY - r.top];
+    };
+    const geoBox = (p) => {
+      const a = this._map.unproject([Math.min(start[0], p[0]), Math.min(start[1], p[1])]);
+      const b = this._map.unproject([Math.max(start[0], p[0]), Math.max(start[1], p[1])]);
+      return [Math.min(a.lng, b.lng), Math.min(a.lat, b.lat), Math.max(a.lng, b.lng), Math.max(a.lat, b.lat)];
+    };
+    const cleanup = () => {
+      map.removeEventListener("mousedown", onDown);
+      map.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      map.removeEventListener("touchstart", onDown);
+      map.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+      box = null; start = null;
+      this._setPreviewBox(null);
+      if (this._map) { this._map.dragPan.enable(); }
+      map.style.cursor = prevCursor;
+      this._areaCleanup = null;
+    };
+    this._areaCleanup = cleanup;
+    const onDown = (ev) => {
+      ev.preventDefault();
+      start = ptOf(ev);
+      box = document.createElement("div");
+      // Inline styles, not the app's `.box-sel` class: the map container lives in
+      // the chart-plotter's OWN shadow root, where the app shadow root's CSS can't
+      // reach — a class-styled box would be invisible.
+      box.style.cssText = "position:absolute;z-index:1000;border:2px solid #1565c0;background:rgba(21,101,192,.12);pointer-events:none;box-sizing:border-box;border-radius:2px;";
+      map.appendChild(box);
+      onMove(ev);
+    };
+    const onMove = (ev) => {
+      if (!start || !box) return;
+      const p = ptOf(ev);
+      box.style.left = Math.min(start[0], p[0]) + "px";
+      box.style.top = Math.min(start[1], p[1]) + "px";
+      box.style.width = Math.abs(p[0] - start[0]) + "px";
+      box.style.height = Math.abs(p[1] - start[1]) + "px";
+      this._setPreviewBox(geoBox(p)); // live amber preview of cells under the box
+    };
+    const onUp = (ev) => {
+      if (!start) { cleanup(); return; }
+      const p = ev.changedTouches ? ptOf({ touches: [ev.changedTouches[0]] }) : ptOf(ev);
+      const dx = Math.abs(p[0] - start[0]), dy = Math.abs(p[1] - start[1]);
+      const bbox = dx >= 5 && dy >= 5 ? geoBox(p) : null;
+      cleanup();
+      if (bbox) this._addAreaBox(bbox); // commit; re-renders the panel + selected fill
+    };
+    map.addEventListener("mousedown", onDown);
+    map.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    map.addEventListener("touchstart", onDown, { passive: false });
+    map.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onUp);
+  }
+
+  // Tear down an armed/active box-drag (leaving Charts mode, Home, etc.).
+  _cancelAreaSelect() { if (this._areaCleanup) this._areaCleanup(); }
+
+  // Add every catalog cell whose bbox intersects the drawn box to the union.
+  _addAreaBox([w, s, e, n]) {
+    for (const c of this._catalog) {
+      if (!Array.isArray(c.bb) || c.bb.length !== 4 || !this._bandOn(c)) continue;
+      if (!(c.bb[2] < w || c.bb[0] > e || c.bb[3] < s || c.bb[1] > n)) this._areaCells.add(c.n);
+    }
+    this._saveAreaCells();
+    this._refreshCellSel(); // repaint the selected-cell highlight on the map
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+  }
+
+  _clearArea() {
+    this._areaCells.clear();
+    this._saveAreaCells();
+    this._refreshCellSel();
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+  }
+
+  // Download the full union: bake ALL selected cells into ONE charts-user.pmtiles
+  // (same provision machinery as regions). Each download re-bakes the union, so
+  // adding more boxes then downloading again just extends the package.
+  async _downloadArea() {
+    if (this._taskRunning()) return;
+    const cells = this._effectiveAreaCells(); // only enabled-band cells
+    if (!cells.length) return;
+    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
+    this._taskMeta = { name: "Selected area", verb: "Downloading" };
+    this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: cells.length, cells: cells.length, cell: "" };
     this._renderTaskUI();
     try {
       const res = await fetch("api/provision", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ regions }),
+        body: JSON.stringify({ cells }),
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
     } catch (e) {
       console.error("[provision]", e);
       this._task = { kind: "provision", status: "error", error: "start" };
-      this._taskMeta = { ...(meta || {}), errMsg: "Is the chartplotter server running?" };
+      this._taskMeta = { name: "Selected area", verb: "Downloading", errMsg: "Is the chartplotter server running?" };
       this._renderTaskUI();
       this._clearTaskSoon(3500);
       return;
     }
     this._startPolling();
+  }
+
+  // The area-selection panel rendered above the region list: pick-on-map button
+  // plus a live count + estimated size + download/clear once cells are picked.
+  _renderAreaSelect() {
+    let bytes = 0, have = 0;
+    for (const n of this._effectiveAreaCells()) {
+      const c = this._byName.get(n);
+      if (c) { have++; if (typeof c.zs === "number") bytes += c.zs; }
+    }
+    const busy = this._taskRunning();
+    let body = `<button class="cta" id="area-pick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="1.5" stroke-dasharray="4 3.2"/><path d="M12 9v6M9 12h6"/></svg>Select area on map</button>`;
+    if (have > 0) {
+      const mb = (bytes / 1e6).toFixed(1);
+      body += `<div class="muted" style="margin:8px 0 6px">${have} chart${have !== 1 ? "s" : ""} selected · ~${mb} MB</div>`;
+      body += `<button class="add-dl" id="area-dl"${busy ? " disabled" : ""}>${busy ? "Downloading…" : `⬇ Download ${have} chart${have !== 1 ? "s" : ""}`}</button>`;
+      body += `<button class="linkbtn" id="area-clear"${busy ? " disabled" : ""}>Clear selection</button>`;
+    } else {
+      body += `<div class="muted" style="margin-top:8px">Drag a box on the map to grab the charts inside it.</div>`;
+    }
+    return `<div class="area-select">${body}</div>`;
+  }
+
+  _wireAreaSelect() {
+    const root = this.shadowRoot;
+    root.getElementById("area-pick")?.addEventListener("click", () => this._enterAreaSelect());
+    root.getElementById("area-dl")?.addEventListener("click", () => this._downloadArea());
+    root.getElementById("area-clear")?.addEventListener("click", () => this._clearArea());
   }
 
   // Remove ALL regions at once (DELETE /api/charts), then reflect empty by
@@ -710,11 +812,79 @@ export class ChartPlotterApp extends HTMLElement {
     try { localStorage.setItem(LS_VIEW, JSON.stringify({ center: [c.lng, c.lat], zoom: this._map.getZoom() })); } catch {}
   }
 
-  // The map's region-highlight layer (outline of the region open in the drawer).
+  // The map's region-highlight layer (outline of the region open in the drawer)
+  // plus the area-select overlay: every catalog cell footprint (shown only in
+  // selection mode), the already-selected cells (blue fill), and a live amber
+  // preview of the cells the in-progress drag box will grab.
   addCatalogOverlay(map) {
-    map.addSource("focus", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    const empty = { type: "FeatureCollection", features: [] };
+    map.addSource("focus", { type: "geojson", data: empty });
     map.addLayer({ id: "focus-fill", type: "fill", source: "focus", paint: { "fill-color": "#1565c0", "fill-opacity": 0.12 } });
     map.addLayer({ id: "focus-line", type: "line", source: "focus", paint: { "line-color": "#1565c0", "line-width": 2.5 } });
+    // All catalog cells, shown only while selecting. `sel`=1 → already chosen.
+    map.addSource("selcells", { type: "geojson", data: empty });
+    map.addLayer({ id: "selcells-line", type: "line", source: "selcells", layout: { visibility: "none" }, paint: { "line-color": "#1565c0", "line-opacity": 0.3, "line-width": 0.5 } });
+    map.addLayer({ id: "selcells-fill", type: "fill", source: "selcells", filter: ["==", ["get", "sel"], 1], layout: { visibility: "none" }, paint: { "fill-color": "#1565c0", "fill-opacity": 0.18 } });
+    map.addLayer({ id: "selcells-sel-line", type: "line", source: "selcells", filter: ["==", ["get", "sel"], 1], layout: { visibility: "none" }, paint: { "line-color": "#1565c0", "line-width": 1.3 } });
+    // Live preview of cells under the current drag box.
+    map.addSource("selpreview", { type: "geojson", data: empty });
+    map.addLayer({ id: "selpreview-fill", type: "fill", source: "selpreview", layout: { visibility: "none" }, paint: { "fill-color": "#f0a500", "fill-opacity": 0.28 } });
+    map.addLayer({ id: "selpreview-line", type: "line", source: "selpreview", layout: { visibility: "none" }, paint: { "line-color": "#e08a00", "line-width": 1.2 } });
+  }
+
+  // Build a GeoJSON FeatureCollection of cell footprints. `cells` is an iterable
+  // of catalog entries; `mark` tags each with sel=1 when already selected. Cells
+  // of a band the user has toggled off are omitted (the selector only shows/grabs
+  // enabled bands).
+  _cellsFC(cells, mark) {
+    const f = [];
+    for (const c of cells) {
+      const b = c.bb;
+      if (!Array.isArray(b) || b.length !== 4 || !this._bandOn(c)) continue;
+      f.push({
+        type: "Feature",
+        properties: { sel: mark && this._areaCells.has(c.n) ? 1 : 0 },
+        geometry: { type: "Polygon", coordinates: [[[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]], [b[0], b[1]]]] },
+      });
+    }
+    return { type: "FeatureCollection", features: f };
+  }
+
+  // Show/hide the all-cells selection overlay (and refresh the selected fill).
+  _setCellOverlay(on) {
+    const map = this._map;
+    if (!map) return;
+    const vis = on ? "visible" : "none";
+    for (const id of ["selcells-line", "selcells-fill", "selcells-sel-line", "selpreview-fill", "selpreview-line"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
+    }
+    const s = map.getSource("selcells");
+    if (s) s.setData(on ? this._cellsFC(this._catalog, true) : { type: "FeatureCollection", features: [] });
+    if (!on) { const p = map.getSource("selpreview"); if (p) p.setData({ type: "FeatureCollection", features: [] }); }
+  }
+
+  // Re-emit the all-cells layer so newly-selected cells pick up sel=1.
+  _refreshCellSel() {
+    const s = this._map && this._map.getSource("selcells");
+    if (s) s.setData(this._cellsFC(this._catalog, true));
+  }
+
+  // Live amber preview of the cells the current drag box ([w,s,e,n]) will grab.
+  _setPreviewBox(box) {
+    const map = this._map;
+    if (!map) return;
+    let fc = { type: "FeatureCollection", features: [] };
+    if (box) {
+      const [w, s, e, n] = box;
+      const hit = [];
+      for (const c of this._catalog) {
+        const b = c.bb;
+        if (Array.isArray(b) && b.length === 4 && !(b[2] < w || b[0] > e || b[3] < s || b[1] > n)) hit.push(c);
+      }
+      fc = this._cellsFC(hit, false);
+    }
+    const src = map.getSource("selpreview");
+    if (src) src.setData(fc);
   }
 
   // A cell is "installed" when locally imported (OPFS) OR its NOAA region is
@@ -730,7 +900,7 @@ export class ChartPlotterApp extends HTMLElement {
   refreshBoxes() { /* region-centric UI: no per-cell overlay to refresh */ }
 
   // (legacy) focus a single chart cell — kept for reference; superseded by
-  // openRegion's region highlight.
+  // the map drag-a-box selector's highlight.
   focusChart(name) {
     const c = this._byName.get(name);
     if (!c || !this._map || !Array.isArray(c.bb) || c.bb.length !== 4) return;
@@ -849,14 +1019,17 @@ export class ChartPlotterApp extends HTMLElement {
     });
   }
 
-  // A not-downloaded in-view cell was tapped: open its NOAA region in the Charts
-  // drawer (the region bundle that covers it) so it can be downloaded. Falls back
-  // to the Charts list if the cell's region can't be resolved.
+  // A not-downloaded in-view cell was tapped in the coverage HUD: add it to the
+  // map selection (enabling its band so it counts) and open the Charts selector
+  // so it can be downloaded.
   _downloadCellRegion(name) {
     const c = this._byName.get(name);
-    for (const num of (c && c.rg) || []) {
-      const reg = (this._regions || []).find((r) => r.num === num);
-      if (reg) return this.openRegion(reg.name);
+    if (c) {
+      this._selBands.add(bandForScale(c.s));
+      this._saveSelBands();
+      this._areaCells.add(name);
+      this._saveAreaCells();
+      this._refreshCellSel();
     }
     this.openCharts();
   }
@@ -888,6 +1061,7 @@ export class ChartPlotterApp extends HTMLElement {
           // + directory; tiles stream on demand from the File). Persist in the
           // BACKGROUND so a multi-GB file doesn't block the map on the IndexedDB copy.
           await this._plotter.addArchive(file);
+          this._importedArchives.push(file); // keep in memory so a coverage rebuild can re-add it
           this._markArchive({ type: "blob" });
           log.textContent = `loaded ${file.name}`;
           this.closeDrawer();
@@ -976,6 +1150,10 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   // Frame to the union bounds of the installed region archives (from the manifest).
+  // A degenerate full-world bbox (some bakes write one) — useless to frame to.
+  _isWorldBounds(b) {
+    return Array.isArray(b) && b[0] <= -179.5 && b[1] <= -84 && b[2] >= 179.5 && b[3] >= 84;
+  }
   _frameRegionArchives(regions) {
     let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false;
     for (const x of regions || []) {
@@ -1029,6 +1207,7 @@ export class ChartPlotterApp extends HTMLElement {
       });
       const blob = new Blob([bytes], { type: "application/octet-stream" });
       await this._plotter.addArchive(blob); // render first (header + dir only)
+      this._importedArchives.push(blob); // keep in memory so a coverage rebuild can re-add it
       this._markArchive({ type: "blob" });
       archivePut(blob).catch((e) => console.warn("[archive] persist failed", e)); // background
       this._setProgress({ label: `Imported ${names.length} chart${names.length > 1 ? "s" : ""}`, sub: "Ready", frac: 1 });
@@ -1065,7 +1244,7 @@ export class ChartPlotterApp extends HTMLElement {
 
   async removeChart(name) {
     // NOAA-provisioned charts are removed a whole region at a time (one pmtiles
-    // per region — see removeRegion), so this only handles locally-imported
+    // per region), so this only handles locally-imported
     // (OPFS) cells: drop it and re-bake the in-browser archive.
     await this._store.remove(name);
     this._installed.delete(name);
@@ -1080,6 +1259,7 @@ export class ChartPlotterApp extends HTMLElement {
   applyScheme(name) {
     this._scheme = name;
     this._plotter.setScheme(name);
+    this.setAttribute("data-scheme", name);
     localStorage.setItem(LS_SCHEME, name);
   }
 
@@ -1101,100 +1281,111 @@ export class ChartPlotterApp extends HTMLElement {
     r.innerHTML = `
       <style>
         :host { display:block; position:relative; width:100%; height:100%; font:13px/1.4 system-ui,sans-serif;
-          --drawer-w:clamp(340px, 33%, 560px); }
+          --drawer-w:clamp(340px, 33%, 560px);
+          --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2); }
+        :host([data-scheme="dusk"]) {
+          --ui-bg:#20262b; --ui-surface:#2a3137; --ui-surface-2:#333b42; --ui-text:#cdd6dc; --ui-text-dim:#9aa6ae; --ui-text-faint:#7d8990; --ui-border:#3a434a; --ui-border-2:#333b42; --ui-border-strong:#4a555d; --ui-hover:#353f47; --ui-accent:#4f9be6; --ui-accent-hover:#69abe9; --ui-accent-text:#0c1318; --ui-shadow:rgba(0,0,0,.5); }
+        :host([data-scheme="night"]) {
+          --ui-bg:#14181b; --ui-surface:#1b2024; --ui-surface-2:#232a2f; --ui-text:#aeb8be; --ui-text-dim:#7e898f; --ui-text-faint:#626c72; --ui-border:#2a3137; --ui-border-2:#232a2f; --ui-border-strong:#38424a; --ui-hover:#232a30; --ui-accent:#3f7fb5; --ui-accent-hover:#4d8cc2; --ui-accent-text:#0a0e11; --ui-shadow:rgba(0,0,0,.6); }
         /* The map sits right of the 56px rail; when the drawer flies out it shrinks
            to clear the drawer rather than being overlaid. */
         #map { position:absolute; inset:0 0 0 56px; transition:left .2s; }
         #map.with-drawer { left:calc(56px + var(--drawer-w)); }
         #map chart-plotter { width:100%; height:100%; }
-        .btn { cursor:pointer; border:1px solid #aaa; background:#fff; border-radius:6px; padding:6px 10px; font:inherit; }
-        .btn:hover { background:#f0f0f0; }
+        .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
+        .btn:hover { background:var(--ui-hover); }
         /* persistent left rail — the sidebar's docked spine (drawer flies out from it) */
-        #rail { position:absolute; left:0; top:0; bottom:0; width:56px; z-index:7; background:#fff; border-right:1px solid #e2e2e2;
+        #rail { position:absolute; left:0; top:0; bottom:0; width:56px; z-index:7; background:var(--ui-surface); border-right:1px solid var(--ui-border);
           box-shadow:1px 0 5px rgba(0,0,0,.07); display:flex; flex-direction:column; align-items:center; gap:4px; padding-top:10px; }
-        #rail .ri { width:48px; min-height:48px; border:none; background:none; border-radius:11px; cursor:pointer; color:#5a626b;
+        #rail .ri { width:48px; min-height:48px; border:none; background:none; border-radius:11px; cursor:pointer; color:var(--ui-text-dim);
           display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; padding:7px 0;
           transition:background .12s, color .12s; }
-        #rail .ri:hover { background:#eef1f4; color:#1565c0; }
-        #rail .ri.on { background:#1565c0; color:#fff; }
+        #rail .ri:hover { background:var(--ui-surface-2); color:var(--ui-accent); }
+        #rail .ri.on { background:var(--ui-accent); color:var(--ui-accent-text); }
         #rail .ri svg { width:21px; height:21px; display:block; }
         #rail .ri .cap { font-size:9.5px; font-weight:500; letter-spacing:.02em; }
         #rail .spacer { flex:1; }
         /* band filter chips (Add charts view) + on-map box-select rectangle */
-        .band-chip { display:inline-flex; align-items:center; gap:6px; cursor:pointer; border:1px solid #ddd; border-radius:16px;
-          padding:4px 10px; font-size:12px; background:#fff; user-select:none; }
+        .band-chip { display:inline-flex; align-items:center; gap:6px; cursor:pointer; border:1px solid var(--ui-border); border-radius:16px;
+          padding:4px 10px; font-size:12px; background:var(--ui-surface); user-select:none; color:var(--ui-text); }
         .band-chip .sw { width:11px; height:11px; border-radius:3px; }
         .band-chip.off { opacity:.38; }
-        .box-sel { position:absolute; z-index:5; border:2px solid #1565c0; background:rgba(21,101,192,.12); pointer-events:none; }
+        .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
+        .area-select { margin-bottom:14px; }
+        .area-select .cta { width:100%; }
+        .area-select .linkbtn { padding-top:4px; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
-        .cta { flex:1; background:#1565c0; color:#fff; border:none; border-radius:8px; padding:11px 12px; font:inherit;
+        .cta { flex:1; background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:8px; padding:11px 12px; font:inherit;
           font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:7px; }
-        .cta:hover { background:#1257a8; }
+        .cta:hover { background:var(--ui-accent-hover); }
         .cta svg { width:17px; height:17px; }
         .upd { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
-        .charts-summary { color:#7a828b; font-size:12px; margin:0 0 12px; }
-        .charts-empty { text-align:center; color:#8a8a8a; padding:26px 10px; }
-        .chart-card { display:flex; align-items:flex-start; gap:10px; padding:11px 0; border-bottom:1px solid #ededed; }
+        .charts-summary { color:var(--ui-text-dim); font-size:12px; margin:0 0 12px; }
+        .charts-empty { text-align:center; color:var(--ui-text-faint); padding:26px 10px; }
+        .chart-card { display:flex; align-items:flex-start; gap:10px; padding:11px 0; border-bottom:1px solid var(--ui-border-2); }
         .chart-card .cc-dot { width:10px; height:10px; border-radius:3px; flex:none; margin-top:3px; }
         .chart-card .cc-main { flex:1; min-width:0; }
         .chart-card .cc-title { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .chart-card .cc-meta { color:#868d95; font-size:12px; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .chart-card .cc-edition { font-size:12px; color:#9aa0a8; margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+        .chart-card .cc-meta { color:var(--ui-text-dim); font-size:12px; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .chart-card .cc-edition { font-size:12px; color:var(--ui-text-faint); margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
         .chart-card .cc-actions { flex:none; display:flex; align-items:center; gap:4px; }
-        .cc-btn { border:1px solid #d4d8dd; background:#fff; color:#5a626b; border-radius:7px; width:30px; height:30px; cursor:pointer;
+        .cc-btn { border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:7px; width:30px; height:30px; cursor:pointer;
           font-size:14px; display:inline-flex; align-items:center; justify-content:center; }
-        .cc-btn:hover { background:#f0f3f6; color:#1565c0; border-color:#b9c0c8; }
+        .cc-btn:hover { background:var(--ui-hover); color:var(--ui-accent); border-color:#b9c0c8; }
         .cc-btn.cc-rm:hover { color:#c0392b; border-color:#e2b6b1; background:#fdeceb; }
         /* freshness pill */
         .fresh { font-size:10.5px; font-weight:600; padding:1px 8px; border-radius:10px; }
         .fresh.current { background:#e4f5ea; color:#1f7a36; }
         .fresh.aging { background:#fbf0d8; color:#8a6000; }
         .fresh.stale { background:#fbe3e1; color:#c0392b; }
-        .chart-card.focus { background:#eef4fb; box-shadow:inset 3px 0 0 #1565c0; }
+        .chart-card.focus { background:var(--ui-hover); box-shadow:inset 3px 0 0 var(--ui-accent); }
         .chart-card.clickable { cursor:pointer; }
-        .chart-card.clickable:hover { background:#f4f7fa; }
+        .chart-card.clickable:hover { background:var(--ui-hover); }
         /* in-drawer "Add charts" view */
         .add-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
         .add-head strong { font-size:15px; }
-        .add-hint { color:#7a828b; font-size:12px; line-height:1.5; margin:0 0 12px; }
+        .add-hint { color:var(--ui-text-dim); font-size:12px; line-height:1.5; margin:0 0 12px; }
         #charts-add .band-row { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
         .add-tools { display:flex; gap:8px; margin-bottom:4px; }
-        .add-tools .tool { flex:1; border:1px solid #cfcfcf; background:#fff; border-radius:8px; padding:9px; font:inherit; font-size:13px; cursor:pointer; }
-        .add-tools .tool:hover { background:#f4f7fa; }
-        .add-tools .tool.on { background:#1565c0; color:#fff; border-color:#1565c0; }
-        .add-sel { border-top:1px solid #ededed; margin-top:14px; padding-top:14px; }
-        .add-sel .empty { color:#9aa0a8; font-size:13px; text-align:center; padding:6px 0; }
+        .add-tools .tool { flex:1; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:8px; padding:9px; font:inherit; font-size:13px; cursor:pointer; color:var(--ui-text); }
+        .add-tools .tool:hover { background:var(--ui-hover); }
+        .add-tools .tool.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
+        .add-sel { border-top:1px solid var(--ui-border-2); margin-top:14px; padding-top:14px; }
+        .add-sel .empty { color:var(--ui-text-faint); font-size:13px; text-align:center; padding:6px 0; }
         .add-sel .sel-line { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; font-weight:600; }
-        .add-clear { background:none; border:none; color:#1565c0; cursor:pointer; font:inherit; }
-        .add-dl { display:block; width:100%; box-sizing:border-box; background:#1565c0; color:#fff; border:none;
+        .add-clear { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; }
+        .add-dl { display:block; width:100%; box-sizing:border-box; background:var(--ui-accent); color:var(--ui-accent-text); border:none;
           border-radius:8px; padding:11px; font:inherit; font-weight:600; cursor:pointer; }
-        .add-dl:hover { background:#1257a8; }
+        .add-dl:hover { background:var(--ui-accent-hover); }
         .add-dl:disabled { background:#9fb6cf; cursor:default; }
         .add-dl:disabled:hover { background:#9fb6cf; }
-        .linkbtn:disabled { color:#9aa0a6; cursor:default; text-decoration:none; }
+        .linkbtn:disabled { color:var(--ui-text-faint); cursor:default; text-decoration:none; }
         /* region browser */
-        .region-search { width:100%; box-sizing:border-box; border:1px solid #cfcfcf; border-radius:8px; padding:9px 12px; font:inherit; margin-bottom:10px; }
-        .region-search:focus { outline:none; border-color:#1565c0; }
+        .region-search { width:100%; box-sizing:border-box; border:1px solid var(--ui-border-strong); border-radius:8px; padding:9px 12px; font:inherit; margin-bottom:10px; background:var(--ui-surface); color:var(--ui-text); }
+        .region-search:focus { outline:none; border-color:var(--ui-accent); }
         .region-list { display:flex; flex-direction:column; }
-        .region-group { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#9098a0; font-weight:700; margin:12px 0 4px; }
+        .region-group { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); font-weight:700; margin:12px 0 4px; }
         .region-row { display:flex; align-items:center; gap:9px; width:100%; text-align:left;
-          border:none; background:none; border-bottom:1px solid #ededed; padding:10px 4px; font:inherit; cursor:pointer; }
-        .region-row:hover { background:#f4f7fa; }
-        .region-row .region-name { font-weight:600; color:#2a2f35; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .region-row .region-meta { flex:none; color:#9aa0a8; font-size:12px; }
+          border:none; background:none; border-bottom:1px solid var(--ui-border-2); padding:10px 4px; font:inherit; cursor:pointer; }
+        .region-row:hover { background:var(--ui-hover); }
+        .region-row .region-name { font-weight:600; color:var(--ui-text); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .region-row .region-meta { flex:none; color:var(--ui-text-faint); font-size:12px; }
         .rdot { flex:none; width:9px; height:9px; border-radius:50%; box-shadow:inset 0 0 0 1.5px #c2c8cf; }
         .rdot.full { background:#1f9d4d; box-shadow:none; }
         .rdot.partial { background:#f0a500; box-shadow:none; }
         .rdot.none { background:transparent; }
-        .region-empty { color:#9aa0a8; text-align:center; padding:20px; }
+        .region-empty { color:var(--ui-text-faint); text-align:center; padding:20px; }
+        /* "On this device" coverage rows */
+        .owned-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 2px; border-bottom:1px solid var(--ui-border-2); }
+        .owned-row b { font-weight:600; }
         .region-title { margin:4px 0 2px; font-size:16px; }
         .region-status { background:#e4f5ea; color:#1f7a36; font-weight:600; font-size:12.5px; padding:6px 10px; border-radius:8px; margin:2px 0 4px; }
-        .linkbtn { background:none; border:none; color:#1565c0; cursor:pointer; font:inherit; padding:8px 0; display:block; }
+        .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:8px 0; display:block; }
         .linkbtn.danger { color:#c0392b; }
         /* persistent in-flight download/import pill (bottom-centre) */
         #dlpill { position:absolute; bottom:42px; left:50%; transform:translateX(-50%); z-index:7; display:inline-flex; align-items:center;
-          gap:9px; background:#1565c0; color:#fff; border:none; border-radius:22px; padding:8px 16px; font:inherit; font-size:13px; font-weight:600;
+          gap:9px; background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:22px; padding:8px 16px; font:inherit; font-size:13px; font-weight:600;
           cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.28); }
         #dlpill[hidden] { display:none; }
         #dlpill.error { background:#c0392b; }
@@ -1204,48 +1395,48 @@ export class ChartPlotterApp extends HTMLElement {
         /* chart info pill (map popup when focusing a chart from the list) */
         .chart-pill { font:13px/1.4 system-ui,sans-serif; min-width:170px; }
         .chart-pill .cp-title { font-weight:600; margin-bottom:2px; }
-        .chart-pill .cp-meta { color:#6b7280; font-size:12px; }
-        .chart-pill .cp-ed { margin-top:5px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12px; color:#6b7280; }
+        .chart-pill .cp-meta { color:var(--ui-text-dim); font-size:12px; }
+        .chart-pill .cp-ed { margin-top:5px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12px; color:var(--ui-text-dim); }
         /* settings */
         .set-section { margin:0 0 22px; }
-        .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#9098a0; margin:0 0 4px; font-weight:700; }
-        .set-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:10px 0; border-bottom:1px solid #ededed; }
+        .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 4px; font-weight:700; }
+        .set-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:10px 0; border-bottom:1px solid var(--ui-border-2); }
         .set-row:last-child { border-bottom:none; }
         .set-row .lbl { display:flex; flex-direction:column; min-width:0; }
         .set-row .lbl .t { font-weight:500; }
-        .set-row .lbl .d { font-size:12px; color:#9a9a9a; margin-top:1px; }
+        .set-row .lbl .d { font-size:12px; color:var(--ui-text-faint); margin-top:1px; }
         .set-row .ctl { flex:none; display:flex; align-items:center; gap:6px; }
-        .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid #cfcfcf; border-radius:6px; padding:5px 7px; font:inherit; }
-        .set-row .ctl .unit { color:#9a9a9a; font-size:12px; width:14px; }
-        .set-row .ctl select { border:1px solid #cfcfcf; border-radius:6px; padding:5px 8px; font:inherit; background:#fff; }
+        .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 7px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
+        .set-row .ctl .unit { color:var(--ui-text-faint); font-size:12px; width:14px; }
+        .set-row .ctl select { border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 8px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
         /* toggle switch */
         .switch { position:relative; width:38px; height:22px; display:inline-block; flex:none; }
         .switch input { opacity:0; width:0; height:0; }
-        .switch .sl { position:absolute; inset:0; background:#cdd2d8; border-radius:22px; cursor:pointer; transition:.15s; }
+        .switch .sl { position:absolute; inset:0; background:var(--ui-border-strong); border-radius:22px; cursor:pointer; transition:.15s; }
         .switch .sl:before { content:""; position:absolute; width:16px; height:16px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; box-shadow:0 1px 2px rgba(0,0,0,.3); }
-        .switch input:checked + .sl { background:#1565c0; }
+        .switch input:checked + .sl { background:var(--ui-accent); }
         .switch input:checked + .sl:before { transform:translateX(16px); }
         /* segmented control */
-        .seg { display:inline-flex; border:1px solid #cfcfcf; border-radius:7px; overflow:hidden; }
-        .seg button { border:none; background:#fff; padding:6px 11px; font:inherit; font-size:13px; cursor:pointer; border-left:1px solid #ededed; color:#333; }
+        .seg { display:inline-flex; border:1px solid var(--ui-border-strong); border-radius:7px; overflow:hidden; }
+        .seg button { border:none; background:var(--ui-surface); padding:6px 11px; font:inherit; font-size:13px; cursor:pointer; border-left:1px solid var(--ui-border-2); color:var(--ui-text); }
         .seg button:first-child { border-left:none; }
-        .seg button.sel { background:#1565c0; color:#fff; }
+        .seg button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
         /* Bottom statusbar: live readout (left) · in-view band pills (right). */
         #statusbar { position:absolute; left:56px; right:0; bottom:0; z-index:6; height:30px;
           display:flex; align-items:center; gap:14px; padding:0 12px; box-sizing:border-box;
-          background:rgba(255,255,255,.95); border-top:1px solid rgba(0,0,0,.08);
+          background:var(--ui-surface); border-top:1px solid rgba(0,0,0,.08);
           box-shadow:0 -1px 6px rgba(0,0,0,.07); backdrop-filter:blur(5px);
-          font:12px system-ui,sans-serif; color:#2a2f35; transition:left .2s; }
+          font:12px system-ui,sans-serif; color:var(--ui-text); transition:left .2s; }
         #statusbar.with-drawer { left:calc(56px + var(--drawer-w)); }
         /* NOAA attribution — a pill DEBOSSED into the chart: faint inset fill +
            inset shadow (pressed-in) with a light bottom bevel, under an engraved
            letterpress text effect, so the whole pill reads as embossed in the map. */
         #noaa-attr { position:absolute; right:12px; bottom:38px; z-index:5; pointer-events:auto;
           font:600 11px/1.4 system-ui,sans-serif; letter-spacing:.01em;
-          color:rgba(33,40,48,.6); text-shadow:0 1px 0 rgba(255,255,255,.7);
-          background:rgba(255,255,255,.72); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.06);
+          color:var(--ui-text-dim); text-shadow:0 1px 0 rgba(255,255,255,.7);
+          background:var(--ui-surface); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.06);
           box-shadow:inset 0 1px 2px rgba(0,0,0,.22), inset 0 -1px 0 rgba(255,255,255,.5), 0 1px 0 rgba(255,255,255,.45); }
         #noaa-attr a, #noaa-attr .attr-link { color:inherit; text-shadow:inherit; cursor:pointer;
           text-decoration:underline; text-decoration-color:rgba(33,40,48,.32); text-underline-offset:2px; }
@@ -1255,12 +1446,12 @@ export class ChartPlotterApp extends HTMLElement {
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
           background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
         .modal[hidden] { display:none; }
-        .modal-card { background:#fff; max-width:520px; width:calc(100% - 40px); max-height:86%; overflow:auto;
-          border-radius:12px; padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.3); font:14px/1.5 system-ui,sans-serif; color:#2a2f35; }
+        .modal-card { background:var(--ui-surface); max-width:520px; width:calc(100% - 40px); max-height:86%; overflow:auto;
+          border-radius:12px; padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.3); font:14px/1.5 system-ui,sans-serif; color:var(--ui-text); }
         .modal-card h2 { margin:0 0 10px; font-size:18px; }
         .modal-card .agree-body ul { margin:8px 0; padding-left:20px; }
         .modal-card .agree-body li { margin:5px 0; }
-        .modal-card a { color:#1565c0; }
+        .modal-card a { color:var(--ui-accent); }
         .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
         /* Live band·scale·zoom readout (left of the statusbar), one line. Each
            field has a fixed width + tabular figures so the bar never reflows. */
@@ -1268,96 +1459,100 @@ export class ChartPlotterApp extends HTMLElement {
         .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
         .sb-readout .hud-band { display:inline-block; min-width:62px; }
-        .sb-readout .hud-scale { color:#1565c0; display:inline-block; min-width:92px; }
-        .sb-readout .hud-z { display:inline-block; min-width:42px; color:#6b7280; }
+        .sb-readout .hud-scale { color:var(--ui-accent); display:inline-block; min-width:92px; }
+        .sb-readout .hud-z { display:inline-block; min-width:42px; color:var(--ui-text-dim); }
         /* In-view band pills, right-aligned; each opens a cell-list popup. */
         .sb-bands { display:flex; align-items:center; gap:8px; min-width:0; margin-left:auto; }
         .sb-band-wrap { position:relative; flex:none; }
-        .sb-band { display:inline-flex; align-items:center; gap:5px; font:600 11px/1 system-ui,sans-serif; color:#384049;
-          background:#fff; border:1px solid rgba(0,0,0,.14); border-radius:13px; padding:4px 9px; cursor:pointer; white-space:nowrap; }
-        .sb-band:hover { border-color:#1565c0; }
+        .sb-band { display:inline-flex; align-items:center; gap:5px; font:600 11px/1 system-ui,sans-serif; color:var(--ui-text);
+          background:var(--ui-surface); border:1px solid rgba(0,0,0,.14); border-radius:13px; padding:4px 9px; cursor:pointer; white-space:nowrap; }
+        .sb-band:hover { border-color:var(--ui-accent); }
         .sb-band .sb-dot { width:8px; height:8px; border-radius:50%; background:var(--bc); flex:none; }
-        .sb-band .sb-ct { color:#8a9098; font-weight:500; }
-        .sb-band .sb-miss { color:#1565c0; font-weight:700; }
+        .sb-band .sb-ct { color:var(--ui-text-faint); font-weight:500; }
+        .sb-band .sb-miss { color:var(--ui-accent); font-weight:700; }
         .sb-band.has-missing { border-color:rgba(21,101,192,.5); }
         /* Cell-list popup above a band pill (hover on desktop; tap to pin on touch). */
         .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
-          background:#fff; border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
+          background:var(--ui-surface); border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
           box-shadow:0 6px 22px rgba(0,0,0,.22); width:max-content; max-width:280px; }
         .band-pop::before { content:""; position:absolute; left:0; right:0; bottom:-6px; height:6px; } /* hover bridge over the gap */
         .sb-band-wrap:hover .band-pop, .band-pop:hover, .sb-band-wrap.open .band-pop { display:block; }
-        .band-pop-h { font:600 11px/1.3 system-ui,sans-serif; color:#5a6068; margin-bottom:6px; }
+        .band-pop-h { font:600 11px/1.3 system-ui,sans-serif; color:var(--ui-text-dim); margin-bottom:6px; }
         .band-pop-cells { display:flex; flex-wrap:wrap; gap:4px; max-height:210px; overflow-y:auto; }
         .cov-cell { font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; padding:0 6px; border-radius:5px;
-          border:1px solid rgba(0,0,0,.12); background:#eef1f4; color:#384049; cursor:pointer; }
-        .cov-cell:hover { border-color:#1565c0; color:#1565c0; }
-        .cov-cell.missing { background:repeating-linear-gradient(45deg,#fff,#fff 4px,#f3f4f6 4px,#f3f4f6 8px);
-          color:#8a9098; border-style:dashed; }
-        .cov-cell.missing::after { content:" ↓"; color:#1565c0; }
-        .cov-cell.missing:hover { color:#1565c0; border-color:#1565c0; }
-        .cov-empty { font:12px system-ui,sans-serif; color:#8a9098; }
+          border:1px solid rgba(0,0,0,.12); background:var(--ui-surface-2); color:var(--ui-text); cursor:pointer; }
+        .cov-cell:hover { border-color:var(--ui-accent); color:var(--ui-accent); }
+        .cov-cell.missing { background:repeating-linear-gradient(45deg,var(--ui-surface),var(--ui-surface) 4px,var(--ui-surface-2) 4px,var(--ui-surface-2) 8px);
+          color:var(--ui-text-faint); border-style:dashed; }
+        .cov-cell.missing::after { content:" ↓"; color:var(--ui-accent); }
+        .cov-cell.missing:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
+        .cov-empty { font:12px system-ui,sans-serif; color:var(--ui-text-faint); }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
-        #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:#fafafa;
+        #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:var(--ui-bg); color:var(--ui-text);
           box-shadow:2px 0 8px rgba(0,0,0,.25); z-index:6; transform:translateX(calc(-100% - 56px)); transition:transform .2s; display:flex; flex-direction:column; }
         #drawer.open { transform:none; }
-        .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid #ddd; }
+        .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
         .dhead strong { flex:1; }
         .body { overflow:auto; padding:12px; flex:1; }
         .panel { display:none; } .panel.sel { display:block; }
-        .drop { border:2px dashed #bbb; border-radius:8px; padding:18px; text-align:center; color:#666; margin-bottom:10px; }
-        .drop.over { border-color:#1565c0; background:#eef4fb; color:#1565c0; }
-        .row { display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid #eee; }
-        .row .name { font-weight:600; } .row .meta { color:#777; font-size:12px; }
+        .drop { border:2px dashed var(--ui-border-strong); border-radius:8px; padding:18px; text-align:center; color:var(--ui-text-dim); margin-bottom:10px; }
+        .drop.over { border-color:var(--ui-accent); background:var(--ui-hover); color:var(--ui-accent); }
+        .row { display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid var(--ui-border-2); }
+        .row .name { font-weight:600; } .row .meta { color:var(--ui-text-dim); font-size:12px; }
         .grow { flex:1; }
-        .muted { color:#888; }
+        .muted { color:var(--ui-text-dim); }
         label.fld { display:block; margin:8px 0; }
         label.fld span { display:inline-block; min-width:135px; }
         input[type=number] { width:64px; }
         /* progress surface (drawer): phase label + percent, bar, detail sub-line */
-        .progwrap { margin:4px 0 16px; background:#f1f4f7; border:1px solid #e4e8ec; border-radius:10px; padding:11px 13px; }
+        .progwrap { margin:4px 0 16px; background:var(--ui-surface-2); border:1px solid var(--ui-border); border-radius:10px; padding:11px 13px; }
         .progwrap .prog-top { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:7px; }
         .progwrap .prog-label { font-weight:600; }
-        .progwrap .prog-pct { color:#1565c0; font-weight:600; font-variant-numeric:tabular-nums; }
+        .progwrap .prog-pct { color:var(--ui-accent); font-weight:600; font-variant-numeric:tabular-nums; }
         .progwrap .prog-sub { margin-top:6px; font-size:12px; }
-        progress { width:100%; height:8px; -webkit-appearance:none; appearance:none; border:none; border-radius:5px; overflow:hidden; background:#dde3e9; }
-        progress::-webkit-progress-bar { background:#dde3e9; border-radius:5px; }
-        progress::-webkit-progress-value { background:#1565c0; border-radius:5px; }
-        progress::-moz-progress-bar { background:#1565c0; border-radius:5px; }
+        progress { width:100%; height:8px; -webkit-appearance:none; appearance:none; border:none; border-radius:5px; overflow:hidden; background:var(--ui-surface-2); }
+        progress::-webkit-progress-bar { background:var(--ui-surface-2); border-radius:5px; }
+        progress::-webkit-progress-value { background:var(--ui-accent); border-radius:5px; }
+        progress::-moz-progress-bar { background:var(--ui-accent); border-radius:5px; }
         /* collapsible "import from a file" */
-        .import-more { margin-top:18px; border-top:1px solid #ededed; padding-top:6px; }
-        .import-more > summary { cursor:pointer; color:#5a626b; font-weight:500; padding:6px 0; list-style:none; }
+        .import-more { margin-top:18px; border-top:1px solid var(--ui-border-2); padding-top:6px; }
+        .import-more > summary { cursor:pointer; color:var(--ui-text-dim); font-weight:500; padding:6px 0; list-style:none; }
         .import-more > summary::-webkit-details-marker { display:none; }
-        .import-more > summary:before { content:"▸ "; color:#9aa0a8; }
+        .import-more > summary:before { content:"▸ "; color:var(--ui-text-faint); }
         .import-more[open] > summary:before { content:"▾ "; }
         .legend { display:flex; gap:12px; font-size:12px; margin-bottom:10px; flex-wrap:wrap; }
         .legend i { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
         #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:4; pointer-events:none; }
         #empty[hidden] { display:none; }
-        #empty .card { pointer-events:auto; background:rgba(255,255,255,.97); border-radius:16px; padding:30px 30px 24px; max-width:360px;
+        #empty .card { pointer-events:auto; background:var(--ui-surface); color:var(--ui-text); border-radius:16px; padding:30px 30px 24px; max-width:360px;
           text-align:center; box-shadow:0 8px 34px rgba(0,0,0,.22); }
         #empty .welcome-mark { width:44px; height:44px; margin-bottom:10px; }
         #empty h2 { margin:0 0 8px; font-size:21px; }
-        #empty p { color:#5a626b; margin:0 0 18px; line-height:1.5; }
+        #empty p { color:var(--ui-text-dim); margin:0 0 18px; line-height:1.5; }
         #empty .welcome-cta { display:inline-flex; align-items:center; gap:8px; width:auto; padding:11px 22px; font-size:15px; }
-        #empty .welcome-sub { margin-top:12px; font-size:13px; color:#9098a0; }
-        #empty .linkbtn { background:none; border:none; color:#1565c0; cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
+        #empty .welcome-sub { margin-top:12px; font-size:13px; color:var(--ui-text-faint); }
+        #empty .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
         /* geo search */
         #search { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; width:340px; max-width:44%; }
-        #search input { width:100%; box-sizing:border-box; border:1px solid #b3b3b3; border-radius:20px; padding:8px 16px;
-          font:inherit; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.3); outline:none; }
-        #search input:focus { border-color:#1565c0; box-shadow:0 1px 6px rgba(21,101,192,.4); }
-        #search-results { margin-top:5px; background:#fff; border-radius:12px; box-shadow:0 6px 22px rgba(0,0,0,.25); overflow:hidden; }
+        #search input { width:100%; box-sizing:border-box; border:1px solid var(--ui-border-strong); border-radius:20px; padding:8px 16px;
+          font:inherit; background:var(--ui-surface); color:var(--ui-text); box-shadow:0 1px 4px rgba(0,0,0,.3); outline:none; }
+        #search input:focus { border-color:var(--ui-accent); box-shadow:0 1px 6px rgba(21,101,192,.4); }
+        #search-results { margin-top:5px; background:var(--ui-surface); border-radius:12px; box-shadow:0 6px 22px rgba(0,0,0,.25); overflow:hidden; }
         #search-results[hidden] { display:none; }
-        .sr-item { padding:8px 16px; cursor:pointer; border-bottom:1px solid #f1f1f1; }
+        .sr-item { padding:8px 16px; cursor:pointer; border-bottom:1px solid var(--ui-border-2); }
         .sr-item:last-child { border-bottom:none; }
-        .sr-item:hover, .sr-item.sel { background:#eef4fb; }
-        .sr-item .t { font-weight:600; } .sr-item .s { color:#8a8a8a; font-size:12px; }
+        .sr-item:hover, .sr-item.sel { background:var(--ui-hover); }
+        .sr-item .t { font-weight:600; } .sr-item .s { color:var(--ui-text-faint); font-size:12px; }
       </style>
       <div id="map"></div>
       <div id="rail">
-        <button class="ri" id="rail-menu" title="Your charts">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12 9.5 5 9.5-5"/><path d="m2.5 16 9.5 5 9.5-5"/></svg>
+        <button class="ri" id="rail-home" title="Chart viewer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></svg>
+          <span class="cap">Home</span>
+        </button>
+        <button class="ri" id="rail-menu" title="Get &amp; manage charts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 3 5.5v15L9 18l6 3 6-2.5v-15L15 6 9 3Z"/><path d="M9 3v15M15 6v15"/></svg>
           <span class="cap">Charts</span>
         </button>
         <button class="ri" id="rail-settings" title="Settings">
@@ -1425,11 +1620,13 @@ export class ChartPlotterApp extends HTMLElement {
     // The rail is the sidebar's docked spine: its icons pick which drawer section
     // flies out (clicking the active one closes it). "Add charts" / "Update all"
     // live inside the Charts section itself.
+    $("rail-home").onclick = () => this.goHome();
     $("rail-menu").onclick = () => this.toggleSection("charts");
     $("rail-settings").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
     $("empty-add").onclick = () => this.openCharts();
     $("empty-import").onclick = () => { this.openCharts(); const det = r.querySelector(".import-more"); if (det) det.open = true; };
+    $("rail-home").classList.add("on"); // boot shows the bare chart viewer
     // NOAA ENC user-agreement gate + attribution "Terms" link.
     $("attr-terms").onclick = () => this._showAgreement();
     $("agree-accept").onclick = () => this._resolveAgreement(true);
@@ -1453,12 +1650,24 @@ export class ChartPlotterApp extends HTMLElement {
   toggleSection(name) {
     const open = this.shadowRoot.getElementById("drawer").classList.contains("open");
     if (open && this._section === name) { this.closeDrawer(); return; }
+    this._cancelAreaSelect(); // drop any armed box-drag when switching sections
     this._section = name;
     const r = this.shadowRoot;
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : (this._region ? this._region.name : "Charts");
-    if (name === "charts") this.renderCharts();
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : "Charts";
+    // Charts is the "get & see charts" mode: overlay every catalog cell on the
+    // map (selected ones highlighted) so you can see and box-select coverage.
+    // Any other section is just chrome over the live viewer — no overlay.
+    if (name === "charts") { this.renderCharts(); this._setCellOverlay(true); }
+    else this._setCellOverlay(false);
     this.setDrawerOpen(true);
+  }
+
+  // Home: the full-screen chart viewer — drop any selection overlay/section and
+  // show just the map.
+  goHome() {
+    this._cancelAreaSelect();
+    this.closeDrawer();
   }
 
   closeDrawer() { this.setDrawerOpen(false); }
@@ -1472,8 +1681,12 @@ export class ChartPlotterApp extends HTMLElement {
     r.getElementById("statusbar").classList.toggle("with-drawer", open);
     r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
-    // Closing the drawer drops the open region, so clear its map highlight box.
-    if (!open) { this._region = null; this._clearFocus(); }
+    // Home is "active" whenever the drawer is shut — i.e. the bare chart viewer.
+    r.getElementById("rail-home").classList.toggle("on", !open);
+    // Closing the drawer drops the open region + the cell overlay (Charts mode),
+    // so clear the region highlight and cancel any in-progress box drag.
+    if (!open) { this._clearFocus(); this._setCellOverlay(false); this._cancelAreaSelect(); }
+    this.updateEmptyState(); // the welcome card hides while the drawer is open
     setTimeout(() => { if (this._map) this._map.resize(); }, 230);
   }
 
@@ -1486,7 +1699,9 @@ export class ChartPlotterApp extends HTMLElement {
     // flight: a running download means charts ARE on the way (the pill shows
     // progress), so the "no charts yet" card would be wrong and overlay the map.
     const el = this.shadowRoot.getElementById("empty");
-    if (el) el.hidden = this._hasArchive || !!(this._task && this._task.status === "running");
+    // Also hide it whenever the drawer is open — the user is already in Charts/
+    // Settings, so the centred "no charts yet" card would just float over them.
+    if (el) el.hidden = this._hasArchive || this._drawerOpen() || !!(this._task && this._task.status === "running");
   }
 
   renderArchiveList() {
@@ -1566,10 +1781,11 @@ export class ChartPlotterApp extends HTMLElement {
             <label class="chk"><input type="checkbox" data-key="displayOther" ${m.displayOther ? "checked" : ""}>Other</label></div></div></div>
         <div class="set-row"><div class="lbl"><span class="t">Area boundaries</span></div>
           <div class="ctl"><select data-key="boundaryStyle">${["plain", "symbolized"].map((v) =>
-            `<option ${(m.boundaryStyle || "plain") === v ? "selected" : ""}>${v}</option>`).join("")}</select></div></div>
+            `<option ${(m.boundaryStyle || "symbolized") === v ? "selected" : ""}>${v}</option>`).join("")}</select></div></div>
         ${toggle("fourShadeWater", "Four-shade water", "Four depth shades instead of two", m.fourShadeWater !== false)}
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
+        ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
       </div>`;
 
     el.querySelectorAll("#scheme-seg button").forEach((b) =>
@@ -1606,35 +1822,6 @@ function bandForScale(s) {
   if (n <= 2300000) return "general";
   return "overview";
 }
-
-const COAST_ORDER = ["Northeast", "Mid-Atlantic", "Southeast", "Gulf of Mexico", "Great Lakes", "California", "Pacific Northwest", "Alaska", "Pacific Islands", "Caribbean"];
-
-// NOAA's official ENC regions (catalog `rg` numbers) — name from
-// charts.noaa.gov/MCD/images/list.txt, plus a coast bucket for grouping the
-// browser list. A region's cells are exactly the catalog cells whose `rg`
-// includes its number, so a body of water (e.g. the Chesapeake) is never split.
-const NOAA_REGIONS = {
-  2: ["Block Island, RI to the Canadian Border", "Northeast"],
-  3: ["New York to Nantucket and Cape May, New Jersey", "Northeast"],
-  4: ["Chesapeake and Delaware Bays", "Mid-Atlantic"],
-  6: ["Norfolk, VA to Florida — The Intracoastal Waterway", "Mid-Atlantic"],
-  7: ["Florida East Coast and the Keys", "Southeast"],
-  8: ["Florida West Coast and the Keys", "Gulf of Mexico"],
-  10: ["Puerto Rico and US Virgin Islands", "Caribbean"],
-  12: ["Southern California — Point Arena to Mexican Border", "California"],
-  13: ["Lake Michigan", "Great Lakes"],
-  14: ["San Francisco to Cape Flattery", "California"],
-  15: ["Pacific Northwest — Puget Sound to Canadian Border", "Pacific Northwest"],
-  17: ["Mobile, AL to Mexican Border", "Gulf of Mexico"],
-  22: ["Lake Superior and Lake Huron", "Great Lakes"],
-  24: ["Lake Erie (US Waters)", "Great Lakes"],
-  26: ["Lake Ontario (US Waters)", "Great Lakes"],
-  30: ["Southeast Alaska", "Alaska"],
-  32: ["South Central Alaska", "Alaska"],
-  34: ["Alaska — The Aleutians and Bristol Bay", "Alaska"],
-  36: ["Alaska — Norton Sound to Beaufort Sea", "Alaska"],
-  40: ["Hawaiian Islands", "Pacific Islands"],
-};
 
 // The finest band whose source paints at zoom z (Band.zoomRange mins in bake.zig:
 // overview 0, general 7, coastal 9, approach 11, harbor 13, berthing 16).

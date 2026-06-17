@@ -144,6 +144,13 @@ func (b *Builder) blobEquals(offset uint64, bytes []byte) bool {
 // Count returns the number of addressed tiles.
 func (b *Builder) Count() int { return len(b.entries) }
 
+// SetBounds overrides the archive's lon/lat bounds (the header w/s/e/n + centre).
+// AddTile derives bounds from the tiles, but a spec-display bake emits a z0 world
+// tile (DISPLAYBASE features float to z0), which makes the derived bounds global.
+// Pass the real data extent (the baker's cell-union bbox) so clients frame to the
+// charts, not the whole world. Call after the last AddTile, before WriteArchive.
+func (b *Builder) SetBounds(w, s, e, n float64) { b.w, b.s, b.e, b.n = w, s, e, n }
+
 // WriteArchive streams the whole archive to out: header + directories + metadata, then
 // the data section. The archive depends only on the (tile-id -> bytes) set.
 func (b *Builder) WriteArchive(out io.Writer) error {

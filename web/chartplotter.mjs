@@ -199,6 +199,10 @@ export class ChartPlotter extends HTMLElement {
     this._map = map;
     this.map = map; // public handle
 
+    // Graphical bar scale (ECDIS/S-52 expectation): a linear distance scale in
+    // nautical miles, complementing the numeric 1:N readout in the app HUD.
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 140, unit: "nautical" }), "bottom-left");
+
     map.on("styleimagemissing", (e) => {
       if (this._patterns[e.id]) this.registerPattern(e.id);
       else this.registerImage(e.id);
@@ -258,6 +262,30 @@ export class ChartPlotter extends HTMLElement {
     for (const tok in t) { m.push(tok, t[tok]); n++; }
     m.push(fallback || FALLBACK);
     return n ? m : (fallback || FALLBACK);
+  }
+
+  // Legible chart-text colour. S-52's dusk/night palettes dim the text inks
+  // (CHBLK/CHGRD) to near-black, which is unreadable on the equally dark scheme
+  // — a halo can't help because the glyph *body* itself vanishes. So at
+  // dusk/night we render text in a bright neutral (legibility over strict
+  // night-vision dimming, per user request) and pair it with a dark halo
+  // (textHaloColor). Day keeps the per-feature S-52 ink (so coloured labels
+  // stay semantic) over a light halo.
+  textColor() {
+    if (this._active === "day") return this.colorExpr("color_token", "#000000");
+    return this._active === "night" ? "#aab7bf" : "#dde7ec";
+  }
+  // Backing that contrasts with textColor: light under day's dark inks, dark
+  // under the bright dusk/night ink. Applied to ALL text — the old bake gated
+  // the halo to ≥10 px glyphs, leaving small labels bare.
+  textHaloColor() {
+    return this._active === "day" ? "rgba(255,255,255,0.9)" : "rgba(0,0,0,0.85)";
+  }
+  // Contour (depth) labels: S-52 CHGRD by day, bright neutral at dusk/night so
+  // they stay legible like the rest of the chart text.
+  contourLabelColor() {
+    if (this._active === "day") return this.token("CHGRD", "#5a5a44");
+    return this._active === "night" ? "#aab7bf" : "#dde7ec";
   }
 
   // SEABED01 (S-52 §13.2.15) as a data-driven expression: a depth area's
@@ -373,15 +401,28 @@ export class ChartPlotter extends HTMLElement {
     if (m.displayBase !== false) en.push(0);
     if (m.displayStandard !== false) en.push(1);
     if (m.displayOther === true) en.push(2);
-    return ["in", ["coalesce", ["get", "cat"], 1], ["literal", en]];
+    const inCat = ["in", ["coalesce", ["get", "cat"], 1], ["literal", en]];
+    // The M_QUAL data-quality overlay (CATZOC DQUAL* area patterns + boundary)
+    // is baked display-category Other, so enabling Other dumped it on top of
+    // everything — too cluttered. Decouple it into its own `dataQuality` toggle:
+    // quality features show IFF dataQuality (independent of Other), and are
+    // excluded from the normal category membership so Other no longer carries it.
+    const isQual = ["==", ["get", "class"], "M_QUAL"];
+    return m.dataQuality
+      ? ["any", isQual, ["all", inCat, ["!", isQual]]]
+      : ["all", inCat, ["!", isQual]];
   }
 
   // Boundary symbolization (S-52 §8.6.1), client-side: each primitive is baked
   // with a `bnd` tag — 2 = style-independent (always shown), 0 = plain-boundary
   // only, 1 = symbolized-boundary only. Show common (2) + the active style.
-  // Missing `bnd` (non-area / stale tile) defaults to common.
+  // Missing `bnd` (non-area / stale tile) defaults to common. Default to
+  // SYMBOLIZED (rank 1) per the IMO/S-52 default (the engine also bakes
+  // SymbolizedBoundaries=true by default); plain only when explicitly chosen.
+  // Symbolized is the variant that carries the embedded LC line symbols (e.g.
+  // RESARE's EMAREMG1), so a plain default hid every complex-line symbol.
   boundaryFilter() {
-    const rank = this._mariner.boundaryStyle === "symbolized" ? 1 : 0;
+    const rank = this._mariner.boundaryStyle === "plain" ? 0 : 1;
     return ["in", ["coalesce", ["get", "bnd"], 2], ["literal", [2, rank]]];
   }
 
@@ -426,12 +467,12 @@ export class ChartPlotter extends HTMLElement {
     for (const id of ["lines-solid", "lines-dashed", "lines-dotted"]) setIf(id, "line-color", this.colorExpr("color_token"));
     setIf("safety-contour", "line-color", this.token("DEPSC", "#3a6a8a"));
     setIf("danger-boundary", "line-color", this.token("CHBLK", "#000000"));
-    setIf("contour-labels", "text-color", this.token("CHGRD", "#5a5a44"));
-    setIf("contour-labels", "text-halo-color", this.seaColor());
+    setIf("contour-labels", "text-color", this.contourLabelColor());
+    setIf("contour-labels", "text-halo-color", this.textHaloColor());
     for (const name2 in this._linestyles) setIf("lc-line-" + name2, "line-color", this.colorExpr("color_token"));
     for (const v of TEXT_VARIANTS) {
-      setIf(v.id, "text-color", this.colorExpr("color_token", "#000000"));
-      setIf(v.id, "text-halo-color", this.colorExpr("halo_color_token", "rgba(255,255,255,0)"));
+      setIf(v.id, "text-color", this.textColor());
+      setIf(v.id, "text-halo-color", this.textHaloColor());
     }
     // Basemap (sea background + offline coastline) is scheme-aware too.
     setIf("bg", "background-color", this.seaColor());
@@ -644,7 +685,7 @@ export class ChartPlotter extends HTMLElement {
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
-      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle")) {
+      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "dataQuality")) {
         this.applyFeatureFilters();
       }
   }
@@ -819,9 +860,11 @@ export class ChartPlotter extends HTMLElement {
         "text-allow-overlap": false, "text-optional": true,
       },
       paint: {
-        "text-color": this.colorExpr("color_token", "#000000"),
-        "text-halo-color": this.colorExpr("halo_color_token", "rgba(255,255,255,0)"),
-        "text-halo-width": ["coalesce", ["get", "halo_width"], 0],
+        // Legible at dusk/night (bright ink + dark halo) — see textColor.
+        "text-color": this.textColor(),
+        "text-halo-color": this.textHaloColor(),
+        "text-halo-width": 1.4,
+        "text-halo-blur": 0.5,
       },
     }));
   }
@@ -854,7 +897,7 @@ export class ChartPlotter extends HTMLElement {
       { id: "contour-labels", type: "symbol", source: "chart", "source-layer": "lines",
         filter: ["all", ["==", ["get", "class"], "DEPCNT"], ["has", "valdco"]],
         layout: { "symbol-placement": "line", "text-field": this.contourLabelField(), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "symbol-spacing": 300, "text-allow-overlap": false, "text-optional": true, visibility: this._mariner.showContourLabels ? "visible" : "none" },
-        paint: { "text-color": this.token("CHGRD", "#5a5a44"), "text-halo-color": this.seaColor(), "text-halo-width": 1 } },
+        paint: { "text-color": this.contourLabelColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.2 } },
     ];
     // Template chart layers (source "chart" is a placeholder rewritten per band
     // by expandChartLayers). Their `filter` is the intrinsic (base) filter.
@@ -880,12 +923,16 @@ export class ChartPlotter extends HTMLElement {
         (this._variants[L.id] ||= []).push(id);
         const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) };
         // Symbol layout/placement is the bake-render bottleneck (one provisioned
-        // archive fanned across every band re-places the same marks at each zoom).
-        // Bound SYMBOL layers to a few levels of overscale past their band so only
-        // ~2 bands lay out symbols at any zoom — soundings still persist (no gaps
-        // in normal use; they drop only at extreme overscale, flagged by OVERSC01).
-        // Area/line FILLS keep overzooming for coverage (cheap, no placement).
-        if (L.type === "symbol" && band.slug !== "all") v.maxzoom = Math.min(ZMAX + 2, band.max + 3);
+        // archive fanned across every band re-places the same marks at each zoom),
+        // so SYMBOL layers are bounded to a few levels of overscale past their band
+        // (keeping ~3 bands laying out at any zoom). The margin must be wide enough
+        // to bridge a SKIPPED band: where an area has e.g. general (max z9) then
+        // harbor (min z13) cells but no coastal/approach in between, a tight +3 cap
+        // hid general's overzoom at z≥12 while harbor only starts at z13 — leaving
+        // soundings/buoys/lights blank at z12 (and vanishing as you zoomed in). +4
+        // makes every band reach the next-present band's start across the realistic
+        // single/double NOAA band skips. Area/line FILLS keep overzooming (cheap).
+        if (L.type === "symbol" && band.slug !== "all") v.maxzoom = Math.min(ZMAX + 2, band.max + 4);
         out.push(v);
       }
     }

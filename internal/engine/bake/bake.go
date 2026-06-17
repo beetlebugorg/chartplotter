@@ -408,14 +408,32 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 		}
 		out = addRange(out, seen, bb, r.zMin, r.zMax, extent)
 	}
-	// Sector lights anchor a small screen-px figure; their own anchor tile (plus
-	// the bbox reject margin in EmitTile) covers the spill.
+	// A sector light's screen-px figure (the 26 mm ring/legs) spills well beyond
+	// its anchor tile — up to ~0.3 tile at any zoom. Enumerate every tile that
+	// spill touches (per zoom, since the figure is a fixed fraction of a tile)
+	// so a neighbour tile with no other primitives is still emitted; otherwise
+	// the arc is clipped dead at the tile boundary.
 	for i := range b.sectors {
 		sp := &b.sectors[i]
-		bb := geo.BoundingBox{MinLat: sp.anchor.Lat, MinLon: sp.anchor.Lon, MaxLat: sp.anchor.Lat, MaxLon: sp.anchor.Lon}
-		out = addRange(out, seen, bb, sp.zMin, sp.natMax, extent)
+		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		for z := sp.zMin; z <= sp.natMax; z++ {
+			r := sectorRadiusNorm(z)
+			bb := geo.BoundingBox{
+				MinLat: unnormY(ay + r), MinLon: (ax-r)*360 - 180,
+				MaxLat: unnormY(ay - r), MaxLon: (ax+r)*360 - 180,
+			}
+			out = addRange(out, seen, bb, z, z, extent)
+		}
 	}
 	return out
+}
+
+// sectorRadiusNorm is the LIGHTS06 sector figure's maximum extent (the 26 mm
+// ring) in normalized-world units at zoom z. The geometry is laid out in a
+// 256-px-per-tile space (see expandSector's worldPx), so the spill is a fixed
+// fraction of a tile at every zoom: 26 mm × px/mm ÷ 256 ÷ 2^z.
+func sectorRadiusNorm(z uint32) float64 {
+	return 26.0 * float64(portrayal.DefaultPxPerSymbolUnit) * 100.0 / 256.0 / math.Pow(2, float64(z))
 }
 
 func addRange(out []tile.TileCoord, seen map[uint64]struct{}, bb geo.BoundingBox, zMin, zMax, extent uint32) []tile.TileCoord {
@@ -444,6 +462,11 @@ func (b *Baker) BakePMTiles(extent uint32, buffer float64) *pmtiles.Builder {
 		if data := b.EmitTileInto(c, extent, buffer, &ts); data != nil {
 			pb.AddTile(uint8(c.Z), c.X, c.Y, data)
 		}
+	}
+	// Override the tile-derived bounds (a z0 world tile would make them global)
+	// with the real cell-union extent so clients frame to the charts.
+	if bb := b.bbox; bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
+		pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
 	}
 	return pb
 }
@@ -554,8 +577,10 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 
 	// Sector lights: tessellate per zoom into the lines layer. Their screen-px
 	// geometry can spill into neighbouring tiles, so reject with a margin sized to
-	// the largest radius (the ring's 26 mm).
-	margin := (26.0*float64(portrayal.DefaultPxPerSymbolUnit)*100.0 + buffer) / float64(extent) / n
+	// the largest radius (the ring's 26 mm) plus the clip buffer. The figure is
+	// laid out in 256-px-per-tile space, so the radius term divides by 256 (NOT
+	// the MVT extent) — matching sectorRadiusNorm and TileCoords' enumeration.
+	margin := sectorRadiusNorm(coord.Z) + (buffer/float64(extent))/n
 	for i := range b.sectors {
 		sp := &b.sectors[i]
 		if coord.Z < sp.zMin || coord.Z > sp.natMax {

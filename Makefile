@@ -11,7 +11,11 @@ ASSETS ?= web
 DOCS_HOST ?= localhost
 DOCS_PORT ?= 3000
 
-.PHONY: build test vet fmt tidy clean serve docs
+# Provisioning cache dir (region zips + baked .pmtiles + charts-user + cell cache).
+# Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
+CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
+
+.PHONY: build test vet fmt tidy clean clear-cache serve docs
 
 build: ## Build the chartplotter binary into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
@@ -36,3 +40,7 @@ tidy:
 
 clean:
 	rm -rf bin dist
+
+clear-cache: ## Delete the provisioning cache (region zips, baked .pmtiles, charts-user, cell cache) for a clean slate
+	rm -rf "$(CACHE)"
+	@echo "cleared chartplotter cache: $(CACHE)"
