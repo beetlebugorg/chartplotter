@@ -930,8 +930,16 @@ export class ChartPlotter extends HTMLElement {
     this._layerBase = {};
     this._variants = {};
     const out = [];
-    for (const band of CHART_BANDS) {
-      for (const L of tmpl) {
+    // Iterate TEMPLATE-outer, band-inner so the global draw order is by S-52
+    // class (all bands' fills, then all bands' lines, then all symbols, then all
+    // text) rather than per-band stacks. Band-outer order put a finer band's area
+    // FILLS above a coarser band's point SYMBOLS, so a coarse-scale light/beacon
+    // that overzoomed past its band got buried under the finer chart's depth-area
+    // fill the moment you zoomed in — it "disappeared". Keeping bands coarse→fine
+    // WITHIN each class preserves best-available (finer fill covers coarser fill),
+    // while symbols/text now always sit above every band's fills.
+    for (const L of tmpl) {
+      for (const band of CHART_BANDS) {
         const id = L.id + "@" + band.slug;
         const base = L.filter ?? null;
         this._layerBase[id] = base;
