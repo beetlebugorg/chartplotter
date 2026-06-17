@@ -656,12 +656,16 @@ export class ChartPlotter extends HTMLElement {
   }
   registerImage(id) {
     if (!this._spriteImg || this._map.hasImage(id)) return;
+    let img = null;
     try {
-      const img = id.startsWith("snd:") ? this.synthSounding(id)
+      img = id.startsWith("snd:") ? this.synthSounding(id)
         : id.indexOf(",") >= 0 ? this.compositeSounding(id)
         : this.centredSymbol(id);
-      this.addImageData(id, img);
     } catch (e) { console.warn("registerImage", id, e); }
+    // NEVER leave a referenced icon-image unresolved — MapLibre's symbol
+    // renderer can crash on a missing image (the `getx` atlas-lookup crash).
+    // A failed/unknown symbol falls back to a blank 1×1 so the layer is inert.
+    this.addImageData(id, img || new ImageData(1, 1));
   }
 
   // Build a sounding number in non-metric units from a synthesized name
@@ -874,7 +878,15 @@ export class ChartPlotter extends HTMLElement {
         const base = L.filter ?? null;
         this._layerBase[id] = base;
         (this._variants[L.id] ||= []).push(id);
-        out.push({ ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) });
+        const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) };
+        // Symbol layout/placement is the bake-render bottleneck (one provisioned
+        // archive fanned across every band re-places the same marks at each zoom).
+        // Bound SYMBOL layers to a few levels of overscale past their band so only
+        // ~2 bands lay out symbols at any zoom — soundings still persist (no gaps
+        // in normal use; they drop only at extreme overscale, flagged by OVERSC01).
+        // Area/line FILLS keep overzooming for coverage (cheap, no placement).
+        if (L.type === "symbol" && band.slug !== "all") v.maxzoom = Math.min(ZMAX + 2, band.max + 3);
+        out.push(v);
       }
     }
     return out;
