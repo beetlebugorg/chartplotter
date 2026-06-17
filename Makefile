@@ -7,13 +7,20 @@ HOST   ?= 127.0.0.1
 PORT   ?= 8080
 ASSETS ?= web
 
-.PHONY: build test vet fmt tidy clean serve
+# docs dev-server overrides (e.g. `make docs DOCS_HOST=0.0.0.0`)
+DOCS_HOST ?= localhost
+DOCS_PORT ?= 3000
+
+.PHONY: build test vet fmt tidy clean serve docs
 
 build: ## Build the chartplotter binary into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
 
 serve: build ## Serve the web frontend + provisioning API (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)
+
+docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
+	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)
 
 test:
 	go test ./...
