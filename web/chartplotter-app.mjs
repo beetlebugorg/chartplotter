@@ -26,6 +26,11 @@ const LS_SCHEME = "chartplotter:scheme";
 const LS_MARINER = "chartplotter:mariner";
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
+const LS_AGREE = "chartplotter:enc-agreement"; // NOAA ENC User Agreement acceptance
+// NOAA's ENC distribution pages + the User Agreement that must be displayed and
+// accepted before downloading ENCs (charts.noaa.gov/ENCs/ENCs.shtml §3).
+const NOAA_ENC_URL = "https://www.charts.noaa.gov/ENCs/ENCs.shtml";
+const NOAA_AGREEMENT_URL = "https://www.charts.noaa.gov/ENCs/ENC_Agreement.shtml";
 // NOTE: the provisioned-chart list is NOT cached in localStorage — the on-disk
 // manifest (charts-user.json, written by the server) is the single source of
 // truth, so the UI can never show charts that aren't actually on disk.
@@ -63,6 +68,7 @@ export class ChartPlotterApp extends HTMLElement {
       delete this._mariner.displayCategory;
     }
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
+    this._agreed = localStorage.getItem(LS_AGREE) === "1"; // NOAA ENC agreement accepted
     this._region = null;                // the region currently open in the drawer (null = list)
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
@@ -145,7 +151,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._reattachTask();
 
     // Persist the view so a refresh resumes where you were; re-assess chart
-    // coverage at the new centre (zoom cap + "finer charts available" prompt).
+    // coverage at the new centre (caps max zoom to the finest installed chart).
     map.on("moveend", () => { this.saveView(); this._assessCoverage(); });
 
     // Live zoom/scale readout (HUD).
@@ -284,7 +290,6 @@ export class ChartPlotterApp extends HTMLElement {
     this._section = "charts";
     this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
     this.shadowRoot.getElementById("empty").hidden = true;
-    this.shadowRoot.getElementById("coverage").hidden = true;
     this.setDrawerOpen(true);
     this.renderCharts();
   }
@@ -299,6 +304,28 @@ export class ChartPlotterApp extends HTMLElement {
   // Start (or no-op to) the background provision of `cells` (the full set to
   // bake). `meta` = { name (region label), verb, bytes } for the pill. Once the
   // POST is acked, progress comes from polling.
+  // NOAA ENC User Agreement gate: must be displayed + accepted before any chart
+  // download (charts.noaa.gov/ENCs §3). Resolves true once accepted (persisted).
+  _ensureAgreed() {
+    if (this._agreed) return Promise.resolve(true);
+    return this._showAgreement();
+  }
+  _showAgreement() {
+    return new Promise((resolve) => {
+      const m = this.shadowRoot.getElementById("agree");
+      if (!m) return resolve(this._agreed);
+      m.hidden = false;
+      this._agreeResolve = resolve;
+    });
+  }
+  _resolveAgreement(accepted) {
+    const m = this.shadowRoot.getElementById("agree");
+    if (m) m.hidden = true;
+    if (accepted) { this._agreed = true; try { localStorage.setItem(LS_AGREE, "1"); } catch {} }
+    const r = this._agreeResolve; this._agreeResolve = null;
+    if (r) r(accepted);
+  }
+
   async _startProvision(cells, meta) {
     this._taskMeta = meta || null;
     // Optimistic running state so the pill appears instantly (the first poll
@@ -425,8 +452,6 @@ export class ChartPlotterApp extends HTMLElement {
         el.onclick = () => { const n = (this._taskMeta || {}).name; if (n) this.openRegion(n); else this.openCharts(); };
       }
     }
-    const cov = this.shadowRoot.getElementById("coverage");
-    if (cov && d) cov.hidden = true; // the pill owns the bottom-centre slot
     this._setProgress(d ? { label: d.label, sub: d.sub, frac: d.frac } : null);
     // A running download means charts are inbound — don't show the empty-state
     // welcome over the map (and restore it if the task failed with no coverage).
@@ -583,6 +608,7 @@ export class ChartPlotterApp extends HTMLElement {
   async downloadRegion() {
     const r = this._region;
     if (!r) return;
+    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
     const nums = new Set([...this._dlRegions, r.num]);
     await this._startProvisionRegions([...nums], { name: r.name, verb: "Downloading" });
   }
@@ -711,73 +737,33 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.querySelectorAll(".chart-card.focus").forEach((el) => el.classList.remove("focus"));
   }
 
-  // On view change: look at the catalog cells over the screen centre and
-  //  (a) cap the max zoom to the finest INSTALLED chart there, so you can't zoom
-  //      past the available detail into an overscale blur;
-  //  (b) if a finer chart exists but isn't downloaded, surface a one-tap prompt
-  //      to grab it (so missing detail is obvious + quick to fix).
+  // On view change, cap the max zoom to the finest INSTALLED chart over the
+  // screen centre, so you can't zoom past the available detail into an overscale
+  // blur (the chart would blank to the no-data pattern). Charts are added by
+  // region (the Charts drawer), so there's no per-point "finer chart here" prompt.
   _assessCoverage() {
     if (!this._map || !this._catalog.length) return;
-    if (this._addMode) { this._renderCoverage([], null); return; } // picking owns the map
-    // Fresh start (no charts anywhere): the empty-state card does the onboarding,
-    // so don't also nag with the banner — but still leave zoom uncapped.
-    if (!this._provisioned.size && !this._installed.size) { this._applyMaxZoom(null); this._renderCoverage([], null); return; }
+    if (this._addMode) return; // picking owns the map
+    if (!this._provisioned.size && !this._installed.size) { this._applyMaxZoom(null); return; }
     const c = this._map.getCenter();
     const scaleOf = (x) => x.s || 1e12;
     let finestInstalled = null;
-    const finer = [];
     const covers = (bb) => c.lng >= bb[0] && c.lng <= bb[2] && c.lat >= bb[1] && c.lat <= bb[3];
     for (const x of this._catalog) {
       if (!Array.isArray(x.bb) || x.bb.length !== 4 || !covers(x.bb)) continue;
-      if (this.stateOf(x.n) === "installed") {
-        if (!finestInstalled || scaleOf(x) < scaleOf(finestInstalled)) finestInstalled = x;
-      }
-    }
-    for (const x of this._catalog) {
-      if (!Array.isArray(x.bb) || x.bb.length !== 4 || !covers(x.bb)) continue;
-      if (this.stateOf(x.n) !== "installed" && (!finestInstalled || scaleOf(x) < scaleOf(finestInstalled))) finer.push(x);
+      if (this.stateOf(x.n) === "installed" && (!finestInstalled || scaleOf(x) < scaleOf(finestInstalled))) finestInstalled = x;
     }
     this._applyMaxZoom(finestInstalled);
-    this._renderCoverage(finer, finestInstalled);
   }
 
   // Cap zoom-in to the finest installed chart's baked band max — the deepest zoom
-  // its tiles actually exist at. Past that the chart can't render (it would blank
-  // to the no-data pattern), so capping there KEEPS the chart on screen instead of
-  // losing it, and avoids overscale. To zoom deeper you download a finer chart
-  // (the coverage banner offers it). Nothing installed here → basemap zooms free.
+  // its tiles actually exist at. Past that the chart can't render, so capping
+  // there KEEPS the chart on screen instead of losing it. Nothing installed here
+  // → basemap zooms free.
   _applyMaxZoom(cell) {
     if (!this._map) return;
     const mz = cell ? BAND_MAXZOOM[bandForScale(cell.s)] : 18;
     if (this._map.getMaxZoom() !== mz) this._map.setMaxZoom(mz);
-  }
-
-  // The "finer chart available here" hint. `finer` = downloadable catalog cells
-  // over the centre more detailed than what's installed. Names exactly what you'd
-  // get (band + scale) and adds it IN PLACE — no drawer, no map jump.
-  _renderCoverage(finer, finestInstalled) {
-    const el = this.shadowRoot.getElementById("coverage");
-    if (!el || el.classList.contains("busy")) return; // don't clobber a download in progress
-    if (!finer || !finer.length) { el.hidden = true; el.innerHTML = ""; this._coverFiner = null; return; }
-    finer.sort((a, b) => (a.s || 1e12) - (b.s || 1e12));
-    const best = finer[0];
-    this._coverFiner = finer.map((x) => x.n);
-    el.hidden = false;
-    el.innerHTML = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#1565c0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
-      <span class="cov-txt"><b>${BAND_LABEL[bandForScale(best.s)]}</b> chart here · 1:${(best.s || 0).toLocaleString()}</span>
-      <button class="cov-dl" id="cov-dl" title="Download this chart for the current area">Add</button>`;
-    el.querySelector("#cov-dl").onclick = () => this._quickDownload(this._coverFiner);
-  }
-
-  // One-tap download of the finer cell(s) the hint points at — runs through the
-  // shared job runner (persistent pill + progress), then re-assesses coverage.
-  async _quickDownload(names) {
-    const picked = (names || []).filter((n) => this.stateOf(n) === "catalog");
-    if (!picked.length) return;
-    this.shadowRoot.getElementById("coverage").hidden = true;
-    const all = [...new Set([...this._provisioned, ...picked])];
-    const bytes = picked.reduce((s, n) => s + (this._byName.get(n)?.zs || 0), 0);
-    await this._startProvision(all, { name: null, verb: "Downloading", bytes });
   }
 
   // -- import (drop a .zip / .000, unzip in-browser → OPFS) ----------------
@@ -1142,8 +1128,26 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button.sel { background:#1565c0; color:#fff; }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
-        /* Scale/zoom readout — a light card at the map's bottom-right. */
-        #hud { position:absolute; right:12px; bottom:12px; z-index:5; background:rgba(255,255,255,.93);
+        /* NOAA attribution — required reference to the chart origin, lower-right. */
+        #noaa-attr { position:absolute; right:10px; bottom:8px; z-index:5; font:11px/1.4 system-ui,sans-serif;
+          color:#5a6068; background:rgba(255,255,255,.82); border-radius:5px; padding:2px 8px;
+          box-shadow:0 1px 4px rgba(0,0,0,.1); backdrop-filter:blur(3px); }
+        #noaa-attr a, #noaa-attr .attr-link { color:#1565c0; text-decoration:none; cursor:pointer; }
+        #noaa-attr a:hover, #noaa-attr .attr-link:hover { text-decoration:underline; }
+        #noaa-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
+        /* NOAA ENC user-agreement gate (shown before the first download). */
+        .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
+          background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
+        .modal[hidden] { display:none; }
+        .modal-card { background:#fff; max-width:520px; width:calc(100% - 40px); max-height:86%; overflow:auto;
+          border-radius:12px; padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.3); font:14px/1.5 system-ui,sans-serif; color:#2a2f35; }
+        .modal-card h2 { margin:0 0 10px; font-size:18px; }
+        .modal-card .agree-body ul { margin:8px 0; padding-left:20px; }
+        .modal-card .agree-body li { margin:5px 0; }
+        .modal-card a { color:#1565c0; }
+        .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+        /* Scale/zoom readout — a light card at the map's bottom-right (above the attribution). */
+        #hud { position:absolute; right:12px; bottom:34px; z-index:5; background:rgba(255,255,255,.93);
           color:#2a2f35; border:1px solid rgba(0,0,0,.06); border-radius:10px; padding:7px 12px;
           box-shadow:0 2px 10px rgba(0,0,0,.14); pointer-events:none; backdrop-filter:blur(5px); text-align:right; }
         #hud .hud-main { display:flex; align-items:center; gap:7px; font-weight:600; font-size:13px; line-height:1.2; }
@@ -1151,15 +1155,6 @@ export class ChartPlotterApp extends HTMLElement {
         #hud .hud-scale { color:#1565c0; }
         #hud .hud-sep { color:#c7ccd2; font-weight:400; }
         #hud .hud-sub { margin-top:2px; font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8a9098; }
-        /* unobtrusive "finer chart available here" hint (bottom-centre pill) */
-        #coverage { position:absolute; bottom:18px; left:50%; transform:translateX(-50%); z-index:6; display:flex; align-items:center;
-          gap:8px; background:rgba(255,255,255,.95); border:1px solid rgba(0,0,0,.06); border-radius:9px; padding:5px 6px 5px 11px;
-          box-shadow:0 2px 9px rgba(0,0,0,.14); font-size:12.5px; max-width:80%; backdrop-filter:blur(4px); }
-        #coverage[hidden] { display:none; }
-        #coverage svg { flex:none; }
-        #coverage .cov-txt { color:#3a4046; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        #coverage .cov-dl { flex:none; background:#1565c0; color:#fff; border:none; border-radius:6px; padding:5px 12px; font:inherit; font-weight:600; cursor:pointer; white-space:nowrap; }
-        #coverage .cov-dl:hover { background:#1257a8; }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
         #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:#fafafa;
@@ -1231,7 +1226,29 @@ export class ChartPlotterApp extends HTMLElement {
       </div>
       <div id="search"><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
       <div id="hud"></div>
-      <div id="coverage" hidden></div>
+      <div id="noaa-attr">
+        <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
+        · <button id="attr-terms" class="attr-link" type="button">Terms</button>
+        · not for navigation
+      </div>
+      <div id="agree" class="modal" hidden>
+        <div class="modal-card">
+          <h2>NOAA ENC® — User Agreement</h2>
+          <div class="agree-body">
+            <p>NOAA Electronic Navigational Charts (NOAA ENC®) are downloaded directly from NOAA. By continuing you acknowledge that you have read, understood, and accepted NOAA's User Agreement.</p>
+            <ul>
+              <li><b>Not for navigation.</b> Charts downloaded and baked here are processed for display and are <b>not</b> the official NOAA ENC; they do not meet chart-carriage regulations. Use official, up-to-date charts for navigation.</li>
+              <li><b>Updates.</b> NOAA updates ENCs weekly on a best-efforts basis. You are responsible for ensuring you have the current edition and latest updates.</li>
+              <li><b>Origin.</b> Charts are sourced from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA Office of Coast Survey</a>. NOAA makes no warranty and assumes no liability for their use.</li>
+            </ul>
+            <p>Read the full terms: <a href="${NOAA_AGREEMENT_URL}" target="_blank" rel="noopener">NOAA ENC User Agreement</a>.</p>
+          </div>
+          <div class="agree-actions">
+            <button id="agree-decline" class="btn" type="button">Decline</button>
+            <button id="agree-accept" class="cta" type="button">Accept &amp; continue</button>
+          </div>
+        </div>
+      </div>
       <button id="dlpill" hidden></button>
       <div id="empty" hidden><div class="card">
         <svg class="welcome-mark" viewBox="0 0 24 24" fill="none" stroke="#1565c0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M5 12a7 7 0 0 0 14 0M3 12h2m14 0h2M12 21a7 7 0 0 1-5-2m10 0a7 7 0 0 1-5 2"/></svg>
@@ -1269,6 +1286,10 @@ export class ChartPlotterApp extends HTMLElement {
     $("close").onclick = () => this.closeDrawer();
     $("empty-add").onclick = () => this.openCharts();
     $("empty-import").onclick = () => { this.openCharts(); const det = r.querySelector(".import-more"); if (det) det.open = true; };
+    // NOAA ENC user-agreement gate + attribution "Terms" link.
+    $("attr-terms").onclick = () => this._showAgreement();
+    $("agree-accept").onclick = () => this._resolveAgreement(true);
+    $("agree-decline").onclick = () => this._resolveAgreement(false);
 
     // Geo search (offline, over the catalog titles).
     const si = $("search-input");
