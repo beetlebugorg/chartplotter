@@ -310,3 +310,56 @@ func TestRingClosure(t *testing.T) {
 		})
 	}
 }
+
+// TestResolvePolygonOutOfOrder verifies the assembler chains a ring by node
+// connectivity even when the edges are NOT listed in sequential order — the
+// case that previously left the ring open and got force-closed with a diagonal
+// "crosscut" chord. A correct square has only length-2 sides; a crosscut would
+// introduce a longer diagonal/closing edge.
+func TestResolvePolygonOutOfOrder(t *testing.T) {
+	edge := func(id int64, a, b [2]float64) (spatialKey, *spatialRecord) {
+		return spatialKey{RCNM: int(spatialTypeEdge), RCID: id}, &spatialRecord{
+			ID: id, RecordType: spatialTypeEdge,
+			Coordinates: [][]float64{{a[0], a[1]}, {b[0], b[1]}},
+		}
+	}
+	recs := map[spatialKey]*spatialRecord{}
+	for _, e := range []struct {
+		id   int64
+		a, b [2]float64
+	}{
+		{10, [2]float64{0, 0}, [2]float64{2, 0}},
+		{11, [2]float64{2, 0}, [2]float64{2, 2}},
+		{12, [2]float64{2, 2}, [2]float64{0, 2}},
+		{13, [2]float64{0, 2}, [2]float64{0, 0}},
+	} {
+		k, v := edge(e.id, e.a, e.b)
+		recs[k] = v
+	}
+	r := newPolygonBuilder(recs)
+
+	// Deliberately scrambled order (10,12,11,13) — not a connected walk.
+	rings, err := r.resolvePolygon([]spatialRef{
+		{RCID: 10, Orientation: 1}, {RCID: 12, Orientation: 1},
+		{RCID: 11, Orientation: 1}, {RCID: 13, Orientation: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rings) != 1 {
+		t.Fatalf("expected 1 ring, got %d", len(rings))
+	}
+	ring := rings[0]
+	if !isRingClosed(ring) {
+		t.Fatalf("ring not closed: %v", ring)
+	}
+	// Every segment of a correct square is length 2; a crosscut chord would be
+	// longer (a diagonal is 2√2 ≈ 2.83).
+	for i := 0; i+1 < len(ring); i++ {
+		dx := ring[i+1][0] - ring[i][0]
+		dy := ring[i+1][1] - ring[i][1]
+		if d := dx*dx + dy*dy; d > 4.0001 {
+			t.Errorf("crosscut: segment %d→%d has length²=%.3f (>4) — ring was not chained correctly: %v", i, i+1, d, ring)
+		}
+	}
+}

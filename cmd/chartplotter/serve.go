@@ -55,6 +55,7 @@ func (c serveCmd) Run() error {
 	// other bind means the operator opted into network exposure.
 	allowRemote := !(c.Host == "127.0.0.1" || c.Host == "localhost" || c.Host == "::1")
 	srv := server.New(c.Assets, cacheDir, allowRemote)
+	srv.Version = version
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""

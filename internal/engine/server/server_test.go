@@ -92,6 +92,78 @@ func TestProvisionCoreLegacyCache(t *testing.T) {
 	}
 }
 
+// DELETE /api/charts must remove the map-selected (cell-list) bake too, not just
+// region archives — otherwise "remove all" leaves charts on disk.
+func TestDeleteRemovesUserBake(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{userPMTiles, userManifest} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(`{"x":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(New("", dir, false))
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/charts", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	for _, n := range []string{userPMTiles, userManifest} {
+		if _, err := os.Stat(filepath.Join(dir, n)); !os.IsNotExist(err) {
+			t.Errorf("%s still present after DELETE /api/charts (err=%v)", n, err)
+		}
+	}
+}
+
+func TestDebugEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	srv := New("", dir, false)
+	srv.Version = "test-1.2.3"
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	// GET before any client push: server state present, client null.
+	resp, err := http.Get(ts.URL + "/api/debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d struct {
+		Server map[string]any  `json:"server"`
+		Client json.RawMessage `json:"client"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		t.Fatalf("decode debug: %v", err)
+	}
+	resp.Body.Close()
+	if d.Server["version"] != "test-1.2.3" {
+		t.Errorf("server.version = %v", d.Server["version"])
+	}
+	if string(d.Client) != "null" {
+		t.Errorf("client should be null before a push, got %s", d.Client)
+	}
+
+	// POST a client snapshot, then GET echoes it back.
+	snap := `{"inspect":{"selected":{"properties":{"class":"BOYLAT","cell":"US4MD81M"}}}}`
+	if _, err := http.Post(ts.URL+"/api/debug", "application/json", strings.NewReader(snap)); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = http.Get(ts.URL + "/api/debug")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"US4MD81M"`) || !strings.Contains(string(body), `"BOYLAT"`) {
+		t.Errorf("debug GET did not echo client snapshot: %s", body)
+	}
+
+	// Non-JSON POST is rejected.
+	resp, _ = http.Post(ts.URL+"/api/debug", "application/json", strings.NewReader("not json"))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("non-JSON snapshot: status %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestServeStaticAndRange(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>hi</html>"), 0o644); err != nil {

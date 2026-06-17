@@ -47,6 +47,63 @@ const BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing
 const BAND_LABEL = { overview: "Overview", general: "General", coastal: "Coastal", approach: "Approach", harbor: "Harbor", berthing: "Berthing" };
 const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a", approach: "#9ccc65", harbor: "#ffa726", berthing: "#ef5350" };
 
+// Escape text for safe innerHTML insertion (inspector panel renders feature
+// properties straight from the tiles).
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// Does a GeoJSON geometry intersect the lon/lat box [W,S,E,N]? Points test exactly;
+// lines/polygons use a bbox-overlap approximation (fine for the area inspector).
+function geomIntersectsBox(g, W, S, E, N) {
+  if (!g) return false;
+  if (g.type === "Point") {
+    const c = g.coordinates;
+    return c[0] >= W && c[0] <= E && c[1] >= S && c[1] <= N;
+  }
+  const bb = [Infinity, Infinity, -Infinity, -Infinity];
+  (function walk(c) {
+    if (typeof c[0] === "number") {
+      if (c[0] < bb[0]) bb[0] = c[0];
+      if (c[1] < bb[1]) bb[1] = c[1];
+      if (c[0] > bb[2]) bb[2] = c[0];
+      if (c[1] > bb[3]) bb[3] = c[1];
+    } else for (const x of c) walk(x);
+  })(g.coordinates || []);
+  return !(bb[2] < W || bb[0] > E || bb[3] < S || bb[1] > N);
+}
+
+// S-57 object-class acronym → human label (the baked `class` attribute is the
+// acronym). Covers the common ENC classes; unknown acronyms fall back to raw.
+const S57_CLASS = {
+  ACHARE: "Anchorage area", ACHBRT: "Anchor berth", ADMARE: "Administration area", AIRARE: "Airport / airfield",
+  BCNCAR: "Beacon, cardinal", BCNISD: "Beacon, isolated danger", BCNLAT: "Beacon, lateral", BCNSAW: "Beacon, safe water", BCNSPP: "Beacon, special purpose",
+  BERTHS: "Berth", BOYCAR: "Buoy, cardinal", BOYINB: "Buoy, installation", BOYISD: "Buoy, isolated danger", BOYLAT: "Buoy, lateral", BOYSAW: "Buoy, safe water", BOYSPP: "Buoy, special purpose",
+  BRIDGE: "Bridge", BUAARE: "Built-up area", BUISGL: "Building, single", CBLARE: "Cable area", CBLSUB: "Cable, submarine", CBLOHD: "Cable, overhead",
+  CANALS: "Canal", CAUSWY: "Causeway", CGUSTA: "Coastguard station", COALNE: "Coastline", CONVYR: "Conveyor", CRANES: "Crane", CTNARE: "Caution area",
+  CTRPNT: "Control point", CURENT: "Current, non-gravitational", DAMCON: "Dam", DAYMAR: "Daymark", DEPARE: "Depth area", DEPCNT: "Depth contour",
+  DISMAR: "Distance mark", DMPGRD: "Dumping ground", DOCARE: "Dock area", DRGARE: "Dredged area", DRYDOC: "Dry dock", DWRTCL: "Deep water route centreline", DWRTPT: "Deep water route part",
+  EXEZNE: "Exclusive economic zone", FAIRWY: "Fairway", FERYRT: "Ferry route", FLODOC: "Floating dock", FNCLNE: "Fence / wall", FOGSIG: "Fog signal",
+  FORSTC: "Fortified structure", FSHFAC: "Fishing facility", FSHGRD: "Fishing ground", FSHZNE: "Fishery zone", GATCON: "Gate", GRIDRN: "Gridiron",
+  HRBARE: "Harbour area", HRBFAC: "Harbour facility", HULKES: "Hulk", ICEARE: "Ice area", ISTZNE: "Inshore traffic zone", LAKARE: "Lake", LNDARE: "Land area",
+  LNDELV: "Land elevation", LNDMRK: "Landmark", LNDRGN: "Land region", LIGHTS: "Light", LITFLT: "Light float", LITVES: "Light vessel", LOCMAG: "Local magnetic anomaly",
+  MAGVAR: "Magnetic variation", MARCUL: "Marine farm / culture", MIPARE: "Military practice area", MORFAC: "Mooring / warping facility", MPAARE: "Marine protected area",
+  NAVLNE: "Navigation line", OBSTRN: "Obstruction", OFSPLF: "Offshore platform", OSPARE: "Offshore production area", PILBOP: "Pilot boarding place", PILPNT: "Pile",
+  PIPARE: "Pipeline area", PIPOHD: "Pipeline, overhead", PIPSOL: "Pipeline, submarine/on land", PONTON: "Pontoon", PRCARE: "Precautionary area", PRDARE: "Production / storage area",
+  PYLONS: "Pylon / bridge support", RADLNE: "Radar line", RADRFL: "Radar reflector", RADRNG: "Radar range", RADSTA: "Radar station", RTPBCN: "Radar transponder beacon",
+  RDOCAL: "Radio calling-in point", RDOSTA: "Radio station", RECTRC: "Recommended track", RCRTCL: "Recommended route centreline", RCTLPT: "Recommended traffic lane part",
+  RESARE: "Restricted area", RIVERS: "River", ROADWY: "Road", RUNWAY: "Runway", SBDARE: "Seabed area", SLCONS: "Shoreline construction", SISTAT: "Signal station, traffic",
+  SISTAW: "Signal station, warning", SILTNK: "Silo / tank", SLOTOP: "Slope topline", SLOGRD: "Sloping ground", SMCFAC: "Small craft facility", SNDWAV: "Sand waves",
+  SOUNDG: "Sounding", SPRING: "Spring", STSLNE: "Straight territorial sea baseline", SUBTLN: "Submarine transit lane", SWPARE: "Swept area", TESARE: "Territorial sea area",
+  TS_FEB: "Tidal stream", TSELNE: "Traffic separation line", TSEZNE: "Traffic separation zone", TSSBND: "Traffic separation boundary", TSSCRS: "Traffic separation crossing",
+  TSSLPT: "Traffic separation lane part", TSSRON: "Traffic separation roundabout", TUNNEL: "Tunnel", TWRTPT: "Two-way route part", UWTROC: "Underwater / awash rock",
+  VEGATN: "Vegetation", WATTUR: "Water turbulence", WATFAL: "Waterfall", WEDKLP: "Weed / kelp", WRECKS: "Wreck", WTWAXS: "Waterway axis", WTWPRF: "Waterway profile",
+  "M_QUAL": "Quality of data", "M_COVR": "Coverage", "M_NPUB": "Nautical publication info", "M_NSYS": "Navigational system of marks", "M_SDAT": "Sounding datum", "M_VDAT": "Vertical datum",
+};
+
+// Fallback label for a chart MVT source-layer when a feature has no `class`.
+const INSPECT_LAYER_LABEL = { point_symbols: "Symbol", soundings: "Sounding", lines: "Line", complex_lines: "Boundary", areas: "Area", area_patterns: "Area pattern", text: "Label" };
+
 export class ChartPlotterApp extends HTMLElement {
   constructor() {
     super();
@@ -62,6 +119,12 @@ export class ChartPlotterApp extends HTMLElement {
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._selBands = this._loadSelBands(); // navigational-purpose bands enabled in the selector (Set of band slugs)
+    this._inspectMode = false;          // feature-inspect mode (toggled from the statusbar)
+    this._inspectLocked = false;        // a feature is pinned (click-to-lock) — hover stops updating
+    this._inspectLastKey = "";          // last rendered hover/lock key, to skip redundant re-renders
+    this._inspectFeats = [];            // the stack of features under the cursor (cycler steps through them)
+    this._inspectIdx = 0;               // which one of the stack is shown
+    this._inspectMulti = false;         // true after a SHIFT+drag area capture (list all, no cycler)
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = loadJSON(LS_MARINER, {});
     // Migrate the old single-value display category (base|standard|other) to
@@ -154,6 +217,7 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
     this.renderCharts();
     this._assessCoverage();
+    this._startDebugPush(); // mirror live app state to GET /api/debug
     // Refresh-resume: if a provision job is still running on the server, re-attach
     // (show the pill + start polling). A finished/idle task is ignored.
     this._reattachTask();
@@ -630,6 +694,7 @@ export class ChartPlotterApp extends HTMLElement {
   // open (the map is visible beside it). Re-entrant: cancels a prior arm first.
   _enterAreaSelect() {
     if (!this._map) return;
+    this._setInspectMode(false); // inspect + box-select are mutually exclusive
     this._cancelAreaSelect();
     this._setCellOverlay(true); // ensure the all-cells overlay is up
     const map = this._map.getContainer();
@@ -830,6 +895,326 @@ export class ChartPlotterApp extends HTMLElement {
     map.addSource("selpreview", { type: "geojson", data: empty });
     map.addLayer({ id: "selpreview-fill", type: "fill", source: "selpreview", layout: { visibility: "none" }, paint: { "fill-color": "#f0a500", "fill-opacity": 0.28 } });
     map.addLayer({ id: "selpreview-line", type: "line", source: "selpreview", layout: { visibility: "none" }, paint: { "line-color": "#e08a00", "line-width": 1.2 } });
+    // Feature inspector highlight (the picked feature's geometry).
+    map.addSource("inspect", { type: "geojson", data: empty });
+    map.addLayer({ id: "inspect-fill", type: "fill", source: "inspect", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#ff5252", "fill-opacity": 0.12 } });
+    map.addLayer({ id: "inspect-line", type: "line", source: "inspect", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#ff5252", "line-width": 2.5 } });
+    map.addLayer({ id: "inspect-pt", type: "circle", source: "inspect", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 11, "circle-color": "rgba(255,82,82,0.15)", "circle-stroke-color": "#ff5252", "circle-stroke-width": 2.5 } });
+    // Focused-feature highlight (one picked from the area list) — cyan, on top of
+    // the dim red set, so you can see exactly which polygon is which.
+    map.addSource("inspect-focus", { type: "geojson", data: empty });
+    map.addLayer({ id: "inspect-focus-fill", type: "fill", source: "inspect-focus", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#00e5ff", "fill-opacity": 0.25 } });
+    map.addLayer({ id: "inspect-focus-line", type: "line", source: "inspect-focus", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#00b8d4", "line-width": 3.5 } });
+    map.addLayer({ id: "inspect-focus-pt", type: "circle", source: "inspect-focus", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 13, "circle-color": "rgba(0,229,255,0.25)", "circle-stroke-color": "#00b8d4", "circle-stroke-width": 3 } });
+    // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
+    // hovering highlights + previews the feature under the cursor; a click LOCKS
+    // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
+    // region and captures every chart feature inside it. Skipped while the area
+    // (box-download) selector is armed (it owns pointer events).
+    let boxStart = null, boxEl = null;
+    map.on("mousedown", (e) => {
+      if (!this._inspectMode || this._areaCleanup || !e.originalEvent.shiftKey) return;
+      e.preventDefault();
+      this._map.dragPan.disable();
+      boxStart = e.point;
+      boxEl = document.createElement("div");
+      boxEl.style.cssText = "position:absolute;z-index:1000;border:2px solid #ff5252;background:rgba(255,82,82,.12);pointer-events:none;box-sizing:border-box;border-radius:2px;";
+      map.getContainer().appendChild(boxEl);
+    });
+    map.on("mousemove", (e) => {
+      if (boxStart && boxEl) {
+        const p = e.point;
+        boxEl.style.left = Math.min(boxStart.x, p.x) + "px";
+        boxEl.style.top = Math.min(boxStart.y, p.y) + "px";
+        boxEl.style.width = Math.abs(p.x - boxStart.x) + "px";
+        boxEl.style.height = Math.abs(p.y - boxStart.y) + "px";
+        return;
+      }
+      if (!this._inspectMode || this._inspectLocked || this._areaCleanup) return;
+      this._inspectAt(e.point, false);
+    });
+    map.on("mouseup", (e) => {
+      if (!boxStart) return;
+      const a = boxStart, b = e.point;
+      if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
+      boxEl = null; boxStart = null;
+      this._map.dragPan.enable();
+      if (Math.abs(b.x - a.x) < 3 || Math.abs(b.y - a.y) < 3) return; // too small → ignore
+      this._showInspectArea(this._captureArea(a, b));
+    });
+    map.on("click", (e) => {
+      if (!this._inspectMode || this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
+      if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
+      this._inspectAt(e.point, true); // lock onto whatever's here
+    });
+  }
+
+  // Toggle inspect mode on/off. ON opens the panel (with a hover hint), arms the
+  // hover/click handlers, sets a crosshair cursor, and cancels the box selector.
+  // OFF clears everything. Mutually exclusive with the area selector.
+  _setInspectMode(on) {
+    on = !!on;
+    if (on === this._inspectMode) return;
+    this._inspectMode = on;
+    this._inspectLocked = false;
+    this._inspectLastKey = "";
+    if (on) this._cancelAreaSelect();
+    const map = this._map;
+    if (map) {
+      map.getCanvas().style.cursor = on ? "crosshair" : "";
+      // Free SHIFT+drag for area capture (MapLibre uses it for box-zoom by default).
+      if (on) map.boxZoom.disable(); else map.boxZoom.enable();
+    }
+    this.shadowRoot.getElementById("inspect-toggle")?.classList.toggle("on", on);
+    if (on) {
+      this._inspectHint("Hover to inspect · click to lock · SHIFT+drag to capture an area.");
+      this.shadowRoot.getElementById("inspect").classList.add("open");
+    } else {
+      this._closeInspect();
+    }
+  }
+
+  // Inspect the chart features at a canvas point. `lock` freezes the panel on a
+  // hit (the click-to-lock action); a no-hit lock is a no-op (so clicking empty
+  // chart doesn't clear a useful hover), a no-hit hover shows the hint.
+  _inspectAt(point, lock) {
+    const map = this._map;
+    const feats = map.queryRenderedFeatures(point).filter((f) => typeof f.source === "string" && f.source.startsWith("chart-"));
+    if (!feats.length) {
+      if (lock) return;
+      this._inspectLastKey = "";
+      this._inspectFeats = [];
+      const src = map.getSource("inspect");
+      if (src) src.setData({ type: "FeatureCollection", features: [] });
+      this._inspectHint("Hover to inspect · click to lock · SHIFT+drag to capture an area.");
+      return;
+    }
+    const seen = new Set(), uniq = [];
+    for (const f of feats) {
+      const key = (f.sourceLayer || "") + "|" + JSON.stringify(f.properties || {});
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uniq.push(f);
+    }
+    const rank = { point_symbols: 0, soundings: 1, lines: 2, complex_lines: 3, areas: 4, area_patterns: 5, text: 6 };
+    uniq.sort((a, b) => (rank[a.sourceLayer] ?? 9) - (rank[b.sourceLayer] ?? 9));
+    if (lock) this._inspectLocked = true;
+    // Skip re-render when hovering the same feature set (cheap mousemove path).
+    const setKey = (lock ? "L:" : "") + uniq.map((f) => f.sourceLayer + "|" + JSON.stringify(f.properties)).join("~");
+    if (setKey === this._inspectLastKey) return;
+    this._inspectLastKey = setKey;
+    this._inspectFeats = uniq; // the stack under the cursor
+    this._inspectIdx = 0; // show the topmost; the cycler steps through the rest
+    this._inspectMulti = false; // single-point pick → cycler
+    this._renderInspect();
+  }
+
+  // Capture EVERY chart feature in the dragged pixel box (corners a,b). Reads the
+  // loaded vector tiles directly via querySourceFeatures — unlike
+  // queryRenderedFeatures it also returns collision-hidden symbols and features
+  // not currently painted — across every loaded chart band, deduped, geo-filtered
+  // to the box. So "capture everything" really means everything there.
+  _captureArea(a, b) {
+    const map = this._map;
+    const tl = map.unproject([Math.min(a.x, b.x), Math.min(a.y, b.y)]);
+    const br = map.unproject([Math.max(a.x, b.x), Math.max(a.y, b.y)]);
+    const W = Math.min(tl.lng, br.lng), E = Math.max(tl.lng, br.lng);
+    const S = Math.min(tl.lat, br.lat), N = Math.max(tl.lat, br.lat);
+    const inBox = (g) => geomIntersectsBox(g, W, S, E, N);
+    const sources = [...BANDS, "all"].map((s) => "chart-" + s);
+    const layers = ["point_symbols", "soundings", "areas", "area_patterns", "lines", "complex_lines", "text"];
+    const seen = new Set(), out = [];
+    for (const src of sources) {
+      for (const layer of layers) {
+        let feats;
+        try { feats = map.querySourceFeatures(src, { sourceLayer: layer }); } catch { continue; }
+        for (const f of feats) {
+          if (!inBox(f.geometry)) continue;
+          const key = layer + "|" + JSON.stringify(f.properties || {});
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ source: src, sourceLayer: layer, properties: f.properties, geometry: f.geometry });
+        }
+      }
+    }
+    return out;
+  }
+
+  // SHIFT+drag box capture: show EVERY chart feature inside the dragged region as
+  // a list (locked), highlighting them all. Answers "what's all here / what's
+  // overlapping?" in one shot.
+  _showInspectArea(feats) {
+    const seen = new Set(), uniq = [];
+    for (const f of feats) {
+      const key = (f.sourceLayer || "") + "|" + JSON.stringify(f.properties || {});
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uniq.push(f);
+    }
+    const rank = { point_symbols: 0, soundings: 1, lines: 2, complex_lines: 3, areas: 4, area_patterns: 5, text: 6 };
+    uniq.sort((a, b) => (rank[a.sourceLayer] ?? 9) - (rank[b.sourceLayer] ?? 9));
+    this._inspectFeats = uniq;
+    this._inspectIdx = 0;
+    this._inspectMulti = true;
+    this._inspectLocked = true;
+    this._inspectLastKey = "AREA"; // distinct from any hover key
+    this._renderInspect();
+  }
+
+  // Render the inspected feature(s): a single card + cycler for a point pick, or
+  // the full list for a SHIFT+drag area capture. Highlights the shown feature(s).
+  _renderInspect() {
+    const feats = this._inspectFeats || [];
+    if (!feats.length) return;
+    const src = this._map.getSource("inspect");
+    const body = this.shadowRoot.getElementById("inspect-body");
+    const lockNote = this._inspectLocked ? `<div class="ins-lock">🔒 Locked — click the map to release</div>` : "";
+    if (this._inspectMulti) {
+      const cap = 80;
+      const shown = feats.slice(0, cap);
+      if (src) src.setData({ type: "FeatureCollection", features: feats.map((f) => ({ type: "Feature", properties: {}, geometry: f.geometry })) });
+      this._clearInspectFocus();
+      const more = feats.length > cap ? `<div class="ins-empty">…and ${feats.length - cap} more</div>` : "";
+      const hint = `<div class="ins-cycler"><span>${feats.length} features in area · click one to isolate it</span></div>`;
+      body.innerHTML = lockNote + hint + shown.map((f, i) => this._renderFeatureCard(f, i)).join("") + more;
+      this.shadowRoot.getElementById("inspect").classList.add("open");
+      body.querySelectorAll(".ins-feat[data-fi]").forEach((el) => (el.onclick = () => this._focusInspectFeature(+el.dataset.fi)));
+      return;
+    }
+    const i = Math.min(this._inspectIdx, feats.length - 1);
+    const f = feats[i];
+    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: f.geometry }] });
+    const cycler = feats.length > 1
+      ? `<div class="ins-cycler"><button id="ins-prev" class="btn" title="Previous">◀</button><span>${i + 1} / ${feats.length} here</span><button id="ins-next" class="btn" title="Next">▶</button></div>`
+      : "";
+    body.innerHTML = lockNote + cycler + this._renderFeatureCard(f);
+    this.shadowRoot.getElementById("inspect").classList.add("open");
+    if (feats.length > 1) {
+      this.shadowRoot.getElementById("ins-prev").onclick = () => this._inspectStep(-1);
+      this.shadowRoot.getElementById("ins-next").onclick = () => this._inspectStep(1);
+    }
+  }
+
+  // Isolate one feature from the area list: paint it cyan over the dim red set
+  // and mark its card, so you can see its exact footprint and judge overlap.
+  _focusInspectFeature(i) {
+    const f = (this._inspectFeats || [])[i];
+    if (!f) return;
+    const src = this._map.getSource("inspect-focus");
+    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: f.geometry }] });
+    this.shadowRoot.querySelectorAll(".ins-feat[data-fi]").forEach((el) => el.classList.toggle("active", +el.dataset.fi === i));
+  }
+
+  _clearInspectFocus() {
+    const src = this._map && this._map.getSource("inspect-focus");
+    if (src) src.setData({ type: "FeatureCollection", features: [] });
+  }
+
+  // Step the cycler through overlapping features (wraps).
+  _inspectStep(d) {
+    const n = (this._inspectFeats || []).length;
+    if (!n) return;
+    this._inspectIdx = (this._inspectIdx + d + n) % n;
+    this._renderInspect();
+  }
+
+  _inspectHint(msg) {
+    const body = this.shadowRoot.getElementById("inspect-body");
+    if (body) body.innerHTML = `<div class="ins-empty">${esc(msg)}</div>`;
+  }
+
+  // -- debug --------------------------------------------------------------
+  // A snapshot of the live app state — selection, inspected feature, view,
+  // display prefs, loaded coverage — surfaced via GET /api/debug (the frontend
+  // pushes this to the server whenever it changes; see _startDebugPush).
+  _debugSnapshot() {
+    const m = this._map;
+    const c = m ? m.getCenter() : null;
+    // Include geometry for the inspect stack so /api/debug can be used to compute
+    // exact feature overlaps offline. (Only the locked/area set, so it's bounded.)
+    const summ = (f) => (f ? { source: f.source, layer: f.sourceLayer, properties: f.properties, geometry: f.geometry } : null);
+    return {
+      scheme: this._scheme,
+      drawer: { open: this._drawerOpen(), section: this._section },
+      view: c ? { lng: +c.lng.toFixed(6), lat: +c.lat.toFixed(6), zoom: +m.getZoom().toFixed(2) } : null,
+      hasArchive: this._hasArchive,
+      userBake: this._userBake ? { cells: this._userBake.cells.length, bounds: this._userBake.bounds } : null,
+      importedArchives: this._importedArchives.length,
+      selection: {
+        count: this._areaCells.size,
+        effective: this._effectiveAreaCells().length,
+        bands: [...this._selBands],
+        cells: [...this._areaCells],
+      },
+      inspect: {
+        mode: this._inspectMode,
+        locked: this._inspectLocked,
+        count: this._inspectFeats.length,
+        index: this._inspectIdx,
+        selected: summ(this._inspectFeats[this._inspectIdx]),
+        stack: this._inspectFeats.map(summ),
+      },
+      mariner: this._mariner,
+    };
+  }
+
+  // Push the debug snapshot to the server on change (≤ every 1.5s) so `curl
+  // /api/debug` reflects what the app is showing, including the selected item.
+  _startDebugPush() {
+    if (this._dbgTimer) return;
+    this._dbgLast = "";
+    const push = () => {
+      let snap;
+      try { snap = JSON.stringify(this._debugSnapshot()); } catch { return; }
+      if (snap === this._dbgLast) return;
+      this._dbgLast = snap;
+      fetch("api/debug", { method: "POST", headers: { "content-type": "application/json" }, body: snap }).catch(() => {});
+    };
+    this._dbgTimer = setInterval(push, 1500);
+    push();
+  }
+
+  // `idx` (when given) makes the card a clickable list item for the area view —
+  // clicking it isolates that feature's geometry on the map (see _focusInspectFeature).
+  _renderFeatureCard(f, idx) {
+    const p = f.properties || {};
+    const acr = p.class || "";
+    const named = S57_CLASS[acr];
+    const label = named || INSPECT_LAYER_LABEL[f.sourceLayer] || acr || f.sourceLayer || "Feature";
+    const cellPill = p.cell ? `<span class="ins-cell" title="Source ENC cell">▦ ${esc(p.cell)}</span>` : "";
+    // `cell` is shown as a pill, not a raw row; `class` is in the title.
+    const keys = Object.keys(p).filter((k) => k !== "cell" && k !== "class").sort();
+    const rows = keys.map((k) => `<div class="k">${esc(k)}</div><div class="v">${esc(this._fmtInspectVal(k, p[k]))}</div>`).join("")
+      || `<div class="k" style="grid-column:1/-1;color:var(--ui-text-faint)">no attributes</div>`;
+    const clickable = idx != null ? ` data-fi="${idx}" class="ins-feat ins-clickable"` : ` class="ins-feat"`;
+    return `<div${clickable}>
+      <div class="ins-title">${esc(label)}${named && acr ? `<span class="ins-acr">${esc(acr)}</span>` : ""}<span class="ins-layer">${esc(f.sourceLayer || "")}</span></div>
+      ${cellPill ? `<div class="ins-pills">${cellPill}</div>` : ""}
+      <div class="ins-kv">${rows}</div>
+    </div>`;
+  }
+
+  // Friendlier rendering for a few baked enum/typed attributes.
+  _fmtInspectVal(k, v) {
+    if (k === "cat") return ["base", "standard", "other"][v] ?? String(v);
+    if (k === "bnd") return ["plain", "symbolized", "common"][v] ?? String(v);
+    if ((k === "depth" || k === "danger_depth" || k === "drval1" || k === "drval2") && v !== "" && v != null && !isNaN(v)) return `${v} m`;
+    return String(v);
+  }
+
+  _closeInspect() {
+    this._inspectLocked = false;
+    this._inspectLastKey = "";
+    this._inspectFeats = [];
+    this._inspectIdx = 0;
+    this._inspectMulti = false;
+    this.shadowRoot.getElementById("inspect")?.classList.remove("open");
+    if (this._map) {
+      this._map.getCanvas().style.cursor = "";
+      const src = this._map.getSource("inspect");
+      if (src) src.setData({ type: "FeatureCollection", features: [] });
+      this._clearInspectFocus();
+    }
   }
 
   // Build a GeoJSON FeatureCollection of cell footprints. `cells` is an iterable
@@ -1455,6 +1840,15 @@ export class ChartPlotterApp extends HTMLElement {
         .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
         /* Live band·scale·zoom readout (left of the statusbar), one line. Each
            field has a fixed width + tabular figures so the bar never reflows. */
+        /* Statusbar inspect toggle (bottom-left). */
+        .sb-btn { display:inline-flex; align-items:center; gap:5px; flex:none; border:1px solid var(--ui-border-strong); background:var(--ui-surface);
+          color:var(--ui-text-dim); border-radius:13px; padding:3px 10px 3px 8px; font:600 11px/1 system-ui,sans-serif; cursor:pointer; white-space:nowrap; }
+        .sb-btn svg { width:14px; height:14px; }
+        .sb-btn:hover { border-color:var(--ui-accent); color:var(--ui-accent); }
+        .sb-btn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
+        .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
+        .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--ui-text-dim); }
+        .ins-cycler .btn { padding:2px 9px; line-height:1.3; }
         .sb-readout { flex:none; }
         .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
@@ -1492,7 +1886,29 @@ export class ChartPlotterApp extends HTMLElement {
         #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:var(--ui-bg); color:var(--ui-text);
           box-shadow:2px 0 8px rgba(0,0,0,.25); z-index:6; transform:translateX(calc(-100% - 56px)); transition:transform .2s; display:flex; flex-direction:column; }
         #drawer.open { transform:none; }
-        .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
+        /* Feature inspector — slides in from the RIGHT (overlays the map). */
+        .inspect { position:absolute; top:0; right:0; width:clamp(300px, 30%, 460px); height:100%; z-index:8;
+          background:var(--ui-bg); color:var(--ui-text); box-shadow:-2px 0 10px rgba(0,0,0,.3);
+          transform:translateX(100%); transition:transform .2s; display:flex; flex-direction:column; font:13px/1.45 system-ui,sans-serif; }
+        .inspect.open { transform:none; }
+        .ins-head { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
+        .ins-head strong { flex:1; font-size:14px; }
+        .ins-body { overflow:auto; padding:12px; flex:1; }
+        .ins-empty { color:var(--ui-text-faint); text-align:center; padding:24px 10px; }
+        .ins-feat { margin:0 0 14px; border:1px solid var(--ui-border-2); border-radius:8px; overflow:hidden; }
+        .ins-feat .ins-title { padding:8px 10px; background:var(--ui-surface-2); font-weight:600; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+        .ins-feat .ins-acr { color:var(--ui-text-dim); font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:500; }
+        .ins-feat .ins-layer { margin-left:auto; color:var(--ui-text-faint); font-size:11px; }
+        .ins-feat.ins-clickable { cursor:pointer; }
+        .ins-feat.ins-clickable:hover { border-color:#00b8d4; }
+        .ins-feat.active { border-color:#00b8d4; box-shadow:0 0 0 1px #00b8d4 inset; }
+        .ins-feat.active .ins-title { background:rgba(0,184,212,.14); }
+        .ins-pills { padding:6px 10px 0; }
+        .ins-cell { display:inline-flex; align-items:center; gap:4px; background:var(--ui-accent); color:var(--ui-accent-text);
+          border-radius:11px; padding:2px 9px; font:600 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.02em; }
+        .ins-kv { display:grid; grid-template-columns:minmax(80px,auto) 1fr; gap:3px 12px; padding:8px 10px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .ins-kv .k { color:var(--ui-text-dim); }
+        .ins-kv .v { color:var(--ui-text); word-break:break-word; }
         .dhead strong { flex:1; }
         .body { overflow:auto; padding:12px; flex:1; }
         .panel { display:none; } .panel.sel { display:block; }
@@ -1562,6 +1978,10 @@ export class ChartPlotterApp extends HTMLElement {
       </div>
       <div id="search"><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
       <div id="statusbar">
+        <button id="inspect-toggle" class="sb-btn" title="Inspect features — hover to highlight, click to lock, SHIFT+drag to capture an area">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
+          <span>Inspect</span>
+        </button>
         <div id="cov-readout" class="sb-readout"></div>
         <div id="cov-cells" class="sb-bands"></div>
       </div>
@@ -1613,6 +2033,10 @@ export class ChartPlotterApp extends HTMLElement {
             <div id="settings-body"></div>
           </div>
         </div>
+      </div>
+      <div id="inspect" class="inspect">
+        <div class="ins-head"><strong>Feature inspector</strong><button id="ins-close" class="btn" title="Close">✕</button></div>
+        <div id="inspect-body" class="ins-body"></div>
       </div>`;
 
     // wiring
@@ -1624,6 +2048,10 @@ export class ChartPlotterApp extends HTMLElement {
     $("rail-menu").onclick = () => this.toggleSection("charts");
     $("rail-settings").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
+    $("ins-close").onclick = () => this._setInspectMode(false);
+    $("inspect-toggle").onclick = () => this._setInspectMode(!this._inspectMode);
+    // Esc exits the feature inspector.
+    window.addEventListener("keydown", (e) => { if (e.key === "Escape" && this._inspectMode) this._setInspectMode(false); });
     $("empty-add").onclick = () => this.openCharts();
     $("empty-import").onclick = () => { this.openCharts(); const det = r.querySelector(".import-more"); if (det) det.open = true; };
     $("rail-home").classList.add("on"); // boot shows the bare chart viewer

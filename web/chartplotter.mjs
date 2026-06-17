@@ -35,7 +35,6 @@ import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./pmtiles
 const FALLBACK = "#ff00ff";
 const FEATURE_SCALE = 0.01 / 0.35278;
 const FONT = ["Noto Sans Regular"];
-const ZMIN = 5, ZMAX = 16;
 const M_TO_FT = 3.280839895; // depth-unit conversion (metric ↔ imperial)
 
 // NOAA ENC navigational-purpose bands (the rescheming standard) → one vector
@@ -922,17 +921,14 @@ export class ChartPlotter extends HTMLElement {
         this._layerBase[id] = base;
         (this._variants[L.id] ||= []).push(id);
         const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) };
-        // Symbol layout/placement is the bake-render bottleneck (one provisioned
-        // archive fanned across every band re-places the same marks at each zoom),
-        // so SYMBOL layers are bounded to a few levels of overscale past their band
-        // (keeping ~3 bands laying out at any zoom). The margin must be wide enough
-        // to bridge a SKIPPED band: where an area has e.g. general (max z9) then
-        // harbor (min z13) cells but no coastal/approach in between, a tight +3 cap
-        // hid general's overzoom at z≥12 while harbor only starts at z13 — leaving
-        // soundings/buoys/lights blank at z12 (and vanishing as you zoomed in). +4
-        // makes every band reach the next-present band's start across the realistic
-        // single/double NOAA band skips. Area/line FILLS keep overzooming (cheap).
-        if (L.type === "symbol" && band.slug !== "all") v.maxzoom = Math.min(ZMAX + 2, band.max + 4);
+        // SYMBOL layers used to be capped a few levels past their band (a perf
+        // guard, since the fanned archive re-places the same marks per band), but
+        // that dropped coarse-scale point symbols/soundings the moment you zoomed
+        // past the cap when no finer-scale chart covered them — they'd just vanish.
+        // Now symbols overzoom to the map max like area/line FILLS, so a feature
+        // stays visible as you zoom in. Where a coarse and a finer chart both carry
+        // the same object the two marks share a lat/lon and overlap into ~one icon;
+        // sparse marks make the extra layout cheap in practice.
         out.push(v);
       }
     }

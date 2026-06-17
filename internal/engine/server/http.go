@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/web"
@@ -31,7 +32,11 @@ type Server struct {
 	assetsDir   string // optional on-disk asset override (dev); "" → embedded only
 	cacheDir    string // XDG cache root; regions/<NN>.pmtiles served at /charts/<NN>.pmtiles
 	allowRemote bool
+	Version     string // build version, surfaced by /api/debug
 	task        task
+
+	debugMu     sync.Mutex // guards debugClient
+	debugClient []byte     // last client state snapshot POSTed to /api/debug (selected items etc.)
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -131,6 +136,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleCharts(w, r) // GET → manifest, DELETE → remove all
 	case strings.HasPrefix(r.URL.Path, "/api/charts/"):
 		s.deleteRegion(w, r) // DELETE /api/charts/<NN>
+	case r.URL.Path == "/api/debug":
+		s.handleDebug(w, r) // GET → server+client debug snapshot, POST → store client snapshot
 	default:
 		apiErr(w, http.StatusNotFound, "unknown endpoint")
 	}
@@ -177,6 +184,10 @@ func (s *Server) handleCharts(w http.ResponseWriter, r *http.Request) {
 				_ = DeleteRegion(s.cacheDir, n)
 			}
 		}
+		// Also drop the map-selected (cell-list) bake + its manifest — otherwise
+		// "remove all" leaves it on disk and it reloads on the next apply.
+		_ = os.Remove(filepath.Join(s.cacheDir, userPMTiles))
+		_ = os.Remove(filepath.Join(s.cacheDir, userManifest))
 		w.Header().Set("Content-Type", jsonCT)
 		io.WriteString(w, `{"ok":true}`)
 	default:
@@ -206,6 +217,89 @@ func (s *Server) deleteRegion(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", jsonCT)
 	io.WriteString(w, `{"ok":true}`)
+}
+
+// handleDebug is a single-shot debug dump. POST stores the client (web-app) state
+// snapshot — selection, inspected feature, view, mariner, etc. — pushed by the
+// frontend; GET returns that latest client snapshot alongside live server state
+// (version, cache dir, current task, installed coverage, cache listing). It's the
+// one place to `curl` for "what is the app showing right now".
+func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 16<<20)) // 16 MiB cap (snapshot may carry inspected geometry)
+		if !json.Valid(body) {
+			apiErr(w, http.StatusBadRequest, "client snapshot must be JSON")
+			return
+		}
+		s.debugMu.Lock()
+		s.debugClient = body
+		s.debugMu.Unlock()
+		w.Header().Set("Content-Type", jsonCT)
+		io.WriteString(w, `{"ok":true}`)
+		return
+	}
+
+	s.debugMu.Lock()
+	client := json.RawMessage("null")
+	if len(s.debugClient) > 0 {
+		client = append(json.RawMessage(nil), s.debugClient...)
+	}
+	s.debugMu.Unlock()
+
+	userBake := json.RawMessage("null")
+	if b, err := os.ReadFile(filepath.Join(s.cacheDir, userManifest)); err == nil && json.Valid(b) {
+		userBake = b
+	}
+
+	out := map[string]any{
+		"version":      s.Version,
+		"cache_dir":    s.cacheDir,
+		"allow_remote": s.allowRemote,
+		"assets":       assetsDesc(s.assetsDir),
+		"task":         json.RawMessage(s.task.json()),
+		"regions":      json.RawMessage(regionManifest(s.cacheDir)),
+		"user_bake":    userBake,
+		"cache":        s.debugCacheListing(),
+	}
+	w.Header().Set("Content-Type", jsonCT)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(map[string]any{"server": out, "client": client})
+}
+
+// debugCacheListing summarises the on-disk cache: baked region archives, the
+// map-selected bake, and the ENC_ROOT cell cache count.
+func (s *Server) debugCacheListing() map[string]any {
+	out := map[string]any{}
+	var regions []string
+	if ents, err := os.ReadDir(regionsDir(s.cacheDir)); err == nil {
+		for _, e := range ents {
+			regions = append(regions, e.Name())
+		}
+	}
+	out["region_files"] = regions
+	if fi, err := os.Stat(filepath.Join(s.cacheDir, userPMTiles)); err == nil {
+		out["charts_user_bytes"] = fi.Size()
+	} else {
+		out["charts_user_bytes"] = nil
+	}
+	cells := 0
+	if ents, err := os.ReadDir(filepath.Join(s.cacheDir, "ENC_ROOT")); err == nil {
+		for _, e := range ents {
+			if e.IsDir() {
+				cells++
+			}
+		}
+	}
+	out["enc_root_cells"] = cells
+	return out
+}
+
+func assetsDesc(dir string) string {
+	if dir == "" {
+		return "embedded"
+	}
+	return dir
 }
 
 // validRegions is the set of NOAA ENC region numbers (the catalog `rg` values).

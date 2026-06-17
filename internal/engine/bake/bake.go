@@ -179,6 +179,7 @@ type sectorPrim struct {
 	anchor   geo.LatLon
 	params   portrayal.SectorParams
 	class    string
+	cell     string
 	drawPrio int
 	cat      int
 	band     Band
@@ -191,6 +192,7 @@ type Baker struct {
 	prims   []routed
 	sectors []sectorPrim
 	bbox    geo.BoundingBox
+	curCell string // dataset name of the cell currently being added (stamped on each feature)
 }
 
 // New returns an empty Baker.
@@ -202,6 +204,12 @@ func (b *Baker) Bounds() geo.BoundingBox { return b.bbox }
 // AddCell expands every feature of a parsed cell into routed primitives at the
 // cell's scale band, with per-feature SCAMIN display z-min.
 func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.MarinerSettings) {
+	// Cell name (sans the .000/.NNN extension) stamped on every feature for the
+	// inspector's source-cell pill.
+	b.curCell = chart.DatasetName()
+	if i := strings.LastIndexByte(b.curCell, '.'); i > 0 {
+		b.curCell = b.curCell[:i]
+	}
 	band := BandForScale(uint32(chart.CompilationScale()))
 	zr := band.ZoomRange()
 	cb := chart.Bounds()
@@ -253,6 +261,7 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
 	attrs := []mvt.KeyValue{
 		{Key: "class", Value: mvt.StringVal(class)},
+		{Key: "cell", Value: mvt.StringVal(b.curCell)},
 		{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
 		{Key: "cat", Value: mvt.IntVal(catRank(cat))},
 		{Key: "bnd", Value: mvt.IntVal(bnd)},
@@ -304,6 +313,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
+			{Key: "cell", Value: mvt.StringVal(b.curCell)},
 			{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
 			{Key: "cat", Value: mvt.IntVal(catRank(cat))},
 			{Key: "bnd", Value: mvt.IntVal(bnd)},
@@ -365,7 +375,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 	case portrayal.SectorLight:
 		b.bbox.ExtendPoint(v.Anchor)
 		b.sectors = append(b.sectors, sectorPrim{
-			anchor: v.Anchor, params: v.Sector, class: class,
+			anchor: v.Anchor, params: v.Sector, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, band: band, zMin: zMin, natMax: zr.Max,
 		})
 	}
@@ -607,6 +617,7 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			}
 			tb.Layer("lines").AddLines(paths, []mvt.KeyValue{
 				{Key: "class", Value: mvt.StringVal(sp.class)},
+				{Key: "cell", Value: mvt.StringVal(sp.cell)},
 				{Key: "color_token", Value: mvt.StringVal(st.colorToken)},
 				{Key: "width_px", Value: mvt.IntVal(int64(st.widthPx + 0.5))},
 				{Key: "dash", Value: mvt.StringVal(dash)},

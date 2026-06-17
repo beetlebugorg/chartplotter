@@ -224,70 +224,83 @@ func (r *polygonBuilder) buildRingsWithUsage(edgeRefs []spatialRef, orientations
 		}
 	}
 
-	rings := make([]ringWithUsage, 0)
-	currentRing := [][2]float64{}
-	currentUsage := 0
-	startCoord := [2]float64{}
-
+	// Resolve each edge ref to its coordinate run (orientation applied) + usage.
+	// We chain these by COORDINATE CONNECTIVITY rather than trusting FSPT order —
+	// real ENCs don't always list an area's edges sequentially, and the old
+	// file-order concatenation left such rings open, which were then force-closed
+	// with a straight chord (a "crosscut" filling area that shouldn't be filled).
+	type seg struct {
+		coords [][2]float64
+		usage  int
+	}
+	var segs []seg
 	for _, edgeRef := range edgeRefs {
-		// Load edge
 		edge, err := r.loadEdge(edgeRef.RCID)
 		if err != nil {
-			continue // Skip failed edges
+			continue // skip missing edges (data gap — handled by close-as-best below)
 		}
-
-		// Get edge coordinates with orientation applied
-		edgeCoords := r.getFullEdgeCoordinates(edge, edgeRef.Orientation)
-		if len(edgeCoords) == 0 {
+		coords := r.getFullEdgeCoordinates(edge, edgeRef.Orientation)
+		if len(coords) < 2 {
 			continue
 		}
-
-		// If starting a new ring, record the starting coordinate and usage
-		if len(currentRing) == 0 {
-			startCoord = edgeCoords[0]
-			currentUsage = edgeRef.Usage
-			if currentUsage == 0 {
-				currentUsage = 1 // Default to exterior
-			}
+		usage := edgeRef.Usage
+		if usage == 0 {
+			usage = 1 // default to exterior
 		}
-
-		// Deduplicate: skip first coordinate if it matches last coordinate in ring
-		if len(currentRing) > 0 {
-			lastCoord := currentRing[len(currentRing)-1]
-			firstNewCoord := edgeCoords[0]
-			if lastCoord[0] == firstNewCoord[0] && lastCoord[1] == firstNewCoord[1] {
-				edgeCoords = edgeCoords[1:]
-			}
-		}
-
-		currentRing = append(currentRing, edgeCoords...)
-
-		// Check if ring is closed (last coord equals start coord)
-		if len(currentRing) >= 3 {
-			lastCoord := currentRing[len(currentRing)-1]
-			if lastCoord[0] == startCoord[0] && lastCoord[1] == startCoord[1] {
-				// Ring is closed - save it
-				rings = append(rings, ringWithUsage{
-					coords: currentRing,
-					usage:  currentUsage,
-				})
-				currentRing = [][2]float64{}
-				currentUsage = 0
-			}
-		}
+		segs = append(segs, seg{coords: coords, usage: usage})
 	}
 
-	// After processing all edges, save any unclosed ring
-	if len(currentRing) > 0 {
-		if !isRingClosed(currentRing) {
-			currentRing = append(currentRing, startCoord)
+	rings := make([]ringWithUsage, 0)
+	// Build rings per usage class (exterior/truncated/interior) so an area's hole
+	// edges never chain into its outer ring. Within a class, follow connectivity.
+	for _, usage := range []int{1, 3, 2} {
+		pool := make([]seg, 0)
+		for _, s := range segs {
+			if s.usage == usage {
+				pool = append(pool, s)
+			}
 		}
-		// Only save ring if it has at least 3 points (minimum for a polygon)
-		if len(currentRing) >= 3 {
-			rings = append(rings, ringWithUsage{
-				coords: currentRing,
-				usage:  currentUsage,
-			})
+		for len(pool) > 0 {
+			ring := append([][2]float64(nil), pool[0].coords...)
+			pool = pool[1:]
+			for len(pool) > 0 {
+				end := ring[len(ring)-1]
+				if ptEq(end, ring[0]) {
+					break // ring closed
+				}
+				// Find a remaining edge that continues from the open end (matching
+				// either of its endpoints; reverse it if it connects tail-first).
+				k, rev := -1, false
+				for i := range pool {
+					c := pool[i].coords
+					if ptEq(c[0], end) {
+						k, rev = i, false
+						break
+					}
+					if ptEq(c[len(c)-1], end) {
+						k, rev = i, true
+						break
+					}
+				}
+				if k < 0 {
+					break // no continuation (missing edge) — stop, close as best below
+				}
+				nc := pool[k].coords
+				pool = append(pool[:k], pool[k+1:]...)
+				if rev {
+					nc = reverseCoords(nc)
+				}
+				ring = append(ring, nc[1:]...) // skip the shared joining point
+			}
+			// Close the ring. If chaining returned it to the start this is a no-op;
+			// otherwise (an edge was genuinely missing) close to start — the only
+			// case left where a chord is unavoidable.
+			if !ptEq(ring[len(ring)-1], ring[0]) {
+				ring = append(ring, ring[0])
+			}
+			if len(ring) >= 3 {
+				rings = append(rings, ringWithUsage{coords: ring, usage: usage})
+			}
 		}
 	}
 
@@ -296,20 +309,21 @@ func (r *polygonBuilder) buildRingsWithUsage(edgeRefs []spatialRef, orientations
 			Reason: "no valid rings could be constructed",
 		}
 	}
+	return rings, nil // already exterior(1) → truncated(3) → interior(2) order
+}
 
-	// Sort rings: Exterior (1) first, then Truncated (3), then Interior (2)
-	// This matches GeoJSON convention where first ring is exterior, rest are holes
-	sortedRings := make([]ringWithUsage, 0, len(rings))
+// ptEq reports whether two coordinates are identical (shared topology nodes are
+// the same spatial record, so an exact match is correct here).
+func ptEq(a, b [2]float64) bool { return a[0] == b[0] && a[1] == b[1] }
 
-	for _, usage := range []int{1, 3, 2} {
-		for _, ring := range rings {
-			if ring.usage == usage {
-				sortedRings = append(sortedRings, ring)
-			}
-		}
+// reverseCoords returns coords in reverse order (for an edge that connects to the
+// ring tail-first).
+func reverseCoords(c [][2]float64) [][2]float64 {
+	out := make([][2]float64, len(c))
+	for i, p := range c {
+		out[len(c)-1-i] = p
 	}
-
-	return sortedRings, nil
+	return out
 }
 
 // isRingClosed checks if a ring is properly closed
