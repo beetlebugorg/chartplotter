@@ -213,6 +213,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			scamin := intAttr(f.Attributes(), "SCAMIN")
 			zMin := specZMin(fb.DisplayCategory, scamin)
 			class := f.ObjectClass()
+			drval1, drval2 := depthVals(f.Attributes(), class)
 			prims := fb.Primitives
 			for pi := 0; pi < len(prims); pi++ {
 				// A sounding number (SOUNDG03) emits one digit glyph per column, all at
@@ -233,7 +234,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd)
 					continue
 				}
-				b.route(prims[pi], class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd)
+				b.route(prims[pi], class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd, drval1, drval2)
 			}
 		}
 	}
@@ -295,7 +296,7 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.prims = append(b.prims, r)
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32, bnd int64) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32, bnd int64, drval1, drval2 float32) {
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
@@ -310,7 +311,16 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 	switch v := p.(type) {
 	case portrayal.FillPolygon:
 		r.layer, r.kind, r.nrings = "areas", mvt.GeomPolygon, normRings(v.Rings)
-		r.attrs = common(mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)})
+		extra := []mvt.KeyValue{{Key: "color_token", Value: mvt.StringVal(v.ColorToken)}}
+		// Depth areas (DEPARE/DRGARE) carry DRVAL1/DRVAL2 so the client runs
+		// SEABED01 shading + the safety-contour line + shallow pattern LIVE
+		// against the mariner's contours (no re-bake). Other areas don't.
+		if !isNaN32(drval1) {
+			extra = append(extra,
+				mvt.KeyValue{Key: "drval1", Value: mvt.FloatVal(drval1)},
+				mvt.KeyValue{Key: "drval2", Value: mvt.FloatVal(drval2)})
+		}
+		r.attrs = common(extra...)
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.PatternFill:
 		r.layer, r.kind, r.nrings = "area_patterns", mvt.GeomPolygon, normRings(v.Rings)
@@ -752,6 +762,47 @@ func ptsBbox(pts []geo.LatLon) geo.BoundingBox {
 
 func ptBbox(p geo.LatLon) geo.BoundingBox {
 	return geo.BoundingBox{MinLat: p.Lat, MinLon: p.Lon, MaxLat: p.Lat, MaxLon: p.Lon}
+}
+
+// depthVals returns a depth area's DRVAL1/DRVAL2 (metres) for the client's live
+// SEABED01 shading, or (NaN, NaN) for non-depth areas (so route() omits them).
+// DRVAL2 falls back to DRVAL1 when absent. Mirrors bake.zig's is_depth gate.
+func depthVals(attrs map[string]interface{}, class string) (float32, float32) {
+	if class != "DEPARE" && class != "DRGARE" {
+		return nan32f, nan32f
+	}
+	d1, ok := floatAttr(attrs, "DRVAL1")
+	if !ok {
+		return nan32f, nan32f
+	}
+	d2, ok := floatAttr(attrs, "DRVAL2")
+	if !ok {
+		d2 = d1
+	}
+	return float32(d1), float32(d2)
+}
+
+var nan32f = float32(math.NaN())
+
+// floatAttr reads a numeric S-57 attribute (int/float/string) as a float64.
+func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
+	v, ok := attrs[key]
+	if !ok {
+		return 0, false
+	}
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case string:
+		if n, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 func intAttr(attrs map[string]interface{}, key string) uint32 {
