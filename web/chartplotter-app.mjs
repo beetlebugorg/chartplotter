@@ -439,15 +439,23 @@ export class ChartPlotterApp extends HTMLElement {
       return { pill: `${meta.verb || "Download"} failed`, label: `${meta.verb || "Download"} failed`, sub: meta.errMsg || t.error || "", frac: null, error: true };
     if (t._flourish || t.status === "done")
       return { pill: meta.verb === "Removing" ? "✓ Removed" : "✓ Added", label: meta.verb === "Removing" ? "Removed" : "Added", sub: name || "", frac: 1 };
-    // running
+    // running. A removal re-bakes the REMAINING regions from cache (one combined
+    // archive — no re-download), so don't present it as a download/import: label
+    // it "Removing…". Charts being added go through the genuine download + bake.
+    const removing = meta.verb === "Removing";
     if (t.phase === "download") {
       const total = t.total || t.cells || 0;
       const frac = total ? t.done / total : null;
+      if (removing)
+        return { pill: `Removing ${name || ""}`.trim(), label: "Removing region…", sub: "rebuilding charts", frac };
       const mb = meta.bytes ? ` · ${fmtMB(meta.bytes)}` : "";
       return { pill: `⬇ ${name || "Charts"}`, label: "Downloading from NOAA", sub: `${t.cell || ""}${total ? ` · ${Math.min(t.done + 1, total)} of ${total}` : ""}${mb}`, frac };
     }
     const frac = t.total ? t.done / t.total : null;
-    return { pill: `Importing ${name || "charts"}`, label: "Importing charts…", sub: t.total ? `${(t.done || 0).toLocaleString()} / ${t.total.toLocaleString()} tiles` : "preparing", frac };
+    const tiles = t.total ? `${(t.done || 0).toLocaleString()} / ${t.total.toLocaleString()} tiles` : "preparing";
+    if (removing)
+      return { pill: `Removing ${name || ""}`.trim(), label: "Removing region…", sub: `rebuilding · ${tiles}`, frac };
+    return { pill: `Importing ${name || "charts"}`, label: "Importing charts…", sub: tiles, frac };
   }
 
   // Project `_task` to the persistent pill + (when the drawer's open) the
