@@ -1472,6 +1472,8 @@ export class ChartPlotterApp extends HTMLElement {
     r.getElementById("statusbar").classList.toggle("with-drawer", open);
     r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
+    // Closing the drawer drops the open region, so clear its map highlight box.
+    if (!open) { this._region = null; this._clearFocus(); }
     setTimeout(() => { if (this._map) this._map.resize(); }, 230);
   }
 
