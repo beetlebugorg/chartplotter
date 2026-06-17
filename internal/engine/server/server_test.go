@@ -66,7 +66,7 @@ func TestServeStaticAndRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "data.pmtiles"), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(New(dir, false))
+	ts := httptest.NewServer(New(dir, dir, false))
 	defer ts.Close()
 
 	// Root serves index.html.
@@ -99,7 +99,7 @@ func TestServeStaticAndRange(t *testing.T) {
 
 func TestAPIEndpoints(t *testing.T) {
 	dir := t.TempDir()
-	ts := httptest.NewServer(New(dir, false))
+	ts := httptest.NewServer(New(dir, dir, false))
 	defer ts.Close()
 
 	// /api/tasks with no job → {"task":null}.
@@ -137,7 +137,7 @@ func TestAPIEndpoints(t *testing.T) {
 
 func TestAPIHostCheck(t *testing.T) {
 	dir := t.TempDir()
-	srv := New(dir, false) // loopback-only: non-local Host must be rejected
+	srv := New(dir, dir, false) // loopback-only: non-local Host must be rejected
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

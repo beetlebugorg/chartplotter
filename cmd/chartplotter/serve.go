@@ -32,28 +32,34 @@ type serveCmd struct {
 	Host       string `default:"127.0.0.1" help:"Bind host."`
 	Port       int    `default:"8080" help:"Bind port."`
 	Assets     string `default:"web" type:"existingdir" help:"Directory of static assets to serve."`
-	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cell download cache + provisioned charts-user.{pmtiles,json} for a clean slate."`
+	Cache      string `help:"Cache dir for per-region zips + baked .pmtiles (default: XDG cache)."`
+	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached region zips + baked archives for a clean slate."`
 }
 
 func (c serveCmd) Run() error {
+	cacheDir := c.Cache
+	if cacheDir == "" {
+		cacheDir = server.DefaultCacheDir()
+	}
+
 	if c.ClearCache {
-		n, err := server.ClearCache(c.Assets)
+		n, err := server.ClearCache(cacheDir)
 		if err != nil {
 			return fmt.Errorf("clear cache: %w", err)
 		}
-		fmt.Printf("cleared %d cached file(s) from %s\n", n, c.Assets)
+		fmt.Printf("cleared %d cached file(s) from %s\n", n, cacheDir)
 	}
 
 	// Loopback bind → enforce the Host-header DNS-rebind check on /api. Any
 	// other bind means the operator opted into network exposure.
 	allowRemote := !(c.Host == "127.0.0.1" || c.Host == "localhost" || c.Host == "::1")
-	srv := server.New(c.Assets, allowRemote)
+	srv := server.New(c.Assets, cacheDir, allowRemote)
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""
 	if allowRemote {
 		remoteNote = ", remote OK"
 	}
-	fmt.Printf("chartplotter → http://%s/  (assets=%s%s)\n", addr, c.Assets, remoteNote)
+	fmt.Printf("chartplotter → http://%s/  (assets=%s, cache=%s%s)\n", addr, c.Assets, cacheDir, remoteNote)
 	return http.ListenAndServe(addr, srv)
 }

@@ -49,25 +49,17 @@ func (p *ProgressSink) log(format string, a ...any) {
 	}
 }
 
-// ClearCache removes the provisioned state from dir: the per-cell download
-// cache (.cellcache-*.000), the baked archive (charts-user.pmtiles), its
-// sidecar manifest (charts-user.json), and any stray spill. Returns how many
-// files were removed. Used by `serve --clear-cache` for a clean slate.
-func ClearCache(dir string) (int, error) {
-	n := 0
-	for _, pat := range []string{".cellcache-*.000", ".regioncache-*.zip"} {
-		matches, err := filepath.Glob(filepath.Join(dir, pat))
-		if err != nil {
-			return 0, err
-		}
-		for _, m := range matches {
-			if os.Remove(m) == nil {
-				n++
-			}
-		}
+// ClearCache removes the per-region cache under cacheDir: every cached region
+// zip + baked .pmtiles (the whole regions/ dir). Returns how many files were
+// removed. Used by `serve --clear-cache` for a clean slate.
+func ClearCache(cacheDir string) (int, error) {
+	matches, err := filepath.Glob(filepath.Join(regionsDir(cacheDir), "*"))
+	if err != nil {
+		return 0, err
 	}
-	for _, name := range []string{"charts-user.pmtiles", "charts-user.json", "charts-user.pmtiles.spill"} {
-		if os.Remove(filepath.Join(dir, name)) == nil {
+	n := 0
+	for _, m := range matches {
+		if os.Remove(m) == nil {
 			n++
 		}
 	}
@@ -201,95 +193,6 @@ func ProvisionCore(dir string, names []string, p *ProgressSink) (ProvisionResult
 // noaaENCBase is the NOAA ENC download root (per-cell and per-region zips live
 // here). Server-side so the browser never has to fetch NOAA cross-origin.
 const noaaENCBase = "https://www.charts.noaa.gov/ENCs/"
-
-// ProvisionRegions provisions whole NOAA ENC regions by downloading each
-// region's official bundle zip (`<NN>Region_ENCs.zip`) — ONE big download that
-// is the authoritative, complete cell list for the region — extracting every
-// base cell, and baking the union into dir/charts-user.pmtiles. The region zips
-// are cached at dir/.regioncache-<NN>.zip so re-baking (add/remove a region)
-// doesn't re-download. The manifest records the installed region numbers.
-func ProvisionRegions(dir string, regions []int, p *ProgressSink) (ProvisionResult, error) {
-	client := &http.Client{Timeout: 30 * time.Minute} // region zips are tens of MB
-	cells := map[string][]byte{}
-	total := len(regions)
-	for i, num := range regions {
-		zipName := fmt.Sprintf("%02dRegion_ENCs.zip", num)
-		p.onDownload(i, total, zipName)
-		data, hit, err := loadRegionZipCached(client, dir, num)
-		if err != nil {
-			p.log("  ! region %d: %v (skipped)", num, err)
-			continue
-		}
-		n, err := extractBaseCells(data, cells)
-		if err != nil {
-			p.log("  ! region %d: extract: %v (skipped)", num, err)
-			continue
-		}
-		src := "downloaded"
-		if hit {
-			src = "cached"
-		}
-		p.log("%s region %d: %d cells (%d/%d)", src, num, n, i+1, total)
-		p.onDownload(i+1, total, zipName)
-	}
-	if len(cells) == 0 {
-		return ProvisionResult{}, fmt.Errorf("no cells from %d region(s)", total)
-	}
-
-	b, ok, err := baker.BuildBaker(cells, func(n string, e error) { p.log("  ! %s: %v (skipped)", n, e) })
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	pb := baker.BakeToPMTiles(b, func(done, t int) { p.onImport(done, t) })
-
-	out := filepath.Join(dir, "charts-user.pmtiles")
-	f, err := os.Create(out)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	if err := pb.WriteArchive(f); err != nil {
-		f.Close()
-		return ProvisionResult{}, err
-	}
-	f.Close()
-
-	info, err := pmtilesInfo(out)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	okNames := make([]string, len(ok))
-	for i, n := range ok {
-		okNames[i] = trimCellExt(n)
-	}
-	writeUserManifest(dir, okNames, regions, info)
-
-	return ProvisionResult{
-		Cells: len(ok), Tiles: info.tiles, Bytes: info.bytes,
-		W: info.w, S: info.s, E: info.e, N: info.n,
-	}, nil
-}
-
-// loadRegionZipCached returns a region bundle zip's bytes, cached at
-// dir/.regioncache-<NN>.zip. Downloads with retry on transient failure.
-func loadRegionZipCached(client *http.Client, dir string, num int) (data []byte, hit bool, err error) {
-	cpath := filepath.Join(dir, fmt.Sprintf(".regioncache-%02d.zip", num))
-	if b, e := os.ReadFile(cpath); e == nil && len(b) > 0 {
-		return b, true, nil
-	}
-	url := fmt.Sprintf("%s%02dRegion_ENCs.zip", noaaENCBase, num)
-	for attempt := 1; ; attempt++ {
-		data, err = httpGet(client, url)
-		if err == nil {
-			break
-		}
-		if attempt >= 3 {
-			return nil, false, err
-		}
-		time.Sleep(time.Duration(attempt) * time.Second)
-	}
-	_ = os.WriteFile(cpath, data, 0o644)
-	return data, false, nil
-}
 
 // httpGet fetches a URL and returns the body, erroring on non-200.
 func httpGet(client *http.Client, url string) ([]byte, error) {

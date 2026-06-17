@@ -14,22 +14,26 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Server hosts assetsDir and the API. The zero value is not usable; use New.
+// Server hosts assetsDir (static web assets) + the per-region chart archives
+// from cacheDir, and the API. The zero value is not usable; use New.
 type Server struct {
 	assetsDir   string
+	cacheDir    string // XDG cache root; regions/<NN>.pmtiles served at /charts/<NN>.pmtiles
 	allowRemote bool
 	task        task
 }
 
-// New returns a Server rooted at assetsDir. allowRemote is true when the bind
-// host is not loopback (the operator opted into network exposure), which skips
-// the per-request Host-header DNS-rebind check on /api.
-func New(assetsDir string, allowRemote bool) *Server {
-	return &Server{assetsDir: assetsDir, allowRemote: allowRemote}
+// New returns a Server serving static assets from assetsDir and baked region
+// archives from cacheDir. allowRemote is true when the bind host is not loopback
+// (the operator opted into network exposure), which skips the per-request
+// Host-header DNS-rebind check on /api.
+func New(assetsDir, cacheDir string, allowRemote bool) *Server {
+	return &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +41,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lw := &logResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		s.handleAPI(lw, r)
+	} else if strings.HasPrefix(r.URL.Path, "/charts/") {
+		s.serveRegion(lw, r)
 	} else {
 		s.serveAsset(lw, r)
 	}
@@ -96,20 +102,84 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusForbidden, "non-local host")
 		return
 	}
-	switch r.URL.Path {
-	case "/api/health":
+	switch {
+	case r.URL.Path == "/api/health":
 		w.Header().Set("Content-Type", jsonCT)
 		io.WriteString(w, `{"ok":true}`)
-	case "/api/provision":
+	case r.URL.Path == "/api/provision":
 		s.provisionStart(w, r)
-	case "/api/tasks":
+	case r.URL.Path == "/api/tasks":
 		w.Header().Set("Content-Type", jsonCT)
 		io.WriteString(w, s.task.json())
-	case "/api/charts":
-		s.deleteCharts(w, r)
+	case r.URL.Path == "/api/charts":
+		s.handleCharts(w, r) // GET → manifest, DELETE → remove all
+	case strings.HasPrefix(r.URL.Path, "/api/charts/"):
+		s.deleteRegion(w, r) // DELETE /api/charts/<NN>
 	default:
 		apiErr(w, http.StatusNotFound, "unknown endpoint")
 	}
+}
+
+// serveRegion serves a baked region archive (/charts/<NN>.pmtiles) from the
+// cache's regions dir, honouring HTTP Range.
+func (s *Server) serveRegion(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/charts/")
+	num, ok := regionNumFromPMTiles(name)
+	if !ok || strings.ContainsAny(name, "/\\") {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveFile(w, r, regionPMTilesPath(s.cacheDir, num), name)
+}
+
+// handleCharts: GET → the installed-region manifest; DELETE → remove every
+// baked region archive (clean slate).
+func (s *Server) handleCharts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", jsonCT)
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write(regionManifest(s.cacheDir))
+	case http.MethodDelete:
+		if s.task.isRunning() {
+			apiErr(w, http.StatusConflict, "busy")
+			return
+		}
+		entries, _ := os.ReadDir(regionsDir(s.cacheDir))
+		for _, e := range entries {
+			if n, ok := regionNumFromPMTiles(e.Name()); ok {
+				_ = DeleteRegion(s.cacheDir, n)
+			}
+		}
+		w.Header().Set("Content-Type", jsonCT)
+		io.WriteString(w, `{"ok":true}`)
+	default:
+		apiErr(w, http.StatusMethodNotAllowed, "GET or DELETE")
+	}
+}
+
+// deleteRegion removes ONE region's baked archive (DELETE /api/charts/<NN>) —
+// instant, no re-bake of the others. Refused while a job is running.
+func (s *Server) deleteRegion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		apiErr(w, http.StatusMethodNotAllowed, "DELETE only")
+		return
+	}
+	if s.task.isRunning() {
+		apiErr(w, http.StatusConflict, "busy")
+		return
+	}
+	num, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/charts/"))
+	if err != nil || !validRegions[num] {
+		apiErr(w, http.StatusBadRequest, "bad region")
+		return
+	}
+	if err := DeleteRegion(s.cacheDir, num); err != nil {
+		apiErr(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	w.Header().Set("Content-Type", jsonCT)
+	io.WriteString(w, `{"ok":true}`)
 }
 
 // validRegions is the set of NOAA ENC region numbers (the catalog `rg` values).
@@ -202,11 +272,17 @@ func (s *Server) runProvisionJob(names []string) {
 	s.task.finishOk()
 }
 
-// runRegionJob runs ProvisionRegions (NOAA region bundle zips).
+// runRegionJob bakes each requested region into its OWN archive in the cache
+// (regions/<NN>.pmtiles), skipping any already baked. One pmtiles per region, so
+// this only ever bakes the NEW region(s) — never the union.
 func (s *Server) runRegionJob(regions []int) {
-	if _, err := ProvisionRegions(s.assetsDir, regions, s.sink()); err != nil {
-		s.task.finishErr(sanitizeErr(err))
-		return
+	sink := s.sink()
+	for i, num := range regions {
+		s.task.setDownload(i, len(regions), fmt.Sprintf("region %d", num))
+		if err := ProvisionRegionToCache(s.cacheDir, num, sink); err != nil {
+			s.task.finishErr(sanitizeErr(err))
+			return
+		}
 	}
 	s.task.finishOk()
 }
@@ -225,24 +301,6 @@ func sanitizeErr(err error) string {
 	}, msg)
 }
 
-// deleteCharts removes the provisioned archive + sidecar (used to remove the
-// last region). Refused while a job is running (it owns those files).
-func (s *Server) deleteCharts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		apiErr(w, http.StatusMethodNotAllowed, "DELETE only")
-		return
-	}
-	if s.task.isRunning() {
-		apiErr(w, http.StatusConflict, "busy")
-		return
-	}
-	for _, name := range []string{"charts-user.pmtiles", "charts-user.json", "charts-user.pmtiles.spill"} {
-		_ = os.Remove(filepath.Join(s.assetsDir, name))
-	}
-	w.Header().Set("Content-Type", jsonCT)
-	io.WriteString(w, `{"ok":true}`)
-}
-
 // serveAsset serves a static file from assetsDir, honouring HTTP Range (via
 // http.ServeContent) and adding permissive CORS so the pmtiles:// protocol can
 // fetch byte ranges.
@@ -256,8 +314,13 @@ func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	full := filepath.Join(s.assetsDir, filepath.FromSlash(rel))
+	s.serveFile(w, r, filepath.Join(s.assetsDir, filepath.FromSlash(rel)), rel)
+}
 
+// serveFile streams a file with HTTP Range + permissive CORS (so the pmtiles://
+// protocol can fetch byte ranges). `rel` is the request path (used for the MIME
+// type + cache policy).
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, full, rel string) {
 	f, err := os.Open(full)
 	if err != nil {
 		http.NotFound(w, r)
