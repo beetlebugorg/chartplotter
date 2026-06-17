@@ -472,14 +472,30 @@ export class ChartPlotter extends HTMLElement {
     return this.addArchive(src);
   }
 
+  // The NOAA bands a full-range ("all") archive fans out to. A single full-range
+  // source can only overzoom above the archive's GLOBAL max, so a coarse-only
+  // spot in a mixed archive (e.g. a region's open water, baked only to the
+  // coastal band) would blank to S-52 no-data above that band instead of showing
+  // the coarser chart overscale. Serving the one archive through every per-band
+  // source — each fixed to its band's [min,max] and overzooming above its own max
+  // — gives the spec's overscale (the finest band present shows; coarser fills
+  // the rest), exactly like the per-band district path. Explicit bands pass through.
+  _fanBands(band) {
+    return band === "all" ? CHART_BANDS.filter((b) => b.slug !== "all").map((b) => b.slug) : [band];
+  }
+
   // ADD an archive to the loaded coverage (does not unload the others), into its
-  // NOAA band (`overview`…`berthing`). A bandless source (an uploaded merged
-  // archive / `--emit-pmtiles`) goes to the full-range `all` band. Districts bake
-  // to disjoint per-band archives, so adding them all lets the map show charts
-  // wherever you look at every zoom — tiles still stream by viewport.
+  // NOAA band (`overview`…`berthing`), or — for a bandless merged archive (an
+  // upload / `--emit-pmtiles` / the provisioned `charts-user.pmtiles`) — fanned
+  // across every band so it overzooms correctly (see `_fanBands`). Tiles still
+  // stream by viewport.
   async addArchive(src, band = "all") {
-    if (!this._bands[band]) this._bands[band] = new MultiArchive();
-    const a = await this._bands[band].add(this._resolveSrc(src));
+    const resolved = this._resolveSrc(src);
+    let a = null;
+    for (const b of this._fanBands(band)) {
+      if (!this._bands[b]) this._bands[b] = new MultiArchive();
+      a = await this._bands[b].add(resolved);
+    }
     this._updateSourceZoom();
     this.refresh();
     return a;
@@ -490,8 +506,12 @@ export class ChartPlotter extends HTMLElement {
   // the other bands (e.g. hosted per-band districts). Re-reads the new header +
   // directory and re-requests tiles. A cache-busted URL avoids a stale 304.
   async replaceBand(band, src) {
-    this._bands[band] = new MultiArchive();
-    const a = await this._bands[band].add(this._resolveSrc(src));
+    const resolved = this._resolveSrc(src);
+    let a = null;
+    for (const b of this._fanBands(band)) {
+      this._bands[b] = new MultiArchive();
+      a = await this._bands[b].add(resolved);
+    }
     this._updateSourceZoom();
     this.refresh();
     return a;
