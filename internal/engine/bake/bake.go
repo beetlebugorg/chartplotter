@@ -91,19 +91,23 @@ func BandForScale(cscl uint32) Band {
 	}
 }
 
-// scaminZoom maps an S-52 SCAMIN (1:N denominator) to the lowest Web-Mercator
-// zoom whose display-scale denominator is <= SCAMIN — where the object first
-// becomes visible (OGC/equator scale set). Clamped to the baked zoom span.
-func scaminZoom(scamin uint32) uint32 {
+// scaminZoom maps an S-52 SCAMIN (1:N denominator) to the Web-Mercator zoom
+// where the object first becomes visible: the zoom whose DISPLAY-scale
+// denominator (at the cell's latitude) is nearest SCAMIN. S-52 §8.4 gates on the
+// display scale, so we use the cell's latitude (not the equator) and round to
+// the nearest integer zoom — otherwise (equator + round-up, as bake.zig does)
+// features pop in ~1 zoom late at mid/high latitudes (e.g. a 1:22k harbour
+// sounding wouldn't show until 1:13k instead of ~1:26k). Clamped to the zoom span.
+func scaminZoom(scamin uint32, lat float64) uint32 {
 	if scamin == 0 {
 		return 0
 	}
-	const denomZ0 = 559_082_264.029 // 1:N at z0, equator, OGC 0.28 mm px
+	denomZ0 := 559_082_264.029 * math.Cos(lat*math.Pi/180) // 1:N at z0 at this latitude
 	s := float64(scamin)
 	if denomZ0 <= s {
 		return 0
 	}
-	z := math.Ceil(math.Log2(denomZ0 / s))
+	z := math.Round(math.Log2(denomZ0 / s))
 	if z >= float64(maxBandZ) {
 		return maxBandZ
 	}
@@ -118,12 +122,12 @@ func scaminZoom(scamin uint32) uint32 {
 // no minimum display scale, so both float to z0; SCAMIN raises it. Coarse-tile
 // pile-up is bounded by EmitTile's best-available suppression (a finer cell
 // yields only where no coarser cell covers it). Matches bake.zig specZMin.
-func specZMin(displayCategory int, scamin uint32) uint32 {
+func specZMin(displayCategory int, scamin uint32, lat float64) uint32 {
 	if displayCategory == s52.DisplayBase {
 		return 0
 	}
 	if scamin != 0 {
-		return scaminZoom(scamin)
+		return scaminZoom(scamin, lat)
 	}
 	return 0
 }
@@ -201,6 +205,8 @@ func (b *Baker) Bounds() geo.BoundingBox { return b.bbox }
 func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.MarinerSettings) {
 	band := BandForScale(uint32(chart.CompilationScale()))
 	zr := band.ZoomRange()
+	cb := chart.Bounds()
+	cellLat := (cb.MinLat + cb.MaxLat) / 2 // SCAMIN→zoom uses the cell's display scale
 	features := chart.Features()
 	for i := range features {
 		f := &features[i]
@@ -211,7 +217,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
-			zMin := specZMin(fb.DisplayCategory, scamin)
+			zMin := specZMin(fb.DisplayCategory, scamin, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
 			prims := fb.Primitives
