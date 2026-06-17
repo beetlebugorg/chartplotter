@@ -93,6 +93,92 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 	return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}, true
 }
 
+// Boundary-symbolization tags (S-52 §8.6.1) stamped on each primitive's baked
+// `bnd`, which the client's boundaryFilter keys off: 2 = style-independent
+// (always shown), 0 = plain-boundary pass, 1 = symbolized-boundary pass.
+const (
+	BndCommon     = 2
+	BndPlain      = 0
+	BndSymbolized = 1
+)
+
+// FeatureBuildPass is one boundary-symbolization pass: the built primitives plus
+// the bnd tag the baker stamps on every primitive of the pass. Mirrors bake.zig
+// Pass.
+type FeatureBuildPass struct {
+	Build FeatureBuild
+	Bnd   int
+}
+
+// BuildFeaturePasses expands a feature into its boundary-symbolization passes
+// (S-52 §8.6.1). Non-area features, and areas whose plain and symbolized
+// boundaries are identical, get ONE pass tagged bnd=2 (style-independent). A
+// style-variant area — a distinct SYMBOLIZED_BOUNDARIES lookup, or one routing
+// through RESARE04 (the only CSP that reads the boundary style) — gets TWO
+// passes, plain (bnd=0) and symbolized (bnd=1), so the client toggles boundary
+// style live with no re-bake. Mirrors bake.zig boundaryPasses.
+func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature) []FeatureBuildPass {
+	if mariner == nil {
+		mariner = s52.DefaultMarinerSettings()
+	}
+	mPlain := *mariner
+	mPlain.SymbolizedBoundaries = false
+	buildP, ok := BuildFeature(lib, &mPlain, f)
+	if !ok {
+		return nil
+	}
+	one := []FeatureBuildPass{{Build: buildP, Bnd: BndCommon}}
+	if f.Geometry().Type != s57.GeometryTypePolygon {
+		return one
+	}
+	mSym := *mariner
+	mSym.SymbolizedBoundaries = true
+	objClass := f.ObjectClass()
+	geomCode := geometryCode(f.Geometry().Type)
+	attrs := f.Attributes()
+	setP := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mPlain)
+	setS := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mSym)
+	if setP == nil || setS == nil {
+		return one
+	}
+	if !instructionSetsDiffer(setP, setS) && !routesToResare(setP) {
+		return one
+	}
+	buildS, ok := BuildFeature(lib, &mSym, f)
+	if !ok {
+		return one
+	}
+	return []FeatureBuildPass{
+		{Build: buildP, Bnd: BndPlain},
+		{Build: buildS, Bnd: BndSymbolized},
+	}
+}
+
+// routesToResare reports whether a lookup dispatches RESARE04 — the one CSP whose
+// output (the area boundary, LC vs LS) depends on the mariner's boundary style.
+func routesToResare(set *s52.InstructionSet) bool {
+	for _, ins := range set.Instructions {
+		if cs, ok := ins.(*s52.CSInstruction); ok && cs.ProcedureName == "RESARE04" {
+			return true
+		}
+	}
+	return false
+}
+
+// instructionSetsDiffer reports whether two lookups resolved to different
+// instructions — e.g. a distinct PLAIN_BOUNDARIES vs SYMBOLIZED_BOUNDARIES LUP.
+func instructionSetsDiffer(a, b *s52.InstructionSet) bool {
+	if len(a.Instructions) != len(b.Instructions) {
+		return true
+	}
+	for i := range a.Instructions {
+		if a.Instructions[i].String() != b.Instructions[i].String() {
+			return true
+		}
+	}
+	return false
+}
+
 // applyDangerDepth reproduces the net OBSTRN06/WRECKS05 danger behaviour (S-52
 // §13.2.6/§13.2.20): a sounded obstruction/wreck (one with VALSOU) is portrayed
 // as the dangerous symbol DANGER01 carrying its depth + the deep variant

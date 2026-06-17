@@ -204,34 +204,37 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	features := chart.Features()
 	for i := range features {
 		f := &features[i]
-		fb, ok := portrayal.BuildFeature(lib, mariner, f)
-		if !ok {
-			continue
-		}
-		scamin := intAttr(f.Attributes(), "SCAMIN")
-		zMin := specZMin(fb.DisplayCategory, scamin)
-		class := f.ObjectClass()
-		prims := fb.Primitives
-		for pi := 0; pi < len(prims); pi++ {
-			// A sounding number (SOUNDG03) emits one digit glyph per column, all at
-			// the same anchor (the glyph art carries the column shift). Group a
-			// number's consecutive same-anchor digit glyphs into ONE soundings
-			// feature so the client renders the whole number and declutter treats
-			// it as a single unit (matches bake.zig).
-			if sc, ok := prims[pi].(portrayal.SymbolCall); ok && isSoundingName(sc.SymbolName) {
-				names := []string{sc.SymbolName}
-				for pi+1 < len(prims) {
-					nsc, ok := prims[pi+1].(portrayal.SymbolCall)
-					if !ok || !isSoundingName(nsc.SymbolName) || nsc.Anchor != sc.Anchor {
-						break
+		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
+		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
+		// style live; everything else is one pass tagged bnd=2.
+		for _, pass := range portrayal.BuildFeaturePasses(lib, mariner, f) {
+			fb := pass.Build
+			bnd := int64(pass.Bnd)
+			scamin := intAttr(f.Attributes(), "SCAMIN")
+			zMin := specZMin(fb.DisplayCategory, scamin)
+			class := f.ObjectClass()
+			prims := fb.Primitives
+			for pi := 0; pi < len(prims); pi++ {
+				// A sounding number (SOUNDG03) emits one digit glyph per column, all at
+				// the same anchor (the glyph art carries the column shift). Group a
+				// number's consecutive same-anchor digit glyphs into ONE soundings
+				// feature so the client renders the whole number and declutter treats
+				// it as a single unit (matches bake.zig).
+				if sc, ok := prims[pi].(portrayal.SymbolCall); ok && isSoundingName(sc.SymbolName) {
+					names := []string{sc.SymbolName}
+					for pi+1 < len(prims) {
+						nsc, ok := prims[pi+1].(portrayal.SymbolCall)
+						if !ok || !isSoundingName(nsc.SymbolName) || nsc.Anchor != sc.Anchor {
+							break
+						}
+						names = append(names, nsc.SymbolName)
+						pi++
 					}
-					names = append(names, nsc.SymbolName)
-					pi++
+					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd)
+					continue
 				}
-				b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin)
-				continue
+				b.route(prims[pi], class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd)
 			}
-			b.route(prims[pi], class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin)
 		}
 	}
 }
@@ -239,14 +242,14 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 // routeSoundingGroup emits one soundings feature for a whole sounding number
 // (the comma-joined digit-glyph list), carrying depth + both palette variants so
 // the client runs SNDFRM04's safety-depth split live.
-func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32) {
+func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32, bnd int64) {
 	joined := strings.Join(names, ",")
 	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
 	attrs := []mvt.KeyValue{
 		{Key: "class", Value: mvt.StringVal(class)},
 		{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
 		{Key: "cat", Value: mvt.IntVal(catRank(cat))},
-		{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
+		{Key: "bnd", Value: mvt.IntVal(bnd)},
 		{Key: "symbol_names", Value: mvt.StringVal(joined)},
 		{Key: "scale", Value: mvt.FloatVal(sc.Scale)},
 	}
@@ -277,10 +280,10 @@ func catRank(displayCategory int) int64 {
 }
 
 // bndAlwaysShown is the S-52 boundary-symbolization tag the client's
-// boundaryFilter always passes (2 = style-independent). The plain/symbolized
-// split (bnd 0/1, a SYMINS refinement for area boundaries) is not yet produced
-// by the portrayal, so every feature is tagged always-shown — emitting the
-// scale band here (as before) made boundaryFilter reject every feature.
+// boundaryFilter always passes (2 = style-independent), used for geometry that
+// isn't a style-variant area boundary (sector lights here; most features via the
+// single bnd=2 pass). Style-variant areas instead get the plain (0) / symbolized
+// (1) split from portrayal.BuildFeaturePasses, so the boundary-style toggle works.
 const bndAlwaysShown int64 = 2
 
 func (b *Baker) add(r routed, bb geo.BoundingBox) {
@@ -292,13 +295,13 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.prims = append(b.prims, r)
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32, bnd int64) {
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
 			{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
 			{Key: "cat", Value: mvt.IntVal(catRank(cat))},
-			{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
+			{Key: "bnd", Value: mvt.IntVal(bnd)},
 		}
 		return append(base, extra...)
 	}
