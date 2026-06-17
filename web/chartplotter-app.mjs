@@ -169,10 +169,10 @@ export class ChartPlotterApp extends HTMLElement {
     const z = this._map.getZoom(), c = this._map.getCenter();
     const band = bandForZoom(z);
     el.innerHTML =
-      `<div class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
+      `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
       `<span>${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span></div>` +
-      `<div class="hud-sub">z ${z.toFixed(1)}  ·  ${c.lat.toFixed(4)}°, ${c.lng.toFixed(4)}°</div>`;
+      `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span>` +
+      `<span class="hud-sep">·</span><span>z${z.toFixed(1)}</span></span>`;
   }
 
 
@@ -1147,7 +1147,7 @@ export class ChartPlotterApp extends HTMLElement {
         .linkbtn { background:none; border:none; color:#1565c0; cursor:pointer; font:inherit; padding:8px 0; display:block; }
         .linkbtn.danger { color:#c0392b; }
         /* persistent in-flight download/import pill (bottom-centre) */
-        #dlpill { position:absolute; bottom:18px; left:50%; transform:translateX(-50%); z-index:7; display:inline-flex; align-items:center;
+        #dlpill { position:absolute; bottom:42px; left:50%; transform:translateX(-50%); z-index:7; display:inline-flex; align-items:center;
           gap:9px; background:#1565c0; color:#fff; border:none; border-radius:22px; padding:8px 16px; font:inherit; font-size:13px; font-weight:600;
           cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.28); }
         #dlpill[hidden] { display:none; }
@@ -1186,15 +1186,17 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button.sel { background:#1565c0; color:#fff; }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
-        /* Merged lower-right panel: live readout + in-view cells + NOAA attribution. */
-        #coverage-panel { position:absolute; right:12px; bottom:12px; z-index:5; width:min(300px,calc(100% - 24px));
-          background:rgba(255,255,255,.94); border:1px solid rgba(0,0,0,.06); border-radius:10px;
-          box-shadow:0 2px 10px rgba(0,0,0,.14); backdrop-filter:blur(5px); overflow:hidden;
-          display:flex; flex-direction:column; }
-        #cov-attr { font:11px/1.4 system-ui,sans-serif; color:#5a6068; padding:5px 11px; border-top:1px solid rgba(0,0,0,.06); }
-        #cov-attr a, #cov-attr .attr-link { color:#1565c0; text-decoration:none; cursor:pointer; }
-        #cov-attr a:hover, #cov-attr .attr-link:hover { text-decoration:underline; }
-        #cov-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
+        /* Bottom statusbar: live readout (left) · in-view cells (scrolls) · NOAA attribution (right). */
+        #statusbar { position:absolute; left:56px; right:0; bottom:0; z-index:5; height:30px;
+          display:flex; align-items:center; gap:12px; padding:0 12px; box-sizing:border-box;
+          background:rgba(255,255,255,.95); border-top:1px solid rgba(0,0,0,.08);
+          box-shadow:0 -1px 6px rgba(0,0,0,.07); backdrop-filter:blur(5px);
+          font:12px system-ui,sans-serif; color:#2a2f35; transition:left .2s; }
+        #statusbar.with-drawer { left:calc(56px + var(--drawer-w)); }
+        .sb-attr { flex:none; font-size:11px; color:#5a6068; white-space:nowrap; }
+        .sb-attr a, .sb-attr .attr-link { color:#1565c0; text-decoration:none; cursor:pointer; }
+        .sb-attr a:hover, .sb-attr .attr-link:hover { text-decoration:underline; }
+        .sb-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
         /* NOAA ENC user-agreement gate (shown before the first download). */
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
           background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
@@ -1206,28 +1208,26 @@ export class ChartPlotterApp extends HTMLElement {
         .modal-card .agree-body li { margin:5px 0; }
         .modal-card a { color:#1565c0; }
         .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
-        /* Live scale/zoom/band readout (top of the panel). */
-        #cov-readout { color:#2a2f35; padding:7px 12px; text-align:right; }
-        #cov-readout .hud-main { display:flex; align-items:center; justify-content:flex-end; gap:7px; font-weight:600; font-size:13px; line-height:1.2; }
-        #cov-readout .hud-dot { width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); }
-        #cov-readout .hud-scale { color:#1565c0; }
-        #cov-readout .hud-sep { color:#c7ccd2; font-weight:400; }
-        #cov-readout .hud-sub { margin-top:2px; font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8a9098; }
-        /* In-view cells, grouped by band. Scrolls when many are in view. */
-        #cov-cells { max-height:38vh; overflow-y:auto; padding:0 10px 6px; }
-        #cov-cells:empty { display:none; }
-        .cov-band { display:flex; gap:6px; align-items:flex-start; padding:4px 0; border-top:1px solid rgba(0,0,0,.05); }
-        .cov-band-tag { flex:none; margin-top:1px; color:#fff; font:600 10px/1.5 system-ui,sans-serif; padding:0 6px; border-radius:9px; }
-        .cov-chips { display:flex; flex-wrap:wrap; gap:4px; }
-        .cov-cell { font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; padding:1px 6px; border-radius:5px;
+        /* Live band·scale·zoom readout (left of the statusbar), one line. */
+        .sb-readout { flex:none; }
+        .sb-readout .hud-main { display:inline-flex; align-items:center; gap:6px; font-weight:600; font-size:12px; white-space:nowrap; }
+        .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); }
+        .sb-readout .hud-scale { color:#1565c0; }
+        .sb-readout .hud-sep { color:#c7ccd2; font-weight:400; }
+        /* In-view cells, band-grouped, in one horizontally-scrolling row. */
+        .sb-cells { flex:1; min-width:0; display:flex; align-items:center; gap:10px; overflow-x:auto; overflow-y:hidden; white-space:nowrap; scrollbar-width:thin; }
+        .cov-band { display:inline-flex; align-items:center; gap:5px; flex:none; }
+        .cov-band-tag { flex:none; color:#fff; font:600 10px/1.5 system-ui,sans-serif; padding:0 6px; border-radius:9px; }
+        .cov-chips { display:inline-flex; gap:4px; }
+        .cov-cell { font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; padding:0 6px; border-radius:5px;
           border:1px solid rgba(0,0,0,.12); background:#eef1f4; color:#384049; cursor:pointer; }
         .cov-cell:hover { border-color:#1565c0; color:#1565c0; }
         .cov-cell.missing { background:repeating-linear-gradient(45deg,#fff,#fff 4px,#f3f4f6 4px,#f3f4f6 8px);
           color:#8a9098; border-style:dashed; }
         .cov-cell.missing::after { content:" ↓"; color:#1565c0; }
         .cov-cell.missing:hover { color:#1565c0; border-color:#1565c0; }
-        .cov-more { font:11px/1.5 system-ui,sans-serif; color:#8a9098; align-self:center; }
-        .cov-empty { font:12px/1.4 system-ui,sans-serif; color:#8a9098; padding:4px 2px; }
+        .cov-more { font:11px system-ui,sans-serif; color:#8a9098; }
+        .cov-empty { font:12px system-ui,sans-serif; color:#8a9098; }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
         #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:#fafafa;
@@ -1298,10 +1298,10 @@ export class ChartPlotterApp extends HTMLElement {
         </button>
       </div>
       <div id="search"><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
-      <div id="coverage-panel">
-        <div id="cov-readout"></div>
-        <div id="cov-cells"></div>
-        <div id="cov-attr">
+      <div id="statusbar">
+        <div id="cov-readout" class="sb-readout"></div>
+        <div id="cov-cells" class="sb-cells"></div>
+        <div id="cov-attr" class="sb-attr">
           Data from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
           · <button id="attr-terms" class="attr-link" type="button">Terms</button>
           · not for navigation
@@ -1401,6 +1401,7 @@ export class ChartPlotterApp extends HTMLElement {
     const r = this.shadowRoot;
     r.getElementById("drawer").classList.toggle("open", open);
     r.getElementById("map").classList.toggle("with-drawer", open);
+    r.getElementById("statusbar").classList.toggle("with-drawer", open);
     r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
     setTimeout(() => { if (this._map) this._map.resize(); }, 230);
