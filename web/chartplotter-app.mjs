@@ -1227,7 +1227,7 @@ export class ChartPlotterApp extends HTMLElement {
         #noaa-attr { position:absolute; right:12px; bottom:38px; z-index:5; pointer-events:auto;
           font:600 11px/1.4 system-ui,sans-serif; letter-spacing:.01em;
           color:rgba(33,40,48,.6); text-shadow:0 1px 0 rgba(255,255,255,.7);
-          background:rgba(255,255,255,.3); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.05);
+          background:rgba(255,255,255,.72); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.06);
           box-shadow:inset 0 1px 2px rgba(0,0,0,.22), inset 0 -1px 0 rgba(255,255,255,.5), 0 1px 0 rgba(255,255,255,.45); }
         #noaa-attr a, #noaa-attr .attr-link { color:inherit; text-shadow:inherit; cursor:pointer;
           text-decoration:underline; text-decoration-color:rgba(33,40,48,.32); text-underline-offset:2px; }
