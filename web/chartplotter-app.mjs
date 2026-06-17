@@ -1221,12 +1221,15 @@ export class ChartPlotterApp extends HTMLElement {
           box-shadow:0 -1px 6px rgba(0,0,0,.07); backdrop-filter:blur(5px);
           font:12px system-ui,sans-serif; color:#2a2f35; transition:left .2s; }
         #statusbar.with-drawer { left:calc(56px + var(--drawer-w)); }
-        /* NOAA attribution — an embedded map pill in the lower-right, just above the bar. */
-        #noaa-attr { position:absolute; right:10px; bottom:38px; z-index:5; font:11px/1.4 system-ui,sans-serif;
-          color:#5a6068; background:rgba(255,255,255,.82); border-radius:6px; padding:2px 8px;
-          box-shadow:0 1px 4px rgba(0,0,0,.12); backdrop-filter:blur(3px); }
-        #noaa-attr a, #noaa-attr .attr-link { color:#1565c0; text-decoration:none; cursor:pointer; }
-        #noaa-attr a:hover, #noaa-attr .attr-link:hover { text-decoration:underline; }
+        /* NOAA attribution — no card; engraved into the chart. A letterpress
+           effect (dark semi-transparent ink + a light highlight just below each
+           glyph) makes it read as embossed in the map surface. */
+        #noaa-attr { position:absolute; right:12px; bottom:38px; z-index:5; pointer-events:auto;
+          font:600 11px/1.4 system-ui,sans-serif; letter-spacing:.01em;
+          color:rgba(33,40,48,.5); text-shadow:0 1px 0 rgba(255,255,255,.7); }
+        #noaa-attr a, #noaa-attr .attr-link { color:inherit; text-shadow:inherit; cursor:pointer;
+          text-decoration:underline; text-decoration-color:rgba(33,40,48,.32); text-underline-offset:2px; }
+        #noaa-attr a:hover, #noaa-attr .attr-link:hover { color:rgba(18,24,31,.82); }
         #noaa-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
         /* NOAA ENC user-agreement gate (shown before the first download). */
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
