@@ -874,15 +874,7 @@ export class ChartPlotter extends HTMLElement {
         const base = L.filter ?? null;
         this._layerBase[id] = base;
         (this._variants[L.id] ||= []).push(id);
-        const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) };
-        // Area/line fills overzoom above a band's max (so coarse coverage fills
-        // in — no no-data). SYMBOL layers must NOT: every band the one archive is
-        // fanned into would otherwise re-place the same marks at mid-zoom (N×
-        // symbol-placement work, which stalls panning). Cap them to the band's
-        // native range so exactly one band draws symbols at each zoom. (The "all"
-        // band spans the full range and is unused by the fan-out.)
-        if (L.type === "symbol" && band.slug !== "all") v.maxzoom = band.max;
-        out.push(v);
+        out.push({ ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) });
       }
     }
     return out;
