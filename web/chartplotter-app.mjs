@@ -752,14 +752,22 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.querySelectorAll(".chart-card.focus").forEach((el) => el.classList.remove("focus"));
   }
 
-  // On view change, refresh the lower-right coverage panel. Zoom is no longer
-  // capped per-location: the map's fixed maxZoom (18 — the berthing band max)
-  // applies everywhere, so the deepest zoom is the SAME everywhere (berthing).
-  // Where the view's finer charts aren't downloaded, deep zoom reads as the S-52
-  // no-data hatch and the panel flags those cells so you can go grab them.
+  // On view change: hold the map at the 1:MIN_DETAIL_SCALE scale floor (so charts
+  // never magnify into blocky overzoom, berthing included) and refresh the
+  // lower-right coverage panel. The cap is the SAME scale everywhere — uniform
+  // zoom — and just resolves to a different zoom level per latitude.
   _assessCoverage() {
     if (this._addMode) return; // picking owns the map
+    this._applyScaleFloor();
     this._renderCoverageCells();
+  }
+
+  // Cap the map's max zoom at the 1:MIN_DETAIL_SCALE scale for the current centre
+  // latitude — a consistent scale floor rather than a per-location data cap.
+  _applyScaleFloor() {
+    if (!this._map) return;
+    const mz = maxZoomForScaleFloor(this._map.getCenter().lat);
+    if (Math.abs(this._map.getMaxZoom() - mz) > 1e-3) this._map.setMaxZoom(mz);
   }
 
   // List the catalog cells intersecting the current viewport in the coverage
@@ -1294,7 +1302,7 @@ export class ChartPlotterApp extends HTMLElement {
         <div id="cov-readout"></div>
         <div id="cov-cells"></div>
         <div id="cov-attr">
-          <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
+          Data from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
           · <button id="attr-terms" class="attr-link" type="button">Terms</button>
           · not for navigation
         </div>
@@ -1572,6 +1580,16 @@ function bandForZoom(z) {
 function scaleDenom(z, lat) {
   const mpp = 156543.03392804097 * Math.cos((lat * Math.PI) / 180) / Math.pow(2, z);
   return mpp / 0.00028;
+}
+
+// Finest map scale we allow: don't let charts magnify past 1:MIN_DETAIL_SCALE,
+// even where berthing data exists (past this it's just blocky overzoom). Inverse
+// of scaleDenom — the (fractional) zoom whose scale at `lat` equals the floor.
+// Latitude-dependent because 1:4000 is a different zoom at each latitude.
+const MIN_DETAIL_SCALE = 4000;
+function maxZoomForScaleFloor(lat) {
+  const z = Math.log2(156543.03392804097 * Math.cos((lat * Math.PI) / 180) / (0.00028 * MIN_DETAIL_SCALE));
+  return Math.max(1, Math.min(18, z));
 }
 
 // NOAA ENC freshness from a cell's issue date `d` ("YYYY-MM-DD"). ENCs have no
