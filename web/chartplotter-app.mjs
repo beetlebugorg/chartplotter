@@ -1221,12 +1221,14 @@ export class ChartPlotterApp extends HTMLElement {
           box-shadow:0 -1px 6px rgba(0,0,0,.07); backdrop-filter:blur(5px);
           font:12px system-ui,sans-serif; color:#2a2f35; transition:left .2s; }
         #statusbar.with-drawer { left:calc(56px + var(--drawer-w)); }
-        /* NOAA attribution — no card; engraved into the chart. A letterpress
-           effect (dark semi-transparent ink + a light highlight just below each
-           glyph) makes it read as embossed in the map surface. */
+        /* NOAA attribution — a pill DEBOSSED into the chart: faint inset fill +
+           inset shadow (pressed-in) with a light bottom bevel, under an engraved
+           letterpress text effect, so the whole pill reads as embossed in the map. */
         #noaa-attr { position:absolute; right:12px; bottom:38px; z-index:5; pointer-events:auto;
           font:600 11px/1.4 system-ui,sans-serif; letter-spacing:.01em;
-          color:rgba(33,40,48,.5); text-shadow:0 1px 0 rgba(255,255,255,.7); }
+          color:rgba(33,40,48,.6); text-shadow:0 1px 0 rgba(255,255,255,.7);
+          background:rgba(255,255,255,.3); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.05);
+          box-shadow:inset 0 1px 2px rgba(0,0,0,.22), inset 0 -1px 0 rgba(255,255,255,.5), 0 1px 0 rgba(255,255,255,.45); }
         #noaa-attr a, #noaa-attr .attr-link { color:inherit; text-shadow:inherit; cursor:pointer;
           text-decoration:underline; text-decoration-color:rgba(33,40,48,.32); text-underline-offset:2px; }
         #noaa-attr a:hover, #noaa-attr .attr-link:hover { color:rgba(18,24,31,.82); }
