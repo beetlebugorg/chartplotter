@@ -98,13 +98,14 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
+			var ts bake.TileScratch // reused across every tile this worker bakes
 			defer wg.Done()
 			for {
 				i := int(atomic.AddInt64(&next, 1))
 				if i >= total {
 					return
 				}
-				encoded[i] = b.EmitTile(coords[i], MVTExtent, MVTBuffer)
+				encoded[i] = b.EmitTileInto(coords[i], MVTExtent, MVTBuffer, &ts)
 				if progress != nil {
 					progress(int(atomic.AddInt64(&done, 1)), total)
 				}

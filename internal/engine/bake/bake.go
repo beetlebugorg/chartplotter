@@ -435,17 +435,35 @@ func addRange(out []tile.TileCoord, seen map[uint64]struct{}, bb geo.BoundingBox
 // tiles dropped, identical tiles deduped). Call WriteTo/Finish on the result.
 func (b *Baker) BakePMTiles(extent uint32, buffer float64) *pmtiles.Builder {
 	pb := pmtiles.New()
+	var ts TileScratch
 	for _, c := range b.TileCoords(extent) {
-		if data := b.EmitTile(c, extent, buffer); data != nil {
+		if data := b.EmitTileInto(c, extent, buffer, &ts); data != nil {
 			pb.AddTile(uint8(c.Z), c.X, c.Y, data)
 		}
 	}
 	return pb
 }
 
-// EmitTile bakes the merged MVT for one tile, or nil if it has no features.
-// band_z is coord.Z (the per-primitive in-band test zoom).
+// TileScratch holds the per-tile working buffers EmitTile would otherwise
+// allocate fresh every tile — the clipper's ping-pong arrays, the ring
+// projection scratch, and the candidate index list. Reuse ONE per goroutine
+// across many EmitTileInto calls so the buffers grow once and amortise; this is
+// the dominant bake allocation otherwise (the clipper alone is ~⅓ of it).
+type TileScratch struct {
+	clip     tile.Clipper
+	proj     []tile.FPoint
+	eligible []int
+}
+
+// EmitTile bakes one tile with a throwaway scratch — convenience for the serial
+// path / tests. Hot parallel callers should reuse a TileScratch via EmitTileInto.
 func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []byte {
+	return b.EmitTileInto(coord, extent, buffer, &TileScratch{})
+}
+
+// EmitTileInto bakes the merged MVT for one tile, or nil if it has no features,
+// reusing ts's buffers. band_z is coord.Z (the per-primitive in-band test zoom).
+func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64, ts *TileScratch) []byte {
 	tb := mvt.NewTileBuilder(extent)
 	proj := tile.NewProjector(coord, extent)
 	rect := tile.RectForTile(extent, buffer)
@@ -458,7 +476,7 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 	tnx0, tnx1 := float64(coord.X)/n-bufN, float64(coord.X+1)/n+bufN
 	tny0, tny1 := float64(coord.Y)/n-bufN, float64(coord.Y+1)/n+bufN
 
-	var eligible []int
+	eligible := ts.eligible[:0]
 	var finestNat uint32
 	minNatMin := uint32(math.MaxUint32)
 	for i := range b.prims {
@@ -478,8 +496,9 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 		}
 	}
 
-	var scratch []tile.FPoint // reused per-ring projection buffer
-	var clip tile.Clipper     // reused across all polygons in this tile
+	ts.eligible = eligible // persist the (possibly grown) backing array for reuse
+	scratch := ts.proj     // reused per-ring projection buffer (across tiles)
+	clip := &ts.clip       // reused clipper (across tiles)
 	for _, i := range eligible {
 		r := &b.prims[i]
 		// Best-available suppression: below its native band, yield only where no
@@ -527,6 +546,7 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 			tb.Layer(r.layer).AddPoints([]mvt.IPoint{tile.Quantize(p)}, r.attrs)
 		}
 	}
+	ts.proj = scratch // persist the (possibly grown) projection buffer for reuse
 
 	// Sector lights: tessellate per zoom into the lines layer. Their screen-px
 	// geometry can spill into neighbouring tiles, so reject with a margin sized to
