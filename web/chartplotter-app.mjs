@@ -217,7 +217,6 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
     this.renderCharts();
     this._assessCoverage();
-    this._startDebugPush(); // mirror live app state to GET /api/debug
     // Refresh-resume: if a provision job is still running on the server, re-attach
     // (show the pill + start polling). A finished/idle task is ignored.
     this._reattachTask();
@@ -563,6 +562,8 @@ export class ChartPlotterApp extends HTMLElement {
       if (dl) { dl.disabled = busy; if (busy) dl.textContent = "Downloading…"; }
       const rm = this.shadowRoot.getElementById("owned-remove");
       if (rm) rm.disabled = busy;
+      const rb = this.shadowRoot.getElementById("owned-rebake");
+      if (rb) rb.disabled = busy;
     }
     // A running download means charts are inbound — don't show the empty-state
     // welcome over the map (and restore it if the task failed with no coverage).
@@ -590,6 +591,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._wireAreaSelect();
     this._wireBandToggles();
     this.shadowRoot.getElementById("owned-remove")?.addEventListener("click", () => this._removeDownloaded());
+    this.shadowRoot.getElementById("owned-rebake")?.addEventListener("click", () => this._rebakeDownloaded());
     this._wireImport();
   }
 
@@ -625,7 +627,8 @@ export class ChartPlotterApp extends HTMLElement {
       const mb = bytes ? ` · ~${(bytes / 1e6).toFixed(1)} MB` : "";
       const busy = this._taskRunning();
       rows += `<div class="owned-row"><div><b>Map selection</b><div class="muted">${u.cells.length} chart${u.cells.length !== 1 ? "s" : ""}${mb}</div></div>` +
-        `<button class="linkbtn danger" id="owned-remove"${busy ? " disabled" : ""}>Remove</button></div>`;
+        `<div class="owned-actions"><button class="linkbtn" id="owned-rebake" title="Re-bake tiles from the cached cells (no re-download)"${busy ? " disabled" : ""}>Re-bake</button>` +
+        `<button class="linkbtn danger" id="owned-remove"${busy ? " disabled" : ""}>Remove</button></div></div>`;
     }
     if (imp) rows += `<div class="owned-row"><div><b>Imported files</b><div class="muted">${imp} archive${imp !== 1 ? "s" : ""} loaded</div></div></div>`;
     return `<div class="region-group">On this device</div>${rows}`;
@@ -641,6 +644,36 @@ export class ChartPlotterApp extends HTMLElement {
     this._userBake = null;
     this._refreshCellSel();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+  }
+
+  // Re-bake the already-downloaded map selection: re-POST the baked cell list to
+  // /api/provision. The server reads each cell from the local cell cache (no
+  // re-download) and regenerates charts-user.pmtiles, so bake-side code changes
+  // (symbology, soundings, light text…) take effect without fetching anything.
+  async _rebakeDownloaded() {
+    if (this._taskRunning()) return;
+    const cells = (this._userBake && Array.isArray(this._userBake.cells)) ? this._userBake.cells.slice() : [];
+    if (!cells.length) return;
+    this._taskMeta = { name: "Map selection", verb: "Re-baking" };
+    this._task = { kind: "provision", status: "running", phase: "import", done: 0, total: cells.length, cells: cells.length, cell: "" };
+    this._renderTaskUI();
+    try {
+      const res = await fetch("api/provision", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cells }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    } catch (e) {
+      console.error("[rebake]", e);
+      this._task = { kind: "provision", status: "error", error: "start" };
+      this._taskMeta = { name: "Map selection", verb: "Re-baking", errMsg: "Is the chartplotter server running?" };
+      this._renderTaskUI();
+      this._clearTaskSoon(3500);
+      return;
+    }
+    this._startPolling();
   }
 
   // -- Drag-a-box custom area selection ------------------------------------
@@ -1123,56 +1156,6 @@ export class ChartPlotterApp extends HTMLElement {
     if (body) body.innerHTML = `<div class="ins-empty">${esc(msg)}</div>`;
   }
 
-  // -- debug --------------------------------------------------------------
-  // A snapshot of the live app state — selection, inspected feature, view,
-  // display prefs, loaded coverage — surfaced via GET /api/debug (the frontend
-  // pushes this to the server whenever it changes; see _startDebugPush).
-  _debugSnapshot() {
-    const m = this._map;
-    const c = m ? m.getCenter() : null;
-    // Include geometry for the inspect stack so /api/debug can be used to compute
-    // exact feature overlaps offline. (Only the locked/area set, so it's bounded.)
-    const summ = (f) => (f ? { source: f.source, layer: f.sourceLayer, properties: f.properties, geometry: f.geometry } : null);
-    return {
-      scheme: this._scheme,
-      drawer: { open: this._drawerOpen(), section: this._section },
-      view: c ? { lng: +c.lng.toFixed(6), lat: +c.lat.toFixed(6), zoom: +m.getZoom().toFixed(2) } : null,
-      hasArchive: this._hasArchive,
-      userBake: this._userBake ? { cells: this._userBake.cells.length, bounds: this._userBake.bounds } : null,
-      importedArchives: this._importedArchives.length,
-      selection: {
-        count: this._areaCells.size,
-        effective: this._effectiveAreaCells().length,
-        bands: [...this._selBands],
-        cells: [...this._areaCells],
-      },
-      inspect: {
-        mode: this._inspectMode,
-        locked: this._inspectLocked,
-        count: this._inspectFeats.length,
-        index: this._inspectIdx,
-        selected: summ(this._inspectFeats[this._inspectIdx]),
-        stack: this._inspectFeats.map(summ),
-      },
-      mariner: this._mariner,
-    };
-  }
-
-  // Push the debug snapshot to the server on change (≤ every 1.5s) so `curl
-  // /api/debug` reflects what the app is showing, including the selected item.
-  _startDebugPush() {
-    if (this._dbgTimer) return;
-    this._dbgLast = "";
-    const push = () => {
-      let snap;
-      try { snap = JSON.stringify(this._debugSnapshot()); } catch { return; }
-      if (snap === this._dbgLast) return;
-      this._dbgLast = snap;
-      fetch("api/debug", { method: "POST", headers: { "content-type": "application/json" }, body: snap }).catch(() => {});
-    };
-    this._dbgTimer = setInterval(push, 1500);
-    push();
-  }
 
   // `idx` (when given) makes the card a clickable list item for the area view —
   // clicking it isolates that feature's geometry on the map (see _focusInspectFeature).
@@ -1181,15 +1164,19 @@ export class ChartPlotterApp extends HTMLElement {
     const acr = p.class || "";
     const named = S57_CLASS[acr];
     const label = named || INSPECT_LAYER_LABEL[f.sourceLayer] || acr || f.sourceLayer || "Feature";
+    const name = p.objnam ? `<div class="ins-name">${esc(p.objnam)}</div>` : "";
     const cellPill = p.cell ? `<span class="ins-cell" title="Source ENC cell">▦ ${esc(p.cell)}</span>` : "";
-    // `cell` is shown as a pill, not a raw row; `class` is in the title.
-    const keys = Object.keys(p).filter((k) => k !== "cell" && k !== "class").sort();
+    const lightPill = p.light ? `<span class="ins-light" title="Light characteristic">✦ ${esc(p.light)}</span>` : "";
+    const pills = cellPill || lightPill ? `<div class="ins-pills">${cellPill}${lightPill}</div>` : "";
+    // name/light/cell get their own prominent rows; class is in the title.
+    const keys = Object.keys(p).filter((k) => !["cell", "class", "objnam", "light"].includes(k)).sort();
     const rows = keys.map((k) => `<div class="k">${esc(k)}</div><div class="v">${esc(this._fmtInspectVal(k, p[k]))}</div>`).join("")
       || `<div class="k" style="grid-column:1/-1;color:var(--ui-text-faint)">no attributes</div>`;
     const clickable = idx != null ? ` data-fi="${idx}" class="ins-feat ins-clickable"` : ` class="ins-feat"`;
     return `<div${clickable}>
       <div class="ins-title">${esc(label)}${named && acr ? `<span class="ins-acr">${esc(acr)}</span>` : ""}<span class="ins-layer">${esc(f.sourceLayer || "")}</span></div>
-      ${cellPill ? `<div class="ins-pills">${cellPill}</div>` : ""}
+      ${name}
+      ${pills}
       <div class="ins-kv">${rows}</div>
     </div>`;
   }
@@ -1764,6 +1751,7 @@ export class ChartPlotterApp extends HTMLElement {
         /* "On this device" coverage rows */
         .owned-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 2px; border-bottom:1px solid var(--ui-border-2); }
         .owned-row b { font-weight:600; }
+        .owned-actions { display:flex; align-items:center; gap:12px; flex:none; }
         .region-title { margin:4px 0 2px; font-size:16px; }
         .region-status { background:#e4f5ea; color:#1f7a36; font-weight:600; font-size:12.5px; padding:6px 10px; border-radius:8px; margin:2px 0 4px; }
         .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:8px 0; display:block; }
@@ -1906,6 +1894,9 @@ export class ChartPlotterApp extends HTMLElement {
         .ins-pills { padding:6px 10px 0; }
         .ins-cell { display:inline-flex; align-items:center; gap:4px; background:var(--ui-accent); color:var(--ui-accent-text);
           border-radius:11px; padding:2px 9px; font:600 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.02em; }
+        .ins-name { padding:2px 10px 0; font-weight:600; }
+        .ins-light { display:inline-flex; align-items:center; gap:4px; background:#7e3ff2; color:#fff;
+          border-radius:11px; padding:2px 9px; font:600 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .ins-kv { display:grid; grid-template-columns:minmax(80px,auto) 1fr; gap:3px 12px; padding:8px 10px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .ins-kv .k { color:var(--ui-text-dim); }
         .ins-kv .v { color:var(--ui-text); word-break:break-word; }

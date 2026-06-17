@@ -281,7 +281,13 @@ func (w *walker) emit(list []s52.Instruction, g geom, depth int) {
 		case *s52.LCInstruction:
 			w.emitLinePattern(in.LineStyleID, g)
 		case *s52.SYInstruction:
-			w.emitSymbol(in.SymbolID, float32(in.Rotation), g)
+			rot := in.Rotation
+			if in.RotationAttr != "" {
+				if v, ok := floatAttr(w.attrs, in.RotationAttr); ok {
+					rot = v // e.g. SY(RECTRC57,ORIENT) → the feature's ORIENT bearing
+				}
+			}
+			w.emitSymbol(in.SymbolID, float32(rot), g)
 		case *s52.SectorInstruction:
 			if g.kind == geomPoint {
 				w.out = append(w.out, SectorLight{

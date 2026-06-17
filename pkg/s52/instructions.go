@@ -195,6 +195,12 @@ type Instruction interface {
 type SYInstruction struct {
 	SymbolID string
 	Rotation float64 // degrees clockwise, 0 if not specified
+
+	// RotationAttr names the feature attribute (e.g. "ORIENT") to take the
+	// rotation from when the SY parameter is an attribute name rather than a
+	// numeric literal — S-52 uses this for directional symbols like SY(RECTRC57,
+	// ORIENT). Resolved against the feature's attributes at portrayal time.
+	RotationAttr string
 }
 
 func (s *SYInstruction) Type() InstructionType { return InstructionSY }
@@ -387,22 +393,28 @@ func parseSY(args string) (*SYInstruction, error) {
 	parts := strings.Split(args, ",")
 	symbolID := strings.TrimSpace(parts[0])
 	rotation := 0.0
+	rotationAttr := ""
 
 	if len(parts) >= 2 {
-		// Parse rotation parameter (degrees)
+		// The rotation parameter is either a numeric literal (degrees) or, per
+		// S-52, the name of a feature attribute to take the bearing from — e.g.
+		// SY(RECTRC57,ORIENT). A non-numeric value is an attribute reference,
+		// resolved later against the feature; it must NOT fail the parse (that
+		// would drop the whole symbol, e.g. range tracks / directional lights).
 		rotStr := strings.TrimSpace(parts[1])
 		if rotStr != "" {
-			var err error
-			rotation, err = strconv.ParseFloat(rotStr, 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid rotation value: %s", rotStr)
+			if v, err := strconv.ParseFloat(rotStr, 64); err == nil {
+				rotation = v
+			} else {
+				rotationAttr = rotStr
 			}
 		}
 	}
 
 	return &SYInstruction{
-		SymbolID: symbolID,
-		Rotation: rotation,
+		SymbolID:     symbolID,
+		Rotation:     rotation,
+		RotationAttr: rotationAttr,
 	}, nil
 }
 

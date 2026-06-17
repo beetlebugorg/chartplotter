@@ -123,6 +123,24 @@ func TestLIGHTS06_SectorLight(t *testing.T) {
 	assert.NotEqual(t, 0.0, sy.Rotation, "Sector light should be rotated")
 }
 
+func TestLIGHTS06_AllRoundFlareDefaultOrientation(t *testing.T) {
+	// A plain light with no direction or sectors gets the S-52 default flare
+	// orientation of 135° (clockwise from the native up-pointing flare), so it
+	// points down-right and clears the upper-right label position.
+	ctx := NewCSContext(map[string]interface{}{
+		"COLOUR": 3, // Red
+	}, "", nil, nil)
+
+	result, err := NewLIGHTS06(ctx, &Library{}).Execute()
+	require.NoError(t, err)
+	require.NotEmpty(t, result)
+
+	sy, ok := result[0].(*SYInstruction)
+	require.True(t, ok)
+	assert.Equal(t, "LIGHTS11", sy.SymbolID, "Red all-round light")
+	assert.Equal(t, 135.0, sy.Rotation, "All-round flare should use the 135° default orientation")
+}
+
 func TestLIGHTS06_WithCharacteristic(t *testing.T) {
 	ctx := NewCSContext(map[string]interface{}{
 		"COLOUR": 1,   // White

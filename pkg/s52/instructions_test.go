@@ -377,6 +377,16 @@ func TestParseSY(t *testing.T) {
 			input: "SY(BOYSPH01)",
 			want:  &SYInstruction{SymbolID: "BOYSPH01"},
 		},
+		{
+			name:  "numeric rotation",
+			input: "SY(LIGHTDEF,135)",
+			want:  &SYInstruction{SymbolID: "LIGHTDEF", Rotation: 135},
+		},
+		{
+			name:  "attribute rotation (S-52 SY(SYM,ORIENT)) must parse, not error",
+			input: "SY(RECTRC57,ORIENT)",
+			want:  &SYInstruction{SymbolID: "RECTRC57", RotationAttr: "ORIENT"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -393,6 +403,8 @@ func TestParseSY(t *testing.T) {
 			sy, ok := instrs[0].(*SYInstruction)
 			require.True(t, ok, "expected *SYInstruction")
 			assert.Equal(t, tt.want.SymbolID, sy.SymbolID)
+			assert.Equal(t, tt.want.Rotation, sy.Rotation)
+			assert.Equal(t, tt.want.RotationAttr, sy.RotationAttr)
 		})
 	}
 }

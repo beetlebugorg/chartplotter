@@ -473,6 +473,8 @@ export class ChartPlotter extends HTMLElement {
       setIf(v.id, "text-color", this.textColor());
       setIf(v.id, "text-halo-color", this.textHaloColor());
     }
+    setIf("light-text", "text-color", this.textColor());
+    setIf("light-text", "text-halo-color", this.textHaloColor());
     // Basemap (sea background + offline coastline) is scheme-aware too.
     setIf("bg", "background-color", this.seaColor());
     setIf("coast-land", "fill-color", this.landColor());
@@ -851,8 +853,13 @@ export class ChartPlotter extends HTMLElement {
     return layers;
   }
   textLayers() {
+    // LIGHTS characteristic text is drawn by its OWN always-on layer (see the
+    // "light-text" layer in buildLayers) so it can't be decluttered behind a
+    // verbose name label — exclude it from the general (collidable) text layers.
+    const notLight = ["!=", ["get", "class"], "LIGHTS"];
     return TEXT_VARIANTS.map((v) => ({
-      id: v.id, type: "symbol", source: "chart", "source-layer": "text", filter: v.filter,
+      id: v.id, type: "symbol", source: "chart", "source-layer": "text",
+      filter: ["all", notLight, v.filter],
       layout: {
         "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
         "text-size": ["coalesce", ["get", "font_size_px"], 11], "text-anchor": v.anchor,
@@ -897,6 +904,15 @@ export class ChartPlotter extends HTMLElement {
         filter: ["all", ["==", ["get", "class"], "DEPCNT"], ["has", "valdco"]],
         layout: { "symbol-placement": "line", "text-field": this.contourLabelField(), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "symbol-spacing": 300, "text-allow-overlap": false, "text-optional": true, visibility: this._mariner.showContourLabels ? "visible" : "none" },
         paint: { "text-color": this.contourLabelColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.2 } },
+      // Light characteristics (LIGHTS06 TX, e.g. "Fl(1)R 3s 4.2m") — their own
+      // layer, always drawn (allow/ignore-overlap) so the important nav data is
+      // never decluttered behind a name label. Placed below the light flare.
+      { id: "light-text", type: "symbol", source: "chart", "source-layer": "text",
+        filter: ["==", ["get", "class"], "LIGHTS"],
+        layout: { "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
+          "text-size": ["coalesce", ["get", "font_size_px"], 10], "text-anchor": "top", "text-offset": [0, 0.4],
+          "text-allow-overlap": true, "text-ignore-placement": true },
+        paint: { "text-color": this.textColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.4, "text-halo-blur": 0.5 } },
     ];
     // Template chart layers (source "chart" is a placeholder rewritten per band
     // by expandChartLayers). Their `filter` is the intrinsic (base) filter.

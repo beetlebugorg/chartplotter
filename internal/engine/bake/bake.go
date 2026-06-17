@@ -191,8 +191,10 @@ type sectorPrim struct {
 type Baker struct {
 	prims   []routed
 	sectors []sectorPrim
-	bbox    geo.BoundingBox
-	curCell string // dataset name of the cell currently being added (stamped on each feature)
+	bbox      geo.BoundingBox
+	curCell   string // dataset name of the cell currently being added (stamped on each feature)
+	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
+	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 }
 
 // New returns an empty Baker.
@@ -217,6 +219,14 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	features := chart.Features()
 	for i := range features {
 		f := &features[i]
+		// Per-feature inspector data: the object name, and (for lights) the S-52
+		// light characteristic string ("Fl.R.4s") so the inspector can show the
+		// light data, not just the symbol.
+		b.curObjnam = stringAttr(f.Attributes(), "OBJNAM")
+		b.curLight = ""
+		if f.ObjectClass() == "LIGHTS" {
+			b.curLight = s52.BuildLightCharacteristic(f.Attributes())
+		}
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
 		// style live; everything else is one pass tagged bnd=2.
@@ -317,6 +327,13 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 			{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
 			{Key: "cat", Value: mvt.IntVal(catRank(cat))},
 			{Key: "bnd", Value: mvt.IntVal(bnd)},
+		}
+		// Inspector extras — only when present, to avoid bloating every feature.
+		if b.curObjnam != "" {
+			base = append(base, mvt.KeyValue{Key: "objnam", Value: mvt.StringVal(b.curObjnam)})
+		}
+		if b.curLight != "" {
+			base = append(base, mvt.KeyValue{Key: "light", Value: mvt.StringVal(b.curLight)})
 		}
 		return append(base, extra...)
 	}
@@ -863,6 +880,14 @@ func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// stringAttr returns the trimmed string value of a string attribute, or "".
+func stringAttr(attrs map[string]interface{}, key string) string {
+	if s, ok := attrs[key].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
 }
 
 func intAttr(attrs map[string]interface{}, key string) uint32 {

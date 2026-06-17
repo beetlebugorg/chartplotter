@@ -1,6 +1,9 @@
 package s52
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // LIGHTS06 represents the Navigation Light symbology procedure.
 // Implements S-52 Part I Section 13.2.4 LIGHTS06 Conditional Symbology Procedure.
@@ -129,7 +132,12 @@ func (lt *LIGHTS06) directionalLineInstruction() []Instruction {
 // selectSymbolAndRotation determines the appropriate symbol and rotation angle.
 func (lt *LIGHTS06) selectSymbolAndRotation() (string, float64) {
 	symbol := selectSymbolByColour(lt.colour)
-	rotation := 0.0
+	// All-round lights with no direction/sector get the S-52 default flare
+	// orientation: the LIGHTS11/12/13 flare is drawn natively pointing up, and
+	// the presentation library rotates it 135° clockwise so it points down-right
+	// (clear of the upper-right label position). Directional/sectored lights
+	// override this to point at their bearing.
+	rotation := 135.0
 
 	if lt.isDirectional() {
 		// Directional light: ORIENT is bearing FROM seaward, flare points TOWARD seaward
@@ -254,6 +262,13 @@ func selectSymbolByColour(colour int) string {
 	return "LIGHTS11" // Default for other colors
 }
 
+// BuildLightCharacteristic is the exported form of buildLightCharacteristic — an
+// S-52 light characteristic string (e.g. "Fl.R.4s") for a LIGHTS feature's
+// attributes, or "" if none. Used by the baker to carry light data for display.
+func BuildLightCharacteristic(attributes map[string]interface{}) string {
+	return buildLightCharacteristic(attributes)
+}
+
 // buildLightCharacteristic builds a light characteristic string from attributes
 // Returns strings like "Fl.W.5s", "Q.R", "Oc.G.10s", etc.
 // Per S-57 Appendix A and S-52 LIGHTS06 procedure
@@ -308,10 +323,19 @@ func buildLightCharacteristic(attributes map[string]interface{}) string {
 		}
 	}
 
-	// Get SIGPER (signal period in seconds)
+	// Get SIGPER (signal period, s), SIGGRP (flash group), HEIGHT (m), VALNMR (range, M)
 	sigper := 0.0
 	if val, ok := attributes["SIGPER"]; ok {
 		sigper = getFloatValue(val)
+	}
+	siggrp := lightGroup(attributes)
+	height := 0.0
+	if val, ok := attributes["HEIGHT"]; ok {
+		height = getFloatValue(val)
+	}
+	valnmr := 0.0
+	if val, ok := attributes["VALNMR"]; ok {
+		valnmr = getFloatValue(val)
 	}
 
 	// Map LITCHR code to abbreviation
@@ -321,28 +345,64 @@ func buildLightCharacteristic(attributes map[string]interface{}) string {
 		charStr = fmt.Sprintf("LITCHR(%d)", litchr)
 	}
 
-	// Build color string
+	// Build color string (concatenated, e.g. "WR" for alternating white/red)
 	var colorStr string
-	if len(colours) > 0 {
-		// Map color codes to abbreviations
-		for i, c := range colours {
-			if i > 0 {
-				colorStr += "."
-			}
-			colorStr += mapColorCode(c)
-		}
+	for _, c := range colours {
+		colorStr += mapColorCode(c)
 	}
 
-	// Build complete characteristic string
+	// Assemble in S-52 / NOAA form, e.g. "Fl(1)R 3s 4.3m 5M":
+	//   <char>(<group>)<colour> <period>s <height>m <range>M  (parts omitted if absent)
 	result := charStr
-	if colorStr != "" {
-		result += "." + colorStr
+	if siggrp != "" {
+		result += "(" + siggrp + ")" + colorStr // group parens separate the colour
+	} else if colorStr != "" {
+		result += " " + colorStr // no group → space before colour ("Fl R")
 	}
 	if sigper > 0 {
-		result += fmt.Sprintf(".%.0fs", sigper)
+		result += " " + trimFloat(sigper) + "s"
 	}
-
+	if height > 0 {
+		result += " " + trimFloat(height) + "m"
+	}
+	if valnmr > 0 {
+		result += " " + trimFloat(valnmr) + "M"
+	}
 	return result
+}
+
+// lightGroup returns the SIGGRP flash-group string (e.g. "1", "2+1"), or "".
+func lightGroup(attributes map[string]interface{}) string {
+	v, ok := attributes["SIGGRP"]
+	if !ok {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		s := trimSpace(t)
+		// S-57 encodes groups like "(1)" or "(2+1)"; strip the wrapping parens.
+		s = trimString(s, "()")
+		if s == "" || s == "0" {
+			return ""
+		}
+		return s
+	case int:
+		if t <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d", t)
+	case float64:
+		if t <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d", int(t))
+	}
+	return ""
+}
+
+// trimFloat formats a float without a trailing ".0" (3.0 → "3", 4.3 → "4.3").
+func trimFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 // mapColorCode maps S-57 COLOUR attribute values to abbreviations.
