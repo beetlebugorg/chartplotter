@@ -31,9 +31,10 @@ const LS_AGREE = "chartplotter:enc-agreement"; // NOAA ENC User Agreement accept
 // accepted before downloading ENCs (charts.noaa.gov/ENCs/ENCs.shtml §3).
 const NOAA_ENC_URL = "https://www.charts.noaa.gov/ENCs/ENCs.shtml";
 const NOAA_AGREEMENT_URL = "https://www.charts.noaa.gov/ENCs/ENC_Agreement.shtml";
-// NOTE: the provisioned-chart list is NOT cached in localStorage — the on-disk
-// manifest (charts-user.json, written by the server) is the single source of
-// truth, so the UI can never show charts that aren't actually on disk.
+// NOTE: the installed-region list is NOT cached in localStorage — the server's
+// GET /api/charts manifest (one entry per baked region archive in its XDG cache)
+// is the single source of truth, so the UI can never show charts that aren't
+// actually on disk.
 
 // Box colours by state (kept readable in both day and night chrome).
 const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000" };
@@ -53,8 +54,8 @@ export class ChartPlotterApp extends HTMLElement {
     this._installed = new Set();        // all stored cell names
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
-    this._provisioned = new Set();      // NOAA-downloaded cells; filled from the on-disk manifest on boot (the source of truth)
-    this._dlRegions = new Set();        // installed NOAA region numbers (from the manifest)
+    this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
+    this._regionArchives = [];          // [{num,file,bounds}] — one pmtiles per installed region
     this._districts = [];               // hosted per-district archives (charts-index.json)
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = loadJSON(LS_MARINER, {});
@@ -200,25 +201,21 @@ export class ChartPlotterApp extends HTMLElement {
       const arcs = await this._plotter.addArchives(this._districts.map((d) => ({ src: d.file, band: d.band || "all" })));
       if (arcs.length) { this._hasArchive = true; loaded = true; this._frameInitial(); }
     }
-    // A persisted uploaded archive coexists with the hosted districts.
-    const src = loadJSON(LS_SOURCE, null);
-    if (src && src.type === "blob") {
-      try { const b = await archiveGet(); if (b) { await this._plotter.addArchive(b); this._markArchive({ type: "blob" }); loaded = true; } } catch (e) { console.warn(e); }
-    }
-    // A NOAA-provisioned archive (`charts-user.pmtiles`). Detect it from its
-    // sidecar manifest (charts-user.json, written by the server) rather than
-    // localStorage — so charts baked by the CLI, or in another browser, are
-    // still found and shown as installed. The manifest is authoritative for
-    // which cells the archive holds.
-    const manifest = await this._detectProvisioned();
-    if (manifest) {
-      if (await this.loadHostedArchive(`charts-user.pmtiles?t=${Date.now()}`, { file: "charts-user.pmtiles" }, true)) {
-        loaded = true;
-        if (!loadJSON(LS_VIEW, null) && manifest.cells?.length) this._frameCells(manifest.cells);
+    if (this._districts.length) {
+      // Hosted-district deployment: a persisted uploaded archive coexists.
+      const src = loadJSON(LS_SOURCE, null);
+      if (src && src.type === "blob") {
+        try { const b = await archiveGet(); if (b) { await this._plotter.addArchive(b); this._markArchive({ type: "blob" }); loaded = true; } } catch (e) { console.warn(e); }
       }
-    } else if (src && src.type === "url" && src.file) {
-      // Legacy: an in-browser provision before manifests existed.
-      if (await this.loadHostedArchive(`${src.file}?t=${Date.now()}`, { file: src.file }, true)) loaded = true;
+    } else {
+      // The provisioned deployment: ONE pmtiles per NOAA region in the server's
+      // XDG cache, listed by GET /api/charts. Render exactly that set (+ blob).
+      const regions = await this._loadManifest();
+      await this._applyArchives();
+      if (regions && regions.length) {
+        loaded = true;
+        if (!loadJSON(LS_VIEW, null)) this._frameRegionArchives(regions);
+      }
     }
     if (loaded) { this.updateEmptyState(); return; }
     if (this.getAttribute("pmtiles")) await this.loadHostedArchive(this.getAttribute("pmtiles"));
@@ -241,30 +238,34 @@ export class ChartPlotterApp extends HTMLElement {
 
   _districtFor(file) { return this._districts.find((d) => d.file === file) || null; }
 
-  // Read the provisioned-archive manifest (charts-user.json) the server writes
-  // after each bake, and fold its cell names into `_provisioned` so they show as
-  // installed — regardless of whether THIS browser downloaded them. Returns the
-  // manifest ({cells,bounds}) or null if there's no provisioned archive.
-  async _detectProvisioned() {
+  // Read the per-region manifest (GET /api/charts) the server builds from the
+  // cache: one entry per baked region archive ({num,file,bounds}). Sets
+  // _dlRegions (installed region numbers — a cell is "installed" when its region
+  // is) and _regionArchives (the archives to render). Returns the regions array,
+  // or null on a transient failure (keep what we have).
+  async _loadManifest() {
     try {
-      const r = await fetch(`${this._assets}charts-user.json?t=${Date.now()}`);
-      // The manifest is the source of truth. A 404 means the provisioned archive
-      // is GONE (deleted / never made / different server) — so clear the cached
-      // provisioned set instead of showing phantom charts that no longer exist.
-      if (r.status === 404) {
-        this._provisioned = new Set(); // no provisioned archive on disk → nothing installed
-        this._dlRegions = new Set();
-        const src = loadJSON(LS_SOURCE, null);
-        if (src && src.type === "url") localStorage.removeItem(LS_SOURCE);
-        return null;
-      }
-      if (!r.ok) return null; // transient (5xx / network) → keep what we have
+      const r = await fetch(`api/charts?t=${Date.now()}`);
+      if (!r.ok) return null;
       const j = await r.json();
-      if (!Array.isArray(j.cells)) return null;
-      this._provisioned = new Set(j.cells);
-      this._dlRegions = new Set(Array.isArray(j.regions) ? j.regions : []);
-      return j;
-    } catch { return null; } // network error → keep what we have, try again next boot
+      const regions = Array.isArray(j.regions) ? j.regions : [];
+      this._regionArchives = regions;
+      this._dlRegions = new Set(regions.map((x) => x.num));
+      return regions;
+    } catch { return null; } // network error → keep what we have
+  }
+
+  // Render exactly the installed region archives (each fanned across the per-band
+  // sources), plus a persisted uploaded blob if any. Add/remove a region just
+  // re-applies the manifest's set — header reads only, no re-bake.
+  async _applyArchives() {
+    const urls = (this._regionArchives || []).map((x) => `charts/${x.file}?t=${Date.now()}`);
+    await this._plotter.loadRegions(urls);
+    if (urls.length) this._hasArchive = true;
+    const src = loadJSON(LS_SOURCE, null);
+    if (src && src.type === "blob") {
+      try { const b = await archiveGet(); if (b) await this._plotter.addArchive(b); } catch (e) { console.warn(e); }
+    }
   }
 
   // Fetch + render a hosted archive (incremental, via HTTP Range), framing to
@@ -334,32 +335,6 @@ export class ChartPlotterApp extends HTMLElement {
     if (r) r(accepted);
   }
 
-  async _startProvision(cells, meta) {
-    if (this._taskRunning()) return; // one provision job at a time (server is single-flight)
-    this._taskMeta = meta || null;
-    // Optimistic running state so the pill appears instantly (the first poll
-    // replaces it with the server's truth).
-    this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: cells.length, cells: cells.length, cell: "" };
-    this._renderTaskUI();
-    try {
-      const res = await fetch("api/provision", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cells }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
-    } catch (e) {
-      console.error("[provision]", e);
-      this._task = { kind: "provision", status: "error", error: "start" };
-      this._taskMeta = { ...(meta || {}), errMsg: "Is the chartplotter server running?" };
-      this._renderTaskUI();
-      this._clearTaskSoon(3500);
-      return;
-    }
-    this._startPolling();
-  }
-
   // On boot, re-attach to a job that's still running on the server (refresh-
   // resume — no client-side job persistence). A finished/idle task is ignored so
   // a stale "done" never shows a phantom pill.
@@ -398,14 +373,11 @@ export class ChartPlotterApp extends HTMLElement {
     else this._clearTaskSoon(3500); // error: leave the red pill up briefly
   }
 
-  // A provision finished: the on-disk manifest is now the truth — reload it and
-  // the freshly (re)baked archive, re-project, and flash a brief "done".
+  // A provision finished: the server's per-region manifest is now the truth —
+  // reload it, render the (new) region archive set, re-project, flash "done".
   async _onTaskDone() {
-    await this._detectProvisioned(); // charts-user.json is the source of truth
-    try {
-      await this._plotter.replaceBand("all", `charts-user.pmtiles?t=${Date.now()}`);
-      this._markArchive({ type: "url", file: "charts-user.pmtiles" });
-    } catch (e) { console.warn("[provision] reload", e); }
+    await this._loadManifest();
+    await this._applyArchives();
     this.updateEmptyState();
     this._assessCoverage();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
@@ -639,20 +611,43 @@ export class ChartPlotterApp extends HTMLElement {
     const r = this._region;
     if (!r) return;
     if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
-    const nums = new Set([...this._dlRegions, r.num]);
-    await this._startProvisionRegions([...nums], { name: r.name, verb: "Downloading" });
+    // One pmtiles per region: provision ONLY the new region (the server bakes
+    // just it; already-baked regions are a no-op).
+    await this._startProvisionRegions([r.num], { name: r.name, verb: "Downloading" });
   }
 
   // Region numbers the user has downloaded — authoritative from the manifest.
   _installedRegions() { return new Set(this._dlRegions); }
 
+  // Remove a region = delete its own archive (DELETE /api/charts/<NN>) and
+  // re-apply the remaining set. No re-bake, no download — instant.
   async removeRegion() {
     const r = this._region;
     if (!r) return;
-    if (!this._dlRegions.has(r.num)) return; // not installed
-    const remaining = [...this._dlRegions].filter((n) => n !== r.num);
-    if (!remaining.length) return this._deleteAllCharts(r.name);
-    await this._startProvisionRegions(remaining, { name: r.name, verb: "Removing" });
+    if (!this._dlRegions.has(r.num) || this._taskRunning()) return;
+    this._taskMeta = { name: r.name, verb: "Removing" };
+    this._task = { kind: "remove", status: "running", phase: "import", done: 0, total: 0 };
+    this._renderTaskUI();
+    try {
+      const res = await fetch(`api/charts/${r.num}`, { method: "DELETE" });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    } catch (e) {
+      console.error("[remove]", e);
+      this._task = { kind: "remove", status: "error", error: "delete" };
+      this._taskMeta = { name: r.name, verb: "Removing", errMsg: "Couldn’t remove region" };
+      this._renderTaskUI();
+      this._clearTaskSoon(3000);
+      return;
+    }
+    await this._loadManifest();
+    await this._applyArchives();
+    this.updateEmptyState();
+    this._assessCoverage();
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    this._task = { status: "done", _flourish: true };
+    this._renderTaskUI();
+    this._clearTaskSoon(1200);
   }
 
   // Start a background provision of the given NOAA region numbers (POST
@@ -681,13 +676,12 @@ export class ChartPlotterApp extends HTMLElement {
     this._startPolling();
   }
 
-  // Remove the LAST region: there's no "bake empty", so delete the provisioned
-  // archive outright (DELETE /api/charts), then reflect empty. The disk is now
-  // the truth "nothing" — reboot so the welcome + empty coverage come straight
-  // from disk rather than unwinding in-memory state in place.
+  // Remove ALL regions at once (DELETE /api/charts), then reflect empty by
+  // re-applying the now-empty manifest — no reload needed.
   async _deleteAllCharts(name) {
+    if (this._taskRunning()) return;
     this._taskMeta = { name, verb: "Removing" };
-    this._task = { kind: "provision", status: "running", phase: "importing", done: 0, total: 0 };
+    this._task = { kind: "remove", status: "running", phase: "import", done: 0, total: 0 };
     this._renderTaskUI();
     try {
       const res = await fetch("api/charts", { method: "DELETE" });
@@ -695,14 +689,20 @@ export class ChartPlotterApp extends HTMLElement {
       if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
     } catch (e) {
       console.error("[remove]", e);
-      this._task = { kind: "provision", status: "error", error: "delete" };
+      this._task = { kind: "remove", status: "error", error: "delete" };
       this._taskMeta = { name, verb: "Removing", errMsg: "Couldn’t remove charts" };
       this._renderTaskUI();
       this._clearTaskSoon(3000);
       return;
     }
-    this._provisioned = new Set();
-    location.reload();
+    await this._loadManifest();
+    await this._applyArchives();
+    this.updateEmptyState();
+    this._assessCoverage();
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    this._task = { status: "done", _flourish: true };
+    this._renderTaskUI();
+    this._clearTaskSoon(1200);
   }
 
   saveView() {
@@ -717,8 +717,12 @@ export class ChartPlotterApp extends HTMLElement {
     map.addLayer({ id: "focus-line", type: "line", source: "focus", paint: { "line-color": "#1565c0", "line-width": 2.5 } });
   }
 
+  // A cell is "installed" when locally imported (OPFS) OR its NOAA region is
+  // downloaded (one pmtiles per region — so region membership IS installed-ness).
   stateOf(name) {
-    if (this._installed.has(name) || this._provisioned.has(name)) return "installed";
+    if (this._installed.has(name)) return "installed";
+    const c = this._byName.get(name);
+    if (c && Array.isArray(c.rg) && c.rg.some((n) => this._dlRegions.has(n))) return "installed";
     if (this._archive.has(name)) return "archive";
     return "catalog";
   }
@@ -971,6 +975,18 @@ export class ChartPlotterApp extends HTMLElement {
     if (any && this._map) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
   }
 
+  // Frame to the union bounds of the installed region archives (from the manifest).
+  _frameRegionArchives(regions) {
+    let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false;
+    for (const x of regions || []) {
+      const b = x.bounds;
+      if (Array.isArray(b) && b.length === 4) {
+        W = Math.min(W, b[0]); S = Math.min(S, b[1]); E = Math.max(E, b[2]); N = Math.max(N, b[3]); any = true;
+      }
+    }
+    if (any && this._map) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
+  }
+
   async importSelected() {
     const names = [...this._selected].filter((n) => this._archive.has(n));
     if (!names.length) return;
@@ -1048,15 +1064,9 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   async removeChart(name) {
-    // NOAA-provisioned charts live in one server-baked archive; drop the cell and
-    // re-bake the rest as a background task (or delete the archive if last).
-    if (this._provisioned.has(name)) {
-      const rest = [...this._provisioned].filter((n) => n !== name);
-      if (!rest.length) return this._deleteAllCharts(name);
-      await this._startProvision(rest, { name: null, verb: "Removing" });
-      return;
-    }
-    // Locally-imported (OPFS) cell: drop it and re-bake the in-browser archive.
+    // NOAA-provisioned charts are removed a whole region at a time (one pmtiles
+    // per region — see removeRegion), so this only handles locally-imported
+    // (OPFS) cells: drop it and re-bake the in-browser archive.
     await this._store.remove(name);
     this._installed.delete(name);
     await this.rebakeArchive();

@@ -501,6 +501,18 @@ export class ChartPlotter extends HTMLElement {
     return a;
   }
 
+  // Replace ALL loaded chart coverage with exactly these region-archive URLs,
+  // each fanned across the per-band sources (the per-region provision model:
+  // add/remove a region just reloads the manifest's set — no re-bake). An empty
+  // list clears the map.
+  async loadRegions(urls) {
+    this._bands = {};
+    for (const u of urls) {
+      try { await this.addArchive(u, "all"); } catch (e) { console.warn("[chartplotter] region", u, e); }
+    }
+    if (!urls.length) this.refresh();
+  }
+
   // REPLACE every archive in ONE band with `src` (a URL or Blob/File) — used to
   // reload the server-provisioned `all` band after a re-bake without disturbing
   // the other bands (e.g. hosted per-band districts). Re-reads the new header +
