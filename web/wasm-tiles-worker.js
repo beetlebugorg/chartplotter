@@ -43,6 +43,10 @@ self.onmessage = async (e) => {
         self.postMessage({ id: m.id, ok: true, result });
         break;
       }
+      case "coverage": {
+        self.postMessage({ id: m.id, ok: true, geojson: self.cpCoverage() });
+        break;
+      }
       case "tile": {
         const t = self.cpBakeTile(m.z, m.x, m.y); // Uint8Array or null
         if (t && t.length) {

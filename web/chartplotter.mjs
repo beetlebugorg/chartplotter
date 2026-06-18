@@ -570,6 +570,9 @@ export class ChartPlotter extends HTMLElement {
   // status popup, or null when not on the realtime path.
   realtimeStats() { return this._rtCache ? this._rtCache.usage() : null; }
 
+  // GeoJSON of loaded cells' real M_COVR data-coverage polygons (debug overlay).
+  async realtimeCoverage() { return this._rt ? this._rt.coverage() : { type: "FeatureCollection", features: [] }; }
+
   // Resolve an archive source: a Blob/File is passed through; a URL string is
   // made absolute (relative to the page) for the HTTP-Range reader.
   _resolveSrc(src) {

@@ -212,7 +212,19 @@ type Baker struct {
 	curLightSkip bool                  // current LIGHTS is a non-primary co-located light
 	curLightText string                // merged multi-line characteristic for the primary
 	seenSector   map[sectorKey]struct{} // sector dedup for the current cell
+	coverage     []CellCoverage         // M_COVR data-coverage polygons of added cells (debug)
 }
+
+// CellCoverage is one M_COVR (CATCOV=1) data-coverage polygon of an added cell,
+// in lon/lat — the area the cell ACTUALLY carries data for (vs its rectangular
+// bounding box). Drives the debug overlay's coverage-vs-gap diagnosis.
+type CellCoverage struct {
+	Cell  string        // cell name
+	Rings [][][]float64 // GeoJSON Polygon rings: [ring][point][lon,lat]
+}
+
+// Coverage returns the M_COVR data-coverage polygons of every cell added so far.
+func (b *Baker) Coverage() []CellCoverage { return b.coverage }
 
 // sectorKey identifies a sector light's geometry (anchor + params) for dedup.
 type sectorKey struct {
@@ -310,6 +322,17 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		b.curLight = ""
 		b.curLightSkip = false
 		b.curLightText = ""
+		// Capture the cell's data-coverage polygon (M_COVR, CATCOV=1) for the debug
+		// overlay — the real area the cell carries data for, not its bounding box.
+		if f.ObjectClass() == "M_COVR" && intAttr(f.Attributes(), "CATCOV") == 1 {
+			if rings := f.Geometry().Rings; len(rings) > 0 {
+				cov := CellCoverage{Cell: b.curCell}
+				for _, r := range rings {
+					cov.Rings = append(cov.Rings, r.Coordinates)
+				}
+				b.coverage = append(b.coverage, cov)
+			}
+		}
 		if f.ObjectClass() == "LIGHTS" {
 			b.curLight = s52.BuildLightCharacteristic(f.Attributes())
 			b.curLightSkip = lightSkip[i]

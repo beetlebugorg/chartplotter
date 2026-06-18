@@ -118,6 +118,15 @@ async function ensureCellsForTile(z, x, y) {
   if (jobs.length) await Promise.all(jobs);
 }
 
+// GeoJSON (parsed) of every loaded cell's M_COVR data-coverage polygon, for the
+// debug overlay (where cells actually have data vs their bbox). {} when no baker.
+export async function coverage() {
+  if (!_worker) return { type: "FeatureCollection", features: [] };
+  const r = await call("coverage", {});
+  try { return JSON.parse(r.geojson || "") || { type: "FeatureCollection", features: [] }; }
+  catch { return { type: "FeatureCollection", features: [] }; }
+}
+
 // Register the "cp://{z}/{x}/{y}" vector-tile protocol backed by the cache + the
 // worker baker. Returns the TileCache (for usage()/clear()). Use it as a source:
 //   { type: "vector", tiles: ["cp://{z}/{x}/{y}"], minzoom, maxzoom }

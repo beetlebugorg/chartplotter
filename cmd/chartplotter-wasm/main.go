@@ -9,6 +9,7 @@
 package main
 
 import (
+	"encoding/json"
 	"syscall/js"
 	"time"
 
@@ -78,10 +79,34 @@ func cpBakeTile(_ js.Value, args []js.Value) any {
 	return dst
 }
 
+// cpCoverage() — GeoJSON FeatureCollection (string) of every loaded cell's
+// M_COVR data-coverage polygon (properties.cell = name). The debug overlay draws
+// it to show where cells ACTUALLY have data (vs their bounding box), so nodata
+// inside a polygon is a bug and nodata outside every polygon is a real gap.
+func cpCoverage(_ js.Value, _ []js.Value) any {
+	if session == nil {
+		return js.ValueOf("")
+	}
+	feats := make([]map[string]any, 0)
+	for _, cc := range session.Baker.Coverage() {
+		feats = append(feats, map[string]any{
+			"type":       "Feature",
+			"properties": map[string]any{"cell": cc.Cell},
+			"geometry":   map[string]any{"type": "Polygon", "coordinates": cc.Rings},
+		})
+	}
+	out, err := json.Marshal(map[string]any{"type": "FeatureCollection", "features": feats})
+	if err != nil {
+		return js.ValueOf("")
+	}
+	return js.ValueOf(string(out))
+}
+
 func main() {
 	js.Global().Set("cpBakeReset", js.FuncOf(cpBakeReset))
 	js.Global().Set("cpBakeAddCell", js.FuncOf(cpBakeAddCell))
 	js.Global().Set("cpBakeTile", js.FuncOf(cpBakeTile))
+	js.Global().Set("cpCoverage", js.FuncOf(cpCoverage))
 	js.Global().Set("cpBakeReady", js.ValueOf(true))
 	select {} // keep the instance alive for callbacks
 }

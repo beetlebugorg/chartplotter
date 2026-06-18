@@ -243,8 +243,21 @@ export class ChartPlotterApp extends HTMLElement {
     this._renderCellStatusPopup();
     if (this._debugCells) {
       this._refreshInstalledBounds(); // recolour the debug footprints by new state
-      if (status === "ready") this._pulseCell(name); // one-shot "loaded" ping
+      if (status === "ready") { this._pulseCell(name); this._refreshCoverage(); } // ping + real coverage
     }
+  }
+
+  // Pull the loaded cells' real M_COVR coverage from the baker and draw it on the
+  // debug overlay (debounced — many cells can go ready in a burst).
+  _refreshCoverage() {
+    clearTimeout(this._covTimer);
+    this._covTimer = setTimeout(() => {
+      if (!this._plotter || !this._plotter.realtimeCoverage) return;
+      this._plotter.realtimeCoverage().then((fc) => {
+        const s = this._map && this._map.getSource("inst-cov");
+        if (s) s.setData(fc || { type: "FeatureCollection", features: [] });
+      }).catch(() => {});
+    }, 250);
   }
 
   // Pulse a cell's border once (an expanding, fading ring) when it becomes ready.
@@ -278,10 +291,10 @@ export class ChartPlotterApp extends HTMLElement {
     localStorage.setItem("cp-debug-cells", on ? "1" : "0");
     const map = this._map; if (!map) return;
     const vis = on ? "visible" : "none";
-    for (const id of ["inst-dbg-fill", "inst-dbg-line", "inst-dbg-label"]) {
+    for (const id of ["inst-dbg-fill", "inst-dbg-line", "inst-dbg-label", "inst-cov-fill", "inst-cov-line"]) {
       if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
     }
-    if (on) this._refreshInstalledBounds(); // ensure status props are current
+    if (on) { this._refreshInstalledBounds(); this._refreshCoverage(); } // status + real coverage
   }
 
   // Remove every cell that failed to parse from the browser store (and reset the
@@ -1581,6 +1594,13 @@ export class ChartPlotterApp extends HTMLElement {
       "line-width": ["interpolate", ["linear"], ["get", "prog"], 0, 1, 0.15, 5, 1, 1],
       "line-opacity": ["interpolate", ["linear"], ["get", "prog"], 0, 0.2, 0.15, 1, 1, 0],
     } });
+    // Real M_COVR data-coverage of LOADED cells (vs the bbox rectangles above):
+    // chart data should fill these exactly. Nodata INSIDE a coverage polygon =
+    // a bug; nodata OUTSIDE every polygon (but inside a bbox) = an unloaded cell;
+    // nodata outside all = a genuine gap. Drawn as a green hatched fill + outline.
+    map.addSource("inst-cov", { type: "geojson", data: empty });
+    map.addLayer({ id: "inst-cov-fill", type: "fill", source: "inst-cov", layout: { visibility: dbgVis }, paint: { "fill-color": "#1f9d55", "fill-opacity": 0.16 } });
+    map.addLayer({ id: "inst-cov-line", type: "line", source: "inst-cov", layout: { visibility: dbgVis }, paint: { "line-color": "#136b3a", "line-width": 1.4, "line-dasharray": [3, 2] } });
     // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
     // hovering highlights + previews the feature under the cursor; a click LOCKS
     // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
