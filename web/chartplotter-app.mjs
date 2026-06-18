@@ -556,6 +556,7 @@ export class ChartPlotterApp extends HTMLElement {
   // clickable for the per-cell popup). Hidden only when nothing is installed.
   _updateBakeStatus() {
     const root = this.shadowRoot; if (!root) return;
+    this._updateLoadBar(); // subtle top-bar cue (independent of the pill below)
     const el = root.getElementById("bake-status"); if (!el) return;
     const txt = el.querySelector(".sb-bake-txt");
     const loading = this._countStatus("loading"), failed = this._countStatus("failed");
@@ -574,6 +575,22 @@ export class ChartPlotterApp extends HTMLElement {
     el.classList.toggle("busy", busy);
     el.classList.toggle("has-fail", failed > 0);
     el.hidden = false;
+  }
+
+  // Subtle "loading more while data is shown" cue: a thin indeterminate bar at the
+  // top of the map. Shown only when there's bake/parse activity AND data is already
+  // on screen (cold start keeps the louder pill/welcome). Debounced — delay-in
+  // ~150ms so instant bakes don't flash it; linger ~300ms after idle.
+  _updateLoadBar() {
+    const want = (this._bakeInflight > 0 || this._countStatus("loading") > 0)
+      && (this._hasArchive || this._countStatus("ready") > 0);
+    if (want === this._loadBarWant) return; // only act on a change of desired state
+    this._loadBarWant = want;
+    clearTimeout(this._loadBarTimer);
+    this._loadBarTimer = setTimeout(() => {
+      const bar = this.shadowRoot && this.shadowRoot.getElementById("load-bar");
+      if (bar) bar.classList.toggle("on", want);
+    }, want ? 100 : 300);
   }
 
   _toggleCellStatusPopup() {
@@ -3544,8 +3561,22 @@ export class ChartPlotterApp extends HTMLElement {
         .sr-item:last-child { border-bottom:none; }
         .sr-item:hover, .sr-item.sel { background:var(--ui-hover); }
         .sr-item .t { font-weight:600; } .sr-item .s { color:var(--ui-text-faint); font-size:12px; }
+        /* Subtle "loading more while data is shown" cue: a thin indeterminate bar
+           along the top of the map. Opacity-controlled (always in DOM) so it fades
+           in/out; the slide animation runs continuously (cheap). */
+        .load-bar { position:absolute; top:0; left:0; right:0; height:6px; z-index:25; pointer-events:none; overflow:hidden;
+          opacity:0; transition:opacity .2s ease; background:rgba(13,71,161,.3); }
+        .load-bar.on { opacity:1; }
+        .load-bar::before { content:""; position:absolute; top:0; height:100%; width:40%;
+          background:linear-gradient(90deg, transparent, #0d47a1 45%, #0d47a1 55%, transparent);
+          box-shadow:0 0 8px rgba(13,71,161,.7); animation:load-slide 1.1s ease-in-out infinite; }
+        :host([data-scheme="night"]) .load-bar, :host([data-scheme="dusk"]) .load-bar { background:rgba(90,155,216,.22); }
+        :host([data-scheme="night"]) .load-bar::before, :host([data-scheme="dusk"]) .load-bar::before {
+          background:linear-gradient(90deg, transparent, #6aaef0 45%, #6aaef0 55%, transparent); box-shadow:0 0 8px rgba(106,174,240,.6); }
+        @keyframes load-slide { 0% { left:-40%; } 100% { left:100%; } }
       </style>
       <div id="map"></div>
+      <div id="load-bar" class="load-bar" aria-hidden="true"></div>
       <div id="rail">
         <button class="ri" id="rail-home" title="Chart viewer">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></svg>
