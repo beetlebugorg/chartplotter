@@ -213,7 +213,15 @@ export class ChartPlotterApp extends HTMLElement {
     // per-district archive manifest (charts-index.json, written by --bake-districts).
     const cat = fetch(this._assets + "catalog.json")
       .then((r) => (r.ok ? r.json() : null)).then((j) => { this._catalogDate = (j && j.date) || ""; return (j && j.cells) || []; }).catch(() => [])
-      .then((cells) => { this._catalog = cells; for (const c of cells) this._byName.set(c.n, c); });
+      .then((cells) => {
+        // NOAA catalog titles are HTML-encoded (e.g. "Hawai&#39;i"). Decode once
+        // to plain text so esc() can re-encode them safely for display instead of
+        // double-encoding the entity into a literal "&#39;".
+        const ta = document.createElement("textarea");
+        const decode = (s) => { if (!s || s.indexOf("&") < 0) return s; ta.innerHTML = s; return ta.value; };
+        for (const c of cells) { if (c.l) c.l = decode(c.l); }
+        this._catalog = cells; for (const c of cells) this._byName.set(c.n, c);
+      });
     const man = fetch(this._assets + "charts-index.json")
       .then((r) => (r.ok ? r.json() : null)).then((j) => { this._districts = (j && j.districts) || []; }).catch(() => { this._districts = []; });
     return Promise.all([cat, man]);
@@ -603,8 +611,8 @@ export class ChartPlotterApp extends HTMLElement {
     // re-render happens in _onTaskDone.
     if (this._section === "charts" && this._drawerOpen()) {
       const busy = this._taskRunning();
-      const dl = this.shadowRoot.getElementById("area-dl");
-      if (dl) { dl.disabled = busy; if (busy) dl.textContent = "Downloading…"; }
+      const dl = this.shadowRoot.getElementById("area-apply");
+      if (dl) { dl.disabled = busy; if (busy) dl.textContent = "Working…"; }
       const rm = this.shadowRoot.getElementById("owned-remove");
       if (rm) rm.disabled = busy;
       const rb = this.shadowRoot.getElementById("owned-rebake");
@@ -656,9 +664,8 @@ export class ChartPlotterApp extends HTMLElement {
       const on = cells.length > 0 && cells.every((n) => this._areaCells.has(n)); // fully selected → active
       return `<button class="region-btn${on ? " on" : ""}" data-region="${rgn.id}" title="${on ? "Click to deselect" : "Select"} · ${cells.length} chart${cells.length !== 1 ? "s" : ""}">${rgn.name}<span class="rb-n">${cells.length}</span></button>`;
     }).join("");
-    const any = this._areaCells.size > 0;
     return `<div class="set-section" id="region-sec">
-      <div class="rg-head"><h3>Jump to a region</h3>${any ? `<button class="linkbtn rg-clear" id="rg-clear">Reset selection</button>` : ""}</div>
+      <div class="rg-head"><h3>Jump to a region</h3></div>
       <div class="region-grid">${chips}</div>
     </div>`;
   }
@@ -680,7 +687,6 @@ export class ChartPlotterApp extends HTMLElement {
   _wireRegions() {
     this.shadowRoot.querySelectorAll(".region-btn[data-region]").forEach((b) =>
       (b.onclick = () => this._selectRegion(b.dataset.region)));
-    this.shadowRoot.getElementById("rg-clear")?.addEventListener("click", () => this._clearArea());
   }
   // Region buttons are toggles: if the region is fully selected, clicking clears
   // its cells; otherwise it adds them. No map movement — the selection just lights
@@ -709,29 +715,65 @@ export class ChartPlotterApp extends HTMLElement {
     i.oninput = () => { this._cellQuery = i.value; this._renderCellListInto(); };
   }
 
-  // The selection bar: live count + size + Download/Clear once cells are picked,
-  // a hint otherwise. The map pans/zooms freely; tap a cell on it to add/remove it.
+  // The selection bar: the selection vs what's installed. It only acts on the
+  // DIFFERENCE — added cells download, deselected cells uninstall — so re-opening
+  // the picker with everything already downloaded offers nothing to do. The map
+  // pans/zooms freely; tap a cell to add/remove it.
   _renderSelectionBar() {
-    let bytes = 0, have = 0;
-    for (const n of this._effectiveAreaCells()) {
-      const c = this._byName.get(n);
-      if (c) { have++; if (typeof c.zs === "number") bytes += c.zs; }
-    }
+    const { added, removed, eff } = this._pendingChanges();
+    const have = this._downloadedCells();
     const busy = this._taskRunning();
-    if (!have) {
+    if (!eff.length && !have.size) {
       return `<div class="sel-bar empty"><span class="muted">Pick charts: tap a region, tap cells on the map, or search below.</span></div>`;
     }
-    const mb = (bytes / 1e6).toFixed(1);
+    let bytes = 0; for (const n of eff) { const c = this._byName.get(n); if (c && typeof c.zs === "number") bytes += c.zs; }
+    const addBytes = added.reduce((s, n) => { const c = this._byName.get(n); return s + (c && typeof c.zs === "number" ? c.zs : 0); }, 0);
+    const changed = added.length || removed.length;
+
+    let action;
+    if (!changed) {
+      action = `<button class="add-dl" disabled>✓ Up to date</button>`;
+    } else if (!eff.length) {
+      action = `<button class="add-dl" id="area-apply"${busy ? " disabled" : ""}>${busy ? "Working…" : `Remove all ${removed.length} chart${removed.length !== 1 ? "s" : ""}`}</button>`;
+    } else {
+      let label;
+      if (added.length && removed.length) label = `Apply changes (+${added.length} · −${removed.length})`;
+      else if (added.length) label = `⬇ Download ${added.length} chart${added.length !== 1 ? "s" : ""}`;
+      else label = `Remove ${removed.length} chart${removed.length !== 1 ? "s" : ""}`;
+      action = `<button class="add-dl" id="area-apply"${busy ? " disabled" : ""}>${busy ? "Working…" : label}</button>`;
+    }
+    const bits = [];
+    if (added.length) bits.push(`+${added.length} to add${addBytes ? ` · ~${(addBytes / 1e6).toFixed(1)} MB` : ""}`);
+    if (removed.length) bits.push(`−${removed.length} to remove`);
+    const changeLine = bits.length ? `<div class="sel-change">${bits.join(" · ")}</div>` : "";
+    const revert = changed ? `<button class="linkbtn" id="area-revert"${busy ? " disabled" : ""}>Revert to installed</button>` : "";
+
     return `<div class="sel-bar">
-      <div class="sel-count"><b>${have}</b> chart${have !== 1 ? "s" : ""} selected <span class="muted">· ~${mb} MB</span></div>
-      <button class="add-dl" id="area-dl"${busy ? " disabled" : ""}>${busy ? "Downloading…" : `⬇ Download ${have} chart${have !== 1 ? "s" : ""}`}</button>
-      <button class="linkbtn" id="area-clear"${busy ? " disabled" : ""}>Clear selection</button>
+      <div class="sel-count"><b>${eff.length}</b> chart${eff.length !== 1 ? "s" : ""} selected <span class="muted">· ~${(bytes / 1e6).toFixed(1)} MB total</span></div>
+      ${changeLine}
+      ${action}
+      ${revert}
     </div>`;
   }
   _wireSelectionBar() {
     const r = this.shadowRoot;
-    r.getElementById("area-dl")?.addEventListener("click", () => this._downloadArea());
-    r.getElementById("area-clear")?.addEventListener("click", () => this._clearArea());
+    r.getElementById("area-apply")?.addEventListener("click", () => this._applyChanges());
+    r.getElementById("area-revert")?.addEventListener("click", () => this._resetToDownloaded());
+  }
+  // Apply the pending selection: nothing left selected (all deselected) → uninstall
+  // everything; otherwise re-provision the selection, which fetches the added cells
+  // and drops the removed ones from the re-baked archive.
+  _applyChanges() {
+    const { eff, removed } = this._pendingChanges();
+    if (!eff.length && removed.length) { this._removeDownloaded(); return; }
+    this._downloadArea();
+  }
+  // Discard pending edits — snap the selection back to what's installed.
+  _resetToDownloaded() {
+    this._areaCells = this._downloadedCells();
+    this._saveAreaCells();
+    this._refreshCellSel();
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
   // NOAA data freshness footer (req: show when the catalog data is from).
@@ -758,6 +800,32 @@ export class ChartPlotterApp extends HTMLElement {
     const out = [];
     for (const n of this._areaCells) { const c = this._byName.get(n); if (c && this._bandOn(c)) out.push(n); }
     return out;
+  }
+
+  // The cells currently downloaded on this device: the map-selected bake, any
+  // locally imported cells, and every cell covered by a downloaded NOAA region.
+  // This is the baseline the selection is diffed against (added vs removed).
+  _downloadedCells() {
+    const have = new Set();
+    if (this._userBake && Array.isArray(this._userBake.cells)) for (const n of this._userBake.cells) have.add(n);
+    for (const n of this._installed) have.add(n);
+    if (this._dlRegions && this._dlRegions.size) {
+      for (const c of this._catalog) {
+        if (Array.isArray(c.rg) && c.rg.some((n) => this._dlRegions.has(n))) have.add(c.n);
+      }
+    }
+    return have;
+  }
+
+  // Pending change between the selection and what's installed: cells to add (in
+  // the selection, not yet downloaded) and to remove (downloaded, deselected).
+  _pendingChanges() {
+    const effArr = this._effectiveAreaCells();
+    const eff = new Set(effArr);
+    const have = this._downloadedCells();
+    const added = effArr.filter((n) => !have.has(n));
+    const removed = [...have].filter((n) => !eff.has(n));
+    return { added, removed, eff: effArr };
   }
 
   // "On this device": the map-selected bake (charts-user) + any imported files,
@@ -987,13 +1055,6 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
-  _clearArea() {
-    this._areaCells.clear();
-    this._saveAreaCells();
-    this._refreshCellSel();
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-  }
-
   // Download the full union: bake ALL selected cells into ONE charts-user.pmtiles
   // (same provision machinery as regions). Each download re-bakes the union, so
   // adding more boxes then downloading again just extends the package.
@@ -1002,7 +1063,10 @@ export class ChartPlotterApp extends HTMLElement {
     const cells = this._effectiveAreaCells(); // only enabled-band cells
     if (!cells.length) return;
     if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
-    this._taskMeta = { name: "Selected area", verb: "Downloading" };
+    // Verb reflects the pending change: a re-bake that only drops cells is an
+    // "Updating", not a "Downloading" (nothing new is fetched).
+    const { added } = this._pendingChanges();
+    this._taskMeta = { name: "Selected area", verb: added.length ? "Downloading" : "Updating" };
     this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: cells.length, cells: cells.length, cell: "" };
     this._renderTaskUI();
     try {
@@ -2190,7 +2254,6 @@ export class ChartPlotterApp extends HTMLElement {
         /* charts selector: region quick-picks */
         .rg-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
         .rg-head > h3 { margin-bottom:8px; }
-        .rg-clear { padding:0 0 8px; font-size:12px; }
         .region-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
         .region-btn { display:flex; align-items:center; justify-content:space-between; gap:8px; border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text); border-radius:8px; padding:9px 11px; font:inherit; font-size:13px; font-weight:500; cursor:pointer; text-align:left; }
         .region-btn:hover { background:var(--ui-hover); border-color:var(--ui-accent); }
@@ -2201,7 +2264,9 @@ export class ChartPlotterApp extends HTMLElement {
         .sel-bar { margin:0 0 16px; }
         .sel-bar.empty { background:var(--ui-surface-2); border-radius:8px; padding:10px 12px; }
         .sel-bar.empty .muted { font-size:12px; line-height:1.45; }
-        .sel-bar .sel-count { margin-bottom:8px; font-size:13px; }
+        .sel-bar .sel-count { margin-bottom:4px; font-size:13px; }
+        .sel-bar .sel-change { margin-bottom:8px; font-size:12px; font-weight:600; color:var(--ui-accent); }
+        .sel-bar #area-revert { padding-top:6px; }
         /* cell list (browse + inspect) */
         .cell-list-sec { margin-bottom:18px; }
         .cl-row { border-bottom:1px solid var(--ui-border-2); }
