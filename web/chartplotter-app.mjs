@@ -327,23 +327,128 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._renderSel.size) this._refreshRealtime(false);
   }
 
-  // Debug overlay hover: tint + label the cell footprint under the cursor. With
-  // overlapping cells (multiple bands) pick the smallest box — the most detailed
-  // cell — so the label is the one you're most likely after.
+  // Pick the cell under `point` for the debug overlay. Prefers REAL data coverage
+  // (M_COVR, the inst-cov layer) over the raw catalog bbox, so the result matches
+  // where the cell actually has data — and only considers cells VISIBLE at the
+  // current zoom (band not gated out), so hover/select track what's rendering. The
+  // bbox layer is a fallback for cells not yet loaded (no M_COVR drawn). Smallest
+  // area wins on overlap (the most detailed cell under the cursor). Returns
+  // { name, geometry, status } or null.
+  _debugCellsAt(point) {
+    const map = this._map;
+    if (!map) return [];
+    const z = map.getZoom();
+    const visible = (name) => {
+      const c = this._byName.get(name);
+      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
+      return z >= (BAND_MINZOOM[band] || 0);
+    };
+    const byName = new Map(); // name -> { name, geometry, area, cov }
+    const scan = (layer, key, isCov) => {
+      if (!map.getLayer(layer)) return;
+      for (const f of map.queryRenderedFeatures(point, { layers: [layer] })) {
+        const name = f.properties[key];
+        if (!name || !visible(name)) continue;
+        const a = bboxArea(f.geometry);
+        const prev = byName.get(name);
+        // Prefer the real M_COVR geometry; among the same kind keep the smallest.
+        if (!prev || (isCov && !prev.cov) || (isCov === prev.cov && a < prev.area)) {
+          byName.set(name, { name, geometry: f.geometry, area: a, cov: isCov });
+        }
+      }
+    };
+    scan("inst-cov-fill", "cell", true);  // real M_COVR coverage (loaded cells)
+    scan("inst-dbg-fill", "name", false); // bbox footprints (incl. not-yet-loaded)
+    // Coverage-backed cells first, then by ascending area (most detailed first).
+    return [...byName.values()].sort((a, b) => (b.cov ? 1 : 0) - (a.cov ? 1 : 0) || a.area - b.area);
+  }
+  _debugCellAt(point) { return this._debugCellsAt(point)[0] || null; }
+
+  // Debug overlay hover: report EVERY cell under the cursor and, per cell, exactly
+  // what it's drawing here — grouped from the actually-rendered chart features
+  // (queryRenderedFeatures, which returns only what's painted) by their `cell`
+  // attribute. Cells whose M_COVR covers the point but draw nothing (gated /
+  // suppressed) are listed as "(not drawing)" — the key signal when debugging a
+  // cut-off or empty patch. Highlights all candidate footprints + a HUD readout.
   _onDebugHover(e) {
     if (!this._debugCells || !this._map) return;
-    if (!this._map.getLayer("inst-dbg-fill")) return;
-    const feats = this._map.queryRenderedFeatures(e.point, { layers: ["inst-dbg-fill"] });
-    if (!feats.length) { this._clearDebugHover(); return; }
-    let best = feats[0], bestArea = Infinity;
-    for (const f of feats) { const a = bboxArea(f.geometry); if (a < bestArea) { bestArea = a; best = f; } }
-    const src = this._map.getSource("inst-dbg-hover");
-    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: { name: best.properties.name, status: best.properties.status }, geometry: best.geometry }] });
+    const map = this._map;
+
+    // What's actually painted here, grouped by source cell → { layer: {cls:count} }.
+    const chartLayers = map.getStyle().layers.filter((l) => l.source && isChartSource(l.source)).map((l) => l.id);
+    const drawn = new Map(); // cell -> Map(sourceLayer -> Map(class -> count))
+    if (chartLayers.length) {
+      for (const f of map.queryRenderedFeatures(e.point, { layers: chartLayers })) {
+        const cell = (f.properties && f.properties.cell) || "?";
+        const lyr = f.sourceLayer || "?";
+        const cls = (f.properties && f.properties.class) || "";
+        const byLyr = drawn.get(cell) || new Map();
+        const byCls = byLyr.get(lyr) || new Map();
+        byCls.set(cls, (byCls.get(cls) || 0) + 1);
+        byLyr.set(lyr, byCls); drawn.set(cell, byLyr);
+      }
+    }
+
+    // Cells whose footprint/coverage is under the cursor (visible at this zoom),
+    // smallest-first — so cells that cover here but draw nothing still get listed.
+    const covering = this._debugCellsAt(e.point); // [{name, geometry}], smallest area first
+    const order = covering.map((c) => c.name);
+    for (const cell of drawn.keys()) if (!order.includes(cell)) order.push(cell);
+
+    if (!order.length) { this._clearDebugHover(); this._hideDebugHud(); return; }
+
+    // Highlight all candidate footprints on the map.
+    const src = map.getSource("inst-dbg-hover");
+    if (src) src.setData({ type: "FeatureCollection", features: covering.map((c) => ({ type: "Feature", properties: { name: c.name, status: this._cellStatus.get(c.name) || "" }, geometry: c.geometry })) });
+
+    // HUD readout: per cell, the layers/classes it's drawing (or "not drawing").
+    // Cap the list (most-detailed cells sort first) so it can't grow unwieldy.
+    const CAP = 10;
+    const shown = order.slice(0, CAP);
+    const more = order.length - shown.length;
+    const rows = shown.map((cell) => {
+      const c = this._byName.get(cell);
+      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
+      const dot = `<span class="dh-dot" style="background:${BAND_COLOR[band] || "#888"}"></span>`;
+      const byLyr = drawn.get(cell);
+      let body;
+      if (!byLyr) {
+        body = `<div class="dh-draw dh-none">not drawing here</div>`;
+      } else {
+        body = [...byLyr.entries()].map(([lyr, byCls]) => {
+          const parts = [...byCls.entries()].map(([cls, n]) => (cls ? `${cls}×${n}` : `×${n}`)).join(", ");
+          return `<div class="dh-draw"><span class="dh-lyr">${esc(lyr)}</span>: ${esc(parts)}</div>`;
+        }).join("");
+      }
+      return `<div class="dh-cell"><div class="dh-name">${dot}${esc(cell)}</div>${body}</div>`;
+    }).join("") + (more > 0 ? `<div class="dh-cell dh-none">+${more} more cell${more > 1 ? "s" : ""}</div>` : "");
+    this._showDebugHud(e, rows);
+  }
+
+  _showDebugHud(e, html) {
+    const hud = this.shadowRoot.getElementById("debug-hud");
+    if (!hud) return;
+    hud.innerHTML = html;
+    hud.hidden = false;
+    const rect = this.getBoundingClientRect();
+    const oe = e.originalEvent || e;
+    let x = (oe.clientX - rect.left) + 14, y = (oe.clientY - rect.top) + 14;
+    // Keep it on-screen.
+    const w = hud.offsetWidth, h = hud.offsetHeight;
+    if (x + w > rect.width) x = (oe.clientX - rect.left) - w - 14;
+    if (y + h > rect.height) y = Math.max(4, rect.height - h - 4);
+    hud.style.left = x + "px";
+    hud.style.top = y + "px";
+  }
+  _hideDebugHud() {
+    const hud = this.shadowRoot.getElementById("debug-hud");
+    if (hud && !hud.hidden) hud.hidden = true;
   }
 
   _clearDebugHover() {
     const src = this._map && this._map.getSource("inst-dbg-hover");
     if (src) src.setData({ type: "FeatureCollection", features: [] });
+    this._hideDebugHud();
   }
 
   // Right-click a cell box in the debug overlay → context menu to pick which cells
@@ -351,14 +456,12 @@ export class ChartPlotterApp extends HTMLElement {
   // you can isolate exactly the cells you care about. Picks the smallest box on
   // overlap (the most detailed cell under the cursor).
   _onDebugContextMenu(e) {
-    if (!this._debugCells || !this._map || !this._map.getLayer("inst-dbg-fill")) return;
-    const feats = this._map.queryRenderedFeatures(e.point, { layers: ["inst-dbg-fill"] });
-    if (!feats.length) return;
+    if (!this._debugCells || !this._map) return;
+    const hit = this._debugCellAt(e.point); // M_COVR-aware, visible-at-this-zoom only
+    if (!hit) return;
     if (e.preventDefault) e.preventDefault();
     if (e.originalEvent && e.originalEvent.preventDefault) e.originalEvent.preventDefault();
-    let best = feats[0], bestArea = Infinity;
-    for (const f of feats) { const a = bboxArea(f.geometry); if (a < bestArea) { bestArea = a; best = f; } }
-    const name = best.properties.name;
+    const name = hit.name;
     const picked = this._renderSel.has(name);
     const items = [
       { label: `Render only ${name}`, onClick: () => this._setRenderSel([name]) },
@@ -2109,12 +2212,40 @@ export class ChartPlotterApp extends HTMLElement {
     if (on) {
       if (!this._tileDbg) {
         const mod = await import("./tile-debugger.mjs");
-        this._tileDbg = new mod.TileDebugger({ source: "chart" });
+        this._tileDbg = new mod.TileDebugger({ source: "chart", inspectURL: (z, x, y) => this._tileInspectURL(z, x, y) });
       }
       if (this._tileDbgOn) map.addControl(this._tileDbg, "top-right"); // re-check: user may have toggled off during the import
     } else if (this._tileDbg) {
       try { map.removeControl(this._tileDbg); } catch (e) { /* not added */ }
     }
+  }
+
+  // Build the hittable URL for the tile-debugger's "inspect this tile" button:
+  // GET /api/tile/{z}/{x}/{y}?cells=… — the server re-bakes that z/x/y from the
+  // cached cells (same baker) and returns the raw MVT, so it can be pulled with
+  // curl / fed to an MVT inspector. We scope ?cells to the installed cells whose
+  // footprint overlaps the tile (cells with no known footprint are always passed),
+  // so the server bakes the same set the app loaded. Absolute URL (clipboard-ready).
+  _tileInspectURL(z, x, y) {
+    const [W, S, E, N] = this._tileBBox(z, x, y);
+    const names = [];
+    for (const name of this._installed) {
+      const c = this._byName.get(name);
+      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) { names.push(name); continue; } // unknown footprint → always include
+      const [w, s, e, n] = c.bb;
+      if (e < W || w > E || n < S || s > N) continue; // no overlap
+      names.push(name);
+    }
+    const q = names.length ? `?cells=${encodeURIComponent(names.join(","))}` : "";
+    return new URL(`api/tile/${z}/${x}/${y}${q}`, location.href).href;
+  }
+
+  // Web-Mercator tile z/x/y → lon/lat bbox [W,S,E,N].
+  _tileBBox(z, x, y) {
+    const n = 2 ** z;
+    const lon = (xx) => (xx / n) * 360 - 180;
+    const lat = (yy) => { const r = Math.PI - (2 * Math.PI * yy) / n; return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(r) - Math.exp(-r))); };
+    return [lon(x), lat(y + 1), lon(x + 1), lat(y)];
   }
 
   // Flush the baked-tile caches and force every visible tile to re-bake: clears
@@ -3343,6 +3474,18 @@ export class ChartPlotterApp extends HTMLElement {
         .ctx-menu[hidden] { display:none; }
         .ctx-item { display:block; width:100%; text-align:left; padding:7px 10px; border:0; background:none; color:inherit; border-radius:6px; cursor:pointer; white-space:nowrap; }
         .ctx-item:hover { background:var(--ui-hover); }
+        /* Debug overlay hover HUD: which cells are under the cursor and what each draws. */
+        .debug-hud { position:absolute; z-index:29; pointer-events:none; background:rgba(17,22,28,.94); color:#e6edf3;
+          border:1px solid #2b3742; border-radius:6px; padding:6px 8px; max-width:300px; font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;
+          box-shadow:0 4px 16px rgba(0,0,0,.4); }
+        .debug-hud[hidden] { display:none; }
+        .debug-hud .dh-cell { margin:0 0 4px; }
+        .debug-hud .dh-cell:last-child { margin-bottom:0; }
+        .debug-hud .dh-name { font-weight:700; }
+        .debug-hud .dh-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:baseline; }
+        .debug-hud .dh-none { opacity:.5; font-style:italic; }
+        .debug-hud .dh-draw { opacity:.85; padding-left:13px; }
+        .debug-hud .dh-lyr { color:#90caf9; }
         label.fld { display:block; margin:8px 0; }
         label.fld span { display:inline-block; min-width:135px; }
         input[type=number] { width:64px; }
@@ -3462,6 +3605,7 @@ export class ChartPlotterApp extends HTMLElement {
       </div>
       <button id="dlpill" hidden></button>
       <div id="ctx-menu" class="ctx-menu" hidden></div>
+      <div id="debug-hud" class="debug-hud" hidden></div>
       <div id="empty" hidden><div class="card">
         <svg class="welcome-mark" viewBox="0 0 24 24" fill="none" stroke="#1565c0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M5 12a7 7 0 0 0 14 0M3 12h2m14 0h2M12 21a7 7 0 0 1-5-2m10 0a7 7 0 0 1-5 2"/></svg>
         <h2>Welcome aboard</h2>

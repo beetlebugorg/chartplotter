@@ -70,6 +70,9 @@ export class TileDebugger {
   constructor(opts = {}) {
     this.source = opts.source || "chart";
     this._layersOpt = opts.layers || null;
+    // (z,x,y) → a hittable URL that returns this tile's raw MVT bytes (for
+    // inspecting in an external tool). Supplied by the host; null hides the button.
+    this._inspectURL = typeof opts.inspectURL === "function" ? opts.inspectURL : null;
     this._delivered = new Map();   // "z/x/y" -> { bytes, ver, error, t }
     this._log = new Map();         // "z/x/y" -> [{ t, type, state, err }]
     this._infos = new Map();       // "z/x/y" -> latest tile info (rebuilt each draw)
@@ -386,6 +389,25 @@ export class TileDebugger {
     const cb = this._panel.querySelector(".td-toggle input");
     if (cb) cb.onchange = () => { this._overlayOn = cb.checked; this._scheduleDraw(); this._refreshPanel(); };
     this._panel.querySelectorAll(".td-mm").forEach((li) => (li.onclick = () => { this._selected = li.dataset.id; this._refreshPanel(); this._flyTo(li.dataset.id); }));
+    this._panel.querySelectorAll(".td-btn[data-url]").forEach((ib) => (ib.onclick = () => this._copyURL(ib)));
+  }
+
+  // Copy the tile-inspect URL to the clipboard (also logged, so it's reachable on
+  // an insecure LAN origin where the clipboard API is blocked).
+  _copyURL(btn) {
+    const url = btn.getAttribute("data-url");
+    console.log("[tile-debugger] tile URL:", url);
+    const done = () => { const t = btn.textContent; btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = t; }, 1200); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(done, () => { this._fallbackCopy(url); done(); });
+    } else { this._fallbackCopy(url); done(); }
+  }
+  _fallbackCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    } catch (e) { /* console log above is the fallback-of-last-resort */ }
   }
 
   _detailHTML() {
@@ -414,6 +436,21 @@ export class TileDebugger {
       if (slc) {
         const parts = Object.keys(slc).map((n) => `${esc(n)}:${slc[n]}`).join(", ");
         rows += kv("source-layers", parts || "(none)");
+      }
+    }
+    // "Inspect this tile": hittable URLs that re-bake this z/x/y server-side — as a
+    // single-tile .pmtiles archive (loads in pmtiles.io / any PMTiles viewer) or as
+    // the raw .mvt (for vt2geojson etc.). Open downloads the .pmtiles.
+    if (this._inspectURL) {
+      const [tz, tx, ty] = id.split("/").map(Number);
+      const base = this._inspectURL(tz, tx, ty);
+      if (base) {
+        const sep = base.includes("?") ? "&" : "?";
+        const pm = `${base}${sep}format=pmtiles`;
+        rows += `<div class="td-actions">`
+          + `<button class="td-btn" type="button" data-url="${esc(pm)}">Copy .pmtiles URL</button>`
+          + `<button class="td-btn" type="button" data-url="${esc(base)}">Copy .mvt URL</button>`
+          + `<a class="td-btn td-link" href="${esc(pm)}" download="${tz}-${tx}-${ty}.pmtiles">Download</a></div>`;
       }
     }
     if (log.length) {
@@ -472,7 +509,11 @@ export class TileDebugger {
       .tile-debugger .td-kv span { opacity:.6; } .tile-debugger .td-kv b { font-weight:600; text-align:right; word-break:break-all; }
       .tile-debugger .td-log { list-style:none; margin:0; padding:0; }
       .tile-debugger .td-log li { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-      .tile-debugger .td-log span { opacity:.5; } .tile-debugger .td-log i { color:#90caf9; font-style:normal; } .tile-debugger .td-log em { color:#ef9a9a; font-style:normal; }`;
+      .tile-debugger .td-log span { opacity:.5; } .tile-debugger .td-log i { color:#90caf9; font-style:normal; } .tile-debugger .td-log em { color:#ef9a9a; font-style:normal; }
+      .tile-debugger .td-actions { display:flex; gap:6px; margin-top:6px; }
+      .tile-debugger .td-btn { flex:1; text-align:center; padding:4px 6px; border:1px solid #2b3742; border-radius:4px; background:#1b2530; color:#cfe3f5; cursor:pointer; font:inherit; text-decoration:none; }
+      .tile-debugger .td-btn:hover { background:#243140; }
+      .tile-debugger .td-link { flex:0 0 auto; }`;
     const el = document.createElement("style");
     el.id = "td-style";
     el.textContent = css;
