@@ -2534,17 +2534,17 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
-        /* Bottom statusbar: live readout (left) · in-view band pills (right). */
-        #statusbar { position:absolute; left:56px; right:0; bottom:0; z-index:6; height:30px;
-          display:flex; align-items:center; gap:14px; padding:0 12px; box-sizing:border-box;
-          background:var(--ui-surface); border-top:1px solid rgba(0,0,0,.08);
-          box-shadow:0 -1px 6px rgba(0,0,0,.07); backdrop-filter:blur(5px);
-          font:12px system-ui,sans-serif; color:var(--ui-text); transition:left .2s; }
-        #statusbar.with-drawer { left:calc(56px + var(--drawer-w)); }
+        /* Status overlay: a compact floating pill in the bottom-right corner
+           showing only tile status + band · scale · zoom. */
+        #statusbar { position:absolute; right:12px; bottom:12px; z-index:6;
+          display:inline-flex; align-items:center; gap:12px; padding:5px 12px; box-sizing:border-box;
+          background:var(--ui-surface); border:1px solid rgba(0,0,0,.08); border-radius:12px;
+          box-shadow:0 2px 10px rgba(0,0,0,.14); backdrop-filter:blur(5px);
+          font:12px system-ui,sans-serif; color:var(--ui-text); }
         /* NOAA attribution — a pill DEBOSSED into the chart: faint inset fill +
            inset shadow (pressed-in) with a light bottom bevel, under an engraved
            letterpress text effect, so the whole pill reads as embossed in the map. */
-        #noaa-attr { position:absolute; right:12px; bottom:38px; z-index:5; pointer-events:auto;
+        #noaa-attr { position:absolute; right:12px; bottom:52px; z-index:5; pointer-events:auto;
           font:600 11px/1.4 system-ui,sans-serif; letter-spacing:.01em;
           color:var(--ui-text-dim); text-shadow:0 1px 0 rgba(255,255,255,.7);
           background:var(--ui-surface); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.06);
@@ -2566,57 +2566,51 @@ export class ChartPlotterApp extends HTMLElement {
         .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
         /* Live band·scale·zoom readout (left of the statusbar), one line. Each
            field has a fixed width + tabular figures so the bar never reflows. */
-        /* Statusbar inspect toggle (bottom-left). */
-        .sb-btn { display:inline-flex; align-items:center; gap:5px; flex:none; border:1px solid var(--ui-border-strong); background:var(--ui-surface);
-          color:var(--ui-text-dim); border-radius:13px; padding:3px 10px 3px 8px; font:600 11px/1 system-ui,sans-serif; cursor:pointer; white-space:nowrap; }
-        .sb-btn svg { width:14px; height:14px; }
-        .sb-btn:hover { border-color:var(--ui-accent); color:var(--ui-accent); }
-        .sb-btn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
         .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
         .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--ui-text-dim); }
         .ins-cycler .btn { padding:2px 9px; line-height:1.3; }
-        /* Tile/cell generation indicator — centered in the statusbar, clickable
+        /* Tile/cell generation indicator — inline in the status overlay, clickable
            to open the per-cell status popup. Spinner shows only while busy
            (loading cells or baking tiles); otherwise it's a resting "N charts". */
-        .sb-bake { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:7;
-          display:inline-flex; align-items:center; gap:6px; color:var(--ui-accent); cursor:pointer;
-          border:1px solid transparent; background:transparent; border-radius:13px; padding:3px 10px;
+        .sb-bake { flex:none; display:inline-flex; align-items:center; gap:6px; color:var(--ui-accent); cursor:pointer;
+          border:1px solid transparent; background:transparent; border-radius:9px; padding:2px 6px; margin:-2px -2px -2px -4px;
           font:600 11px/1 system-ui,sans-serif; white-space:nowrap; font-variant-numeric:tabular-nums; }
-        .sb-bake:hover { border-color:var(--ui-border-strong); background:var(--ui-surface); }
+        .sb-bake:hover { border-color:var(--ui-border-strong); background:var(--ui-surface-2); }
         .sb-bake[hidden] { display:none; }
         .sb-bake.has-fail { color:#cf3b3b; }
+        /* When nothing is installed, hide the whole overlay's leading gap cleanly. */
         .sb-bake-spin { display:none; width:12px; height:12px; flex:none; border-radius:50%;
           border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
           animation:sb-bake-spin .7s linear infinite; }
         .sb-bake.busy .sb-bake-spin { display:inline-block; }
         @keyframes sb-bake-spin { to { transform:rotate(360deg); } }
         @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
-        /* Per-cell status popup, above the centered indicator. */
-        #cell-status-pop { position:absolute; left:50%; bottom:36px; transform:translateX(-50%); z-index:9;
-          width:min(320px,calc(100vw - 24px)); max-height:min(50vh,340px); overflow:auto;
-          background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:10px;
-          box-shadow:0 8px 28px rgba(0,0,0,.22); padding:8px; }
+        /* Per-cell status popup, opening upward from the overlay's right edge. */
+        #cell-status-pop { position:absolute; right:0; bottom:100%; margin-bottom:10px; z-index:9;
+          width:min(340px,calc(100vw - 24px)); max-height:min(66vh,520px); overflow:auto;
+          background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:12px;
+          box-shadow:0 10px 32px rgba(0,0,0,.24); padding:14px 16px; }
         #cell-status-pop[hidden] { display:none; }
         .csp-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
-          font:600 11px/1 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
-          letter-spacing:.04em; padding:2px 4px 8px; }
+          font:600 11px/1.2 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
+          letter-spacing:.04em; padding:0 0 12px; }
         .csp-clear { flex:none; border:1px solid #cf3b3b; color:#cf3b3b; background:transparent; cursor:pointer;
-          border-radius:9px; padding:2px 8px; font:600 10px/1 system-ui,sans-serif; text-transform:none; letter-spacing:0; }
+          border-radius:9px; padding:4px 10px; font:600 10px/1 system-ui,sans-serif; text-transform:none; letter-spacing:0; }
         .csp-clear:hover { background:#cf3b3b; color:#fff; }
-        .csp-stats { display:grid; grid-template-columns:1fr 1fr; gap:2px 12px; padding:6px 4px 8px; margin-bottom:4px; border-bottom:1px solid var(--ui-border); }
-        .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:6px; font:500 11px/1.4 system-ui,sans-serif; }
+        .csp-stats { display:grid; grid-template-columns:1fr 1fr; gap:9px 18px; padding:0 0 14px; margin-bottom:12px; border-bottom:1px solid var(--ui-border); }
+        .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font:500 12px/1.5 system-ui,sans-serif; }
         .csp-stats span { color:var(--ui-text-dim); text-transform:uppercase; letter-spacing:.03em; font-size:9.5px; }
         .csp-stats b { color:var(--ui-text); font-weight:600; font-variant-numeric:tabular-nums; }
         .csp-list { list-style:none; margin:0; padding:0; }
-        .csp-row { display:flex; align-items:center; gap:8px; padding:4px 4px; font:500 12px/1.2 system-ui,sans-serif; }
+        .csp-row { display:flex; align-items:center; gap:10px; padding:8px 0; font:500 12.5px/1.3 system-ui,sans-serif; }
         .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
         .csp-row.is-fail { align-items:flex-start; }
         .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:2px; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
-        .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; font-variant-numeric:tabular-nums; color:var(--ui-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .csp-err { font:500 10px/1.25 system-ui,sans-serif; color:#cf3b3b; white-space:normal; word-break:break-word; }
+        .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; font-variant-numeric:tabular-nums; color:var(--ui-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .csp-err { font:500 10.5px/1.35 system-ui,sans-serif; color:#cf3b3b; white-space:normal; word-break:break-word; }
         .csp-stat { flex:none; font-weight:600; font-size:11px; }
         .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
-        .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:6px 4px; }
+        .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:8px 0; }
         .sb-readout { flex:none; }
         .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
@@ -2763,6 +2757,11 @@ export class ChartPlotterApp extends HTMLElement {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
           <span class="cap">Settings</span>
         </button>
+        <div class="spacer"></div>
+        <button class="ri" id="inspect-toggle" title="Inspect features — hover to highlight, click to lock, SHIFT+drag to capture an area">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
+          <span class="cap">Inspect</span>
+        </button>
       </div>
       <button id="search-tab" title="Search a port or area">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -2773,16 +2772,11 @@ export class ChartPlotterApp extends HTMLElement {
         <span>All charts</span>
       </button>
       <div id="statusbar">
-        <button id="inspect-toggle" class="sb-btn" title="Inspect features — hover to highlight, click to lock, SHIFT+drag to capture an area">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
-          <span>Inspect</span>
-        </button>
         <button id="bake-status" class="sb-bake" type="button" hidden title="Chart tile generation — click for per-cell status">
           <span class="sb-bake-spin"></span><span class="sb-bake-txt"></span>
         </button>
-        <div id="cell-status-pop" hidden></div>
         <div id="cov-readout" class="sb-readout"></div>
-        <div id="cov-cells" class="sb-bands"></div>
+        <div id="cell-status-pop" hidden></div>
       </div>
       <div id="noaa-attr">
         Data from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
