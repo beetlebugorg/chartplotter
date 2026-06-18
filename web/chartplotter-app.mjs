@@ -795,20 +795,26 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.querySelectorAll(".band-chip[data-band]").forEach((b) => (b.onclick = () => this._toggleBand(b.dataset.band)));
   }
 
-  // Selected cells that are in an enabled band — the set actually downloaded.
+  // The selected cells that will actually be baked: every selected catalog cell.
+  // Bands are a VIEW/add filter only (they limit what the regions/map add and
+  // what's drawn) — they must NOT shrink the install set here, or downloaded
+  // cells of a hidden band would read as "to remove" forever.
   _effectiveAreaCells() {
     const out = [];
-    for (const n of this._areaCells) { const c = this._byName.get(n); if (c && this._bandOn(c)) out.push(n); }
+    for (const n of this._areaCells) if (this._byName.has(n)) out.push(n);
     return out;
   }
 
-  // The cells currently downloaded on this device: the map-selected bake, any
-  // locally imported cells, and every cell covered by a downloaded NOAA region.
-  // This is the baseline the selection is diffed against (added vs removed).
+  // The catalog cells currently downloaded on this device: the map-selected bake +
+  // every cell covered by a downloaded NOAA region. Filtered to catalog cells so
+  // the diff compares like with like (a baked cell missing from the catalog, or a
+  // locally imported non-catalog cell, can't be re-provisioned and would otherwise
+  // read as a permanent removal).
   _downloadedCells() {
     const have = new Set();
-    if (this._userBake && Array.isArray(this._userBake.cells)) for (const n of this._userBake.cells) have.add(n);
-    for (const n of this._installed) have.add(n);
+    const add = (n) => { if (this._byName.has(n)) have.add(n); };
+    if (this._userBake && Array.isArray(this._userBake.cells)) for (const n of this._userBake.cells) add(n);
+    for (const n of this._installed) add(n);
     if (this._dlRegions && this._dlRegions.size) {
       for (const c of this._catalog) {
         if (Array.isArray(c.rg) && c.rg.some((n) => this._dlRegions.has(n))) have.add(c.n);
@@ -1060,7 +1066,7 @@ export class ChartPlotterApp extends HTMLElement {
   // adding more boxes then downloading again just extends the package.
   async _downloadArea() {
     if (this._taskRunning()) return;
-    const cells = this._effectiveAreaCells(); // only enabled-band cells
+    const cells = this._effectiveAreaCells(); // every selected catalog cell
     if (!cells.length) return;
     if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
     // Verb reflects the pending change: a re-bake that only drops cells is an
