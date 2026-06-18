@@ -174,11 +174,20 @@ export class ChartPlotter extends HTMLElement {
       catch (e) { console.warn("[chartplotter] cell", name, e.message); }
     }
 
-    // One protocol + source per NOAA band: each serves that band's loaded
-    // archive(s) (bake-once), or blank when none is loaded. Missing tile → blank.
-    for (const band of CHART_BANDS) {
-      const slug = band.slug;
-      registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._bands[slug]);
+    // Tile source. Real-time (tiles="realtime"): one "cp://" vector source baked
+    // on demand in-browser by the wasm baker from the store's raw cells (the 100%-
+    // wasm path — no server bake, no pmtiles). Otherwise the legacy per-band
+    // pmtiles protocols, each serving its loaded archive(s) (blank when none).
+    this._realtime = this.getAttribute("tiles") === "realtime";
+    if (this._realtime) {
+      this._rt = await import("./wasm-tiles.mjs");
+      await this._rt.initBaker(assets);
+      this._rtCache = this._rt.registerTileProtocol(maplibregl, { namespace: "rt" });
+    } else {
+      for (const band of CHART_BANDS) {
+        const slug = band.slug;
+        registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._bands[slug]);
+      }
     }
 
     // -- map ----------------------------------------------------------------
@@ -492,11 +501,40 @@ export class ChartPlotter extends HTMLElement {
     this._ver++;
     const map = this._map;
     if (!map) return;
-    for (const band of CHART_BANDS) {
-      const src = map.getSource("chart-" + band.slug);
-      if (src) src.setTiles([`chart-${band.slug}://${this._ver}/{z}/{x}/{y}`]);
+    if (this._realtime) {
+      const src = map.getSource("chart");
+      if (src) src.setTiles([`cp://${this._ver}/{z}/{x}/{y}`]);
+    } else {
+      for (const band of CHART_BANDS) {
+        const src = map.getSource("chart-" + band.slug);
+        if (src) src.setTiles([`chart-${band.slug}://${this._ver}/{z}/{x}/{y}`]);
+      }
     }
     map.triggerRepaint();
+  }
+
+  // -- real-time wasm tiles ------------------------------------------------
+  // Load raw S-57 cell bytes into the in-browser wasm baker, then re-request
+  // tiles so they bake from the new set. `cellMap` is { name: Uint8Array }.
+  async loadCells(cellMap) {
+    if (!this._realtime || !this._rt) return null;
+    const res = await this._rt.loadCells(cellMap, this._assets);
+    if (this._rtCache) this._rtCache.clear(); // the loaded set changed → drop cached tiles
+    this.refresh();
+    return res;
+  }
+
+  // Load every cell currently in the store into the baker (the offline path:
+  // imported cells live in OPFS/IndexedDB).
+  async loadStoreCells() {
+    if (!this._realtime) return null;
+    const names = await this._store.list();
+    const cellMap = {};
+    for (const n of names) {
+      try { cellMap[n] = await this._store.getBytes(n); } catch (e) { console.warn("[chartplotter] cell", n, e.message); }
+    }
+    if (!Object.keys(cellMap).length) return null;
+    return this.loadCells(cellMap);
   }
 
   // Resolve an archive source: a Blob/File is passed through; a URL string is
@@ -955,6 +993,19 @@ export class ChartPlotter extends HTMLElement {
     this._layerBase = {};
     this._variants = {};
     const out = [];
+    // Real-time: one layer per template on the single "chart" source (the wasm
+    // baker already composes bands per tile, so no per-band fan is needed). The
+    // id IS the base id, so scheme/mariner updates that target a layer by name
+    // hit it directly.
+    if (this._realtime) {
+      for (const L of tmpl) {
+        const base = L.filter ?? null;
+        this._layerBase[L.id] = base;
+        this._variants[L.id] = [L.id];
+        out.push({ ...L, source: "chart", filter: this.combineFilters(base) });
+      }
+      return out;
+    }
     // Iterate TEMPLATE-outer, band-inner so the global draw order is by S-52
     // class (all bands' fills, then all bands' lines, then all symbols, then all
     // text) rather than per-band stacks. Band-outer order put a finer band's area
@@ -1005,13 +1056,18 @@ export class ChartPlotter extends HTMLElement {
     // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
     // bands resolve to blank tiles (harmless) until an archive is added.
     const sources = {};
-    for (const band of CHART_BANDS) {
-      sources["chart-" + band.slug] = {
-        type: "vector",
-        tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
-        minzoom: band.min,
-        maxzoom: band.max,
-      };
+    if (this._realtime) {
+      // One source; the wasm baker handles band-gating / best-available per tile.
+      sources.chart = { type: "vector", tiles: [`cp://${v}/{z}/{x}/{y}`], minzoom: 0, maxzoom: 18 };
+    } else {
+      for (const band of CHART_BANDS) {
+        sources["chart-" + band.slug] = {
+          type: "vector",
+          tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
+          minzoom: band.min,
+          maxzoom: band.max,
+        };
+      }
     }
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];
 
