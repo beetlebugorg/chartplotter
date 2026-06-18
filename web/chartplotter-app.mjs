@@ -1565,9 +1565,17 @@ export class ChartPlotterApp extends HTMLElement {
   _setChartLayersVisible(on) {
     const map = this._map;
     if (!map || !map.getStyle) return;
-    const vis = on ? "visible" : "none";
+    const isChartLayer = (l) => (l.source && l.source.startsWith("chart-")) || l.id === "nodata";
     for (const l of map.getStyle().layers || []) {
-      if ((l.source && l.source.startsWith("chart-")) || l.id === "nodata") map.setLayoutProperty(l.id, "visibility", vis);
+      if (!isChartLayer(l)) continue;
+      // Restoring is NOT a blanket "visible": a couple of chart layers are kept
+      // hidden by mariner toggles (shallow-pattern, contour-labels), so re-derive
+      // those from the current settings rather than force-showing them — otherwise
+      // leaving Charts mode would switch them on while the settings still read off.
+      let vis = on ? "visible" : "none";
+      if (on && l.id.startsWith("shallow-pattern")) vis = this._mariner.shallowPattern ? "visible" : "none";
+      else if (on && l.id.startsWith("contour-labels")) vis = this._mariner.showContourLabels ? "visible" : "none";
+      map.setLayoutProperty(l.id, "visibility", vis);
     }
   }
 
