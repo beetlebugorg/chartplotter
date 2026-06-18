@@ -17,3 +17,4 @@ web/chartplotter.wasm
 .DS_Store
 .idea/
 .vscode/
+web/vendor/wasm_exec.js
