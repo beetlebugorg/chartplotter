@@ -17,8 +17,12 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
 .PHONY: build wasm wasm-go test vet fmt tidy clean clear-cache serve docs
 
-build: ## Build the chartplotter binary into bin/
+build: $(ASSETS)/chartplotter.wasm ## Build the self-contained shim (embeds web/ + wasm) into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
+
+# go:embed needs the wasm present; build it (via tinygo) if it's missing.
+$(ASSETS)/chartplotter.wasm:
+	$(MAKE) wasm
 
 wasm: ## [experiment] Build the real-time tile-baker wasm via tinygo (needs tinygo + go 1.25, see mise.toml)
 	tinygo build -o $(ASSETS)/chartplotter.wasm -target=wasm -no-debug ./cmd/chartplotter-wasm

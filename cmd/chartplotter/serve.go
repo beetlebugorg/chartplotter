@@ -8,27 +8,9 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
-// provisionCmd downloads the named NOAA cells (URLs from DIR/catalog.json) and
-// native-bakes them into DIR/charts-user.pmtiles + charts-user.json. Port of
-// `chartplotter --provision`.
-type provisionCmd struct {
-	Dir   string   `arg:"" type:"existingdir" help:"Working dir (must contain catalog.json)."`
-	Cells []string `arg:"" name:"cell" help:"NOAA cell name(s), e.g. US5MD1MC."`
-}
-
-func (c provisionCmd) Run() error {
-	r, err := server.ProvisionCore(c.Dir, c.Cells, server.StdoutSink())
-	if err != nil {
-		fmt.Printf(`{"ok":false,"error":%q}`+"\n", err.Error())
-		return err
-	}
-	fmt.Println(r.ResultJSON())
-	return nil
-}
-
-// serveCmd hosts the web frontend (static files + Range) and the /api
-// onboarding surface. By default it serves the frontend embedded in the binary,
-// so a single file is all you need to run.
+// serveCmd hosts the web frontend (embedded static assets + the tinygo wasm) and
+// the /api/cell NOAA-download proxy. Everything else — parse, bake, render — runs
+// in the browser, so this is just a static server + a thin CORS proxy.
 type serveCmd struct {
 	Host       string `default:"127.0.0.1" help:"Bind host."`
 	Port       int    `default:"8080" help:"Bind port."`
