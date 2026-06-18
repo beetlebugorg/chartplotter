@@ -136,11 +136,51 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleCharts(w, r) // GET → manifest, DELETE → remove all
 	case strings.HasPrefix(r.URL.Path, "/api/charts/"):
 		s.deleteRegion(w, r) // DELETE /api/charts/<NN>
+	case strings.HasPrefix(r.URL.Path, "/api/cell/"):
+		s.serveCell(w, r) // GET raw .000 (the 100%-wasm path: NOAA proxy + cache)
 	case r.URL.Path == "/api/debug":
 		s.handleDebug(w, r) // GET → server+client debug snapshot, POST → store client snapshot
 	default:
 		apiErr(w, http.StatusNotFound, "unknown endpoint")
 	}
+}
+
+// serveCell serves a raw S-57 base cell (.000) for the in-browser wasm baker —
+// the 100%-wasm path. GET /api/cell/<NAME>?url=<noaa-zip-url>: returns the cached
+// cell from ENC_ROOT, or (the shim acting as a NOAA download proxy, since
+// charts.noaa.gov sends no CORS headers) downloads + caches it from `url` first.
+func (s *Server) serveCell(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		apiErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/cell/"), ".000")
+	if name == "" || !isCellName(name) {
+		apiErr(w, http.StatusBadRequest, "bad cell name")
+		return
+	}
+	data, _, err := loadCellCached(http.DefaultClient, s.cacheDir, name, r.URL.Query().Get("url"))
+	if err != nil {
+		apiErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
+}
+
+// isCellName accepts the alphanumeric NOAA cell ids (e.g. US5MD1MC) — a safe
+// single path component (no separators, dots, or traversal).
+func isCellName(s string) bool {
+	if len(s) == 0 || len(s) > 16 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // serveRegion serves a baked region archive (/charts/<NN>.pmtiles) from the

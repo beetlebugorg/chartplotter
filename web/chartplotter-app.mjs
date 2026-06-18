@@ -811,21 +811,13 @@ export class ChartPlotterApp extends HTMLElement {
     return out;
   }
 
-  // The catalog cells currently downloaded on this device: the map-selected bake +
-  // every cell covered by a downloaded NOAA region. Filtered to catalog cells so
-  // the diff compares like with like (a baked cell missing from the catalog, or a
-  // locally imported non-catalog cell, can't be re-provisioned and would otherwise
-  // read as a permanent removal).
+  // The cells installed on this device — in the 100%-wasm model that's exactly the
+  // browser cell store (`_installed`), the set the baker renders from. (Server-side
+  // bake/region state no longer applies.) Catalog-filtered so the diff compares
+  // like with like.
   _downloadedCells() {
     const have = new Set();
-    const add = (n) => { if (this._byName.has(n)) have.add(n); };
-    if (this._userBake && Array.isArray(this._userBake.cells)) for (const n of this._userBake.cells) add(n);
-    for (const n of this._installed) add(n);
-    if (this._dlRegions && this._dlRegions.size) {
-      for (const c of this._catalog) {
-        if (Array.isArray(c.rg) && c.rg.some((n) => this._dlRegions.has(n))) have.add(c.n);
-      }
-    }
+    for (const n of this._installed) if (this._byName.has(n)) have.add(n);
     return have;
   }
 
@@ -843,32 +835,31 @@ export class ChartPlotterApp extends HTMLElement {
   // "On this device": the map-selected bake (charts-user) + any imported files,
   // so it's always clear what coverage you actually have.
   _renderOwned() {
-    const u = this._userBake;
-    const imp = this._importedArchives.length;
-    if (!u && !imp) return "";
-    let rows = "";
-    if (u) {
-      let bytes = 0;
-      for (const n of u.cells) { const c = this._byName.get(n); if (c && typeof c.zs === "number") bytes += c.zs; }
-      const mb = bytes ? ` · ~${(bytes / 1e6).toFixed(1)} MB` : "";
-      const busy = this._taskRunning();
-      rows += `<div class="owned-row"><div><b>Map selection</b><div class="muted">${u.cells.length} chart${u.cells.length !== 1 ? "s" : ""}${mb}</div></div>` +
-        `<div class="owned-actions"><button class="linkbtn" id="owned-rebake" title="Re-bake tiles from the cached cells (no re-download)"${busy ? " disabled" : ""}>Re-bake</button>` +
-        `<button class="linkbtn danger" id="owned-remove"${busy ? " disabled" : ""}>Remove</button></div></div>`;
-    }
-    if (imp) rows += `<div class="owned-row"><div><b>Imported files</b><div class="muted">${imp} archive${imp !== 1 ? "s" : ""} loaded</div></div></div>`;
-    return `<div class="region-group">On this device</div>${rows}`;
+    const n = this._installed.size;
+    if (!n) return "";
+    let bytes = 0;
+    for (const name of this._installed) { const c = this._byName.get(name); if (c && typeof c.zs === "number") bytes += c.zs; }
+    const mb = bytes ? ` · ~${(bytes / 1e6).toFixed(1)} MB` : "";
+    const busy = this._taskRunning();
+    return `<div class="region-group">On this device</div>` +
+      `<div class="owned-row"><div><b>${n} chart${n !== 1 ? "s" : ""}</b><div class="muted">stored in browser${mb}</div></div>` +
+      `<div class="owned-actions"><button class="linkbtn danger" id="owned-remove"${busy ? " disabled" : ""}>Remove all</button></div></div>`;
   }
 
-  // Remove the downloaded map-selection bake (DELETE /api/charts) and reset the
-  // local selection so the UI returns to a clean slate.
+  // 100%-wasm: remove every cell from the browser store, reset the selection, and
+  // reload the (now empty) baker so the map clears.
   async _removeDownloaded() {
     if (this._taskRunning()) return;
-    await this._deleteAllCharts("Downloaded charts");
-    this._areaCells.clear();
+    const names = await this._store.list();
+    for (const name of names) { try { await this._store.remove(name); } catch (e) { console.warn("[store] remove", name, e); } }
+    this._installed = new Set();
+    this._areaCells = new Set();
     this._saveAreaCells();
     this._userBake = null;
+    this._hasArchive = false;
+    await this._refreshRealtime(); // reloads the baker (empty) → tiles clear
     this._refreshCellSel();
+    this.updateEmptyState();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
@@ -916,21 +907,9 @@ export class ChartPlotterApp extends HTMLElement {
   // authoritative on load — it replaces any stale persisted selection that may
   // have drifted from what was actually downloaded.
   async _seedAreaCells() {
-    const have = new Set();
-    // 1) the map-selected bake (charts-user.pmtiles) — the server's record of it.
-    try {
-      const r = await fetch("charts/charts-user.json?t=" + Date.now());
-      if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.cells)) for (const n of j.cells) have.add(n); }
-    } catch {}
-    // 2) locally imported cells (OPFS).
-    for (const n of this._installed) have.add(n);
-    // 3) every catalog cell covered by a downloaded NOAA region archive.
-    if (this._dlRegions && this._dlRegions.size) {
-      for (const c of this._catalog) {
-        if (Array.isArray(c.rg) && c.rg.some((n) => this._dlRegions.has(n))) have.add(c.n);
-      }
-    }
-    this._areaCells = have;
+    // 100%-wasm: the selection defaults to exactly the cells in the browser store
+    // (what the baker renders). Edit from there.
+    this._areaCells = this._downloadedCells();
     this._saveAreaCells();
   }
 
@@ -1067,37 +1046,46 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
-  // Download the full union: bake ALL selected cells into ONE charts-user.pmtiles
-  // (same provision machinery as regions). Each download re-bakes the union, so
-  // adding more boxes then downloading again just extends the package.
+  // Apply the pending change in the 100%-wasm model: fetch added cells' raw bytes
+  // (through the shim's NOAA proxy, /api/cell?url=…) into the browser store, drop
+  // removed ones, then re-bake everything in-browser. No server provision/pmtiles.
   async _downloadArea() {
     if (this._taskRunning()) return;
-    const cells = this._effectiveAreaCells(); // every selected catalog cell
-    if (!cells.length) return;
-    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
-    // Verb reflects the pending change: a re-bake that only drops cells is an
-    // "Updating", not a "Downloading" (nothing new is fetched).
-    const { added } = this._pendingChanges();
-    this._taskMeta = { name: "Selected area", verb: added.length ? "Downloading" : "Updating" };
-    this._task = { kind: "provision", status: "running", phase: "download", done: 0, total: cells.length, cells: cells.length, cell: "" };
-    this._renderTaskUI();
-    try {
-      const res = await fetch("api/provision", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cells }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
-    } catch (e) {
-      console.error("[provision]", e);
-      this._task = { kind: "provision", status: "error", error: "start" };
-      this._taskMeta = { name: "Selected area", verb: "Downloading", errMsg: "Is the chartplotter server running?" };
-      this._renderTaskUI();
-      this._clearTaskSoon(3500);
-      return;
+    const { added, removed } = this._pendingChanges();
+    if (!added.length && !removed.length) return;
+    if (added.length && !await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
+
+    this._task = { kind: "download", status: "running" };
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+
+    // 1) remove deselected cells from the browser store.
+    for (const name of removed) {
+      try { await this._store.remove(name); this._installed.delete(name); } catch (e) { console.warn("[store] remove", name, e); }
     }
-    this._startPolling();
+    // 2) fetch added cells into the store (the shim downloads from NOAA + caches).
+    let done = 0, failed = 0;
+    for (const name of added) {
+      this._setProgress({ label: `Downloading ${added.length} chart${added.length !== 1 ? "s" : ""}`, sub: `${name} · ${done + 1} of ${added.length}`, frac: added.length ? done / added.length : null });
+      try {
+        const c = this._byName.get(name);
+        const url = "api/cell/" + encodeURIComponent(name) + (c && c.z ? "?url=" + encodeURIComponent(c.z) : "");
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        await this._store.put(name, new Uint8Array(await resp.arrayBuffer()));
+        this._installed.add(name);
+      } catch (e) { console.warn("[download]", name, e.message); failed++; }
+      done++;
+    }
+    // 3) re-bake the whole store in-browser.
+    this._setProgress({ label: "Baking tiles…", sub: failed ? `${failed} cell${failed !== 1 ? "s" : ""} failed` : "", frac: 1 });
+    await this._refreshRealtime();
+
+    this._task = null;
+    this._setProgress(null);
+    this._saveAreaCells();
+    this.updateEmptyState();
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    if (failed) console.warn(`[download] ${failed} of ${added.length} cell(s) failed`);
   }
 
   // -- cell list (browse + inspect, req: detailed list & cell info) --------
