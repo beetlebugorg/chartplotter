@@ -283,8 +283,8 @@ export class ChartPlotterApp extends HTMLElement {
     } else if (this._bakeInflight > 0) {
       busy = true; label = this._bakeInflight > 1 ? `Generating ${this._bakeInflight} tiles…` : "Generating tile…";
     } else if (this._installed.size > 0) {
-      const n = this._installed.size;
-      label = `${n} chart${n === 1 ? "" : "s"}` + (failed ? ` · ${failed} failed` : "");
+      const loaded = this._countStatus("ready");
+      label = `${loaded}/${this._installed.size} loaded` + (failed ? ` · ${failed} failed` : "");
     } else {
       el.hidden = true; el.classList.remove("busy"); return;
     }
