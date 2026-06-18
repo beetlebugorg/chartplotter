@@ -1,6 +1,6 @@
 module github.com/beetlebugorg/chartplotter
 
-go 1.26.3
+go 1.25.11
 
 require (
 	github.com/alecthomas/kong v1.12.1
