@@ -721,9 +721,15 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 
 	eligible := ts.eligible[:0]
 	var finestNat uint32
+	var gatedZMin int // polys that overlap this tile but are hidden below their display zMin (SCAMIN) — diagnostic
 	minNatMin := uint32(math.MaxUint32)
 	consider := func(i int) {
 		r := &b.prims[i]
+		// Spatial reject first so the zMin diagnostic below counts only prims that
+		// actually overlap this tile (the full-scan path considers every prim).
+		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
+			return
+		}
 		// Lower gate only: below zMin the feature isn't shown at all. The UPPER end
 		// is governed by best-available suppression below (a coarse prim stays
 		// visible when zoomed in past its native band — overzoomed — except where a
@@ -733,9 +739,9 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		// unaffected; overzoom relies on the full-scan path used by the realtime
 		// baker.) r.zMax is retained for the index build's range only.
 		if coord.Z < r.zMin {
-			return
-		}
-		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
+			if r.kind == mvt.GeomPolygon {
+				gatedZMin++
+			}
 			return
 		}
 		eligible = append(eligible, i)
@@ -762,7 +768,8 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	ts.eligible = eligible // persist the (possibly grown) backing array for reuse
 	scratch := ts.proj     // reused per-ring projection buffer (across tiles)
 	clip := &ts.clip       // reused clipper (across tiles)
-	var suppDown, suppUp, emptyGeom int // tile-generation diagnostics (see TileDiag)
+	var suppDown, suppUp, emptyGeom int    // tile-generation diagnostics (see TileDiag)
+	var polyElig, polyEmit int             // polygon prims eligible vs actually emitted (diagnostic)
 	for _, i := range eligible {
 		r := &b.prims[i]
 		// Best-available suppression: below its native band, yield only where no
@@ -787,6 +794,7 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		}
 		switch r.kind {
 		case mvt.GeomPolygon:
+			polyElig++
 			var outRings [][]mvt.IPoint
 			for _, ring := range r.nrings {
 				scratch = projectNormRing(ring, proj, scratch)
@@ -794,10 +802,20 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				if len(clipped) < 3 {
 					continue
 				}
-				outRings = append(outRings, quantizeRing(clipped))
+				q := quantizeRing(clipped)
+				if len(q) < 3 {
+					// DP over-collapsed a small ring — keep it unsimplified rather
+					// than drop a still-renderable polygon. Truly degenerate rings
+					// (sub-grid) are skipped.
+					if q = quantizeRingExact(clipped); len(q) < 3 {
+						continue
+					}
+				}
+				outRings = append(outRings, q)
 			}
 			if len(outRings) > 0 {
 				tb.Layer(r.layer).AddPolygon(outRings, r.attrs)
+				polyEmit++
 			} else {
 				emptyGeom++
 			}
@@ -867,13 +885,49 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	}
 
 	if TileDiag != nil {
-		TileDiag(fmt.Sprintf("tile %d/%d/%d: eligible=%d suppDown=%d suppUp=%d emptyGeom=%d empty=%t",
-			coord.Z, coord.X, coord.Y, len(eligible), suppDown, suppUp, emptyGeom, tb.IsEmpty()))
+		TileDiag(fmt.Sprintf("tile %d/%d/%d: eligible=%d gatedZMin=%d polyElig=%d polyEmit=%d suppDown=%d suppUp=%d emptyGeom=%d empty=%t",
+			coord.Z, coord.X, coord.Y, len(eligible), gatedZMin, polyElig, polyEmit, suppDown, suppUp, emptyGeom, tb.IsEmpty()))
 	}
 	if tb.IsEmpty() {
 		return nil
 	}
 	return tb.Encode()
+}
+
+// DebugTilePolyOverlap counts polygon prims overlapping a tile two ways: by the
+// fast cached-bbox reject the bake actually uses (stored), and by their TRUE
+// vertex bbox recomputed from the normalized rings (trueOv). A gap (trueOv >
+// stored) means a cached prim bbox is wrong and the bake is silently dropping
+// polygons that belong in the tile — the one polygon-loss the TileDiag funnel
+// can't see (the reject happens before any counter). Diagnostic only.
+func (b *Baker) DebugTilePolyOverlap(coord tile.TileCoord, buffer float64, extent uint32) (stored, trueOv int) {
+	n := math.Pow(2, float64(coord.Z))
+	bufN := (buffer / float64(extent)) / n
+	tnx0, tnx1 := float64(coord.X)/n-bufN, float64(coord.X+1)/n+bufN
+	tny0, tny1 := float64(coord.Y)/n-bufN, float64(coord.Y+1)/n+bufN
+	overlaps := func(minx, miny, maxx, maxy float64) bool {
+		return !(maxx < tnx0 || minx > tnx1 || maxy < tny0 || miny > tny1)
+	}
+	for i := range b.prims {
+		r := &b.prims[i]
+		if r.kind != mvt.GeomPolygon || coord.Z < r.zMin {
+			continue
+		}
+		if overlaps(r.wMinX, r.wMinY, r.wMaxX, r.wMaxY) {
+			stored++
+		}
+		minx, miny, maxx, maxy := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+		for _, ring := range r.nrings {
+			for _, p := range ring {
+				minx, maxx = math.Min(minx, p.X), math.Max(maxx, p.X)
+				miny, maxy = math.Min(miny, p.Y), math.Max(maxy, p.Y)
+			}
+		}
+		if overlaps(minx, miny, maxx, maxy) {
+			trueOv++
+		}
+	}
+	return
 }
 
 // TileDiag, when non-nil, receives one line per EmitTile call with the
@@ -1059,10 +1113,98 @@ func projectNormRing(npts []tile.FPoint, proj tile.Projector, scratch []tile.FPo
 	return scratch
 }
 
+// simplifyTolerance is the Douglas-Peucker tolerance for per-tile geometry, in MVT
+// extent units. At MVTExtent=4096 over a ~512px tile that's 8 units/screen-px, so
+// ~4 units ≈ ½ px — below visible resolution, yet it collapses the dense S-57
+// coastlines that otherwise carry 100k+ vertices into one tile.
+const simplifyTolerance = 4.0
+
+// quantizeRing simplifies a clipped ring/line to tile resolution, then snaps it to
+// the MVT integer grid: first Douglas-Peucker (drops vertices within ½ px of the
+// kept line — the only step that meaningfully thins a crenulated coastline), then
+// exact consecutive-duplicate and collinear-midpoint removal during quantization.
+// Without this a single dense polygon can carry 100k+ vertices into one tile and
+// blow MapLibre's 65535-vertex-per-fill-segment cap, so the whole polygon silently
+// fails to render. Endpoints are always kept (closed rings keep their seam vertex).
 func quantizeRing(pts []tile.FPoint) []mvt.IPoint {
-	out := make([]mvt.IPoint, len(pts))
-	for i, p := range pts {
-		out[i] = tile.Quantize(p)
+	return quantizePts(douglasPeucker(pts, simplifyTolerance))
+}
+
+// quantizeRingExact is quantizeRing without Douglas-Peucker — the fallback for a
+// ring that DP would collapse below 3 points. A small polygon is only a few
+// vertices, so it can't trip the fill-segment cap; keeping it unsimplified means
+// simplification never deletes a whole (still-renderable) polygon.
+func quantizeRingExact(pts []tile.FPoint) []mvt.IPoint { return quantizePts(pts) }
+
+// quantizePts snaps to the MVT integer grid, dropping exact consecutive duplicates
+// and collinear midpoints as it goes (both lossless at integer resolution).
+func quantizePts(pts []tile.FPoint) []mvt.IPoint {
+	out := make([]mvt.IPoint, 0, len(pts))
+	for _, p := range pts {
+		q := tile.Quantize(p)
+		if n := len(out); n > 0 && out[n-1] == q {
+			continue // exact consecutive duplicate
+		}
+		if n := len(out); n >= 2 {
+			a, b := out[n-2], out[n-1]
+			// b is collinear with a→q when the cross product is zero; collapse it
+			// (replace the midpoint with q) so straight runs reduce to endpoints.
+			if int64(b.X-a.X)*int64(q.Y-a.Y) == int64(b.Y-a.Y)*int64(q.X-a.X) {
+				out[n-1] = q
+				continue
+			}
+		}
+		out = append(out, q)
+	}
+	return out
+}
+
+// douglasPeucker returns the subset of pts that approximates the polyline within
+// eps (perpendicular distance, in the input's units), always keeping the first and
+// last vertex. Iterative (explicit stack) to avoid deep recursion on long rings.
+func douglasPeucker(pts []tile.FPoint, eps float64) []tile.FPoint {
+	n := len(pts)
+	if n < 3 {
+		return pts
+	}
+	keep := make([]bool, n)
+	keep[0], keep[n-1] = true, true
+	eps2 := eps * eps
+	stack := [][2]int{{0, n - 1}}
+	for len(stack) > 0 {
+		top := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		s, e := top[0], top[1]
+		if e <= s+1 {
+			continue
+		}
+		ax, ay := pts[s].X, pts[s].Y
+		dx, dy := pts[e].X-ax, pts[e].Y-ay
+		den := dx*dx + dy*dy
+		maxD, maxI := -1.0, -1
+		for i := s + 1; i < e; i++ {
+			ex, ey := pts[i].X-ax, pts[i].Y-ay
+			var d float64
+			if den == 0 {
+				d = ex*ex + ey*ey // degenerate segment: distance to the point
+			} else {
+				num := ex*dy - ey*dx // cross product (= perp dist × √den)
+				d = num * num / den
+			}
+			if d > maxD {
+				maxD, maxI = d, i
+			}
+		}
+		if maxD > eps2 {
+			keep[maxI] = true
+			stack = append(stack, [2]int{s, maxI}, [2]int{maxI, e})
+		}
+	}
+	out := make([]tile.FPoint, 0, n)
+	for i, k := range keep {
+		if k {
+			out = append(out, pts[i])
+		}
 	}
 	return out
 }
