@@ -46,6 +46,9 @@ const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000
 const BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing"];
 const BAND_LABEL = { overview: "Overview", general: "General", coastal: "Coastal", approach: "Approach", harbor: "Harbor", berthing: "Berthing" };
 const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a", approach: "#9ccc65", harbor: "#ffa726", berthing: "#ef5350" };
+// Native min Web-Mercator zoom per band (matches CHART_BANDS in chartplotter.mjs).
+// Below it a cell's chart detail isn't baked, so we draw its coverage outline.
+const BAND_MINZOOM = { overview: 0, general: 7, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
 
 // Curated quick-pick regions for the Charts selector. NOAA's catalog has no
 // human-readable region names (only the 20 numeric `rg` ENC regions), so these
@@ -243,6 +246,7 @@ export class ChartPlotterApp extends HTMLElement {
     // 100%-wasm path: bake whatever cells are already stored (imported offline).
     try {
       const rt = await this._plotter.loadStoreCells();
+      this._refreshInstalledBounds();
       if (rt && rt.ok && rt.names && rt.names.length) { this._hasArchive = true; this.updateEmptyState(); }
     } catch (e) { console.warn("[realtime] loadStoreCells", e); }
     await this._seedAreaCells();
@@ -1258,6 +1262,19 @@ export class ChartPlotterApp extends HTMLElement {
     map.addLayer({ id: "inspect-focus-fill", type: "fill", source: "inspect-focus", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#00e5ff", "fill-opacity": 0.25 } });
     map.addLayer({ id: "inspect-focus-line", type: "line", source: "inspect-focus", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#00b8d4", "line-width": 3.5 } });
     map.addLayer({ id: "inspect-focus-pt", type: "circle", source: "inspect-focus", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 13, "circle-color": "rgba(0,229,255,0.25)", "circle-stroke-color": "#00b8d4", "circle-stroke-width": 3 } });
+    // Installed-cell coverage: at zooms BELOW a cell's native band (where its
+    // chart detail isn't baked yet) draw its footprint + name, so when zoomed out
+    // you can tell WHAT coverage you have, not just that you have some. One set of
+    // layers per band, auto-hidden at the band's native min zoom (maxzoom) — where
+    // the real chart takes over.
+    map.addSource("inst-bounds", { type: "geojson", data: empty });
+    for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
+      const mz = BAND_MINZOOM[band];
+      const f = ["==", ["get", "band"], band];
+      map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
+      map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
+      map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 11 }, paint: { "text-color": "#1b2733", "text-halo-color": "rgba(255,255,255,0.9)", "text-halo-width": 1.2 } });
+    }
     // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
     // hovering highlights + previews the feature under the cursor; a click LOCKS
     // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
@@ -1937,12 +1954,32 @@ export class ChartPlotterApp extends HTMLElement {
     if (!this._plotter) return;
     try {
       const rt = await this._plotter.loadStoreCells();
+      this._refreshInstalledBounds();
       if (rt && rt.ok && rt.names && rt.names.length) {
         this._hasArchive = true;
         this.updateEmptyState();
         this._frameCells(rt.names);
       }
     } catch (e) { console.warn("[realtime] refresh", e); }
+  }
+
+  // Rebuild the installed-cell coverage outlines (shown when zoomed out past a
+  // cell's detail zoom) from the browser store + catalog footprints.
+  _refreshInstalledBounds() {
+    const src = this._map && this._map.getSource("inst-bounds");
+    if (!src) return;
+    const feats = [];
+    for (const name of this._installed) {
+      const c = this._byName.get(name);
+      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) continue;
+      const [w, s, e, n] = c.bb;
+      feats.push({
+        type: "Feature",
+        properties: { name, band: bandForScale(c.s) },
+        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+      });
+    }
+    src.setData({ type: "FeatureCollection", features: feats });
   }
 
   toggleSelect(name) {
