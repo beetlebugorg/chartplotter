@@ -1011,6 +1011,9 @@ export class ChartPlotter extends HTMLElement {
         filter: ["==", ["get", "class"], "LIGHTS"],
         layout: { "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
           "text-size": ["coalesce", ["get", "font_size_px"], 10], "text-anchor": "top", "text-offset": [0, 0.4],
+          // Left-justify so a merged multi-line light label's lines align on their
+          // left edge (e.g. stacked "Mo(U)W 20s 50m 17M" / "Mo(U)R 20s 50m 15M").
+          "text-justify": "left",
           "text-allow-overlap": true, "text-ignore-placement": true },
         paint: { "text-color": this.textColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.4, "text-halo-blur": 0.5 } },
     ];
