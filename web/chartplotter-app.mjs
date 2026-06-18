@@ -3126,6 +3126,7 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
+        ${toggle("showMetaBounds", "Metadata boundaries", "Coverage/region indicator lines (nautical-publication, nav-system, coverage)", !!m.showMetaBounds)}
       </div>`;
 
     el.querySelectorAll("#scheme-seg button").forEach((b) =>

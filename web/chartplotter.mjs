@@ -36,6 +36,13 @@ const FALLBACK = "#ff00ff";
 const FEATURE_SCALE = 0.01 / 0.35278;
 const FONT = ["Noto Sans Regular"];
 const M_TO_FT = 3.280839895; // depth-unit conversion (metric ↔ imperial)
+// S-57 meta objects whose boundary draws as a region/coverage line (nautical
+// publication, nav-system, coverage, compilation scale). These are administrative
+// indicators (S-52 PresLib gives M_NPUB a line only as a pick-report hint); they
+// read as "cell boundaries", so they get their own gate (mariner.showMetaBounds),
+// off by default, rather than riding the "Other" display category. M_QUAL is NOT
+// here — it has its own "Data quality" (CATZOC) toggle.
+const META_BOUND_CLASSES = ["M_NPUB", "M_NSYS", "M_COVR", "M_CSCL"];
 
 // NOAA ENC navigational-purpose bands (the rescheming standard) → one vector
 // source each, baked over [min,max] and overzoomed above max (see bake.zig
@@ -455,6 +462,10 @@ export class ChartPlotter extends HTMLElement {
   // per-feature `cat`/`bnd`).
   combineFilters(base) {
     const parts = ["all", this.categoryFilter(), this.boundaryFilter()];
+    // Meta-object coverage/region boundary lines are gated separately from the
+    // "Other" display category (mariner.showMetaBounds, off by default), since
+    // they read as cell boundaries and aren't useful alongside other "Other" data.
+    if (!this._mariner.showMetaBounds) parts.push(["!", ["in", ["get", "class"], ["literal", META_BOUND_CLASSES]]]);
     if (base) parts.push(base);
     return parts;
   }
@@ -755,7 +766,7 @@ export class ChartPlotter extends HTMLElement {
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
-      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "dataQuality")) {
+      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "dataQuality" || k === "showMetaBounds")) {
         this.applyFeatureFilters();
       }
   }
