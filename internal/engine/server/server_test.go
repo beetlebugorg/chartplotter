@@ -106,3 +106,70 @@ func TestAPIHealthAndHostCheck(t *testing.T) {
 		t.Errorf("non-local host: got %d, want 403", resp.StatusCode)
 	}
 }
+
+// TestShareAndUpload covers the "share my view" round-trip: a snapshot POST is
+// returned verbatim by GET, an uploaded cell lands in the ENC_ROOT cache so a
+// later GET /api/cell serves it, and a fresh Server reloads the snapshot from
+// disk (share.json persistence).
+func TestShareAndUpload(t *testing.T) {
+	dir := t.TempDir()
+	ts := httptest.NewServer(New(dir, dir, false))
+	defer ts.Close()
+
+	// No snapshot yet → 404.
+	resp, _ := http.Get(ts.URL + "/api/share")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("empty share: got %d, want 404", resp.StatusCode)
+	}
+
+	// POST a snapshot, then GET it back verbatim.
+	snap := `{"view":{"center":[-76.49,38.97],"zoom":14.2},"cells":[{"n":"US5MD1MC"}]}`
+	resp, _ = http.Post(ts.URL+"/api/share", jsonCT, strings.NewReader(snap))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("post share: got %d", resp.StatusCode)
+	}
+	resp, _ = http.Get(ts.URL + "/api/share")
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != snap {
+		t.Errorf("share round-trip: got %q", got)
+	}
+
+	// PUT a cell, then GET /api/cell/<NAME> serves the uploaded bytes (no url).
+	cell := []byte("RAW-S57-BYTES")
+	req, _ := http.NewRequest("PUT", ts.URL+"/api/cell/US5MD1MC", strings.NewReader(string(cell)))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("put cell: got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ENC_ROOT", "US5MD1MC", "US5MD1MC.000")); err != nil {
+		t.Errorf("uploaded cell not cached: %v", err)
+	}
+	resp, _ = http.Get(ts.URL + "/api/cell/US5MD1MC")
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != string(cell) {
+		t.Errorf("get uploaded cell: got %q", got)
+	}
+
+	// A bad cell name on PUT is rejected.
+	req, _ = http.NewRequest("PUT", ts.URL+"/api/cell/bad..name", strings.NewReader("x"))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad upload name: got %d, want 400", resp.StatusCode)
+	}
+
+	// A fresh Server over the same cache dir reloads the snapshot from share.json.
+	ts2 := httptest.NewServer(New(dir, dir, false))
+	defer ts2.Close()
+	resp, _ = http.Get(ts2.URL + "/api/share")
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != snap {
+		t.Errorf("share persistence: got %q", got)
+	}
+}

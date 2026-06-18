@@ -18,6 +18,7 @@
 package bake
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -761,6 +762,7 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	ts.eligible = eligible // persist the (possibly grown) backing array for reuse
 	scratch := ts.proj     // reused per-ring projection buffer (across tiles)
 	clip := &ts.clip       // reused clipper (across tiles)
+	var suppDown, suppUp, emptyGeom int // tile-generation diagnostics (see TileDiag)
 	for _, i := range eligible {
 		r := &b.prims[i]
 		// Best-available suppression: below its native band, yield only where no
@@ -769,6 +771,7 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		// suppressed (nothing is coarser), so skip the O(eligible) overlap scan —
 		// for a single-band/single-cell bake this elides it entirely.
 		if bandZ < r.natMin && r.natMin > minNatMin && b.anyCoarserOverlaps(eligible, r) {
+			suppDown++
 			continue
 		}
 		// Symmetric up-direction gate: a coarse prim shown above its native band is
@@ -779,6 +782,7 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		// short-circuit means a prim already at the finest band on the tile pays no
 		// scan, mirroring the down path's minNatMin guard.
 		if bandZ > r.natMax && r.natMax < finestNat && b.anyFinerOverlaps(eligible, r) {
+			suppUp++
 			continue
 		}
 		switch r.kind {
@@ -794,6 +798,8 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			}
 			if len(outRings) > 0 {
 				tb.Layer(r.layer).AddPolygon(outRings, r.attrs)
+			} else {
+				emptyGeom++
 			}
 		case mvt.GeomLineString:
 			scratch = projectNormRing(r.nline, proj, scratch)
@@ -860,11 +866,22 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		}
 	}
 
+	if TileDiag != nil {
+		TileDiag(fmt.Sprintf("tile %d/%d/%d: eligible=%d suppDown=%d suppUp=%d emptyGeom=%d empty=%t",
+			coord.Z, coord.X, coord.Y, len(eligible), suppDown, suppUp, emptyGeom, tb.IsEmpty()))
+	}
 	if tb.IsEmpty() {
 		return nil
 	}
 	return tb.Encode()
 }
+
+// TileDiag, when non-nil, receives one line per EmitTile call with the
+// per-stage primitive counts (eligible → suppressed → empty-geometry → empty).
+// It's the hook for debugging tiles that bake empty: a tile with eligible>0 but
+// empty=true lost everything to suppression or clipping. Off (nil) by default —
+// the wasm baker turns it on via cpSetTileDiag; tests set it directly.
+var TileDiag func(string)
 
 // sectorStroke is one tessellated piece of sector geometry: a lat/lon polyline
 // plus the S-52 pen token + width the lines layer carries.

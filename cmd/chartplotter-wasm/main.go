@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"syscall/js"
 	"time"
 
@@ -62,13 +63,16 @@ func cpBakeAddCell(_ js.Value, args []js.Value) any {
 // over the loaded prims (the lazy loader keeps that set small). Returns a
 // Uint8Array (the gzip-less MVT body) or null when the tile is empty.
 func cpBakeTile(_ js.Value, args []js.Value) any {
-	if session == nil {
-		return js.Null()
-	}
 	coord := tile.TileCoord{
 		Z: uint32(args[0].Int()),
 		X: uint32(args[1].Int()),
 		Y: uint32(args[2].Int()),
+	}
+	if session == nil {
+		if bake.TileDiag != nil {
+			bake.TileDiag(fmt.Sprintf("tile %d/%d/%d: requested before baker session ready (empty)", coord.Z, coord.X, coord.Y))
+		}
+		return js.Null()
 	}
 	data := session.Baker.EmitTileInto(coord, baker.MVTExtent, baker.MVTBuffer, &scratch)
 	if data == nil {
@@ -102,11 +106,32 @@ func cpCoverage(_ js.Value, _ []js.Value) any {
 	return js.ValueOf(string(out))
 }
 
+// cpSetTileDiag(on) — toggle per-tile bake diagnostics. When on, each cpBakeTile
+// logs `tile z/x/y: eligible=.. suppDown=.. suppUp=.. emptyGeom=.. empty=..` to
+// the worker console, so a tile that bakes empty reveals where it lost its prims.
+func cpSetTileDiag(_ js.Value, args []js.Value) any {
+	if len(args) > 0 && args[0].Truthy() {
+		bake.TileDiag = func(s string) {
+			// Forward to the main thread (via the worker's cpDiag) so the line shows
+			// in the page console, not just the worker context; fall back to println.
+			if d := js.Global().Get("cpDiag"); d.Type() == js.TypeFunction {
+				d.Invoke(s)
+			} else {
+				println("[baketile]", s)
+			}
+		}
+	} else {
+		bake.TileDiag = nil
+	}
+	return js.Undefined()
+}
+
 func main() {
 	js.Global().Set("cpBakeReset", js.FuncOf(cpBakeReset))
 	js.Global().Set("cpBakeAddCell", js.FuncOf(cpBakeAddCell))
 	js.Global().Set("cpBakeTile", js.FuncOf(cpBakeTile))
 	js.Global().Set("cpCoverage", js.FuncOf(cpCoverage))
+	js.Global().Set("cpSetTileDiag", js.FuncOf(cpSetTileDiag))
 	js.Global().Set("cpBakeReady", js.ValueOf(true))
 	select {} // keep the instance alive for callbacks
 }

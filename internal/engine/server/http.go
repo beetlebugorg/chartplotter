@@ -29,7 +29,8 @@ type Server struct {
 	assetsDir   string // optional on-disk asset override (dev); "" → embedded only
 	cacheDir    string // XDG cache root: downloaded raw cells cached under ENC_ROOT/
 	allowRemote bool
-	Version     string // build version
+	share       shareStore // latest "share my view" snapshot (camera + cell list)
+	Version     string     // build version
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -97,7 +98,13 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", jsonCT)
 		io.WriteString(w, `{"ok":true}`)
 	case strings.HasPrefix(r.URL.Path, "/api/cell/"):
-		s.serveCell(w, r) // GET raw .000 — the 100%-wasm path: NOAA download proxy + cache
+		if r.Method == http.MethodPut {
+			s.uploadCell(w, r) // PUT raw .000 into the cache (share: hand-imported cells)
+		} else {
+			s.serveCell(w, r) // GET raw .000 — the 100%-wasm path: NOAA download proxy + cache
+		}
+	case r.URL.Path == "/api/share":
+		s.serveShare(w, r) // GET/POST the latest "share my view" snapshot
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
 	default:
