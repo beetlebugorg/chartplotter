@@ -165,24 +165,3 @@ export function cellEntries(entries) {
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
-
-// Adapt a remote, Range-readable URL to the minimal Blob-like interface the
-// reader above uses — `size` and `slice(start,end)` returning an object with
-// `arrayBuffer()`/`stream()`. This lets readCentralDirectory/extractEntry run
-// over a remote ALL_ENCs.zip (fetched in pieces via HTTP Range) without ever
-// downloading the whole multi-GB archive. `rangeFetch(start,end)` resolves to a
-// Response for bytes [start, end). `size` is the total byte length.
-export function remoteZipBlob(size, rangeFetch) {
-  const slice = (start, end) => ({
-    async arrayBuffer() { return (await rangeFetch(start, end)).arrayBuffer(); },
-    stream() {
-      return new ReadableStream({
-        async pull(ctrl) {
-          ctrl.enqueue(new Uint8Array(await (await rangeFetch(start, end)).arrayBuffer()));
-          ctrl.close();
-        },
-      });
-    },
-  });
-  return { size, slice };
-}

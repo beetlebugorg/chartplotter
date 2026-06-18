@@ -17,7 +17,7 @@
 
 import "./chartplotter.mjs"; // defines <chart-plotter> (the renderer we wrap)
 import { ChartStore } from "./chart-store.mjs";
-import { readCentralDirectory, cellEntries, extractEntry, remoteZipBlob } from "./zip-import.mjs";
+import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 
 const SCHEMES = ["day", "dusk", "night", "day_bright"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night", day_bright: "Bright" };
@@ -1274,27 +1274,38 @@ export class ChartPlotterApp extends HTMLElement {
     return any ? any.z.replace(/[^/]+$/, "All_ENCs.zip") : "https://www.charts.noaa.gov/ENCs/All_ENCs.zip";
   }
 
-  // Bulk path: pull `added` cells out of the remote All_ENCs.zip in-browser via
-  // random-access Range reads (the server is a dumb byte/Range proxy). Reads the
-  // zip's central directory once, then slices + inflates only the wanted base
-  // cells into the store. Returns the count that failed. Throws if the archive
-  // can't be opened (caller falls back to per-cell downloads).
+  // Bulk path: download NOAA's All_ENCs.zip ONCE (streamed through the dumb byte
+  // proxy into a disk-backed Blob), then slice + inflate the wanted base cells out
+  // of it locally — no network per cell. Far faster than a Range round-trip per
+  // cell. Returns the count that failed. Throws if the archive can't be opened
+  // (caller falls back to per-cell downloads).
   async _bulkExtract(added) {
     const proxy = "api/proxy?url=" + encodeURIComponent(this._allEncsUrl());
-    this._setProgress({ label: "Opening All_ENCs.zip…", sub: `${added.length} charts — reading the index`, frac: null });
-    // Probe total size (Content-Range from a 1-byte range), then read by range.
-    const probe = await fetch(proxy, { headers: { Range: "bytes=0-0" } });
-    if (!probe.ok && probe.status !== 206) throw new Error("proxy HTTP " + probe.status);
-    let size = 0;
-    const cr = probe.headers.get("Content-Range");
-    if (cr) { const m = cr.match(/\/(\d+)\s*$/); if (m) size = +m[1]; }
-    if (!size) size = +probe.headers.get("Content-Length") || 0;
-    if (!size) throw new Error("could not determine All_ENCs.zip size (no Range support?)");
+    const resp = await fetch(proxy);
+    if (!resp.ok) throw new Error("proxy HTTP " + resp.status);
 
-    const blob = remoteZipBlob(size, (s, e) => fetch(proxy, { headers: { Range: `bytes=${s}-${e - 1}` } }));
+    // Stream the download into a Blob, reporting progress. Piping through a
+    // counting TransformStream into Response().blob() lets the browser back the
+    // Blob on disk (no multi-hundred-MB JS heap spike) while we track bytes.
+    const total = +resp.headers.get("Content-Length") || 0;
+    let blob;
+    if (resp.body) {
+      let recv = 0;
+      const tap = new TransformStream({
+        transform: (chunk, ctrl) => {
+          recv += chunk.length;
+          this._setProgress({ label: "Downloading All_ENCs.zip…", sub: total ? `${this._fmtBytes(recv)} / ${this._fmtBytes(total)} · ${added.length} charts` : this._fmtBytes(recv), frac: total ? recv / total : null });
+          ctrl.enqueue(chunk);
+        },
+      });
+      blob = await new Response(resp.body.pipeThrough(tap)).blob();
+    } else {
+      blob = await resp.blob();
+    }
+
+    this._setProgress({ label: "Reading All_ENCs.zip…", sub: `${added.length} charts — extracting`, frac: null });
     const byName = new Map(cellEntries(await readCentralDirectory(blob)).map((c) => [c.name, c]));
 
-    const want = new Set(added);
     let done = 0, failed = 0;
     for (const name of added) {
       this._setProgress({ label: `Extracting ${added.length} charts from All_ENCs.zip`, sub: `${name} · ${done + 1} of ${added.length}`, frac: added.length ? done / added.length : null });
@@ -1306,7 +1317,7 @@ export class ChartPlotterApp extends HTMLElement {
       } catch (e) { console.warn("[bulk]", name, e.message); failed++; }
       done++;
     }
-    console.log(`[bulk] extracted ${added.length - failed}/${added.length} from All_ENCs.zip via Range`);
+    console.log(`[bulk] downloaded All_ENCs.zip once, extracted ${added.length - failed}/${added.length}`);
     return failed;
   }
 
