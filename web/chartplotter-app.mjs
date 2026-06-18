@@ -157,6 +157,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._selBands = this._loadSelBands(); // navigational-purpose bands enabled in the selector (Set of band slugs)
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage outlines on/off (default on)
+    this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
     this._inspectMode = false;          // feature-inspect mode (toggled from the statusbar)
     this._inspectLocked = false;        // a feature is pinned (click-to-lock) — hover stops updating
     this._inspectLastKey = "";          // last rendered hover/lock key, to skip redundant re-renders
@@ -240,6 +241,20 @@ export class ChartPlotterApp extends HTMLElement {
     else if (status === "failed") { this._cellError.set(name, (info && info.error) || "parse failed"); console.warn(`[charts] ${name} failed:`, info && info.error); }
     this._updateBakeStatus();
     this._renderCellStatusPopup();
+    if (this._debugCells) this._refreshInstalledBounds(); // recolour the debug footprints by new state
+  }
+
+  // Show/hide the debug cell-loading overlay (all installed footprints at every
+  // zoom, coloured by lazy-load state).
+  _setDebugCells(on) {
+    this._debugCells = on;
+    localStorage.setItem("cp-debug-cells", on ? "1" : "0");
+    const map = this._map; if (!map) return;
+    const vis = on ? "visible" : "none";
+    for (const id of ["inst-dbg-fill", "inst-dbg-line", "inst-dbg-label"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
+    }
+    if (on) this._refreshInstalledBounds(); // ensure status props are current
   }
 
   // Remove every cell that failed to parse from the browser store (and reset the
@@ -1513,6 +1528,16 @@ export class ChartPlotterApp extends HTMLElement {
       map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
       map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis, "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 11 }, paint: { "text-color": "#1b2733", "text-halo-color": "rgba(255,255,255,0.9)", "text-halo-width": 1.2 } });
     }
+    // Debug overlay (Settings → "Debug cell loading"): every installed cell's
+    // footprint at ALL zooms, coloured by lazy-load state — green=loaded,
+    // amber=loading, red=failed, grey=not loaded. Lets you see which cells are
+    // loaded vs missing and whether their (catalog-bbox) load region is where you
+    // expect, so "some cells of the same band don't render" is diagnosable.
+    const dbgColor = ["match", ["get", "status"], "ready", "#2e9b57", "loading", "#d9892b", "failed", "#cf3b3b", "#9aa7b4"];
+    const dbgVis = this._debugCells ? "visible" : "none";
+    map.addLayer({ id: "inst-dbg-fill", type: "fill", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0.07 } });
+    map.addLayer({ id: "inst-dbg-line", type: "line", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "line-color": dbgColor, "line-width": 1.6 } });
+    map.addLayer({ id: "inst-dbg-label", type: "symbol", source: "inst-bounds", layout: { visibility: dbgVis, "text-field": ["concat", ["get", "name"], "\n", ["get", "status"]], "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": true }, paint: { "text-color": dbgColor, "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.4 } });
     // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
     // hovering highlights + previews the feature under the cursor; a click LOCKS
     // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
@@ -2232,7 +2257,7 @@ export class ChartPlotterApp extends HTMLElement {
       const [w, s, e, n] = c.bb;
       feats.push({
         type: "Feature",
-        properties: { name, band: bandForScale(c.s) },
+        properties: { name, band: bandForScale(c.s), status: this._cellStatus.get(name) || "queued" },
         geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
       });
     }
@@ -3125,6 +3150,8 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("showNoData", "No-data hatch", "Mark areas with no chart data (off shows the plain basemap)", m.showNoData !== false)}
         <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline + name of installed cells when zoomed out past their detail</span></div>
           <label class="switch"><input type="checkbox" data-app-key="showCellBounds" ${this._showCellBounds ? "checked" : ""}><span class="sl"></span></label></div>
+        <div class="set-row"><div class="lbl"><span class="t">Debug cell loading</span><span class="d">Every installed cell's footprint at all zooms, coloured by load state (green=loaded, amber=loading, red=failed, grey=not loaded)</span></div>
+          <label class="switch"><input type="checkbox" data-app-key="debugCells" ${this._debugCells ? "checked" : ""}><span class="sl"></span></label></div>
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
@@ -3152,6 +3179,7 @@ export class ChartPlotterApp extends HTMLElement {
     el.querySelectorAll("[data-app-key]").forEach((inp) => {
       inp.onchange = () => {
         if (inp.dataset.appKey === "showCellBounds") this._setCellBoundsVisible(inp.checked);
+        else if (inp.dataset.appKey === "debugCells") this._setDebugCells(inp.checked);
       };
     });
   }
