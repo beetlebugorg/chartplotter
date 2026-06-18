@@ -58,6 +58,15 @@ const opfsBackend = {
     const d = await cellsDir();
     await d.removeEntry(name + ".000").catch(() => {});
   },
+  async usage() {
+    const d = await cellsDir();
+    let bytes = 0, count = 0;
+    for await (const [n, h] of d.entries()) {
+      if (!n.endsWith(".000") || h.kind !== "file") continue;
+      try { bytes += (await h.getFile()).size; count++; } catch {} // file.size is metadata, no read
+    }
+    return { bytes, count };
+  },
 };
 
 // -- IndexedDB backend (works on plain http) --------------------------------
@@ -107,6 +116,13 @@ const idbBackend = {
     tx.objectStore(DB_STORE).delete(name);
     await txDone(tx);
   },
+  async usage() {
+    const db = await openDB();
+    const vals = await reqDone(db.transaction(DB_STORE).objectStore(DB_STORE).getAll());
+    let bytes = 0;
+    for (const v of vals) bytes += v.byteLength || v.length || 0;
+    return { bytes, count: vals.length };
+  },
 };
 
 // -- in-memory backend (last resort, session-only) --------------------------
@@ -118,6 +134,7 @@ function memBackend() {
     async put(name, bytes) { m.set(name, bytes); },
     async list() { return [...m.keys()].sort(); },
     async remove(name) { m.delete(name); },
+    async usage() { let bytes = 0; for (const b of m.values()) bytes += b.byteLength || b.length || 0; return { bytes, count: m.size }; },
   };
 }
 
@@ -135,6 +152,9 @@ export class ChartStore {
   put(name, bytes) { return this.backend.put(name, bytes); }
   list() { return this.backend.list(); }
   remove(name) { return this.backend.remove(name); }
+  // Total bytes + count of stored raw cells on disk (best-effort; OPFS uses file
+  // metadata, IndexedDB sums value sizes).
+  usage() { return this.backend.usage(); }
 
   // Download a cell's bytes from `url` into local storage and return them.
   // Accepts a raw .000 today; NOAA ZIP unwrap is handled by the in-browser

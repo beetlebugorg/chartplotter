@@ -139,6 +139,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._installed = new Set();        // all stored cell names
     this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
+    this._cellUsage = { bytes: 0, count: 0 }; // raw cell store disk usage (refreshed on popup open / load)
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
     this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
@@ -297,8 +298,16 @@ export class ChartPlotterApp extends HTMLElement {
     this._cellPopOpen = !this._cellPopOpen;
     // Keep cache stats (tiles/memory/disk) live while the popup is open.
     clearInterval(this._cellPopTimer);
-    if (this._cellPopOpen) this._cellPopTimer = setInterval(() => this._renderCellStatusPopup(), 600);
+    if (this._cellPopOpen) {
+      this._cellPopTimer = setInterval(() => this._renderCellStatusPopup(), 600);
+      this._refreshCellUsage(); // raw cell disk usage (changes only on download/remove)
+    }
     this._renderCellStatusPopup();
+  }
+
+  // Refresh the cached raw-cell store disk usage, then re-render the popup.
+  _refreshCellUsage() {
+    this._store.usage().then((u) => { this._cellUsage = u; if (this._cellPopOpen) this._renderCellStatusPopup(); }).catch(() => {});
   }
 
   _fmtBytes(n) {
@@ -337,11 +346,13 @@ export class ChartPlotterApp extends HTMLElement {
     const clearBtn = failed
       ? `<button id="csp-clear-failed" class="csp-clear" type="button">Remove ${failed} failed</button>` : "";
     const u = this._plotter && this._plotter.realtimeStats && this._plotter.realtimeStats();
+    const cu = this._cellUsage || { bytes: 0, count: 0 };
     const statsHtml = u ? `<div class="csp-stats">`
       + `<div><span>Cells</span><b>${loaded}/${this._installed.size} loaded</b></div>`
+      + `<div><span>Cell data</span><b>${this._fmtBytes(cu.bytes)} on disk</b></div>`
       + `<div><span>Tiles</span><b>${u.memTiles} mem · ${u.diskTiles} disk</b></div>`
-      + `<div><span>Memory</span><b>${this._fmtBytes(u.memBytes)} / ${this._fmtBytes(u.memCap)}</b></div>`
-      + `<div><span>Disk</span><b>${this._fmtBytes(u.diskBytes)} / ${this._fmtBytes(u.diskCap)}</b></div>`
+      + `<div><span>Tile memory</span><b>${this._fmtBytes(u.memBytes)} / ${this._fmtBytes(u.memCap)}</b></div>`
+      + `<div><span>Tile disk</span><b>${this._fmtBytes(u.diskBytes)} / ${this._fmtBytes(u.diskCap)}</b></div>`
       + `<div><span>Cache</span><b>${u.l1Hit + u.l2Hit} hit · ${u.miss} baked</b></div>`
       + `</div>` : "";
     pop.innerHTML = `<div class="csp-head"><span>${esc(head)}</span>${clearBtn}</div>`
@@ -2163,6 +2174,7 @@ export class ChartPlotterApp extends HTMLElement {
         this._frameCells(rt.names);
       }
     } catch (e) { console.warn("[realtime] refresh", e); }
+    this._refreshCellUsage();
   }
 
   // Footprint + render-start zoom for each installed cell, from the catalog —
