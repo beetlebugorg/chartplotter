@@ -182,7 +182,12 @@ export class ChartPlotter extends HTMLElement {
     if (this._realtime) {
       this._rt = await import("./wasm-tiles.mjs");
       await this._rt.initBaker(assets);
-      this._rtCache = this._rt.registerTileProtocol(maplibregl, { namespace: "rt" });
+      this._rtCache = this._rt.registerTileProtocol(maplibregl, {
+        namespace: "rt",
+        // Surface live bake activity so the app can show a "generating tiles"
+        // indicator; fires whenever the worker's in-flight tile count changes.
+        onActivity: (n) => this.dispatchEvent(new CustomEvent("bake-activity", { detail: { inflight: n }, bubbles: true })),
+      });
     } else {
       for (const band of CHART_BANDS) {
         const slug = band.slug;

@@ -58,16 +58,22 @@ export async function loadCells(cellMap, assets = "./") {
 // Register the "cp://{z}/{x}/{y}" vector-tile protocol backed by the cache + the
 // worker baker. Returns the TileCache (for usage()/clear()). Use it as a source:
 //   { type: "vector", tiles: ["cp://{z}/{x}/{y}"], minzoom, maxzoom }
+// opts.onActivity(inflight) fires whenever the number of tiles currently baking
+// in the worker changes (0 = idle) — used to drive a "generating tiles" status.
 export function registerTileProtocol(maplibregl, opts = {}) {
   const cache = new TileCache(opts);
+  const onActivity = opts.onActivity;
+  let inflight = 0;
+  const tick = (d) => { inflight += d; if (onActivity) onActivity(inflight); };
   maplibregl.addProtocol("cp", async (params) => {
     const m = params.url.match(/(\d+)\/(\d+)\/(\d+)$/);
     if (!m) return { data: new ArrayBuffer(0) };
     const [, z, x, y] = m;
     try {
       const bytes = await cache.get(+z, +x, +y, async (z, x, y) => {
-        const r = await call("tile", { z, x, y });
-        return r.tile ? new Uint8Array(r.tile) : null;
+        tick(1); // a real bake in the worker (cache miss)
+        try { const r = await call("tile", { z, x, y }); return r.tile ? new Uint8Array(r.tile) : null; }
+        finally { tick(-1); }
       });
       if (!bytes || !bytes.length) return { data: new ArrayBuffer(0) };
       return { data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };

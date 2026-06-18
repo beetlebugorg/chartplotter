@@ -210,6 +210,23 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.getElementById("map").appendChild(plotter);
 
     plotter.addEventListener("ready", (e) => this.onReady(e.detail.map), { once: true });
+    plotter.addEventListener("bake-activity", (e) => this._onBakeActivity(e.detail.inflight));
+  }
+
+  // Reflect live wasm tile-baking in the statusbar. inflight = tiles currently
+  // baking in the worker (0 = idle). Hide promptly when idle, but debounce the
+  // hide a touch so the indicator doesn't strobe between back-to-back tiles.
+  _onBakeActivity(inflight) {
+    const el = this.shadowRoot && this.shadowRoot.getElementById("bake-status");
+    if (!el) return;
+    this._bakeInflight = inflight;
+    if (inflight > 0) {
+      clearTimeout(this._bakeHideT); this._bakeHideT = 0;
+      el.querySelector(".sb-bake-txt").textContent = inflight > 1 ? `Generating ${inflight} tiles…` : "Generating tile…";
+      el.hidden = false;
+    } else if (!this._bakeHideT) {
+      this._bakeHideT = setTimeout(() => { this._bakeHideT = 0; if (!this._bakeInflight) el.hidden = true; }, 250);
+    }
   }
 
   loadCatalog() {
@@ -2403,6 +2420,16 @@ export class ChartPlotterApp extends HTMLElement {
         .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
         .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--ui-text-dim); }
         .ins-cycler .btn { padding:2px 9px; line-height:1.3; }
+        /* Tile-bake activity indicator (spinner + count), shown only while the
+           wasm worker is baking tiles on demand. */
+        .sb-bake { display:inline-flex; align-items:center; gap:6px; flex:none; color:var(--ui-accent);
+          font:600 11px/1 system-ui,sans-serif; white-space:nowrap; font-variant-numeric:tabular-nums; }
+        .sb-bake[hidden] { display:none; }
+        .sb-bake-spin { width:12px; height:12px; flex:none; border-radius:50%;
+          border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
+          animation:sb-bake-spin .7s linear infinite; }
+        @keyframes sb-bake-spin { to { transform:rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
         .sb-readout { flex:none; }
         .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
@@ -2563,6 +2590,9 @@ export class ChartPlotterApp extends HTMLElement {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
           <span>Inspect</span>
         </button>
+        <div id="bake-status" class="sb-bake" hidden title="Generating chart tiles">
+          <span class="sb-bake-spin"></span><span class="sb-bake-txt"></span>
+        </div>
         <div id="cov-readout" class="sb-readout"></div>
         <div id="cov-cells" class="sb-bands"></div>
       </div>
