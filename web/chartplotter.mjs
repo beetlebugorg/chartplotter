@@ -683,6 +683,11 @@ export class ChartPlotter extends HTMLElement {
       if (keys.includes("showContourLabels")) {
         this._eachLayer("contour-labels", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showContourLabels ? "visible" : "none"));
       }
+      // No-data hatch (NODATA03 fill where there's no chart coverage): a plain
+      // visibility toggle. Off → the basemap shows through where data ends.
+      if (keys.includes("showNoData")) {
+        this._eachLayer("nodata", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showNoData === false ? "none" : "visible"));
+      }
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
@@ -1040,7 +1045,7 @@ export class ChartPlotter extends HTMLElement {
     // hatch instead of looking like surveyed sea. (The pattern image loads lazily
     // via `styleimagemissing` → registerPattern.)
     sources.nodata = { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[-180, -85.0511], [180, -85.0511], [180, 85.0511], [-180, 85.0511], [-180, -85.0511]]] } } };
-    layers.push({ id: "nodata", type: "fill", source: "nodata", paint: { "fill-pattern": "NODATA03" } });
+    layers.push({ id: "nodata", type: "fill", source: "nodata", layout: { visibility: this._mariner.showNoData === false ? "none" : "visible" }, paint: { "fill-pattern": "NODATA03" } });
 
     return {
       version: 8,

@@ -1575,6 +1575,7 @@ export class ChartPlotterApp extends HTMLElement {
       let vis = on ? "visible" : "none";
       if (on && l.id.startsWith("shallow-pattern")) vis = this._mariner.shallowPattern ? "visible" : "none";
       else if (on && l.id.startsWith("contour-labels")) vis = this._mariner.showContourLabels ? "visible" : "none";
+      else if (on && l.id === "nodata") vis = this._mariner.showNoData === false ? "none" : "visible";
       map.setLayoutProperty(l.id, "visibility", vis);
     }
   }
@@ -2688,6 +2689,7 @@ export class ChartPlotterApp extends HTMLElement {
           <div class="ctl"><select data-key="boundaryStyle">${["plain", "symbolized"].map((v) =>
             `<option ${(m.boundaryStyle || "symbolized") === v ? "selected" : ""}>${v}</option>`).join("")}</select></div></div>
         ${toggle("fourShadeWater", "Four-shade water", "Four depth shades instead of two", m.fourShadeWater !== false)}
+        ${toggle("showNoData", "No-data hatch", "Mark areas with no chart data (off shows the plain basemap)", m.showNoData !== false)}
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
