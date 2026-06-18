@@ -529,12 +529,19 @@ export class ChartPlotter extends HTMLElement {
   async loadStoreCells() {
     if (!this._realtime) return null;
     const names = await this._store.list();
+    console.log(`[realtime] loadStoreCells: ${names.length} cell(s) in browser store`, names);
+    if (!names.length) {
+      console.warn("[realtime] no cells in the browser store — import charts (drop a NOAA .zip/.000) to render via the wasm baker");
+      return null;
+    }
     const cellMap = {};
     for (const n of names) {
       try { cellMap[n] = await this._store.getBytes(n); } catch (e) { console.warn("[chartplotter] cell", n, e.message); }
     }
     if (!Object.keys(cellMap).length) return null;
-    return this.loadCells(cellMap);
+    const res = await this.loadCells(cellMap);
+    console.log("[realtime] baker loaded:", res);
+    return res;
   }
 
   // Resolve an archive source: a Blob/File is passed through; a URL string is

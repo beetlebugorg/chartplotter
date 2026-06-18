@@ -42,7 +42,8 @@ export function initBaker(assets = "./") {
   ensureWorker(assets);
   _ready = call("init", { assets }).then((r) => {
     if (!r.ok) throw new Error("wasm baker did not start");
-  });
+    console.log("[realtime] wasm baker worker ready");
+  }).catch((e) => { console.error("[realtime] baker worker init failed:", e.message); throw e; });
   return _ready;
 }
 
