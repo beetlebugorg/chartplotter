@@ -48,9 +48,9 @@ const BAND_LABEL = { overview: "Overview", general: "General", coastal: "Coastal
 const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a", approach: "#9ccc65", harbor: "#ffa726", berthing: "#ef5350" };
 // Native min Web-Mercator zoom per band (matches CHART_BANDS in chartplotter.mjs).
 // Below it a cell's chart detail isn't baked, so we draw its coverage outline.
-// General is overzoomed down to z2 (it renders where no overview covers — see
-// generalOverzoomMin in the baker), so it loads from z2 rather than its native z7.
-const BAND_MINZOOM = { overview: 0, general: 2, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
+// General is overzoomed out to z0 (it renders where no overview covers — see
+// generalOverzoomMin in the baker), so it loads from z0 rather than its native z7.
+const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
 // At/above this many cells in one download, pull them out of NOAA's All_ENCs.zip
 // in-browser (one Range-read source) instead of fetching each cell's own zip
 // separately — cheaper than that many round-trips (see _downloadArea).

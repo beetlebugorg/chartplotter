@@ -34,9 +34,11 @@ import (
 const maxBandZ uint32 = 18
 
 // generalOverzoomMin is the lowest zoom the general band displays at (below its
-// native min of 7) so general charts don't vanish when zoomed out past z7. Below
-// this, world/continental zoom relies on the overview band.
-const generalOverzoomMin uint32 = 2
+// native min of 7) so general charts don't vanish when zoomed out — all the way
+// to the world view. Where an overview cell overlaps, best-available suppression
+// defers to it; general only fills the gap. SCAMIN keeps minor features gated, so
+// a coarse-zoom tile carries only the skeleton (land/coast/major depth).
+const generalOverzoomMin uint32 = 0
 
 // ZoomRange is a baked [min,max] Web-Mercator zoom span.
 type ZoomRange struct{ Min, Max uint32 }
@@ -698,7 +700,15 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	minNatMin := uint32(math.MaxUint32)
 	consider := func(i int) {
 		r := &b.prims[i]
-		if coord.Z < r.zMin || coord.Z > r.zMax {
+		// Lower gate only: below zMin the feature isn't shown at all. The UPPER end
+		// is governed by best-available suppression below (a coarse prim stays
+		// visible when zoomed in past its native band — overzoomed — except where a
+		// strictly-finer cell actually overlaps it). So once data is on screen,
+		// zooming in never drops it unless something better takes its place. (The
+		// indexed bake path only lists prims at their native zooms, so it's
+		// unaffected; overzoom relies on the full-scan path used by the realtime
+		// baker.) r.zMax is retained for the index build's range only.
+		if coord.Z < r.zMin {
 			return
 		}
 		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {

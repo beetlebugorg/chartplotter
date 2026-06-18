@@ -2,6 +2,7 @@ package bake
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
@@ -268,9 +269,36 @@ func TestEmitIndexEquivalence(t *testing.T) {
 	indexed := build()
 	indexed.BuildEmitIndex(mvt.ExtentDefault, buf)
 
+	// The emit index covers each prim only over its native [zMin, zMax]; the full
+	// scan additionally overzooms a coarse prim above its zMax wherever no finer
+	// cell overlaps (the realtime path's best-available behaviour). So the two
+	// agree only at NON-overzoom tiles — skip any tile a coarse prim overzooms
+	// into (a prim with zMax < z whose bbox covers the tile).
+	overzoomsInto := func(c tile.TileCoord) bool {
+		n := math.Pow(2, float64(c.Z))
+		bufN := (buf / float64(mvt.ExtentDefault)) / n
+		tnx0, tnx1 := float64(c.X)/n-bufN, float64(c.X+1)/n+bufN
+		tny0, tny1 := float64(c.Y)/n-bufN, float64(c.Y+1)/n+bufN
+		for i := range scan.prims {
+			r := &scan.prims[i]
+			if c.Z < r.zMin || c.Z <= r.zMax {
+				continue // not overzooming this prim
+			}
+			if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
+				continue
+			}
+			return true
+		}
+		return false
+	}
+
 	coords := scan.TileCoords(mvt.ExtentDefault)
-	var checked int
+	var checked, skipped int
 	for _, c := range coords {
+		if overzoomsInto(c) {
+			skipped++
+			continue
+		}
 		var ts1, ts2 TileScratch
 		a := scan.EmitTileInto(c, mvt.ExtentDefault, buf, &ts1)
 		b := indexed.EmitTileInto(c, mvt.ExtentDefault, buf, &ts2)
@@ -279,7 +307,7 @@ func TestEmitIndexEquivalence(t *testing.T) {
 		}
 		checked++
 	}
-	t.Logf("verified %d tiles byte-identical (full scan vs indexed)", checked)
+	t.Logf("verified %d tiles byte-identical (full scan vs indexed); skipped %d overzoom tiles", checked, skipped)
 	if checked == 0 {
 		t.Fatal("no tiles checked")
 	}

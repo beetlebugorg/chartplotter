@@ -20,7 +20,6 @@ import (
 var (
 	session *baker.Session
 	scratch bake.TileScratch
-	dirty   bool // a cell was added since the last emit-index build
 )
 
 // cpBakeReset() — start a fresh, empty baker session. Cells are then streamed in
@@ -32,14 +31,13 @@ func cpBakeReset(_ js.Value, _ []js.Value) any {
 		return js.ValueOf(map[string]any{"ok": false, "error": err.Error()})
 	}
 	session = s
-	dirty = false
 	return js.ValueOf(map[string]any{"ok": true})
 }
 
 // cpBakeAddCell(name, bytes) — parse one cell (Uint8Array) and add it to the
-// current session. Cheap relative to a full reload: the heavy emit-index rebuild
-// is deferred to the next cpBakeTile. Returns { ok, name, ms } or { ok:false,
-// name, error }.
+// current session. Tiles bake by full-scan over the loaded prims (no prebuilt
+// emit index), so a coarse cell can overzoom into higher zooms where no finer
+// cell covers. Returns { ok, name, ms } or { ok:false, name, error }.
 func cpBakeAddCell(_ js.Value, args []js.Value) any {
 	start := time.Now()
 	name := args[0].String()
@@ -56,20 +54,15 @@ func cpBakeAddCell(_ js.Value, args []js.Value) any {
 	if err := session.AddCellBytes(name, buf); err != nil {
 		return js.ValueOf(map[string]any{"ok": false, "name": name, "error": err.Error()})
 	}
-	dirty = true
 	return js.ValueOf(map[string]any{"ok": true, "name": name, "ms": time.Since(start).Milliseconds()})
 }
 
-// cpBakeTile(z, x, y) — bake one MVT tile from the current session. Returns a
-// Uint8Array (the gzip-less MVT body) or null when the tile is empty. Rebuilds
-// the emit index first if a cell was added since the last bake.
+// cpBakeTile(z, x, y) — bake one MVT tile from the current session by full-scan
+// over the loaded prims (the lazy loader keeps that set small). Returns a
+// Uint8Array (the gzip-less MVT body) or null when the tile is empty.
 func cpBakeTile(_ js.Value, args []js.Value) any {
 	if session == nil {
 		return js.Null()
-	}
-	if dirty {
-		session.Baker.BuildEmitIndex(baker.MVTExtent, baker.MVTBuffer)
-		dirty = false
 	}
 	coord := tile.TileCoord{
 		Z: uint32(args[0].Int()),
