@@ -624,7 +624,6 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.getElementById("dtitle").textContent = "Charts";
     el.innerHTML = `
       ${this._renderRegions()}
-      ${this._renderToolToggle()}
       ${this._renderCellSearch()}
       ${this._renderSelectionBar()}
       ${this._renderBandToggles()}
@@ -639,7 +638,6 @@ export class ChartPlotterApp extends HTMLElement {
       </details>
       ${this._renderDataFreshness()}`;
     this._wireRegions();
-    this._wireToolToggle();
     this._wireCellSearch();
     this._wireSelectionBar();
     this._wireBandToggles();
@@ -659,10 +657,16 @@ export class ChartPlotterApp extends HTMLElement {
       return `<button class="region-btn${on ? " on" : ""}" data-region="${rgn.id}" title="${on ? "Click to deselect" : "Select"} · ${cells.length} chart${cells.length !== 1 ? "s" : ""}">${rgn.name}<span class="rb-n">${cells.length}</span></button>`;
     }).join("");
     const any = this._areaCells.size > 0;
-    return `<div class="set-section">
+    return `<div class="set-section" id="region-sec">
       <div class="rg-head"><h3>Jump to a region</h3>${any ? `<button class="linkbtn rg-clear" id="rg-clear">Reset selection</button>` : ""}</div>
       <div class="region-grid">${chips}</div>
     </div>`;
+  }
+  // Re-render just the region section in place (button active states + Reset link
+  // depend on the current selection, which cell toggles change).
+  _refreshRegions() {
+    const sec = this.shadowRoot.getElementById("region-sec");
+    if (sec) { sec.outerHTML = this._renderRegions(); this._wireRegions(); }
   }
   _regionCells(rgn) {
     const out = [];
@@ -705,22 +709,8 @@ export class ChartPlotterApp extends HTMLElement {
     i.oninput = () => { this._cellQuery = i.value; this._renderCellListInto(); };
   }
 
-  // Pan ⇄ Select tool toggle. Box-select (the default) disables map-drag, so this
-  // is how you switch back to panning the map; zoom (wheel/pinch) works in both.
-  _renderToolToggle() {
-    const sel = this._selectTool !== false;
-    return `<div class="tool-seg seg">
-      <button data-tool="select" class="${sel ? "sel" : ""}">▭ Select</button>
-      <button data-tool="pan" class="${sel ? "" : "sel"}">✋ Pan</button>
-    </div>`;
-  }
-  _wireToolToggle() {
-    this.shadowRoot.querySelectorAll(".tool-seg [data-tool]").forEach((b) =>
-      (b.onclick = () => this._setSelectTool(b.dataset.tool === "select")));
-  }
-
   // The selection bar: live count + size + Download/Clear once cells are picked,
-  // a hint otherwise. Box-select is armed by default, so no "pick" button here.
+  // a hint otherwise. The map pans/zooms freely; tap a cell on it to add/remove it.
   _renderSelectionBar() {
     let bytes = 0, have = 0;
     for (const n of this._effectiveAreaCells()) {
@@ -729,7 +719,7 @@ export class ChartPlotterApp extends HTMLElement {
     }
     const busy = this._taskRunning();
     if (!have) {
-      return `<div class="sel-bar empty"><span class="muted">Pick charts: tap a region, drag a box on the map, or search below.</span></div>`;
+      return `<div class="sel-bar empty"><span class="muted">Pick charts: tap a region, tap cells on the map, or search below.</span></div>`;
     }
     const mb = (bytes / 1e6).toFixed(1);
     return `<div class="sel-bar">
@@ -1117,9 +1107,10 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._areaCells.has(name)) this._areaCells.delete(name); else this._areaCells.add(name);
     this._saveAreaCells();
     this._refreshCellSel();
-    // Re-render the selection bar + list in place (keep the rest of the panel).
+    // Re-render the affected pieces in place (keep the rest of the panel + scroll).
     const bar = this.shadowRoot.querySelector(".sel-bar");
     if (bar) bar.outerHTML = this._renderSelectionBar(), this._wireSelectionBar();
+    this._refreshRegions();
     this._renderCellListInto();
   }
   // Focus one cell: outline + frame it on the map, open its detail row.
@@ -1240,6 +1231,9 @@ export class ChartPlotterApp extends HTMLElement {
       this._showInspectArea(this._captureArea(a, b));
     });
     map.on("click", (e) => {
+      // Charts selection map: a tap toggles the cell under it (drags pan, and
+      // MapLibre only emits "click" for non-pan gestures).
+      if (this._chartsMode) { this._toggleCellAt(e.point.x, e.point.y); return; }
       if (!this._inspectMode || this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
       if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
       this._inspectAt(e.point, true); // lock onto whatever's here
@@ -1581,7 +1575,9 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   // Enter selection mode: hide the ENC render, show the cell overlay, frame to a
-  // wide view (remembering where we were so Home can fly back), and arm box-select.
+  // wide view (remembering where we were so Home can fly back). The map pans/zooms
+  // freely; cells are picked by tapping them (see the map click handler) or via
+  // the region buttons / search / cell list.
   _enterChartsMode() {
     if (!this._map) return;
     const first = !this._chartsMode;
@@ -1591,7 +1587,6 @@ export class ChartPlotterApp extends HTMLElement {
     this._setCellOverlay(true);
     const wb = this.shadowRoot.getElementById("world-btn");
     if (wb) wb.hidden = false; // "All charts" jump-to-world control
-    if (this._selectTool !== false) this._enterAreaSelect(); // box-select is the default tool
     // Zoom all the way out so every catalog cell is in frame at once (small) — the
     // "show the world" selection map. Framed after the drawer finishes opening (it
     // resizes the map at ~230ms) so the coverage centres in the narrower map area
@@ -1643,12 +1638,22 @@ export class ChartPlotterApp extends HTMLElement {
     }
   }
 
-  // Pan ⇄ Select toggle (box-select disables map drag, so this hands panning back).
-  _setSelectTool(on) {
-    this._selectTool = on;
-    if (on) this._enterAreaSelect(); else this._cancelAreaSelect();
-    this.shadowRoot.querySelectorAll(".tool-seg [data-tool]").forEach((b) =>
-      b.classList.toggle("sel", b.dataset.tool === (on ? "select" : "pan")));
+  // Click a cell on the selection map to add/remove it. Picks the finest (largest-
+  // scale) enabled cell whose footprint contains the point, then toggles it. A
+  // plain MapLibre "click" only fires when the gesture wasn't a pan, so dragging
+  // still pans the map.
+  _toggleCellAt(px, py) {
+    if (!this._map) return;
+    const ll = this._map.unproject([px, py]);
+    let best = null;
+    for (const c of this._catalog) {
+      const b = c.bb;
+      if (!Array.isArray(b) || b.length !== 4 || !this._bandOn(c)) continue;
+      if (ll.lng >= b[0] && ll.lng <= b[2] && ll.lat >= b[1] && ll.lat <= b[3]) {
+        if (!best || (c.s || 0) < (best.s || 0)) best = c; // finest = smallest scale denom
+      }
+    }
+    if (best) this._toggleAreaCell(best.n);
   }
 
   // Live amber preview of the cells the current drag box ([w,s,e,n]) will grab.
@@ -2192,9 +2197,6 @@ export class ChartPlotterApp extends HTMLElement {
         .region-btn .rb-n { color:var(--ui-text-faint); font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; }
         .region-btn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
         .region-btn.on .rb-n { color:var(--ui-accent-text); opacity:.8; }
-        /* pan/select map-tool toggle */
-        .tool-seg { display:flex; width:100%; margin:0 0 12px; }
-        .tool-seg button { flex:1; }
         /* selection bar */
         .sel-bar { margin:0 0 16px; }
         .sel-bar.empty { background:var(--ui-surface-2); border-radius:8px; padding:10px 12px; }
