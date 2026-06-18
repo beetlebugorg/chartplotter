@@ -86,8 +86,12 @@ export class TileCache {
 
   // -- public API ---------------------------------------------------------
   // Return the tile bytes (Uint8Array) for z/x/y, baking via bake(z,x,y) on a
-  // full miss. bake may return null/undefined for an empty tile — that's cached
-  // too (as a zero-length marker) so we don't re-bake known-empty tiles.
+  // full miss. EMPTY tiles are NOT cached: with lazy cell loading an "empty" tile
+  // often just means the covering cell hadn't parsed yet (or failed transiently),
+  // so caching it would permanently show no-data over an area that has data. Not
+  // caching empties means they re-bake (and re-load their cells) until they fill
+  // in — at the cost of re-baking genuinely-empty (open-ocean) tiles, which is
+  // cheap (no features).
   async get(z, x, y, bake) {
     const key = this._key(z, x, y);
 
@@ -116,8 +120,11 @@ export class TileCache {
     let bytes = await bake(z, x, y);
     if (bytes == null) bytes = new Uint8Array(0);
     else if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
-    this._memPut(key, bytes);
-    if (this._db) this._dbPut(key, bytes);
+    // Only cache NON-empty tiles (see above) — an empty result re-bakes next time.
+    if (bytes.length) {
+      this._memPut(key, bytes);
+      if (this._db) this._dbPut(key, bytes);
+    }
     return bytes.length ? bytes : null;
   }
 

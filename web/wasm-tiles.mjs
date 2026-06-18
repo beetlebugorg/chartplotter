@@ -133,8 +133,14 @@ export function registerTileProtocol(maplibregl, opts = {}) {
     if (!m) return { data: new ArrayBuffer(0) };
     const [, z, x, y] = m;
     try {
+      // Load this tile's cells for EVERY request, not just cache misses —
+      // otherwise a reload that renders from the persisted cache never parses the
+      // cells (the baker stays empty, the load count reads 0/N even with data on
+      // screen, and any non-cached tile can't bake). On a cache hit this resolves
+      // in the background so rendering stays instant; on a miss the bake awaits it.
+      const ensured = ensureCellsForTile(+z, +x, +y);
       const bytes = await cache.get(+z, +x, +y, async (z, x, y) => {
-        await ensureCellsForTile(z, x, y); // lazily parse any cells this tile needs
+        await ensured; // miss: cells must be parsed before baking
         tick(1); // a real bake in the worker (cache miss)
         try { const r = await call("tile", { z, x, y }); return r.tile ? new Uint8Array(r.tile) : null; }
         finally { tick(-1); }

@@ -192,8 +192,8 @@ export class ChartPlotter extends HTMLElement {
       this._rtCache = this._rt.registerTileProtocol(maplibregl, {
         // Namespace scopes the persistent tile cache. BUMP THE VERSION SUFFIX when
         // the baker's tile output changes, so stale cached tiles are abandoned.
-        // rt5: + best-available overzoom (general out to z0; any band overzooms in).
-        namespace: "rt5",
+        // rt6: load cells for every tile (not just misses) + don't cache empties.
+        namespace: "rt6",
         // Surface live bake activity so the app can show a "generating tiles"
         // indicator; fires whenever the worker's in-flight tile count changes.
         onActivity: (n) => this.dispatchEvent(new CustomEvent("bake-activity", { detail: { inflight: n }, bubbles: true })),
