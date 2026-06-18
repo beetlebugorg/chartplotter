@@ -241,7 +241,34 @@ export class ChartPlotterApp extends HTMLElement {
     else if (status === "failed") { this._cellError.set(name, (info && info.error) || "parse failed"); console.warn(`[charts] ${name} failed:`, info && info.error); }
     this._updateBakeStatus();
     this._renderCellStatusPopup();
-    if (this._debugCells) this._refreshInstalledBounds(); // recolour the debug footprints by new state
+    if (this._debugCells) {
+      this._refreshInstalledBounds(); // recolour the debug footprints by new state
+      if (status === "ready") this._pulseCell(name); // one-shot "loaded" ping
+    }
+  }
+
+  // Pulse a cell's border once (an expanding, fading ring) when it becomes ready.
+  _pulseCell(name) {
+    const c = this._byName.get(name);
+    if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) return;
+    if (!this._pulses) this._pulses = new Map();
+    this._pulses.set(name, performance.now());
+    if (!this._pulseRAF) this._pulseTick();
+  }
+  _pulseTick() {
+    const src = this._map && this._map.getSource("inst-pulse");
+    if (!src || !this._pulses) { this._pulseRAF = 0; return; }
+    const now = performance.now(), DUR = 650, feats = [];
+    for (const [name, start] of this._pulses) {
+      const t = (now - start) / DUR;
+      if (t >= 1) { this._pulses.delete(name); continue; }
+      const c = this._byName.get(name);
+      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) { this._pulses.delete(name); continue; }
+      const [w, s, e, n] = c.bb;
+      feats.push({ type: "Feature", properties: { prog: t }, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
+    }
+    src.setData({ type: "FeatureCollection", features: feats });
+    this._pulseRAF = this._pulses.size ? requestAnimationFrame(() => this._pulseTick()) : 0;
   }
 
   // Show/hide the debug cell-loading overlay (all installed footprints at every
@@ -1537,7 +1564,23 @@ export class ChartPlotterApp extends HTMLElement {
     const dbgVis = this._debugCells ? "visible" : "none";
     map.addLayer({ id: "inst-dbg-fill", type: "fill", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0.07 } });
     map.addLayer({ id: "inst-dbg-line", type: "line", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "line-color": dbgColor, "line-width": 1.6 } });
-    map.addLayer({ id: "inst-dbg-label", type: "symbol", source: "inst-bounds", layout: { visibility: dbgVis, "text-field": ["concat", ["get", "name"], "\n", ["get", "status"]], "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": true }, paint: { "text-color": dbgColor, "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.4 } });
+    // Label everything EXCEPT ready cells — once a cell is loaded its text drops
+    // away (and its border pulses once, see _pulseCell), so the overlay declutters
+    // as charts come in and only pending/loading/failed cells stay labelled.
+    const dbgText = ["case", ["==", ["get", "status"], "ready"], "", ["concat", ["get", "name"], "\n", ["get", "status"]]];
+    map.addLayer({ id: "inst-dbg-label", type: "symbol", source: "inst-bounds", layout: { visibility: dbgVis, "text-field": dbgText, "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": true }, paint: { "text-color": dbgColor, "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.4 } });
+    // One-shot "ready" pulse: the whole cell flashes green (fill) with a bright
+    // border, ramping up fast then fading — obvious across the entire footprint.
+    map.addSource("inst-pulse", { type: "geojson", data: empty });
+    map.addLayer({ id: "inst-pulse-fill", type: "fill", source: "inst-pulse", paint: {
+      "fill-color": "#2e9b57",
+      "fill-opacity": ["interpolate", ["linear"], ["get", "prog"], 0, 0.0, 0.15, 0.45, 1, 0.0],
+    } });
+    map.addLayer({ id: "inst-pulse-line", type: "line", source: "inst-pulse", paint: {
+      "line-color": "#2e9b57",
+      "line-width": ["interpolate", ["linear"], ["get", "prog"], 0, 1, 0.15, 5, 1, 1],
+      "line-opacity": ["interpolate", ["linear"], ["get", "prog"], 0, 0.2, 0.15, 1, 1, 0],
+    } });
     // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
     // hovering highlights + previews the feature under the cursor; a click LOCKS
     // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
