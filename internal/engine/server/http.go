@@ -105,6 +105,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.URL.Path == "/api/share":
 		s.serveShare(w, r) // GET/POST the latest "share my view" snapshot
+	case strings.HasPrefix(r.URL.Path, "/api/tile/"):
+		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
 	default:
