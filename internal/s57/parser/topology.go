@@ -98,7 +98,9 @@ func (r *polygonBuilder) getFullEdgeCoordinates(edge *edge, orientation int) [][
 // they are excluded here. They remain in the fill rings (§8.6.3). One polyline
 // per drawable edge (oriented per its FSPT orientation).
 func (r *polygonBuilder) drawableBoundaryLines(edgeRefs []spatialRef) [][][]float64 {
-	var lines [][][]float64
+	// Non-nil even when every edge is masked, so the renderer can tell "computed,
+	// all edges suppressed" (draw nothing) from "not computed" (stroke the rings).
+	lines := make([][][]float64, 0, len(edgeRefs))
 	for _, er := range edgeRefs {
 		if er.Mask == 1 || er.Usage == 3 {
 			continue // masked or data-limit edge — must not be drawn

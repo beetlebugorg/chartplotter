@@ -614,11 +614,17 @@ func geometryOf(g s57.Geometry) geom {
 			rings = append(rings, coordsToLatLon(g.Coordinates))
 		}
 		// Drawable border polylines (masked / data-limit edges already removed by
-		// the parser, S-52 §8.6.2). The fill still uses the complete rings.
+		// the parser, S-52 §8.6.2). The fill still uses the complete rings. A
+		// non-nil (even if empty) BoundaryLines means the parser computed the
+		// drawable border — use it (empty ⇒ stroke nothing). Nil means it wasn't
+		// computed (fallback geometry) → stroke the full rings.
 		var boundary [][]geo.LatLon
-		for _, bl := range g.BoundaryLines {
-			if pts := coordsToLatLon(bl); len(pts) >= 2 {
-				boundary = append(boundary, pts)
+		if g.BoundaryLines != nil {
+			boundary = make([][]geo.LatLon, 0, len(g.BoundaryLines))
+			for _, bl := range g.BoundaryLines {
+				if pts := coordsToLatLon(bl); len(pts) >= 2 {
+					boundary = append(boundary, pts)
+				}
 			}
 		}
 		return geom{kind: geomArea, area: rings, boundary: boundary}
