@@ -4,10 +4,15 @@
 // Go/tinygo wasm runtime (wasm_exec.js) is a classic script that sets globals.
 //
 // Message protocol (each carries an `id` the main thread correlates):
-//   { id, op:"init", assets }      → loads the wasm runtime + module
-//   { id, op:"load", cells }       → cpBakeLoad(cells) ; cells = { name: Uint8Array }
-//   { id, op:"tile", z, x, y }     → cpBakeTile(z,x,y) ; reply transfers the tile buffer
+//   { id, op:"init", assets }       → loads the wasm runtime + module
+//   { id, op:"reset" }              → cpBakeReset() ; start a fresh empty baker
+//   { id, op:"addcell", name, cell} → cpBakeAddCell(name, cell) ; cell = Uint8Array
+//   { id, op:"tile", z, x, y }      → cpBakeTile(z,x,y) ; reply transfers the tile buffer
 // Reply: { id, ok, result?/tile? } or { id, error }.
+//
+// Cells are streamed in one per "addcell" message (not all at once) so this
+// worker yields between large cells — queued "tile" messages get serviced
+// between cells, so the chart fills in progressively instead of freezing.
 
 let booted = false;
 
@@ -28,8 +33,13 @@ self.onmessage = async (e) => {
         self.postMessage({ id: m.id, ok: booted });
         break;
       }
-      case "load": {
-        const result = self.cpBakeLoad(m.cells);
+      case "reset": {
+        const result = self.cpBakeReset();
+        self.postMessage({ id: m.id, ok: true, result });
+        break;
+      }
+      case "addcell": {
+        const result = self.cpBakeAddCell(m.name, m.cell);
         self.postMessage({ id: m.id, ok: true, result });
         break;
       }

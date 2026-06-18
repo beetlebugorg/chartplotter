@@ -47,12 +47,75 @@ export function initBaker(assets = "./") {
   return _ready;
 }
 
-// Parse + index the given cells into the baker (in the worker). `cellMap` is
-// { name: Uint8Array }. Returns { ok, names, ms }.
-export async function loadCells(cellMap, assets = "./") {
+// -- lazy, demand-driven cell loading -----------------------------------------
+// Cells are NOT parsed up front. Instead each installed cell is registered with
+// its footprint (bbox) + the zoom it starts rendering at (its band min-zoom).
+// A cell is parsed into the baker only when a requested tile actually needs it
+// (the tile's zoom has reached the cell's band and the tile overlaps the cell).
+// So opening to a single harbour parses one cell, not the whole library.
+let _registry = [];          // [{name, w, s, e, n, minzoom, getBytes}]
+const _loaded = new Set();   // cells already parsed into the baker
+const _loading = new Map();  // name -> in-flight load promise (dedupe concurrent tiles)
+let _onCell = null;          // (name, status, info) status callback
+
+// Register the installed cells for lazy loading. `list` items are
+// { name, bb:[w,s,e,n]|null, minzoom, getBytes:()=>Promise<Uint8Array> }; a null
+// bb means "always relevant" (e.g. an imported cell with no catalog footprint).
+export function setCellRegistry(list, onCell) {
+  _registry = (list || []).map((c) => ({
+    name: c.name,
+    w: c.bb ? c.bb[0] : -180, s: c.bb ? c.bb[1] : -90, e: c.bb ? c.bb[2] : 180, n: c.bb ? c.bb[3] : 90,
+    minzoom: c.minzoom || 0,
+    getBytes: c.getBytes,
+  }));
+  _onCell = onCell || null;
+}
+
+// Reset the baker to empty and forget what's been loaded — call when the
+// installed set changes. Cells then re-parse lazily as the map needs them.
+export async function resetCells(assets = "./") {
   await initBaker(assets);
-  const r = await call("load", { cells: cellMap });
-  return r.result;
+  await call("reset", {});
+  _loaded.clear();
+  _loading.clear();
+}
+
+function tile2lat(y, n) { const r = Math.PI * (1 - (2 * y) / n); return (180 / Math.PI) * Math.atan(Math.sinh(r)); }
+function tileBBox(z, x, y) {
+  const n = 2 ** z;
+  const a = tile2lat(y, n), b = tile2lat(y + 1, n);
+  return [(x / n) * 360 - 180, Math.min(a, b), ((x + 1) / n) * 360 - 180, Math.max(a, b)];
+}
+
+// Ensure every registered cell this tile needs (band min-zoom reached + bbox
+// overlaps) is parsed into the baker. Each cell loads at most once; concurrent
+// tiles needing the same cell share one load.
+async function ensureCellsForTile(z, x, y) {
+  if (!_registry.length) return;
+  const [tw, ts, te, tn] = tileBBox(z, x, y);
+  const jobs = [];
+  for (const c of _registry) {
+    if (z < c.minzoom) continue;
+    if (c.e < tw || c.w > te || c.n < ts || c.s > tn) continue; // no overlap
+    if (_loaded.has(c.name)) continue;
+    let p = _loading.get(c.name);
+    if (!p) {
+      p = (async () => {
+        if (_onCell) _onCell(c.name, "loading");
+        try {
+          const bytes = await c.getBytes();
+          const r = await call("addcell", { name: c.name, cell: bytes });
+          if (r.result && r.result.ok) { _loaded.add(c.name); if (_onCell) _onCell(c.name, "ready", r.result); }
+          else { console.warn("[realtime] cell", c.name, "failed:", r.result && r.result.error); if (_onCell) _onCell(c.name, "failed", r.result); }
+        } catch (e) {
+          console.warn("[realtime] cell", c.name, "failed:", e.message); if (_onCell) _onCell(c.name, "failed", { error: e.message });
+        } finally { _loading.delete(c.name); }
+      })();
+      _loading.set(c.name, p);
+    }
+    jobs.push(p);
+  }
+  if (jobs.length) await Promise.all(jobs);
 }
 
 // Register the "cp://{z}/{x}/{y}" vector-tile protocol backed by the cache + the
@@ -71,6 +134,7 @@ export function registerTileProtocol(maplibregl, opts = {}) {
     const [, z, x, y] = m;
     try {
       const bytes = await cache.get(+z, +x, +y, async (z, x, y) => {
+        await ensureCellsForTile(z, x, y); // lazily parse any cells this tile needs
         tick(1); // a real bake in the worker (cache miss)
         try { const r = await call("tile", { z, x, y }); return r.tile ? new Uint8Array(r.tile) : null; }
         finally { tick(-1); }

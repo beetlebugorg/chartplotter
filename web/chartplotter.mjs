@@ -519,30 +519,29 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // -- real-time wasm tiles ------------------------------------------------
-  // Load raw S-57 cell bytes into the in-browser wasm baker, then re-request
-  // tiles so they bake from the new set. `cellMap` is { name: Uint8Array }.
-  async loadCells(cellMap) {
+  // Register the stored cells for LAZY, on-demand parsing — nothing is parsed
+  // now. Each cell is parsed into the baker only when a requested tile needs it
+  // (its zoom reaches the cell's band and the tile overlaps the cell footprint),
+  // so opening to one harbour parses one cell, not the whole library. `meta` maps
+  // cell name -> { bb:[w,s,e,n]|null, minzoom } (footprint + render-start zoom,
+  // from the catalog). clearCache drops persisted tiles when the installed set
+  // changed (false on a plain reload, so cached tiles render with no parsing).
+  // Returns { ok, names } (the installed set) without parsing anything.
+  async loadStoreCells(meta, clearCache = false) {
     if (!this._realtime || !this._rt) return null;
-    const res = await this._rt.loadCells(cellMap, this._assets);
-    if (this._rtCache) this._rtCache.clear(); // the loaded set changed → drop cached tiles
-    this.refresh();
-    return res;
-  }
-
-  // Load every cell currently in the store into the baker (the offline path:
-  // imported cells live in OPFS/IndexedDB).
-  async loadStoreCells() {
-    if (!this._realtime) return null;
     const names = await this._store.list();
-    console.log(`[realtime] loadStoreCells: ${names.length} cell(s) in browser store`, names);
-    const cellMap = {};
-    for (const n of names) {
-      try { cellMap[n] = await this._store.getBytes(n); } catch (e) { console.warn("[chartplotter] cell", n, e.message); }
-    }
-    // Always (re)load — an empty map clears the baker so a removal blanks the map.
-    const res = await this.loadCells(cellMap);
-    console.log("[realtime] baker loaded:", res);
-    return res;
+    console.log(`[realtime] ${names.length} cell(s) in store — lazy load on demand`, names);
+    const list = names.map((name) => {
+      const m = meta && (meta.get ? meta.get(name) : meta[name]);
+      return { name, bb: m && m.bb, minzoom: (m && m.minzoom) || 0, getBytes: () => this._store.getBytes(name) };
+    });
+    this._rt.setCellRegistry(list, (name, status, info) => {
+      this.dispatchEvent(new CustomEvent("cell-status", { detail: { name, status, info }, bubbles: true }));
+    });
+    await this._rt.resetCells(this._assets);
+    if (clearCache && this._rtCache) await this._rtCache.clear();
+    this.refresh();
+    return { ok: true, names };
   }
 
   // Resolve an archive source: a Blob/File is passed through; a URL string is

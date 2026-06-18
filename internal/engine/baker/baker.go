@@ -36,6 +36,41 @@ func ParseCellBytes(name string, data []byte) (*s57.Chart, error) {
 	return s57.ParseWithOptions(p, opts)
 }
 
+// Session is an incremental Baker builder: cells are parsed and added one at a
+// time (AddCell) into a long-lived Baker, instead of all-at-once via BuildBaker.
+// This is the real-time wasm path — parsing a single large cell can take seconds
+// in wasm, so loading the set one cell per call lets the host yield between cells
+// (servicing tile requests / reporting progress) rather than blocking on the
+// whole set. The S-52 library + mariner settings are loaded once and reused.
+type Session struct {
+	Baker   *bake.Baker
+	lib     *s52.Library
+	mariner *s52.MarinerSettings
+}
+
+// NewSession returns an empty incremental Session (loads the S-52 presentation
+// library once). Add cells with AddCellBytes, then bake tiles off Session.Baker.
+func NewSession() (*Session, error) {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		return nil, err
+	}
+	mariner := s52.DefaultMarinerSettings()
+	return &Session{Baker: bake.New(), lib: lib, mariner: mariner}, nil
+}
+
+// AddCellBytes parses one raw cell and adds it to the session's Baker. The caller
+// should rebuild the emit index (Baker.BuildEmitIndex) before baking tiles after
+// any add.
+func (s *Session) AddCellBytes(name string, data []byte) error {
+	chart, err := ParseCellBytes(name, data)
+	if err != nil {
+		return err
+	}
+	s.Baker.AddCell(chart, s.lib, s.mariner)
+	return nil
+}
+
 // BuildBaker parses and adds each named cell to a fresh Baker. cells maps a
 // cell name (or path) to its raw bytes. onSkip, if non-nil, is called for each
 // cell that fails to parse. Returns the Baker and the names successfully added,

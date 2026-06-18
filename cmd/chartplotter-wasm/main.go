@@ -18,56 +18,65 @@ import (
 )
 
 var (
-	theBaker *bake.Baker
-	scratch  bake.TileScratch
+	session *baker.Session
+	scratch bake.TileScratch
+	dirty   bool // a cell was added since the last emit-index build
 )
 
-// cpBakeLoad(cells) — cells is a JS object { "<cellName>": Uint8Array(.000 bytes) }.
-// Parses + indexes them into a Baker. Returns { ok, names:[…], ms } (or { ok:false,
-// error }). Replaces any previously-loaded set.
-func cpBakeLoad(_ js.Value, args []js.Value) any {
-	start := time.Now()
-	obj := args[0]
-	keys := js.Global().Get("Object").Call("keys", obj)
-	cells := make(map[string][]byte, keys.Length())
-	for i := 0; i < keys.Length(); i++ {
-		name := keys.Index(i).String()
-		u8 := obj.Get(name)
-		buf := make([]byte, u8.Get("length").Int())
-		js.CopyBytesToGo(buf, u8)
-		cells[name] = buf
-	}
-
-	b, names, err := baker.BuildBaker(cells, nil)
+// cpBakeReset() — start a fresh, empty baker session. Cells are then streamed in
+// one at a time via cpBakeAddCell so the worker can yield between (large) cells
+// instead of blocking on the whole set. Returns { ok } or { ok:false, error }.
+func cpBakeReset(_ js.Value, _ []js.Value) any {
+	s, err := baker.NewSession()
 	if err != nil {
 		return js.ValueOf(map[string]any{"ok": false, "error": err.Error()})
 	}
-	b.BuildEmitIndex(baker.MVTExtent, baker.MVTBuffer)
-	theBaker = b
-
-	jsNames := make([]any, len(names))
-	for i, n := range names {
-		jsNames[i] = n
-	}
-	return js.ValueOf(map[string]any{
-		"ok":    true,
-		"names": jsNames,
-		"ms":    time.Since(start).Milliseconds(),
-	})
+	session = s
+	dirty = false
+	return js.ValueOf(map[string]any{"ok": true})
 }
 
-// cpBakeTile(z, x, y) — bake one MVT tile from the loaded Baker. Returns a
-// Uint8Array (the gzip-less MVT body) or null when the tile is empty.
+// cpBakeAddCell(name, bytes) — parse one cell (Uint8Array) and add it to the
+// current session. Cheap relative to a full reload: the heavy emit-index rebuild
+// is deferred to the next cpBakeTile. Returns { ok, name, ms } or { ok:false,
+// name, error }.
+func cpBakeAddCell(_ js.Value, args []js.Value) any {
+	start := time.Now()
+	name := args[0].String()
+	if session == nil {
+		if s, err := baker.NewSession(); err == nil {
+			session = s
+		} else {
+			return js.ValueOf(map[string]any{"ok": false, "name": name, "error": err.Error()})
+		}
+	}
+	u8 := args[1]
+	buf := make([]byte, u8.Get("length").Int())
+	js.CopyBytesToGo(buf, u8)
+	if err := session.AddCellBytes(name, buf); err != nil {
+		return js.ValueOf(map[string]any{"ok": false, "name": name, "error": err.Error()})
+	}
+	dirty = true
+	return js.ValueOf(map[string]any{"ok": true, "name": name, "ms": time.Since(start).Milliseconds()})
+}
+
+// cpBakeTile(z, x, y) — bake one MVT tile from the current session. Returns a
+// Uint8Array (the gzip-less MVT body) or null when the tile is empty. Rebuilds
+// the emit index first if a cell was added since the last bake.
 func cpBakeTile(_ js.Value, args []js.Value) any {
-	if theBaker == nil {
+	if session == nil {
 		return js.Null()
+	}
+	if dirty {
+		session.Baker.BuildEmitIndex(baker.MVTExtent, baker.MVTBuffer)
+		dirty = false
 	}
 	coord := tile.TileCoord{
 		Z: uint32(args[0].Int()),
 		X: uint32(args[1].Int()),
 		Y: uint32(args[2].Int()),
 	}
-	data := theBaker.EmitTileInto(coord, baker.MVTExtent, baker.MVTBuffer, &scratch)
+	data := session.Baker.EmitTileInto(coord, baker.MVTExtent, baker.MVTBuffer, &scratch)
 	if data == nil {
 		return js.Null()
 	}
@@ -77,7 +86,8 @@ func cpBakeTile(_ js.Value, args []js.Value) any {
 }
 
 func main() {
-	js.Global().Set("cpBakeLoad", js.FuncOf(cpBakeLoad))
+	js.Global().Set("cpBakeReset", js.FuncOf(cpBakeReset))
+	js.Global().Set("cpBakeAddCell", js.FuncOf(cpBakeAddCell))
 	js.Global().Set("cpBakeTile", js.FuncOf(cpBakeTile))
 	js.Global().Set("cpBakeReady", js.ValueOf(true))
 	select {} // keep the instance alive for callbacks

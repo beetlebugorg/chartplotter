@@ -211,15 +211,19 @@ func (s *Server) serveEmbedded(w http.ResponseWriter, r *http.Request, name, rel
 // setAssetHeaders writes the Range/CORS/cache headers shared by the on-disk and
 // embedded asset paths. The app code + manifests must always reflect the latest
 // build/bake, so HTML/JS/JSON revalidate (otherwise a cached chartplotter-app.mjs
-// keeps the old region logic after an update). Tiles/atlases are large and change
-// only via a fresh provision (cache-busted by ?t=), so they may cache.
+// keeps the old region logic after an update). The wasm baker must revalidate
+// too: it is loaded together with wasm_exec.js (a .js, already no-cache), and the
+// two are a matched pair — a cached .wasm against a fresh wasm_exec.js fails with
+// "import object field 'runtime.ticks' is not a Function" (a tinygo↔go runtime
+// mismatch). Tiles/atlases are large and change only via a fresh provision
+// (cache-busted by ?t=), so they may cache.
 func setAssetHeaders(w http.ResponseWriter, rel string) {
 	w.Header().Set("Content-Type", mimeFor(rel))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Expose-Headers", "content-range,accept-ranges,content-length")
 	switch strings.ToLower(filepath.Ext(rel)) {
-	case ".html", ".js", ".mjs", ".json":
+	case ".html", ".js", ".mjs", ".json", ".wasm":
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 }

@@ -133,6 +133,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._catalog = [];                 // [{n,l,s,e,u,d,z,zs,bb}]
     this._byName = new Map();           // name -> catalog entry
     this._installed = new Set();        // all stored cell names
+    this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
     this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
@@ -211,22 +212,94 @@ export class ChartPlotterApp extends HTMLElement {
 
     plotter.addEventListener("ready", (e) => this.onReady(e.detail.map), { once: true });
     plotter.addEventListener("bake-activity", (e) => this._onBakeActivity(e.detail.inflight));
+    plotter.addEventListener("cell-status", (e) => this._onCellStatus(e.detail));
   }
 
-  // Reflect live wasm tile-baking in the statusbar. inflight = tiles currently
-  // baking in the worker (0 = idle). Hide promptly when idle, but debounce the
-  // hide a touch so the indicator doesn't strobe between back-to-back tiles.
+  // Per-cell load status, streamed from the wasm baker as cells are parsed one at
+  // a time. name → "queued" | "loading" | "ready" | "failed".
+  _onCellStatus({ name, status, info }) {
+    if (!this._cellStatus) this._cellStatus = new Map();
+    this._cellStatus.set(name, status);
+    if (status === "loading") console.log(`[charts] loading ${name}…`);
+    else if (status === "ready") console.log(`[charts] ${name} ready${info && info.ms != null ? ` (${info.ms}ms)` : ""}`);
+    else if (status === "failed") console.warn(`[charts] ${name} failed:`, info && info.error);
+    this._updateBakeStatus();
+    this._renderCellStatusPopup();
+  }
+
+  // Live wasm tile-baking count (tiles currently baking in the worker, 0 = idle).
   _onBakeActivity(inflight) {
-    const el = this.shadowRoot && this.shadowRoot.getElementById("bake-status");
-    if (!el) return;
     this._bakeInflight = inflight;
-    if (inflight > 0) {
-      clearTimeout(this._bakeHideT); this._bakeHideT = 0;
-      el.querySelector(".sb-bake-txt").textContent = inflight > 1 ? `Generating ${inflight} tiles…` : "Generating tile…";
-      el.hidden = false;
-    } else if (!this._bakeHideT) {
-      this._bakeHideT = setTimeout(() => { this._bakeHideT = 0; if (!this._bakeInflight) el.hidden = true; }, 250);
+    this._updateBakeStatus();
+  }
+
+  // The installed set / registry changed: mark every installed cell "queued"
+  // (not yet parsed — cells lazy-load on demand) and prune orphans.
+  _resetCellStatus() {
+    const next = new Map();
+    for (const n of this._installed) next.set(n, "queued");
+    this._cellStatus = next;
+    this._updateBakeStatus();
+    this._renderCellStatusPopup();
+  }
+
+  _countStatus(s) { let n = 0; for (const v of this._cellStatus.values()) if (v === s) n++; return n; }
+
+  // Centered statusbar indicator. Priority: cells currently parsing (lazy) → live
+  // tile baking → a resting "N charts" affordance (kept visible so it stays
+  // clickable for the per-cell popup). Hidden only when nothing is installed.
+  _updateBakeStatus() {
+    const root = this.shadowRoot; if (!root) return;
+    const el = root.getElementById("bake-status"); if (!el) return;
+    const txt = el.querySelector(".sb-bake-txt");
+    const loading = this._countStatus("loading"), failed = this._countStatus("failed");
+    let busy = false, label = "";
+    if (loading > 0) {
+      busy = true; label = loading > 1 ? `Loading ${loading} charts…` : "Loading chart…";
+    } else if (this._bakeInflight > 0) {
+      busy = true; label = this._bakeInflight > 1 ? `Generating ${this._bakeInflight} tiles…` : "Generating tile…";
+    } else if (this._installed.size > 0) {
+      const n = this._installed.size;
+      label = `${n} chart${n === 1 ? "" : "s"}` + (failed ? ` · ${failed} failed` : "");
+    } else {
+      el.hidden = true; el.classList.remove("busy"); return;
     }
+    txt.textContent = label;
+    el.classList.toggle("busy", busy);
+    el.classList.toggle("has-fail", failed > 0);
+    el.hidden = false;
+  }
+
+  _toggleCellStatusPopup() {
+    this._cellPopOpen = !this._cellPopOpen;
+    this._renderCellStatusPopup();
+  }
+
+  // Popup listing every installed cell with its band colour + load status. Opened
+  // by clicking the centered statusbar indicator.
+  _renderCellStatusPopup() {
+    const root = this.shadowRoot; if (!root) return;
+    const pop = root.getElementById("cell-status-pop"); if (!pop) return;
+    if (!this._cellPopOpen) { pop.hidden = true; return; }
+    const names = [...new Set([...this._installed, ...this._cellStatus.keys()])].sort();
+    const loaded = this._countStatus("ready"), loading = this._countStatus("loading"), failed = this._countStatus("failed");
+    const parts = [`${this._installed.size} installed`, `${loaded} loaded`];
+    if (loading) parts.push(`${loading} loading`);
+    if (failed) parts.push(`${failed} failed`);
+    const head = parts.join(" · ");
+    const STAT = { queued: ["idle", "csp-queued"], loading: ["loading…", "csp-loading"], ready: ["loaded", "csp-ready"], failed: ["failed", "csp-failed"] };
+    const rows = names.map((n) => {
+      const c = this._byName.get(n);
+      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
+      const st = this._cellStatus.get(n) || (this._installed.has(n) ? "queued" : "ready");
+      const [lbl, cls] = STAT[st] || STAT.queued;
+      return `<li class="csp-row"><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
+        + `<span class="csp-name" title="${esc((c && c.l) || n)}">${esc(n)}</span>`
+        + `<span class="csp-stat ${cls}">${lbl}</span></li>`;
+    }).join("");
+    pop.innerHTML = `<div class="csp-head">${esc(head)}</div>`
+      + `<ul class="csp-list">${rows || '<li class="csp-empty">No charts installed</li>'}</ul>`;
+    pop.hidden = false;
   }
 
   loadCatalog() {
@@ -260,9 +333,11 @@ export class ChartPlotterApp extends HTMLElement {
     await this._catalogReady;
     this.addCatalogOverlay(map);
     await this.restoreArchive();
-    // 100%-wasm path: bake whatever cells are already stored (imported offline).
+    // 100%-wasm path: register stored cells for lazy, on-demand parsing (nothing
+    // parses until a viewed tile needs it). Plain reload → keep persisted tiles.
+    this._resetCellStatus();
     try {
-      const rt = await this._plotter.loadStoreCells();
+      const rt = await this._plotter.loadStoreCells(this._realtimeCellMeta(), false);
       this._refreshInstalledBounds();
       if (rt && rt.ok && rt.names && rt.names.length) { this._hasArchive = true; this.updateEmptyState(); }
     } catch (e) { console.warn("[realtime] loadStoreCells", e); }
@@ -304,6 +379,12 @@ export class ChartPlotterApp extends HTMLElement {
     // clicks bubble out of the renderer's shadow root to here).
     this.shadowRoot.addEventListener("click", (e) => {
       this.shadowRoot.querySelectorAll(".sb-band-wrap.open").forEach((w) => w.classList.remove("open"));
+      // Close the per-cell status popup when clicking outside it (the indicator
+      // button's own handler stopPropagation's, so this only fires for outside clicks).
+      if (this._cellPopOpen) {
+        const pop = this.shadowRoot.getElementById("cell-status-pop");
+        if (pop && !e.composedPath().some((n) => n === pop)) { this._cellPopOpen = false; this._renderCellStatusPopup(); }
+      }
       const search = this.shadowRoot.getElementById("search");
       if (search && !search.hidden) {
         const onSearch = e.composedPath().some((n) => n === search || (n.id === "search-tab"));
@@ -1969,8 +2050,10 @@ export class ChartPlotterApp extends HTMLElement {
   // reflect coverage in the empty state. Called after any import.
   async _refreshRealtime() {
     if (!this._plotter) return;
+    this._resetCellStatus();
     try {
-      const rt = await this._plotter.loadStoreCells();
+      // The installed set changed → drop persisted tiles so removed cells vanish.
+      const rt = await this._plotter.loadStoreCells(this._realtimeCellMeta(), true);
       this._refreshInstalledBounds();
       if (rt && rt.ok && rt.names && rt.names.length) {
         this._hasArchive = true;
@@ -1978,6 +2061,19 @@ export class ChartPlotterApp extends HTMLElement {
         this._frameCells(rt.names);
       }
     } catch (e) { console.warn("[realtime] refresh", e); }
+  }
+
+  // Footprint + render-start zoom for each installed cell, from the catalog —
+  // drives lazy loading (which cells a tile needs) and the coverage outlines.
+  _realtimeCellMeta() {
+    const meta = new Map();
+    for (const name of this._installed) {
+      const c = this._byName.get(name);
+      const bb = c && Array.isArray(c.bb) && c.bb.length === 4 ? c.bb : null;
+      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "overview";
+      meta.set(name, { bb, minzoom: BAND_MINZOOM[band] || 0 });
+    }
+    return meta;
   }
 
   // Rebuild the installed-cell coverage outlines (shown when zoomed out past a
@@ -2420,16 +2516,38 @@ export class ChartPlotterApp extends HTMLElement {
         .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
         .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--ui-text-dim); }
         .ins-cycler .btn { padding:2px 9px; line-height:1.3; }
-        /* Tile-bake activity indicator (spinner + count), shown only while the
-           wasm worker is baking tiles on demand. */
-        .sb-bake { display:inline-flex; align-items:center; gap:6px; flex:none; color:var(--ui-accent);
+        /* Tile/cell generation indicator — centered in the statusbar, clickable
+           to open the per-cell status popup. Spinner shows only while busy
+           (loading cells or baking tiles); otherwise it's a resting "N charts". */
+        .sb-bake { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:7;
+          display:inline-flex; align-items:center; gap:6px; color:var(--ui-accent); cursor:pointer;
+          border:1px solid transparent; background:transparent; border-radius:13px; padding:3px 10px;
           font:600 11px/1 system-ui,sans-serif; white-space:nowrap; font-variant-numeric:tabular-nums; }
+        .sb-bake:hover { border-color:var(--ui-border-strong); background:var(--ui-surface); }
         .sb-bake[hidden] { display:none; }
-        .sb-bake-spin { width:12px; height:12px; flex:none; border-radius:50%;
+        .sb-bake.has-fail { color:#cf3b3b; }
+        .sb-bake-spin { display:none; width:12px; height:12px; flex:none; border-radius:50%;
           border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
           animation:sb-bake-spin .7s linear infinite; }
+        .sb-bake.busy .sb-bake-spin { display:inline-block; }
         @keyframes sb-bake-spin { to { transform:rotate(360deg); } }
         @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
+        /* Per-cell status popup, above the centered indicator. */
+        #cell-status-pop { position:absolute; left:50%; bottom:36px; transform:translateX(-50%); z-index:9;
+          width:min(320px,calc(100vw - 24px)); max-height:min(50vh,340px); overflow:auto;
+          background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:10px;
+          box-shadow:0 8px 28px rgba(0,0,0,.22); padding:8px; }
+        #cell-status-pop[hidden] { display:none; }
+        .csp-head { font:600 11px/1 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
+          letter-spacing:.04em; padding:2px 4px 8px; }
+        .csp-list { list-style:none; margin:0; padding:0; }
+        .csp-row { display:flex; align-items:center; gap:8px; padding:4px 4px; font:500 12px/1.2 system-ui,sans-serif; }
+        .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
+        .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
+        .csp-name { flex:1; font-variant-numeric:tabular-nums; color:var(--ui-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .csp-stat { flex:none; font-weight:600; font-size:11px; }
+        .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
+        .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:6px 4px; }
         .sb-readout { flex:none; }
         .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
@@ -2590,9 +2708,10 @@ export class ChartPlotterApp extends HTMLElement {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
           <span>Inspect</span>
         </button>
-        <div id="bake-status" class="sb-bake" hidden title="Generating chart tiles">
+        <button id="bake-status" class="sb-bake" type="button" hidden title="Chart tile generation — click for per-cell status">
           <span class="sb-bake-spin"></span><span class="sb-bake-txt"></span>
-        </div>
+        </button>
+        <div id="cell-status-pop" hidden></div>
         <div id="cov-readout" class="sb-readout"></div>
         <div id="cov-cells" class="sb-bands"></div>
       </div>
@@ -2662,6 +2781,7 @@ export class ChartPlotterApp extends HTMLElement {
     $("ins-close").onclick = () => this._setInspectMode(false);
     $("ins-copy").onclick = (e) => this._copyInspectDebug(e.currentTarget);
     $("inspect-toggle").onclick = () => this._setInspectMode(!this._inspectMode);
+    $("bake-status").onclick = (e) => { e.stopPropagation(); this._toggleCellStatusPopup(); };
     // Esc exits the feature inspector.
     window.addEventListener("keydown", (e) => { if (e.key === "Escape" && this._inspectMode) this._setInspectMode(false); });
     $("empty-add").onclick = () => this.openCharts();
