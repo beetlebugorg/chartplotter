@@ -33,6 +33,11 @@ import (
 
 const maxBandZ uint32 = 18
 
+// generalOverzoomMin is the lowest zoom the general band displays at (below its
+// native min of 7) so general charts don't vanish when zoomed out past z7. Below
+// this, world/continental zoom relies on the overview band.
+const generalOverzoomMin uint32 = 2
+
 // ZoomRange is a baked [min,max] Web-Mercator zoom span.
 type ZoomRange struct{ Min, Max uint32 }
 
@@ -278,6 +283,16 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	}
 	band := BandForScale(uint32(chart.CompilationScale()))
 	zr := band.ZoomRange()
+	// Display range vs native band. General cells overzoom OUT (down to z2) so
+	// their data doesn't vanish when you zoom out past z7 with no overview
+	// coverage. The native band [zr] still drives best-available suppression, so
+	// general yields wherever a coarser (overview) cell actually overlaps — it
+	// only fills the gaps. (We don't raise the display ceiling: indexing a
+	// cell-wide prim up to high zoom would blow up the emit index.)
+	dr := zr
+	if band == BandGeneral {
+		dr.Min = generalOverzoomMin
+	}
 	cb := chart.Bounds()
 	cellLat := (cb.MinLat + cb.MaxLat) / 2 // SCAMIN→zoom uses the cell's display scale
 	features := chart.Features()
@@ -308,7 +323,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
-			zMin := bandZMin(fb.DisplayCategory, scamin, zr.Min, cellLat)
+			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
 			prims := fb.Primitives
@@ -328,7 +343,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 						names = append(names, nsc.SymbolName)
 						pi++
 					}
-					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd)
+					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd)
 					continue
 				}
 				// Co-located lights (S-52 LIGHTS06): a non-primary light drops its
@@ -351,7 +366,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 						}
 					}
 				}
-				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd, drval1, drval2)
+				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd, drval1, drval2)
 			}
 		}
 	}
@@ -360,9 +375,9 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 // routeSoundingGroup emits one soundings feature for a whole sounding number
 // (the comma-joined digit-glyph list), carrying depth + both palette variants so
 // the client runs SNDFRM04's safety-depth split live.
-func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32, bnd int64) {
+func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd int64) {
 	joined := strings.Join(names, ",")
-	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
+	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
 	attrs := []mvt.KeyValue{
 		{Key: "class", Value: mvt.StringVal(class)},
 		{Key: "cell", Value: mvt.StringVal(b.curCell)},
@@ -413,7 +428,7 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.prims = append(b.prims, r)
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin uint32, bnd int64, drval1, drval2 float32) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd int64, drval1, drval2 float32) {
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
@@ -431,7 +446,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		}
 		return append(base, extra...)
 	}
-	r := routed{zMin: zMin, zMax: zr.Max, natMin: zr.Min, natMax: zr.Max}
+	r := routed{zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
 
 	switch v := p.(type) {
 	case portrayal.FillPolygon:
