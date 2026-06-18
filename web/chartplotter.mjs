@@ -544,6 +544,10 @@ export class ChartPlotter extends HTMLElement {
     return { ok: true, names };
   }
 
+  // Tile-cache usage (memory + disk bytes/tiles, hit/miss counters) for the
+  // status popup, or null when not on the realtime path.
+  realtimeStats() { return this._rtCache ? this._rtCache.usage() : null; }
+
   // Resolve an archive source: a Blob/File is passed through; a URL string is
   // made absolute (relative to the page) for the HTTP-Range reader.
   _resolveSrc(src) {

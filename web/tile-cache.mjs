@@ -35,6 +35,7 @@ export class TileCache {
     // `_diskBytes` is the running total, summed once on open.
     this._atime = 1;
     this._diskBytes = 0;
+    this._diskCount = 0;
     this._db = null;
     this._ready = this._open();
 
@@ -70,12 +71,12 @@ export class TileCache {
   // Sum the persisted size + seed the atime counter above the max on disk.
   _sumDisk() {
     return new Promise((resolve, reject) => {
-      let total = 0, maxA = 0;
+      let total = 0, maxA = 0, count = 0;
       const cur = this._tx("readonly").openCursor();
       cur.onsuccess = () => {
         const c = cur.result;
-        if (!c) { this._diskBytes = total; this._atime = maxA + 1; resolve(); return; }
-        total += c.value.s || 0;
+        if (!c) { this._diskBytes = total; this._diskCount = count; this._atime = maxA + 1; resolve(); return; }
+        total += c.value.s || 0; count++;
         if (c.value.atime > maxA) maxA = c.value.atime;
         c.continue();
       };
@@ -163,6 +164,7 @@ export class TileCache {
       const g = os.get(key);
       g.onsuccess = () => {
         if (g.result) this._diskBytes -= g.result.s || 0;
+        else this._diskCount++;
         os.put(rec);
         this._diskBytes += size;
         if (this._diskBytes > this.diskCap) this._dbEvict();
@@ -178,6 +180,7 @@ export class TileCache {
         const c = cur.result;
         if (!c || this._diskBytes <= this.diskCap) return;
         this._diskBytes -= c.value.s || 0;
+        this._diskCount = Math.max(0, this._diskCount - 1);
         this.stats.evictedDisk++;
         c.delete();
         c.continue();
@@ -191,14 +194,14 @@ export class TileCache {
     await this._ready;
     if (this._db) {
       await new Promise((res) => { const r = this._tx("readwrite").clear(); r.onsuccess = r.onerror = () => res(); });
-      this._diskBytes = 0;
+      this._diskBytes = 0; this._diskCount = 0;
     }
   }
 
   usage() {
     return {
       memBytes: this._memBytes, memCap: this.memCap, memTiles: this._mem.size,
-      diskBytes: this._diskBytes, diskCap: this.diskCap,
+      diskBytes: this._diskBytes, diskCap: this.diskCap, diskTiles: this._diskCount,
       ...this.stats,
     };
   }

@@ -134,6 +134,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._byName = new Map();           // name -> catalog entry
     this._installed = new Set();        // all stored cell names
     this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
+    this._cellError = new Map();        // name -> error message, for cells that failed to parse
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
     this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
@@ -142,6 +143,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._selBands = this._loadSelBands(); // navigational-purpose bands enabled in the selector (Set of band slugs)
+    this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage outlines on/off (default on)
     this._inspectMode = false;          // feature-inspect mode (toggled from the statusbar)
     this._inspectLocked = false;        // a feature is pinned (click-to-lock) — hover stops updating
     this._inspectLastKey = "";          // last rendered hover/lock key, to skip redundant re-renders
@@ -221,9 +223,26 @@ export class ChartPlotterApp extends HTMLElement {
     if (!this._cellStatus) this._cellStatus = new Map();
     this._cellStatus.set(name, status);
     if (status === "loading") console.log(`[charts] loading ${name}…`);
-    else if (status === "ready") console.log(`[charts] ${name} ready${info && info.ms != null ? ` (${info.ms}ms)` : ""}`);
-    else if (status === "failed") console.warn(`[charts] ${name} failed:`, info && info.error);
+    else if (status === "ready") { this._cellError.delete(name); console.log(`[charts] ${name} ready${info && info.ms != null ? ` (${info.ms}ms)` : ""}`); }
+    else if (status === "failed") { this._cellError.set(name, (info && info.error) || "parse failed"); console.warn(`[charts] ${name} failed:`, info && info.error); }
     this._updateBakeStatus();
+    this._renderCellStatusPopup();
+  }
+
+  // Remove every cell that failed to parse from the browser store (and reset the
+  // baker registry without them) — the "clear them out" affordance.
+  async _removeFailedCells() {
+    const failed = [...this._cellStatus.entries()].filter(([, v]) => v === "failed").map(([k]) => k);
+    if (!failed.length) return;
+    for (const name of failed) {
+      try { await this._store.remove(name); } catch (e) { console.warn("[store] remove", name, e); }
+      this._installed.delete(name);
+      this._cellStatus.delete(name);
+      this._cellError.delete(name);
+    }
+    console.log("[charts] removed failed cells:", failed);
+    await this._refreshRealtime();
+    this.renderCharts();
     this._renderCellStatusPopup();
   }
 
@@ -272,7 +291,17 @@ export class ChartPlotterApp extends HTMLElement {
 
   _toggleCellStatusPopup() {
     this._cellPopOpen = !this._cellPopOpen;
+    // Keep cache stats (tiles/memory/disk) live while the popup is open.
+    clearInterval(this._cellPopTimer);
+    if (this._cellPopOpen) this._cellPopTimer = setInterval(() => this._renderCellStatusPopup(), 600);
     this._renderCellStatusPopup();
+  }
+
+  _fmtBytes(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
   }
 
   // Popup listing every installed cell with its band colour + load status. Opened
@@ -293,12 +322,28 @@ export class ChartPlotterApp extends HTMLElement {
       const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
       const st = this._cellStatus.get(n) || (this._installed.has(n) ? "queued" : "ready");
       const [lbl, cls] = STAT[st] || STAT.queued;
-      return `<li class="csp-row"><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
-        + `<span class="csp-name" title="${esc((c && c.l) || n)}">${esc(n)}</span>`
-        + `<span class="csp-stat ${cls}">${lbl}</span></li>`;
+      const err = st === "failed" ? this._cellError.get(n) : "";
+      // Failed cells show the parse error inline (and as a tooltip) so you can
+      // see why; everything else just shows the chart title on hover.
+      return `<li class="csp-row${err ? " is-fail" : ""}"><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
+        + `<span class="csp-name" title="${esc(err || (c && c.l) || n)}">${esc(n)}`
+        + (err ? `<span class="csp-err">${esc(err)}</span>` : "")
+        + `</span><span class="csp-stat ${cls}">${lbl}</span></li>`;
     }).join("");
-    pop.innerHTML = `<div class="csp-head">${esc(head)}</div>`
+    const clearBtn = failed
+      ? `<button id="csp-clear-failed" class="csp-clear" type="button">Remove ${failed} failed</button>` : "";
+    const u = this._plotter && this._plotter.realtimeStats && this._plotter.realtimeStats();
+    const statsHtml = u ? `<div class="csp-stats">`
+      + `<div><span>Cells</span><b>${loaded}/${this._installed.size} loaded</b></div>`
+      + `<div><span>Tiles</span><b>${u.memTiles} mem · ${u.diskTiles} disk</b></div>`
+      + `<div><span>Memory</span><b>${this._fmtBytes(u.memBytes)} / ${this._fmtBytes(u.memCap)}</b></div>`
+      + `<div><span>Disk</span><b>${this._fmtBytes(u.diskBytes)} / ${this._fmtBytes(u.diskCap)}</b></div>`
+      + `<div><span>Cache</span><b>${u.l1Hit + u.l2Hit} hit · ${u.miss} baked</b></div>`
+      + `</div>` : "";
+    pop.innerHTML = `<div class="csp-head"><span>${esc(head)}</span>${clearBtn}</div>`
+      + statsHtml
       + `<ul class="csp-list">${rows || '<li class="csp-empty">No charts installed</li>'}</ul>`;
+    pop.querySelector("#csp-clear-failed")?.addEventListener("click", (e) => { e.stopPropagation(); this._removeFailedCells(); });
     pop.hidden = false;
   }
 
@@ -383,7 +428,7 @@ export class ChartPlotterApp extends HTMLElement {
       // button's own handler stopPropagation's, so this only fires for outside clicks).
       if (this._cellPopOpen) {
         const pop = this.shadowRoot.getElementById("cell-status-pop");
-        if (pop && !e.composedPath().some((n) => n === pop)) { this._cellPopOpen = false; this._renderCellStatusPopup(); }
+        if (pop && !e.composedPath().some((n) => n === pop)) { this._cellPopOpen = false; clearInterval(this._cellPopTimer); this._renderCellStatusPopup(); }
       }
       const search = this.shadowRoot.getElementById("search");
       if (search && !search.hidden) {
@@ -1366,12 +1411,13 @@ export class ChartPlotterApp extends HTMLElement {
     // layers per band, auto-hidden at the band's native min zoom (maxzoom) — where
     // the real chart takes over.
     map.addSource("inst-bounds", { type: "geojson", data: empty });
+    const boundsVis = this._showCellBounds ? "visible" : "none";
     for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
       const mz = BAND_MINZOOM[band];
       const f = ["==", ["get", "band"], band];
-      map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
-      map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
-      map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 11 }, paint: { "text-color": "#1b2733", "text-halo-color": "rgba(255,255,255,0.9)", "text-halo-width": 1.2 } });
+      map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
+      map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
+      map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis, "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 11 }, paint: { "text-color": "#1b2733", "text-halo-color": "rgba(255,255,255,0.9)", "text-halo-width": 1.2 } });
     }
     // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
     // hovering highlights + previews the feature under the cursor; a click LOCKS
@@ -2095,6 +2141,19 @@ export class ChartPlotterApp extends HTMLElement {
     src.setData({ type: "FeatureCollection", features: feats });
   }
 
+  // Show/hide the installed-cell coverage outlines (the inst-* overlay layers).
+  _setCellBoundsVisible(on) {
+    this._showCellBounds = on;
+    localStorage.setItem("cp-cell-bounds", on ? "1" : "0");
+    const map = this._map; if (!map) return;
+    const vis = on ? "visible" : "none";
+    for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
+      for (const pre of ["inst-fill-", "inst-line-", "inst-label-"]) {
+        if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
+      }
+    }
+  }
+
   toggleSelect(name) {
     if (this._selected.has(name)) this._selected.delete(name);
     else this._selected.add(name);
@@ -2538,13 +2597,23 @@ export class ChartPlotterApp extends HTMLElement {
           background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:10px;
           box-shadow:0 8px 28px rgba(0,0,0,.22); padding:8px; }
         #cell-status-pop[hidden] { display:none; }
-        .csp-head { font:600 11px/1 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
+        .csp-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+          font:600 11px/1 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
           letter-spacing:.04em; padding:2px 4px 8px; }
+        .csp-clear { flex:none; border:1px solid #cf3b3b; color:#cf3b3b; background:transparent; cursor:pointer;
+          border-radius:9px; padding:2px 8px; font:600 10px/1 system-ui,sans-serif; text-transform:none; letter-spacing:0; }
+        .csp-clear:hover { background:#cf3b3b; color:#fff; }
+        .csp-stats { display:grid; grid-template-columns:1fr 1fr; gap:2px 12px; padding:6px 4px 8px; margin-bottom:4px; border-bottom:1px solid var(--ui-border); }
+        .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:6px; font:500 11px/1.4 system-ui,sans-serif; }
+        .csp-stats span { color:var(--ui-text-dim); text-transform:uppercase; letter-spacing:.03em; font-size:9.5px; }
+        .csp-stats b { color:var(--ui-text); font-weight:600; font-variant-numeric:tabular-nums; }
         .csp-list { list-style:none; margin:0; padding:0; }
         .csp-row { display:flex; align-items:center; gap:8px; padding:4px 4px; font:500 12px/1.2 system-ui,sans-serif; }
         .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
-        .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
-        .csp-name { flex:1; font-variant-numeric:tabular-nums; color:var(--ui-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .csp-row.is-fail { align-items:flex-start; }
+        .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:2px; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
+        .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; font-variant-numeric:tabular-nums; color:var(--ui-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .csp-err { font:500 10px/1.25 system-ui,sans-serif; color:#cf3b3b; white-space:normal; word-break:break-word; }
         .csp-stat { flex:none; font-weight:600; font-size:11px; }
         .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
         .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:6px 4px; }
@@ -2958,6 +3027,8 @@ export class ChartPlotterApp extends HTMLElement {
             `<option ${(m.boundaryStyle || "symbolized") === v ? "selected" : ""}>${v}</option>`).join("")}</select></div></div>
         ${toggle("fourShadeWater", "Four-shade water", "Four depth shades instead of two", m.fourShadeWater !== false)}
         ${toggle("showNoData", "No-data hatch", "Mark areas with no chart data (off shows the plain basemap)", m.showNoData !== false)}
+        <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline + name of installed cells when zoomed out past their detail</span></div>
+          <label class="switch"><input type="checkbox" data-app-key="showCellBounds" ${this._showCellBounds ? "checked" : ""}><span class="sl"></span></label></div>
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
@@ -2978,6 +3049,12 @@ export class ChartPlotterApp extends HTMLElement {
           if (inp.dataset.depth && this._mariner.depthUnit === "ft") val = val / M_TO_FT;
         } else val = inp.value;
         this.applyMariner({ [key]: val });
+      };
+    });
+    // App-level toggles (not S-52 mariner settings): cell-boundary overlay.
+    el.querySelectorAll("[data-app-key]").forEach((inp) => {
+      inp.onchange = () => {
+        if (inp.dataset.appKey === "showCellBounds") this._setCellBoundsVisible(inp.checked);
       };
     });
   }
