@@ -198,13 +198,74 @@ type Baker struct {
 	curCell   string // dataset name of the cell currently being added (stamped on each feature)
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
+	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
+	// position, the first is "primary" (one flare + a merged multi-line label);
+	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
+	// dedupes identical sector geometry within the current cell.
+	curLightSkip bool                  // current LIGHTS is a non-primary co-located light
+	curLightText string                // merged multi-line characteristic for the primary
+	seenSector   map[sectorKey]struct{} // sector dedup for the current cell
 }
+
+// sectorKey identifies a sector light's geometry (anchor + params) for dedup.
+type sectorKey struct {
+	lat, lon, s1, s2, r int64
+	col                 string
+}
+
+func quantDeg(f float64) int64 { return int64(math.Round(f * 1e6)) }
 
 // New returns an empty Baker.
 func New() *Baker { return &Baker{bbox: geo.EmptyBox()} }
 
 // Bounds is the union lat/lon bbox of every ingested cell's primitives.
 func (b *Baker) Bounds() geo.BoundingBox { return b.bbox }
+
+// groupCoLocatedLights finds LIGHTS features that share an exact position and,
+// for each such group, returns the merged multi-line characteristic keyed by the
+// first (primary) feature index, plus the set of non-primary indices to suppress.
+// S-52 PresLib §LIGHTS06: co-located lights combine into one flare + one stacked
+// characteristic label rather than drawing N flares/labels on top of each other.
+func groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, skip map[int]bool) {
+	type pos struct{ lat, lon float64 }
+	groups := map[pos][]int{}
+	for i := range features {
+		f := &features[i]
+		if f.ObjectClass() != "LIGHTS" {
+			continue
+		}
+		g := f.Geometry()
+		if g.Type != s57.GeometryTypePoint || len(g.Coordinates) == 0 || len(g.Coordinates[0]) < 2 {
+			continue
+		}
+		c := g.Coordinates[0]
+		k := pos{lat: c[1], lon: c[0]}
+		groups[k] = append(groups[k], i)
+	}
+	for _, idxs := range groups {
+		if len(idxs) < 2 {
+			continue
+		}
+		var lines []string
+		seen := map[string]bool{}
+		for _, i := range idxs {
+			ch := s52.BuildLightCharacteristic(features[i].Attributes())
+			if ch == "" || seen[ch] {
+				continue
+			}
+			seen[ch] = true
+			lines = append(lines, ch)
+		}
+		if primaryText == nil {
+			primaryText, skip = map[int]string{}, map[int]bool{}
+		}
+		primaryText[idxs[0]] = strings.Join(lines, "\n")
+		for _, i := range idxs[1:] {
+			skip[i] = true
+		}
+	}
+	return primaryText, skip
+}
 
 // AddCell expands every feature of a parsed cell into routed primitives at the
 // cell's scale band, with per-feature SCAMIN display z-min.
@@ -220,6 +281,9 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	cb := chart.Bounds()
 	cellLat := (cb.MinLat + cb.MaxLat) / 2 // SCAMIN→zoom uses the cell's display scale
 	features := chart.Features()
+	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.
+	lightPrimary, lightSkip := groupCoLocatedLights(features)
+	b.seenSector = make(map[sectorKey]struct{})
 	for i := range features {
 		f := &features[i]
 		// Per-feature inspector data: the object name, and (for lights) the S-52
@@ -227,8 +291,15 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		// light data, not just the symbol.
 		b.curObjnam = stringAttr(f.Attributes(), "OBJNAM")
 		b.curLight = ""
+		b.curLightSkip = false
+		b.curLightText = ""
 		if f.ObjectClass() == "LIGHTS" {
 			b.curLight = s52.BuildLightCharacteristic(f.Attributes())
+			b.curLightSkip = lightSkip[i]
+			if merged, ok := lightPrimary[i]; ok {
+				b.curLightText = merged
+				b.curLight = merged // inspector shows the combined characteristic
+			}
 		}
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
@@ -260,7 +331,27 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd)
 					continue
 				}
-				b.route(prims[pi], class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd, drval1, drval2)
+				// Co-located lights (S-52 LIGHTS06): a non-primary light drops its
+				// flare + characteristic text (sectors still emit, deduped); the
+				// primary's text becomes the merged multi-line characteristic.
+				p := prims[pi]
+				if class == "LIGHTS" {
+					switch v := p.(type) {
+					case portrayal.SymbolCall:
+						if b.curLightSkip {
+							continue
+						}
+					case portrayal.DrawText:
+						if b.curLightSkip {
+							continue
+						}
+						if b.curLightText != "" {
+							v.Text = b.curLightText
+							p = v
+						}
+					}
+				}
+				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, bnd, drval1, drval2)
 			}
 		}
 	}
@@ -393,6 +484,15 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 	case portrayal.SymbolCall:
 		b.routeSymbol(v, common, r)
 	case portrayal.SectorLight:
+		// Dedupe identical sector geometry (co-located lights often repeat sectors).
+		k := sectorKey{quantDeg(v.Anchor.Lat), quantDeg(v.Anchor.Lon),
+			quantDeg(v.Sector.StartAngleDeg), quantDeg(v.Sector.EndAngleDeg), quantDeg(v.Sector.RadiusNM), v.Sector.ColorToken}
+		if b.seenSector != nil {
+			if _, dup := b.seenSector[k]; dup {
+				return
+			}
+			b.seenSector[k] = struct{}{}
+		}
 		b.bbox.ExtendPoint(v.Anchor)
 		b.sectors = append(b.sectors, sectorPrim{
 			anchor: v.Anchor, params: v.Sector, class: class, cell: b.curCell,
