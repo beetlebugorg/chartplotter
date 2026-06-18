@@ -81,6 +81,12 @@ function esc(s) {
 
 // Does a GeoJSON geometry intersect the lon/lat box [W,S,E,N]? Points test exactly;
 // lines/polygons use a bbox-overlap approximation (fine for the area inspector).
+// A chart vector source: the realtime path has one "chart" source; the legacy
+// pmtiles path had a "chart-<band>" source per band. (Used by the inspector.)
+function isChartSource(s) {
+  return typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
+}
+
 function geomIntersectsBox(g, W, S, E, N) {
   if (!g) return false;
   if (g.type === "Point") {
@@ -1581,7 +1587,7 @@ export class ChartPlotterApp extends HTMLElement {
   // chart doesn't clear a useful hover), a no-hit hover shows the hint.
   _inspectAt(point, lock) {
     const map = this._map;
-    const feats = map.queryRenderedFeatures(point).filter((f) => typeof f.source === "string" && f.source.startsWith("chart-"));
+    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source));
     if (!feats.length) {
       if (lock) return;
       this._inspectLastKey = "";
@@ -1623,7 +1629,10 @@ export class ChartPlotterApp extends HTMLElement {
     const W = Math.min(tl.lng, br.lng), E = Math.max(tl.lng, br.lng);
     const S = Math.min(tl.lat, br.lat), N = Math.max(tl.lat, br.lat);
     const inBox = (g) => geomIntersectsBox(g, W, S, E, N);
-    const sources = [...BANDS, "all"].map((s) => "chart-" + s);
+    // The realtime path has one "chart" source; the legacy pmtiles path had a
+    // "chart-<band>" source per band. Use whichever the live style has.
+    const styleSrc = map.getStyle().sources || {};
+    const sources = Object.keys(styleSrc).filter(isChartSource);
     const layers = ["point_symbols", "soundings", "areas", "area_patterns", "lines", "complex_lines", "text"];
     const seen = new Set(), out = [];
     for (const src of sources) {
@@ -1870,7 +1879,7 @@ export class ChartPlotterApp extends HTMLElement {
   _setChartLayersVisible(on) {
     const map = this._map;
     if (!map || !map.getStyle) return;
-    const isChartLayer = (l) => (l.source && l.source.startsWith("chart-")) || l.id === "nodata";
+    const isChartLayer = (l) => isChartSource(l.source) || l.id === "nodata";
     for (const l of map.getStyle().layers || []) {
       if (!isChartLayer(l)) continue;
       // Restoring is NOT a blanket "visible": a couple of chart layers are kept
