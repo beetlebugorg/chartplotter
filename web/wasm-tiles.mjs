@@ -13,6 +13,7 @@ function ensureWorker(assets) {
   if (_worker) return;
   _worker = new Worker(assets + "wasm-tiles-worker.js"); // classic worker
   _worker.onmessage = (e) => {
+    if (e.data && e.data.diag !== undefined) { console.log("%c[baketile]", "color:#0a8", e.data.diag); return; }
     const { id, error, ...rest } = e.data;
     const p = _pending.get(id);
     if (!p) return;
@@ -118,6 +119,33 @@ async function ensureCellsForTile(z, x, y) {
   if (jobs.length) await Promise.all(jobs);
 }
 
+// Toggle per-tile bake diagnostics in the worker. When on, every cpBakeTile logs
+// `tile z/x/y: eligible=.. suppDown=.. suppUp=.. emptyGeom=.. empty=..` (and a
+// note for tiles requested before the baker session exists) to the worker console
+// — so an empty/blank tile reveals where it lost its primitives.
+let _tileDiagOn = false;
+export function setTileDiag(on) {
+  _tileDiagOn = !!on; // also gates the JS-side delivery log in the cp protocol
+  if (!_worker) return Promise.resolve();
+  return call("tilediag", { on: !!on });
+}
+
+// Delivery observers. Diagnostics surfaces (the tile-debugger plugin) subscribe
+// to learn exactly what the cp:// protocol handed MapLibre per tile — the key
+// correlation for the "delivered N bytes but the tile kept 0 buckets" bug. Each
+// listener gets { z, x, y, bytes, ver, error, t }. Read-only; returns an
+// unsubscribe fn. This can subsume the [cp deliver] console log.
+const _deliveryListeners = new Set();
+export function onTileDelivery(fn) {
+  _deliveryListeners.add(fn);
+  return () => _deliveryListeners.delete(fn);
+}
+function _notifyDelivery(z, x, y, bytes, ver, error) {
+  if (!_deliveryListeners.size) return;
+  const ev = { z, x, y, bytes, ver, error: error || null, t: performance.now() };
+  for (const fn of _deliveryListeners) { try { fn(ev); } catch (e) { console.warn("[cp delivery hook]", e); } }
+}
+
 // GeoJSON (parsed) of every loaded cell's M_COVR data-coverage polygon, for the
 // debug overlay (where cells actually have data vs their bbox). {} when no baker.
 export async function coverage() {
@@ -141,6 +169,10 @@ export function registerTileProtocol(maplibregl, opts = {}) {
     const m = params.url.match(/(\d+)\/(\d+)\/(\d+)$/);
     if (!m) return { data: new ArrayBuffer(0) };
     const [, z, x, y] = m;
+    // The version token (`cp://{ver}/{z}/{x}/{y}`) lets a debug surface see which
+    // tile version a stuck tile is pinned to across a refresh()/bump.
+    const vm = params.url.match(/cp:\/\/(\d+)\//);
+    const ver = vm ? +vm[1] : 0;
     try {
       // Load this tile's cells for EVERY request, not just cache misses —
       // otherwise a reload that renders from the persisted cache never parses the
@@ -154,10 +186,14 @@ export function registerTileProtocol(maplibregl, opts = {}) {
         try { const r = await call("tile", { z, x, y }); return r.tile ? new Uint8Array(r.tile) : null; }
         finally { tick(-1); }
       });
+      const n = bytes ? bytes.length : 0;
+      if (_tileDiagOn) console.log("%c[cp deliver]", "color:#08a", `${z}/${x}/${y} → ${n} bytes`);
+      _notifyDelivery(+z, +x, +y, n, ver);
       if (!bytes || !bytes.length) return { data: new ArrayBuffer(0) };
       return { data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
     } catch (e) {
       console.warn("[cp] tile", z, x, y, "failed:", e.message);
+      _notifyDelivery(+z, +x, +y, 0, ver, e.message || "error");
       return { data: new ArrayBuffer(0) };
     }
   });

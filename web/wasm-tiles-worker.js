@@ -16,6 +16,10 @@
 
 let booted = false;
 
+// Bridge so the wasm baker's tile diagnostics surface in the PAGE console (not
+// just the worker context) — cpSetTileDiag(true) routes each line through here.
+self.cpDiag = (s) => self.postMessage({ diag: s });
+
 self.onmessage = async (e) => {
   const m = e.data;
   try {
@@ -45,6 +49,11 @@ self.onmessage = async (e) => {
       }
       case "coverage": {
         self.postMessage({ id: m.id, ok: true, geojson: self.cpCoverage() });
+        break;
+      }
+      case "tilediag": {
+        if (self.cpSetTileDiag) self.cpSetTileDiag(m.on); // per-tile bake logging → console
+        self.postMessage({ id: m.id, ok: true });
         break;
       }
       case "tile": {

@@ -51,6 +51,8 @@ const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a"
 // General is overzoomed out to z0 (it renders where no overview covers — see
 // generalOverzoomMin in the baker), so it loads from z0 rather than its native z7.
 const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
+// Usage bands in coarse→fine order, for the dev band-filter rows.
+const DEV_BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing"];
 // At/above this many cells in one download, pull them out of NOAA's All_ENCs.zip
 // in-browser (one Range-read source) instead of fetching each cell's own zip
 // separately — cheaper than that many round-trips (see _downloadArea).
@@ -107,6 +109,18 @@ function geomIntersectsBox(g, W, S, E, N) {
   return !(bb[2] < W || bb[0] > E || bb[3] < S || bb[1] > N);
 }
 
+// Lon/lat bbox area of a polygon ring — used to pick the smallest (most detailed)
+// cell box when several overlap under the debug-overlay hover.
+function bboxArea(g) {
+  if (!g || g.type !== "Polygon" || !g.coordinates || !g.coordinates[0]) return Infinity;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of g.coordinates[0]) {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return (maxX - minX) * (maxY - minY);
+}
+
 // S-57 object-class acronym → human label (the baked `class` attribute is the
 // acronym). Covers the common ENC classes; unknown acronyms fall back to raw.
 const S57_CLASS = {
@@ -158,6 +172,10 @@ export class ChartPlotterApp extends HTMLElement {
     this._selBands = this._loadSelBands(); // navigational-purpose bands enabled in the selector (Set of band slugs)
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage outlines on/off (default on)
     this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
+    this._bandsOff = new Set();          // dev: usage bands excluded from the realtime baker (in-memory; default all on)
+    this._renderSel = new Set();         // dev (debug mode): hand-picked cells — when non-empty, ONLY these render, at any zoom
+    this._tileDbgOn = false;             // dev: tile-debugger plugin overlay (lifecycle + delivery integrity + bake logging)
+    this._tileDbg = null;                // dev: the TileDebugger IControl instance (lazily imported)
     this._inspectMode = false;          // feature-inspect mode (toggled from the statusbar)
     this._inspectLocked = false;        // a feature is pinned (click-to-lock) — hover stops updating
     this._inspectLastKey = "";          // last rendered hover/lock key, to skip redundant re-renders
@@ -215,8 +233,16 @@ export class ChartPlotterApp extends HTMLElement {
     // off in parallel; ingestViewport awaits it.
     this._catalogReady = this.loadCatalog();
 
+    // Share-restore: opening <origin>/#share reconstructs someone else's exact
+    // view — pull the snapshot, install its cells (downloaded via the server if
+    // not already stored), and adopt its camera in place of the local last view.
+    let shareView = null;
+    if (isShareUrl()) {
+      shareView = await this._loadSharedView().catch((e) => { console.warn("[share] restore failed:", e); return null; });
+    }
+
     const plotter = document.createElement("chart-plotter");
-    const view = loadJSON(LS_VIEW, null); // resume the last view → load in-region
+    const view = shareView || loadJSON(LS_VIEW, null); // resume the last view → load in-region
     plotter.setAttribute("center", view ? view.center.join(",") : (this.getAttribute("center") || "-76.4875,38.975"));
     plotter.setAttribute("zoom", String(view ? view.zoom : (this.getAttribute("zoom") || 11)));
     if (this.hasAttribute("cell-url")) plotter.setAttribute("cell-url", this.getAttribute("cell-url"));
@@ -291,10 +317,100 @@ export class ChartPlotterApp extends HTMLElement {
     localStorage.setItem("cp-debug-cells", on ? "1" : "0");
     const map = this._map; if (!map) return;
     const vis = on ? "visible" : "none";
-    for (const id of ["inst-dbg-fill", "inst-dbg-line", "inst-dbg-label", "inst-cov-fill", "inst-cov-line"]) {
+    for (const id of ["inst-dbg-fill", "inst-dbg-line", "inst-dbg-hover-fill", "inst-dbg-hover-label", "inst-cov-fill", "inst-cov-line"]) {
       if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
     }
     if (on) { this._refreshInstalledBounds(); this._refreshCoverage(); } // status + real coverage
+    else { this._clearDebugHover(); this._hideContextMenu(); }
+    // Solo render applies only in debug mode, so toggling it with a render set
+    // active flips between "only selected" and normal — re-bake to reflect that.
+    if (this._renderSel.size) this._refreshRealtime(false);
+  }
+
+  // Debug overlay hover: tint + label the cell footprint under the cursor. With
+  // overlapping cells (multiple bands) pick the smallest box — the most detailed
+  // cell — so the label is the one you're most likely after.
+  _onDebugHover(e) {
+    if (!this._debugCells || !this._map) return;
+    if (!this._map.getLayer("inst-dbg-fill")) return;
+    const feats = this._map.queryRenderedFeatures(e.point, { layers: ["inst-dbg-fill"] });
+    if (!feats.length) { this._clearDebugHover(); return; }
+    let best = feats[0], bestArea = Infinity;
+    for (const f of feats) { const a = bboxArea(f.geometry); if (a < bestArea) { bestArea = a; best = f; } }
+    const src = this._map.getSource("inst-dbg-hover");
+    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: { name: best.properties.name, status: best.properties.status }, geometry: best.geometry }] });
+  }
+
+  _clearDebugHover() {
+    const src = this._map && this._map.getSource("inst-dbg-hover");
+    if (src) src.setData({ type: "FeatureCollection", features: [] });
+  }
+
+  // Right-click a cell box in the debug overlay → context menu to pick which cells
+  // render. Once any cell is picked, ONLY the picked set renders (at any zoom), so
+  // you can isolate exactly the cells you care about. Picks the smallest box on
+  // overlap (the most detailed cell under the cursor).
+  _onDebugContextMenu(e) {
+    if (!this._debugCells || !this._map || !this._map.getLayer("inst-dbg-fill")) return;
+    const feats = this._map.queryRenderedFeatures(e.point, { layers: ["inst-dbg-fill"] });
+    if (!feats.length) return;
+    if (e.preventDefault) e.preventDefault();
+    if (e.originalEvent && e.originalEvent.preventDefault) e.originalEvent.preventDefault();
+    let best = feats[0], bestArea = Infinity;
+    for (const f of feats) { const a = bboxArea(f.geometry); if (a < bestArea) { bestArea = a; best = f; } }
+    const name = best.properties.name;
+    const picked = this._renderSel.has(name);
+    const items = [
+      { label: `Render only ${name}`, onClick: () => this._setRenderSel([name]) },
+      picked
+        ? { label: `Remove ${name} from render set`, onClick: () => this._toggleRenderCell(name) }
+        : { label: `Add ${name} to render set`, onClick: () => this._toggleRenderCell(name) },
+    ];
+    if (this._renderSel.size) items.push({ label: `Clear render set (show all)`, onClick: () => this._setRenderSel([]) });
+    const rect = this.getBoundingClientRect();
+    const oe = e.originalEvent;
+    this._showContextMenu(oe.clientX - rect.left, oe.clientY - rect.top, items);
+  }
+
+  // Add/remove one cell from the debug render selection, then re-bake in place.
+  async _toggleRenderCell(name) {
+    if (this._renderSel.has(name)) this._renderSel.delete(name); else this._renderSel.add(name);
+    await this._applyRenderSel();
+  }
+
+  // Replace the whole render selection (e.g. "render only this", or clear with []).
+  async _setRenderSel(names) {
+    this._renderSel = new Set(names);
+    await this._applyRenderSel();
+  }
+
+  async _applyRenderSel() {
+    console.log(`[debug] render set: ${this._renderSel.size ? [...this._renderSel].join(", ") : "(all)"}`);
+    if (this._section === "inspect" && this._drawerOpen()) this._renderDevPanel();
+    await this._refreshRealtime(false); // keep the camera put
+  }
+
+  // A tiny shadow-DOM context menu. items: [{ label, onClick }]. Positioned at
+  // host-relative (x,y); dismissed on any click or map move.
+  _showContextMenu(x, y, items) {
+    const m = this.shadowRoot.getElementById("ctx-menu");
+    if (!m) return;
+    m.innerHTML = "";
+    for (const it of items) {
+      const btn = document.createElement("button");
+      btn.className = "ctx-item";
+      btn.textContent = it.label;
+      btn.onclick = (ev) => { ev.stopPropagation(); this._hideContextMenu(); it.onClick(); };
+      m.appendChild(btn);
+    }
+    m.style.left = x + "px";
+    m.style.top = y + "px";
+    m.hidden = false;
+  }
+
+  _hideContextMenu() {
+    const m = this.shadowRoot.getElementById("ctx-menu");
+    if (m && !m.hidden) m.hidden = true;
   }
 
   // Remove every cell that failed to parse from the browser store (and reset the
@@ -455,6 +571,13 @@ export class ChartPlotterApp extends HTMLElement {
   async onReady(map) {
     this._map = map;
     this._resolveReady();
+    // Share-restore carries bearing/pitch too (center+zoom were applied as the
+    // initial camera). The installed cells were already added to _installed in
+    // boot(), so the loadStoreCells below bakes them at the restored viewport.
+    if (this._sharePending) {
+      const v = this._sharePending; this._sharePending = null;
+      try { map.jumpTo({ bearing: v.bearing || 0, pitch: v.pitch || 0 }); } catch (e) { console.warn("[share] camera", e); }
+    }
     // Apply persisted display prefs.
     if (this._scheme !== "day") this._plotter.setScheme(this._scheme);
     this.setAttribute("data-scheme", this._scheme);
@@ -498,17 +621,29 @@ export class ChartPlotterApp extends HTMLElement {
       // Keep the Charts panel's "in view" cell list in step with the map when no
       // search query is pinning it to catalog-wide matches.
       if (this._chartsMode && this._drawerOpen() && !(this._cellQuery || "").trim()) this._renderCellListInto();
+      // Dev tile inspector: refresh in-view band counts; a prior coverage measure
+      // is now stale (different viewport), so drop its hole overlay.
+      if (this._section === "inspect" && this._drawerOpen()) { this._clearDevHoles(); this._renderDevPanel(); }
     });
 
     // Live zoom/scale/band readout (left of the statusbar).
     this._updateHud();
     map.on("move", () => this._updateHud());
 
+    // Debug overlay: tint + name the cell footprint under the cursor (only while
+    // the overlay is on); clear when the pointer leaves the map. Right-click a cell
+    // to force-bake it at the current zoom regardless of its band min-zoom.
+    map.on("mousemove", (e) => this._onDebugHover(e));
+    map.on("mouseout", () => this._clearDebugHover());
+    map.on("contextmenu", (e) => this._onDebugContextMenu(e));
+    map.on("movestart", () => this._hideContextMenu());
+
     // Close any pinned band-pill popup when clicking elsewhere (pill/cell clicks
     // stopPropagation, so this only fires for clicks outside them). Also tuck the
     // on-map search back into its tab when clicking away while it's empty (map
     // clicks bubble out of the renderer's shadow root to here).
     this.shadowRoot.addEventListener("click", (e) => {
+      this._hideContextMenu(); // any click dismisses the debug context menu (item handlers run first)
       this.shadowRoot.querySelectorAll(".sb-band-wrap.open").forEach((w) => w.classList.remove("open"));
       // Close the per-cell status popup when clicking outside it (the indicator
       // button's own handler stopPropagation's, so this only fires for outside clicks).
@@ -1554,6 +1689,9 @@ export class ChartPlotterApp extends HTMLElement {
     map.addLayer({ id: "inspect-focus-fill", type: "fill", source: "inspect-focus", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#00e5ff", "fill-opacity": 0.25 } });
     map.addLayer({ id: "inspect-focus-line", type: "line", source: "inspect-focus", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#00b8d4", "line-width": 3.5 } });
     map.addLayer({ id: "inspect-focus-pt", type: "circle", source: "inspect-focus", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 13, "circle-color": "rgba(0,229,255,0.25)", "circle-stroke-color": "#00b8d4", "circle-stroke-width": 3 } });
+    // Dev tile inspector: sampled coverage-hole points (Inspect → Coverage → Measure).
+    map.addSource("tile-holes", { type: "geojson", data: empty });
+    map.addLayer({ id: "tile-holes", type: "circle", source: "tile-holes", paint: { "circle-radius": 4, "circle-color": "#ff1744", "circle-opacity": 0.75, "circle-stroke-color": "#fff", "circle-stroke-width": 1 } });
     // Installed-cell coverage: at zooms BELOW a cell's native band (where its
     // chart detail isn't baked yet) draw its footprint + name, so when zoomed out
     // you can tell WHAT coverage you have, not just that you have some. One set of
@@ -1566,7 +1704,7 @@ export class ChartPlotterApp extends HTMLElement {
       const f = ["==", ["get", "band"], band];
       map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
       map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
-      map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis, "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 11 }, paint: { "text-color": "#1b2733", "text-halo-color": "rgba(255,255,255,0.9)", "text-halo-width": 1.2 } });
+      // (cell-name labels removed — the per-box text was too noisy; the outline alone marks coverage)
     }
     // Debug overlay (Settings → "Debug cell loading"): every installed cell's
     // footprint at ALL zooms, coloured by lazy-load state — green=loaded,
@@ -1575,13 +1713,16 @@ export class ChartPlotterApp extends HTMLElement {
     // expect, so "some cells of the same band don't render" is diagnosable.
     const dbgColor = ["match", ["get", "status"], "ready", "#2e9b57", "loading", "#d9892b", "failed", "#cf3b3b", "#9aa7b4"];
     const dbgVis = this._debugCells ? "visible" : "none";
-    map.addLayer({ id: "inst-dbg-fill", type: "fill", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0.07 } });
+    // Default debug overlay is just coloured outlines (green=loaded, amber=loading,
+    // red=failed, grey=not loaded). inst-dbg-fill is an invisible hit-target so a
+    // hover anywhere inside a box is detectable; the tint + name show only for the
+    // hovered cell, via the one-feature inst-dbg-hover source (see _onDebugHover) —
+    // so we never lay out a label per cell across the whole library.
+    map.addLayer({ id: "inst-dbg-fill", type: "fill", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0 } });
     map.addLayer({ id: "inst-dbg-line", type: "line", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "line-color": dbgColor, "line-width": 1.6 } });
-    // Label everything EXCEPT ready cells — once a cell is loaded its text drops
-    // away (and its border pulses once, see _pulseCell), so the overlay declutters
-    // as charts come in and only pending/loading/failed cells stay labelled.
-    const dbgText = ["case", ["==", ["get", "status"], "ready"], "", ["concat", ["get", "name"], "\n", ["get", "status"]]];
-    map.addLayer({ id: "inst-dbg-label", type: "symbol", source: "inst-bounds", layout: { visibility: dbgVis, "text-field": dbgText, "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": true }, paint: { "text-color": dbgColor, "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.4 } });
+    map.addSource("inst-dbg-hover", { type: "geojson", data: empty });
+    map.addLayer({ id: "inst-dbg-hover-fill", type: "fill", source: "inst-dbg-hover", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0.25 } });
+    map.addLayer({ id: "inst-dbg-hover-label", type: "symbol", source: "inst-dbg-hover", layout: { visibility: dbgVis, "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-allow-overlap": true }, paint: { "text-color": dbgColor, "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.4 } });
     // One-shot "ready" pulse: the whole cell flashes green (fill) with a bright
     // border, ramping up fast then fading — obvious across the entire footprint.
     map.addSource("inst-pulse", { type: "geojson", data: empty });
@@ -1647,9 +1788,10 @@ export class ChartPlotterApp extends HTMLElement {
     });
   }
 
-  // Toggle inspect mode on/off. ON opens the panel (with a hover hint), arms the
-  // hover/click handlers, sets a crosshair cursor, and cancels the box selector.
-  // OFF clears everything. Mutually exclusive with the area selector.
+  // Arm/disarm feature-inspect interaction (crosshair, hover/click capture,
+  // SHIFT+drag area select). The Inspect drawer panel's visibility is owned by
+  // the drawer (toggleSection/setDrawerOpen) — this only manages the map-side
+  // interaction + the panel's content. Mutually exclusive with the box selector.
   _setInspectMode(on) {
     on = !!on;
     if (on === this._inspectMode) return;
@@ -1663,13 +1805,11 @@ export class ChartPlotterApp extends HTMLElement {
       // Free SHIFT+drag for area capture (MapLibre uses it for box-zoom by default).
       if (on) map.boxZoom.disable(); else map.boxZoom.enable();
     }
-    this.shadowRoot.getElementById("inspect-toggle")?.classList.toggle("on", on);
-    if (on) {
-      this._inspectHint("Hover to inspect · click to lock · SHIFT+drag to capture an area.");
-      this.shadowRoot.getElementById("inspect").classList.add("open");
-    } else {
-      this._closeInspect();
-    }
+    if (on) this._inspectHint("Hover to inspect · click to lock · SHIFT+drag to capture an area.");
+    else this._closeInspect();
+    // The rail button reflects dev-panel-open (setDrawerOpen); inspect on/off is
+    // shown by the in-panel "Inspect features" button — refresh it.
+    if (this._section === "inspect" && this._drawerOpen()) this._renderDevPanel();
   }
 
   // Inspect the chart features at a canvas point. `lock` freezes the panel on a
@@ -1778,7 +1918,6 @@ export class ChartPlotterApp extends HTMLElement {
       const more = feats.length > cap ? `<div class="ins-empty">…and ${feats.length - cap} more</div>` : "";
       const hint = `<div class="ins-cycler"><span>${feats.length} features in area · click one to isolate it</span></div>`;
       body.innerHTML = lockNote + hint + shown.map((f, i) => this._renderFeatureCard(f, i)).join("") + more;
-      this.shadowRoot.getElementById("inspect").classList.add("open");
       body.querySelectorAll(".ins-feat[data-fi]").forEach((el) => (el.onclick = () => this._focusInspectFeature(+el.dataset.fi)));
       return;
     }
@@ -1789,11 +1928,309 @@ export class ChartPlotterApp extends HTMLElement {
       ? `<div class="ins-cycler"><button id="ins-prev" class="btn" title="Previous">◀</button><span>${i + 1} / ${feats.length} here</span><button id="ins-next" class="btn" title="Next">▶</button></div>`
       : "";
     body.innerHTML = lockNote + cycler + this._renderFeatureCard(f);
-    this.shadowRoot.getElementById("inspect").classList.add("open");
     if (feats.length > 1) {
       this.shadowRoot.getElementById("ins-prev").onclick = () => this._inspectStep(-1);
       this.shadowRoot.getElementById("ins-next").onclick = () => this._inspectStep(1);
     }
+  }
+
+  // --- Share my view -------------------------------------------------------
+  // Publish the current scene (camera + installed cells) to the server so anyone
+  // — including a headless browser used for debugging — can open <origin>/#share
+  // and see exactly what's on screen here. Catalog (NOAA) cells travel as a name
+  // + download url the reconstructing browser pulls through the server; cells the
+  // server can't fetch itself (hand-imported, non-NOAA) are uploaded byte-for-byte
+  // into its cache first. The share URL is copied to the clipboard.
+  async _shareView(btn) {
+    const m = this._map;
+    if (!m) return;
+    if (btn) flashBtn(btn, "…");
+    try {
+      const c = m.getCenter();
+      const view = {
+        center: [+c.lng.toFixed(6), +c.lat.toFixed(6)],
+        zoom: +m.getZoom().toFixed(3),
+        bearing: +m.getBearing().toFixed(1),
+        pitch: +m.getPitch().toFixed(1),
+      };
+      const cells = [];
+      for (const n of this._installed) {
+        const cat = this._byName.get(n);
+        const z = cat && cat.z ? cat.z : "";
+        cells.push(z ? { n, z } : { n });
+        if (z) continue; // server can fetch catalog cells itself via api/cell?url=
+        // No NOAA url → the server can't get this cell; push its bytes into the cache.
+        try {
+          const bytes = await this._store.getBytes(n);
+          const r = await fetch("api/cell/" + encodeURIComponent(n), { method: "PUT", headers: { "content-type": "application/octet-stream" }, body: bytes });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+        } catch (e) { console.warn("[share] upload", n, e); }
+      }
+      const snap = { v: 1, when: new Date().toISOString(), view, cells };
+      const resp = await fetch("api/share", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(snap) });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const url = location.origin + location.pathname + "#share";
+      const ok = await copyText(url);
+      console.log("[share] view published:", url, `(${cells.length} cell${cells.length !== 1 ? "s" : ""})`);
+      if (btn) flashBtn(btn, ok ? "✓ copied" : "✓");
+    } catch (e) {
+      console.warn("[share] publish failed:", e);
+      if (btn) flashBtn(btn, "✗");
+    }
+  }
+
+  // Fetch the latest shared snapshot and install its cells locally, downloading
+  // any not already stored through the server (which serves them from its cache —
+  // including bytes the publisher uploaded — or fetches the NOAA url). Returns the
+  // snapshot's camera ({center,zoom,...}) for boot() to use as the initial view;
+  // bearing/pitch are stashed for onReady. Cells are added to _installed so the
+  // normal loadStoreCells/lazy-bake path renders them.
+  async _loadSharedView() {
+    const resp = await fetch("api/share", { cache: "no-store" });
+    if (!resp.ok) throw new Error("snapshot HTTP " + resp.status);
+    const snap = await resp.json();
+    const cells = Array.isArray(snap.cells) ? snap.cells : [];
+    for (const cell of cells) {
+      const n = typeof cell === "string" ? cell : (cell && cell.n);
+      if (!n) continue;
+      try {
+        if (!(await this._store.has(n))) {
+          const z = cell && cell.z ? cell.z : "";
+          const url = "api/cell/" + encodeURIComponent(n) + (z ? "?url=" + encodeURIComponent(z) : "");
+          const r = await fetch(url);
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          await this._store.put(n, new Uint8Array(await r.arrayBuffer()));
+        }
+        this._installed.add(n);
+      } catch (e) { console.warn("[share] install cell", n, e); }
+    }
+    const view = snap.view || null;
+    this._sharePending = view; // onReady applies bearing/pitch
+    console.log("[share] restored", cells.length, "cell(s)");
+    return view;
+  }
+
+  // --- Dev panel (tile/band inspector) -------------------------------------
+  // Render the Developer block at the foot of the Inspect panel: share/debug
+  // actions, per-band baker toggles, and a tile-coverage inspector. Re-rendered
+  // on band changes, coverage measurements, and (for the in-view counts) map move.
+  _renderDevPanel() {
+    const el = this.shadowRoot.getElementById("dev-tools");
+    if (!el) return;
+    const z = this._map ? this._map.getZoom() : null;
+    const stats = this._devInViewBands();
+    const bandRows = DEV_BANDS.map((b) => {
+      const st = stats[b] || { overlap: 0, loaded: 0 };
+      const off = this._bandsOff.has(b);
+      const mz = BAND_MINZOOM[b] || 0;
+      const gated = z != null && z < mz && st.overlap > 0;
+      const tag = st.overlap
+        ? `${st.loaded}/${st.overlap} loaded${gated ? ` · gated &lt;z${mz}` : ""}`
+        : "none in view";
+      return `<label class="dev-band${off ? " off" : ""}${gated ? " gated" : ""}">
+        <input type="checkbox" data-band="${b}"${off ? "" : " checked"}>
+        <span class="bn">${b}</span><span class="bs">${tag}</span></label>`;
+    }).join("");
+    const cov = this._devCoverage;
+    let covLine = "not measured for this view";
+    if (cov) {
+      if (cov.holePct === 0) covLine = "✓ full coverage — no holes";
+      else if (cov.gated.length) covLine = `${cov.holePct}% holes · filled by ${cov.gated.slice(0, 6).join(", ")}${cov.gated.length > 6 ? `, +${cov.gated.length - 6}` : ""} (zoom in to load)`;
+      else covLine = `${cov.holePct}% holes · no installed cell covers them`;
+    }
+    const inspecting = this._inspectMode;
+    const dbgOn = this._debugCells;
+    el.innerHTML = `
+      <section class="dev-sec">
+        <div class="dev-h">Share view</div>
+        <button id="dev-share" class="btn wide">Copy share link</button>
+        <p class="dev-note">Publishes the current camera + installed charts and copies a link that reproduces exactly this.</p>
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Feature inspector</div>
+        <button id="dev-inspect" class="btn wide${inspecting ? " on" : ""}">${inspecting ? "● Inspecting — click to stop" : "Inspect features"}</button>
+        <button id="dev-feat" class="btn wide"${inspecting ? "" : " disabled"} title="Copy the selected feature's source/geometry/attributes to clipboard + server">Copy feature debug</button>
+        <p class="dev-note">Hover a feature to highlight it · click to lock · SHIFT+drag to capture an area.</p>
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Cell overlay</div>
+        <label class="dev-row"><span>Show debug cell overlay</span><input id="dev-debug-cells" type="checkbox"${dbgOn ? " checked" : ""}></label>
+        <p class="dev-note">Coloured cell outlines (green=loaded, amber=loading, red=failed, grey=idle). Hover a box to name it; right-click to pick which cells render.</p>
+        ${this._renderSel.size ? `<div class="dev-row"><span class="dev-cov">Render set (${this._renderSel.size}): ${[...this._renderSel].slice(0, 4).join(", ")}${this._renderSel.size > 4 ? `, +${this._renderSel.size - 4}` : ""}</span><button id="dev-unforce" class="btn sm">Clear</button></div>` : ""}
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Tiles</div>
+        <label class="dev-row"><span>Tile debugger</span><input id="dev-tiledbg" type="checkbox"${this._tileDbgOn ? " checked" : ""}></label>
+        <p class="dev-note">Per-tile overlay + bake logging. Each chart tile's box shows its lifecycle (with z/x/y): green=rendering, <b style="color:#e53935">red=delivered-but-empty</b>, amber=loading; click a box for detail, and the panel lists any delivered-but-parsed-to-zero tiles. Also logs each bake to the console (<code>eligible=… empty=…</code>).</p>
+        <div class="dev-row"><span>Flush baked tile cache</span><button id="dev-flush" class="btn sm">Flush + re-bake</button></div>
+        <p class="dev-note">Clear the in-browser baked-tile cache (memory + IndexedDB) and drop MapLibre's loaded tiles, forcing every visible tile to re-bake.</p>
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Bands <span class="bz">${z != null ? `z ${z.toFixed(2)} · tiles z${Math.floor(z)}` : ""}</span></div>
+        <p class="dev-note">Uncheck a band to drop its cells from the baker and re-bake — isolate which band paints what. Counts are cells overlapping this view.</p>
+        <div class="dev-bands">${bandRows}</div>
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Coverage</div>
+        <div class="dev-row"><span class="dev-cov">${covLine}</span><button id="dev-measure" class="btn sm">Measure</button></div>
+        <p class="dev-note">Grid-samples the view for holes (no chart data) and paints them red.</p>
+      </section>`;
+    const q = (id) => el.querySelector("#" + id);
+    q("dev-share").onclick = (e) => this._shareView(e.currentTarget);
+    q("dev-inspect").onclick = () => this._setInspectMode(!this._inspectMode);
+    const feat = q("dev-feat"); if (!feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
+    const dbg = q("dev-debug-cells"); dbg.onchange = () => this._setDebugCells(dbg.checked);
+    q("dev-measure").onclick = (e) => this._measureCoverage(e.currentTarget);
+    const unforce = q("dev-unforce");
+    if (unforce) unforce.onclick = () => this._setRenderSel([]);
+    const tiledbg = q("dev-tiledbg");
+    if (tiledbg) tiledbg.onchange = () => this._setTileDebugger(tiledbg.checked);
+    const flush = q("dev-flush");
+    if (flush) flush.onclick = (e) => this._flushTiles(e.currentTarget);
+    el.querySelectorAll("[data-band]").forEach((cb) => (cb.onchange = () => this._setBandOff(cb.dataset.band, !cb.checked)));
+  }
+
+  // Toggle the tile-debugger plugin (per-tile lifecycle + delivery-integrity
+  // overlay). Lazily imported on first use — it's a dev-only diagnostic. Reuses
+  // one IControl instance; add/remove fully sets up / tears it down each time.
+  // Also turns on MapLibre's built-in tile-boundary grid (so the chart tiles are
+  // outlined in the map itself, not just the plugin's own boxes) and the wasm
+  // baker's per-tile bake logging (`eligible=… empty=…` → console).
+  async _setTileDebugger(on) {
+    this._tileDbgOn = !!on;
+    const map = this._map; if (!map) return;
+    map.showTileBoundaries = this._tileDbgOn;
+    if (this._plotter && this._plotter.setTileDiag) this._plotter.setTileDiag(this._tileDbgOn);
+    if (on) {
+      if (!this._tileDbg) {
+        const mod = await import("./tile-debugger.mjs");
+        this._tileDbg = new mod.TileDebugger({ source: "chart" });
+      }
+      if (this._tileDbgOn) map.addControl(this._tileDbg, "top-right"); // re-check: user may have toggled off during the import
+    } else if (this._tileDbg) {
+      try { map.removeControl(this._tileDbg); } catch (e) { /* not added */ }
+    }
+  }
+
+  // Flush the baked-tile caches and force every visible tile to re-bake: clears
+  // the in-browser cp TileCache (memory + IndexedDB), drops MapLibre's already-
+  // loaded tiles for the chart source, and bumps the tile version so it re-fetches.
+  // A debugging probe — if a stale/empty tile fills in after this, it was cached;
+  // if it stays blank, the emptiness is being regenerated (not a cache artifact).
+  async _flushTiles(btn) {
+    const pl = this._plotter, map = this._map;
+    if (!pl || !map) return;
+    if (btn) flashBtn(btn, "…");
+    try {
+      if (pl._rtCache && pl._rtCache.clear) await pl._rtCache.clear(); // cp two-layer cache
+      // Drop MapLibre's loaded tiles for the chart source. MapLibre 4 exposed
+      // `map.style.sourceCaches[id]`; v5 renamed/minified that and splits a source
+      // into paint + symbol caches — so duck-type every cache-shaped dict on style
+      // keyed by "chart" (clearTiles/update survive minification).
+      for (const sc of this._chartSourceCaches()) {
+        if (sc.clearTiles) { sc.clearTiles(); if (sc.update) sc.update(map.transform); }
+      }
+      if (pl.refresh) pl.refresh(); // bump version → re-request + re-bake
+      console.log("[flush] tile caches cleared, re-baking visible tiles");
+      if (btn) flashBtn(btn, "✓");
+    } catch (e) { console.warn("[flush]", e); if (btn) flashBtn(btn, "✗"); }
+  }
+
+  // Every MapLibre SourceCache backing the "chart" source. v4 had one at
+  // map.style.sourceCaches["chart"]; v5 renamed that property and can hold a
+  // separate paint + symbol cache, so we duck-type rather than hardcode the name.
+  _chartSourceCaches() {
+    const style = this._map && this._map.style;
+    if (!style) return [];
+    const out = [];
+    const consider = (c) => { if (c && (c._tiles || typeof c.clearTiles === "function") && !out.includes(c)) out.push(c); };
+    const fromDict = (d) => {
+      if (!d || typeof d !== "object") return;
+      if (d instanceof Map) { consider(d.get("chart")); return; }
+      if (Object.prototype.hasOwnProperty.call(d, "chart")) consider(d["chart"]);
+    };
+    fromDict(style.sourceCaches);
+    for (const k of Object.keys(style)) { const v = style[k]; if (v && typeof v === "object") fromDict(v); }
+    return out;
+  }
+
+  // Cells overlapping the current viewport, tallied per usage band:
+  // { band: { overlap, loaded } }. Drives the dev band rows.
+  _devInViewBands() {
+    const out = {};
+    if (!this._map) return out;
+    const b = this._map.getBounds();
+    const W = b.getWest(), S = b.getSouth(), E = b.getEast(), N = b.getNorth();
+    for (const name of this._installed) {
+      const c = this._byName.get(name);
+      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) continue;
+      const [w, s, e, n] = c.bb;
+      if (e < W || w > E || n < S || s > N) continue; // no overlap
+      const band = typeof c.s === "number" ? bandForScale(c.s) : "overview";
+      const o = (out[band] ||= { overlap: 0, loaded: 0 });
+      o.overlap++;
+      if (this._cellStatus.get(name) === "ready") o.loaded++;
+    }
+    return out;
+  }
+
+  // Exclude/include a usage band from the realtime baker, then re-bake the view
+  // (loadStoreCells with clearCache re-registers + drops stale tiles).
+  async _setBandOff(band, off) {
+    if (off) this._bandsOff.add(band); else this._bandsOff.delete(band);
+    this._clearDevHoles();
+    this._renderDevPanel();
+    await this._refreshRealtime(false); // re-bake in place — don't move the camera
+  }
+
+  // Sample a grid over the viewport: a point where no chart feature renders is a
+  // coverage hole. Paints the holes on the map and reports the hole %, plus which
+  // installed cells cover the holes but are gated out at the current zoom (so you
+  // can see "zoom in past z9 to load these coastal cells"). One-shot (button).
+  async _measureCoverage(btn) {
+    const map = this._map;
+    if (!map) return;
+    if (btn) flashBtn(btn, "…");
+    const layers = map.getStyle().layers.filter((l) => l.source && isChartSource(l.source)).map((l) => l.id);
+    const W = map.getCanvas().clientWidth, H = map.getCanvas().clientHeight;
+    const cols = 32, rows = 20;
+    const holes = [];
+    let covered = 0, total = 0;
+    for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
+      const x = (i / cols) * W, y = (j / rows) * H;
+      total++;
+      if (map.queryRenderedFeatures([x, y], { layers }).length) covered++;
+      else holes.push(map.unproject([x, y]));
+    }
+    const holePct = total ? +(100 * (total - covered) / total).toFixed(1) : 0;
+    const z = map.getZoom();
+    const gated = new Set();
+    for (const ll of holes) {
+      for (const name of this._installed) {
+        const c = this._byName.get(name);
+        if (!c || !Array.isArray(c.bb)) continue;
+        const [w, s, e, n] = c.bb;
+        if (ll.lng < w || ll.lng > e || ll.lat < s || ll.lat > n) continue;
+        const band = typeof c.s === "number" ? bandForScale(c.s) : "overview";
+        if (!this._bandsOff.has(band) && z < (BAND_MINZOOM[band] || 0)) gated.add(name);
+      }
+    }
+    this._devCoverage = { holePct, gated: [...gated].sort() };
+    const src = map.getSource("tile-holes");
+    if (src) src.setData({ type: "FeatureCollection", features: holes.map((ll) => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [ll.lng, ll.lat] } })) });
+    this._renderDevPanel();
+    if (btn) flashBtn(btn, holePct ? `${holePct}%` : "✓");
+  }
+
+  _clearDevHoles() {
+    this._devCoverage = null;
+    const src = this._map && this._map.getSource("tile-holes");
+    if (src) src.setData({ type: "FeatureCollection", features: [] });
   }
 
   // Copy a debug snapshot of the current inspector selection — the picked
@@ -1910,7 +2347,8 @@ export class ChartPlotterApp extends HTMLElement {
     this._inspectFeats = [];
     this._inspectIdx = 0;
     this._inspectMulti = false;
-    this.shadowRoot.getElementById("inspect")?.classList.remove("open");
+    const body = this.shadowRoot.getElementById("inspect-body");
+    if (body) body.innerHTML = ""; // drop any feature cards so the dev tools sit at the top
     if (this._map) {
       this._map.getCanvas().style.cursor = "";
       const src = this._map.getSource("inspect");
@@ -2279,7 +2717,9 @@ export class ChartPlotterApp extends HTMLElement {
 
   // Reload every stored cell into the wasm baker (the 100%-wasm render path) and
   // reflect coverage in the empty state. Called after any import.
-  async _refreshRealtime() {
+  // frame=false re-bakes in place without moving the camera — used by the dev
+  // band toggles, which only change what renders in the current view.
+  async _refreshRealtime(frame = true) {
     if (!this._plotter) return;
     this._resetCellStatus();
     try {
@@ -2289,7 +2729,7 @@ export class ChartPlotterApp extends HTMLElement {
       if (rt && rt.ok && rt.names && rt.names.length) {
         this._hasArchive = true;
         this.updateEmptyState();
-        this._frameCells(rt.names);
+        if (frame) this._frameCells(rt.names);
       }
     } catch (e) { console.warn("[realtime] refresh", e); }
     this._refreshCellUsage();
@@ -2298,12 +2738,21 @@ export class ChartPlotterApp extends HTMLElement {
   // Footprint + render-start zoom for each installed cell, from the catalog —
   // drives lazy loading (which cells a tile needs) and the coverage outlines.
   _realtimeCellMeta() {
+    // Debug solo: when cells are hand-picked (debug mode), render ONLY those — at
+    // any zoom — and exclude everything else. The render selection overrides the
+    // band gate and the per-band toggles entirely.
+    const solo = this._debugCells && this._renderSel.size > 0;
     const meta = new Map();
     for (const name of this._installed) {
       const c = this._byName.get(name);
       const bb = c && Array.isArray(c.bb) && c.bb.length === 4 ? c.bb : null;
       const band = c && typeof c.s === "number" ? bandForScale(c.s) : "overview";
-      meta.set(name, { bb, minzoom: BAND_MINZOOM[band] || 0 });
+      // 999 is a sentinel min-zoom the baker's `z < minzoom` gate never satisfies,
+      // so the cell never bakes; 0 means "bake at any zoom".
+      let minzoom;
+      if (solo) minzoom = this._renderSel.has(name) ? 0 : 999;
+      else minzoom = this._bandsOff.has(band) ? 999 : (BAND_MINZOOM[band] || 0);
+      meta.set(name, { bb, minzoom });
     }
     return meta;
   }
@@ -2839,13 +3288,7 @@ export class ChartPlotterApp extends HTMLElement {
           box-shadow:2px 0 8px rgba(0,0,0,.25); z-index:6; transform:translateX(calc(-100% - 56px)); transition:transform .2s; display:flex; flex-direction:column; }
         #drawer.open { transform:none; }
         /* Feature inspector — slides in from the RIGHT (overlays the map). */
-        .inspect { position:absolute; top:0; right:0; width:clamp(300px, 30%, 460px); height:100%; z-index:8;
-          background:var(--ui-bg); color:var(--ui-text); box-shadow:-2px 0 10px rgba(0,0,0,.3);
-          transform:translateX(100%); transition:transform .2s; display:flex; flex-direction:column; font:13px/1.45 system-ui,sans-serif; }
-        .inspect.open { transform:none; }
-        .ins-head { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
-        .ins-head strong { flex:1; font-size:14px; }
-        .ins-body { overflow:auto; padding:12px; flex:1; }
+        .ins-body { overflow:auto; padding:12px 0; }
         .ins-empty { color:var(--ui-text-faint); text-align:center; padding:24px 10px; }
         .ins-feat { margin:0 0 14px; border:1px solid var(--ui-border-2); border-radius:8px; overflow:hidden; }
         .ins-feat .ins-title { padding:8px 10px; background:var(--ui-surface-2); font-weight:600; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
@@ -2874,6 +3317,32 @@ export class ChartPlotterApp extends HTMLElement {
         .row .name { font-weight:600; } .row .meta { color:var(--ui-text-dim); font-size:12px; }
         .grow { flex:1; }
         .muted { color:var(--ui-text-dim); }
+        /* Dev panel: clearly separated sections, most-used at top, roomy spacing. */
+        .dev-tools { display:flex; flex-direction:column; }
+        .dev-sec { display:flex; flex-direction:column; gap:8px; padding:16px 0; border-top:1px solid var(--ui-border); }
+        .dev-sec:first-child { padding-top:4px; border-top:none; }
+        .dev-h { font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--ui-text-faint); }
+        .dev-h .bz { float:right; text-transform:none; letter-spacing:0; font-weight:500; color:var(--ui-text-dim); }
+        .dev-note { margin:0; color:var(--ui-text-dim); font-size:12px; line-height:1.45; }
+        .dev-row { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:24px; }
+        .btn.wide { width:100%; text-align:center; }
+        .btn.on { background:var(--ui-accent); color:#fff; border-color:var(--ui-accent); }
+        .btn[disabled] { opacity:.45; cursor:default; }
+        .btn.sm { padding:3px 10px; font-size:12px; white-space:nowrap; }
+        .dev-cov { font-size:12px; color:var(--ui-text); }
+        .dev-bands { display:flex; flex-direction:column; gap:3px; }
+        .dev-band { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:6px; cursor:pointer; }
+        .dev-band:hover { background:var(--ui-hover); }
+        .dev-band .bn { flex:1; text-transform:capitalize; font-weight:500; }
+        .dev-band .bs { color:var(--ui-text-dim); font-size:12px; }
+        .dev-band.off { opacity:.5; } .dev-band.off .bn { text-decoration:line-through; }
+        .dev-band.gated .bs { color:#d9892b; }
+        /* Right-click context menu (debug cell picker). */
+        .ctx-menu { position:absolute; z-index:30; background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border);
+          border-radius:8px; box-shadow:0 6px 22px rgba(0,0,0,.28); padding:4px; min-width:180px; font:13px/1.4 system-ui,sans-serif; }
+        .ctx-menu[hidden] { display:none; }
+        .ctx-item { display:block; width:100%; text-align:left; padding:7px 10px; border:0; background:none; color:inherit; border-radius:6px; cursor:pointer; white-space:nowrap; }
+        .ctx-item:hover { background:var(--ui-hover); }
         label.fld { display:block; margin:8px 0; }
         label.fld span { display:inline-block; min-width:135px; }
         input[type=number] { width:64px; }
@@ -2948,9 +3417,9 @@ export class ChartPlotterApp extends HTMLElement {
           <span class="cap">Settings</span>
         </button>
         <div class="spacer"></div>
-        <button class="ri" id="inspect-toggle" title="Inspect features — hover to highlight, click to lock, SHIFT+drag to capture an area">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
-          <span class="cap">Inspect</span>
+        <button class="ri" id="dev-toggle" title="Developer tools — share, tile/band inspector, feature inspect">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3"/><path d="m16 9 4 3-4 3"/><path d="m13 6-2 12"/></svg>
+          <span class="cap">Dev</span>
         </button>
       </div>
       <button id="search-tab" title="Search a port or area">
@@ -2992,6 +3461,7 @@ export class ChartPlotterApp extends HTMLElement {
         </div>
       </div>
       <button id="dlpill" hidden></button>
+      <div id="ctx-menu" class="ctx-menu" hidden></div>
       <div id="empty" hidden><div class="card">
         <svg class="welcome-mark" viewBox="0 0 24 24" fill="none" stroke="#1565c0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M5 12a7 7 0 0 0 14 0M3 12h2m14 0h2M12 21a7 7 0 0 1-5-2m10 0a7 7 0 0 1-5 2"/></svg>
         <h2>Welcome aboard</h2>
@@ -3015,11 +3485,11 @@ export class ChartPlotterApp extends HTMLElement {
           <div class="panel" data-panel="settings">
             <div id="settings-body"></div>
           </div>
+          <div class="panel" data-panel="inspect">
+            <div id="inspect-body" class="ins-body"></div>
+            <div id="dev-tools" class="dev-tools"></div>
+          </div>
         </div>
-      </div>
-      <div id="inspect" class="inspect">
-        <div class="ins-head"><strong>Feature inspector</strong><button id="ins-copy" class="btn" title="Copy debug data (clipboard + server)">⧉</button><button id="ins-close" class="btn" title="Close">✕</button></div>
-        <div id="inspect-body" class="ins-body"></div>
       </div>`;
 
     // wiring
@@ -3031,12 +3501,16 @@ export class ChartPlotterApp extends HTMLElement {
     $("rail-menu").onclick = () => this.toggleSection("charts");
     $("rail-settings").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
-    $("ins-close").onclick = () => this._setInspectMode(false);
-    $("ins-copy").onclick = (e) => this._copyInspectDebug(e.currentTarget);
-    $("inspect-toggle").onclick = () => this._setInspectMode(!this._inspectMode);
+    $("dev-toggle").onclick = () => this.toggleSection("inspect");
+    this._renderDevPanel(); // fills #dev-tools (share, band toggles, tile inspector)
     $("bake-status").onclick = (e) => { e.stopPropagation(); this._toggleCellStatusPopup(); };
-    // Esc exits the feature inspector.
-    window.addEventListener("keydown", (e) => { if (e.key === "Escape" && this._inspectMode) this._setInspectMode(false); });
+    // Esc dismisses the debug context menu, else exits the feature inspector.
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const menu = this.shadowRoot.getElementById("ctx-menu");
+      if (menu && !menu.hidden) { this._hideContextMenu(); return; }
+      if (this._inspectMode) this.closeDrawer();
+    });
     $("empty-add").onclick = () => this.openCharts();
     $("empty-import").onclick = () => { this.openCharts(); const det = r.querySelector(".import-more"); if (det) det.open = true; };
     $("rail-home").classList.add("on"); // boot shows the bare chart viewer
@@ -3075,12 +3549,16 @@ export class ChartPlotterApp extends HTMLElement {
     this._section = name;
     const r = this.shadowRoot;
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : "Charts";
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Dev" : "Charts";
     // Charts is the "get & see charts" mode: overlay every catalog cell on the
     // map (selected ones highlighted) so you can see and box-select coverage.
     // Any other section is just chrome over the live viewer — no overlay.
     if (name === "charts") { this.renderCharts(); this._enterChartsMode(); }
     else this._exitChartsMode();
+    // Feature-inspect is NOT auto-armed; it's a button inside the Dev panel. Any
+    // section switch disarms it (and clears dev hole markers / refreshes the panel).
+    this._setInspectMode(false);
+    if (name === "inspect") { this._clearDevHoles(); this._renderDevPanel(); }
     this.setDrawerOpen(true);
   }
 
@@ -3102,11 +3580,13 @@ export class ChartPlotterApp extends HTMLElement {
     r.getElementById("statusbar").classList.toggle("with-drawer", open);
     r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
+    r.getElementById("dev-toggle").classList.toggle("on", open && this._section === "inspect");
     // Home is "active" whenever the drawer is shut — i.e. the bare chart viewer.
     r.getElementById("rail-home").classList.toggle("on", !open);
     // Closing the drawer leaves Charts mode: restore the ENC render + prior view,
-    // clear the region highlight, and cancel any in-progress box drag.
-    if (!open) this._exitChartsMode();
+    // clear the region highlight, and cancel any in-progress box drag. Also disarm
+    // feature-inspect (crosshair/box-zoom) so it doesn't linger over the bare map.
+    if (!open) { this._exitChartsMode(); this._setInspectMode(false); }
     this.updateEmptyState(); // the welcome card hides while the drawer is open
     setTimeout(() => {
       if (!this._map) return;
@@ -3213,8 +3693,6 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("showNoData", "No-data hatch", "Mark areas with no chart data (off shows the plain basemap)", m.showNoData !== false)}
         <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline + name of installed cells when zoomed out past their detail</span></div>
           <label class="switch"><input type="checkbox" data-app-key="showCellBounds" ${this._showCellBounds ? "checked" : ""}><span class="sl"></span></label></div>
-        <div class="set-row"><div class="lbl"><span class="t">Debug cell loading</span><span class="d">Every installed cell's footprint at all zooms, coloured by load state (green=loaded, amber=loading, red=failed, grey=not loaded)</span></div>
-          <label class="switch"><input type="checkbox" data-app-key="debugCells" ${this._debugCells ? "checked" : ""}><span class="sl"></span></label></div>
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
@@ -3242,7 +3720,6 @@ export class ChartPlotterApp extends HTMLElement {
     el.querySelectorAll("[data-app-key]").forEach((inp) => {
       inp.onchange = () => {
         if (inp.dataset.appKey === "showCellBounds") this._setCellBoundsVisible(inp.checked);
-        else if (inp.dataset.appKey === "debugCells") this._setDebugCells(inp.checked);
       };
     });
   }
@@ -3320,6 +3797,13 @@ function fmtScale(d) {
   if (!isFinite(d) || d <= 0) return "—";
   const mag = Math.pow(10, Math.max(0, Math.floor(Math.log10(d)) - 2));
   return (Math.round(d / mag) * mag).toLocaleString();
+}
+
+// True when the page was opened as a shared-view link (<origin>/#share or
+// ?share) — boot() then reconstructs the publisher's scene from /api/share.
+function isShareUrl() {
+  const h = (location.hash || "").replace(/^#/, "");
+  return h === "share" || new URLSearchParams(location.search).has("share");
 }
 
 // Copy `text` to the clipboard, returning whether it worked. Prefers the async

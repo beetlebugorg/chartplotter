@@ -573,6 +573,9 @@ export class ChartPlotter extends HTMLElement {
   // GeoJSON of loaded cells' real M_COVR data-coverage polygons (debug overlay).
   async realtimeCoverage() { return this._rt ? this._rt.coverage() : { type: "FeatureCollection", features: [] }; }
 
+  // Toggle per-tile bake diagnostics (logged to the worker console). Debug only.
+  setTileDiag(on) { return this._rt && this._rt.setTileDiag ? this._rt.setTileDiag(on) : null; }
+
   // Resolve an archive source: a Blob/File is passed through; a URL string is
   // made absolute (relative to the page) for the HTTP-Range reader.
   _resolveSrc(src) {
