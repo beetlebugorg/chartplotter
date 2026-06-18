@@ -200,16 +200,26 @@ func constructPointGeometry(featureRec *featureRecord, spatialRecords map[spatia
 	defer coordSlicePool.Put(allCoordsPtr)
 
 	for _, spatialRef := range featureRec.SpatialRefs {
-		// Try to find the spatial record - check isolated node first, then connected node
-		// Point features can reference either RCNM=110 (isolated) or RCNM=120 (connected)
-		// NOTE: Check isolated node FIRST - for multipoint features like SOUNDG,
-		// the SG3D coordinates are stored in the isolated node, not the connected node
+		// Resolve the EXACT record the FSPT pointer names (RCNM + RCID). RCID is
+		// unique only within an RCNM, so probing by RCID alone can grab an unrelated
+		// record of a different type that happens to share the id — e.g. a point
+		// feature pointing at connected node 120/X mis-resolving to isolated node
+		// 110/X, which puts the feature at a completely different location.
 		var spatial *spatialRecord
-		for _, rcnm := range []int{int(spatialTypeIsolatedNode), int(spatialTypeConnectedNode)} {
-			key := spatialKey{RCNM: rcnm, RCID: spatialRef.RCID}
-			if sp, ok := spatialRecords[key]; ok {
+		if spatialRef.RCNM != 0 {
+			if sp, ok := spatialRecords[spatialKey{RCNM: spatialRef.RCNM, RCID: spatialRef.RCID}]; ok {
 				spatial = sp
-				break
+			}
+		}
+		// Fallback for records with no/unknown RCNM in the pointer: check isolated
+		// node first, then connected node (isolated holds SG3D for multipoint SOUNDG).
+		if spatial == nil {
+			for _, rcnm := range []int{int(spatialTypeIsolatedNode), int(spatialTypeConnectedNode)} {
+				key := spatialKey{RCNM: rcnm, RCID: spatialRef.RCID}
+				if sp, ok := spatialRecords[key]; ok {
+					spatial = sp
+					break
+				}
 			}
 		}
 

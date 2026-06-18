@@ -21,9 +21,11 @@ type Feature struct {
 }
 
 // spatialRef represents a feature-to-spatial pointer with orientation
-// S-57 §7.6.8 (31Main.pdf p77): FSPT field contains RCID + ORNT + USAG + MASK
+// S-57 §7.6.8 (31Main.pdf p77): FSPT field contains a NAME (RCNM + RCID) + ORNT
+// + USAG + MASK per pointer.
 type spatialRef struct {
-	RCID        int64 // Spatial record ID
+	RCNM        int   // Target spatial record type (110=isolated node, 120=connected node, 130=edge)
+	RCID        int64 // Spatial record ID (only unique WITHIN an RCNM)
 	Orientation int   // 1=Forward, 2=Reverse, 255=Null
 	Usage       int   // 1=Exterior, 2=Interior, 3=Exterior truncated
 	Mask        int   // 1=Mask, 2=Show, 255=Null
@@ -168,7 +170,9 @@ func parseSpatialPointers(data []byte) []spatialRef {
 
 	// Binary mode: fixed 8-byte stride (not ASCII with separators)
 	for i := 0; i+7 < len(data); i += 8 {
-		// Extract NAME_RCID - this is the spatial record ID
+		// Extract NAME = RCNM (target record type) + RCID. RCID alone is NOT unique
+		// across record types, so the RCNM must be kept to resolve the right record.
+		rcnm := int(data[i])
 		rcid := int64(binary.LittleEndian.Uint32(data[i+1 : i+5]))
 
 		// Extract ORNT, USAG, MASK per S-57 §4.7.3.2 (31Main.pdf p51)
@@ -177,6 +181,7 @@ func parseSpatialPointers(data []byte) []spatialRef {
 		mask := int(data[i+7])
 
 		refs = append(refs, spatialRef{
+			RCNM:        rcnm,
 			RCID:        rcid,
 			Orientation: orientation,
 			Usage:       usage,

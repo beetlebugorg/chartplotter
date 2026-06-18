@@ -2,11 +2,11 @@ package parser
 
 import (
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
-	"github.com/spf13/afero"
 )
 
 // UpdateInstruction represents the RUIN (Record Update Instruction) field values
@@ -28,7 +28,7 @@ const (
 //
 // Given "GB5X01SW.000", looks for "GB5X01SW.001", "GB5X01SW.002", etc.
 // in the same directory. Returns paths in order.
-func findUpdateFiles(fs afero.Fs, baseFilename string) ([]string, error) {
+func findUpdateFiles(fsys fs.FS, baseFilename string) ([]string, error) {
 	// Get base filename without extension
 	dir := filepath.Dir(baseFilename)
 	base := filepath.Base(baseFilename)
@@ -43,11 +43,7 @@ func findUpdateFiles(fs afero.Fs, baseFilename string) ([]string, error) {
 		updateFile := filepath.Join(dir, fmt.Sprintf("%s.%03d", baseName, updateNum))
 
 		// Check if file exists using the provided filesystem
-		exists, err := afero.Exists(fs, updateFile)
-		if err != nil {
-			return nil, fmt.Errorf("error checking for update file %s: %w", updateFile, err)
-		}
-		if exists {
+		if iso8211.Exists(fsys, updateFile) {
 			updates = append(updates, updateFile)
 		} else {
 			// Stop at first missing update (updates must be sequential)
@@ -62,9 +58,9 @@ func findUpdateFiles(fs afero.Fs, baseFilename string) ([]string, error) {
 //
 // Updates are applied at the record level before geometry construction.
 // This modifies featureRecords and spatialRecords in place.
-func applyUpdates(fs afero.Fs, baseChart *chartData, updateFiles []string, params datasetParams) error {
+func applyUpdates(fsys fs.FS, baseChart *chartData, updateFiles []string, params datasetParams) error {
 	for _, updateFile := range updateFiles {
-		if err := applyUpdate(fs, baseChart, updateFile, params); err != nil {
+		if err := applyUpdate(fsys, baseChart, updateFile, params); err != nil {
 			return fmt.Errorf("failed to apply update %s: %w", updateFile, err)
 		}
 	}
@@ -91,9 +87,9 @@ type chartData struct {
 }
 
 // applyUpdate applies a single update file to the chart data
-func applyUpdate(fs afero.Fs, chart *chartData, updateFile string, params datasetParams) error {
+func applyUpdate(fsys fs.FS, chart *chartData, updateFile string, params datasetParams) error {
 	// Open update file from filesystem using OpenFS
-	parser, err := iso8211.OpenFS(fs, updateFile)
+	parser, err := iso8211.OpenFS(fsys, updateFile)
 	if err != nil {
 		return fmt.Errorf("failed to open update file: %w", err)
 	}

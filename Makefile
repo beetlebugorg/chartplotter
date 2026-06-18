@@ -15,15 +15,20 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-.PHONY: build wasm test vet fmt tidy clean clear-cache serve docs
+.PHONY: build wasm wasm-go test vet fmt tidy clean clear-cache serve docs
 
 build: ## Build the chartplotter binary into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
 
-wasm: ## [experiment] Build the real-time tile-baker wasm into web/ (+ wasm_exec.js)
+wasm: ## [experiment] Build the real-time tile-baker wasm via tinygo (needs tinygo + go 1.25, see mise.toml)
+	tinygo build -o $(ASSETS)/chartplotter.wasm -target=wasm -no-debug ./cmd/chartplotter-wasm
+	cp "$$(tinygo env TINYGOROOT)/targets/wasm_exec.js" $(ASSETS)/vendor/wasm_exec.js
+	@echo "built $(ASSETS)/chartplotter.wasm ($$(du -h $(ASSETS)/chartplotter.wasm | cut -f1)) via tinygo"
+
+wasm-go: ## [experiment] Build the tile-baker wasm via stock go (larger; fallback if tinygo unavailable)
 	GOOS=js GOARCH=wasm go build -o $(ASSETS)/chartplotter.wasm ./cmd/chartplotter-wasm
 	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" $(ASSETS)/vendor/wasm_exec.js
-	@echo "built $(ASSETS)/chartplotter.wasm ($$(du -h $(ASSETS)/chartplotter.wasm | cut -f1))"
+	@echo "built $(ASSETS)/chartplotter.wasm ($$(du -h $(ASSETS)/chartplotter.wasm | cut -f1)) via go"
 
 serve: build ## Serve the web frontend + provisioning API (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)

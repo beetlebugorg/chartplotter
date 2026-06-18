@@ -18,3 +18,4 @@ web/chartplotter.wasm
 .idea/
 .vscode/
 web/vendor/wasm_exec.js
+web/demo-cell.000

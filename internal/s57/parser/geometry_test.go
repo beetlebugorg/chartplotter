@@ -76,3 +76,27 @@ func TestGeometryCreation(t *testing.T) {
 		})
 	}
 }
+
+// TestPointGeometryResolvesByRCNM is a regression test for the FSPT pointer bug:
+// RCID is unique only WITHIN a record type (RCNM), so a point feature pointing at
+// a connected node (120) must not be mis-resolved to an isolated node (110) that
+// happens to share that RCID. Real-world symptom: range rear lights (which point
+// at connected nodes) placed kilometres from their true position.
+func TestPointGeometryResolvesByRCNM(t *testing.T) {
+	const rcid int64 = 5
+	spatialRecords := map[spatialKey]*spatialRecord{
+		{RCNM: int(spatialTypeIsolatedNode), RCID: rcid}:  {ID: rcid, RecordType: spatialTypeIsolatedNode, Coordinates: [][]float64{{-76.0, 38.0}}},
+		{RCNM: int(spatialTypeConnectedNode), RCID: rcid}: {ID: rcid, RecordType: spatialTypeConnectedNode, Coordinates: [][]float64{{-76.46, 39.22}}},
+	}
+	feat := &featureRecord{
+		GeomPrim:    1, // point
+		SpatialRefs: []spatialRef{{RCNM: int(spatialTypeConnectedNode), RCID: rcid}},
+	}
+	g, err := constructPointGeometry(feat, spatialRecords)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Coordinates) != 1 || g.Coordinates[0][0] != -76.46 || g.Coordinates[0][1] != 39.22 {
+		t.Fatalf("point resolved to wrong spatial record: got %v, want connected node [-76.46, 39.22]", g.Coordinates)
+	}
+}

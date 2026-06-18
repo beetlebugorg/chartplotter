@@ -1,6 +1,6 @@
 package s57
 
-import "github.com/spf13/afero"
+import "io/fs"
 
 // ParseOptions configures parsing behavior.
 type ParseOptions struct {
@@ -19,17 +19,15 @@ type ParseOptions struct {
 	ApplyUpdates bool
 
 	// Fs is the filesystem to use for reading files.
-	// If nil, the OS filesystem is used (afero.NewOsFs()).
-	// This allows using custom filesystem implementations for testing
-	// (e.g., afero.NewMemMapFs()) or specialized storage systems.
+	// If nil, the OS filesystem is used (iso8211.OSFS()).
+	// This allows custom io/fs.FS implementations for testing or specialized
+	// storage (e.g. iso8211.MemFS for parsing raw bytes).
 	//
-	// Example with in-memory filesystem:
-	//   fs := afero.NewMemMapFs()
-	//   afero.WriteFile(fs, "/test.000", data, 0644)
-	//   opts := s57.ParseOptions{Fs: fs}
-	//   parser := s57.NewParser()
-	//   chart, err := parser.ParseWithOptions("/test.000", opts)
-	Fs afero.Fs
+	// Example with an in-memory filesystem:
+	//   fsys := iso8211.MemFS{"/test.000": data}
+	//   opts := s57.ParseOptions{Fs: fsys}
+	//   chart, err := s57.NewParser().ParseWithOptions("/test.000", opts)
+	Fs fs.FS
 }
 
 // DefaultParseOptions returns default options.

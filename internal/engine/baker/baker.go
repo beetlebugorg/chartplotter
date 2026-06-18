@@ -11,10 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/spf13/afero"
-
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
+	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 	"github.com/beetlebugorg/chartplotter/pkg/s52"
 	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
@@ -30,13 +29,9 @@ const (
 // entry or a downloaded NOAA cell) by staging it on an in-memory filesystem.
 // Updates are not applied (the cell is parsed at its base edition).
 func ParseCellBytes(name string, data []byte) (*s57.Chart, error) {
-	fs := afero.NewMemMapFs()
 	p := "/" + path.Base(name)
-	if err := afero.WriteFile(fs, p, data, 0o644); err != nil {
-		return nil, err
-	}
 	opts := s57.DefaultParseOptions()
-	opts.Fs = fs
+	opts.Fs = iso8211.MemFS{p: data}
 	opts.ApplyUpdates = false
 	return s57.ParseWithOptions(p, opts)
 }

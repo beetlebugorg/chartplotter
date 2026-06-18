@@ -1,8 +1,9 @@
 package s57
 
 import (
+	"io/fs"
+
 	"github.com/beetlebugorg/chartplotter/internal/s57/parser"
-	"github.com/spf13/afero"
 )
 
 // Parser parses S-57 Electronic Navigational Chart files.
@@ -75,30 +76,28 @@ func Parse(filename string) (*Chart, error) {
 	return p.Parse(filename)
 }
 
-// ParseFS reads an S-57 file from a custom filesystem and returns the parsed chart.
-// This allows using custom filesystem implementations such as afero.NewMemMapFs()
-// for testing or specialized storage systems.
+// ParseFS reads an S-57 file from a custom io/fs.FS and returns the parsed chart.
+// This allows custom filesystem implementations (e.g. iso8211.MemFS for raw
+// bytes) for testing or specialized storage systems.
 //
 // The filesystem is used for both the base file and any update files (.001, .002, etc.)
 // if ApplyUpdates is enabled in the options.
 //
-// Example with in-memory filesystem:
+// Example with an in-memory filesystem:
 //
-//	fs := afero.NewMemMapFs()
-//	afero.WriteFile(fs, "/chart.000", data, 0644)
-//	chart, err := s57.ParseFS(fs, "/chart.000")
+//	fsys := iso8211.MemFS{"/chart.000": data}
+//	chart, err := s57.ParseFS(fsys, "/chart.000")
 //
 // Example with custom options:
 //
-//	fs := afero.NewMemMapFs()
-//	afero.WriteFile(fs, "/chart.000", data, 0644)
+//	fsys := iso8211.MemFS{"/chart.000": data}
 //	opts := s57.DefaultParseOptions()
-//	opts.Fs = fs
+//	opts.Fs = fsys
 //	opts.ApplyUpdates = false
 //	chart, err := s57.ParseWithOptions("/chart.000", opts)
-func ParseFS(fs afero.Fs, filename string) (*Chart, error) {
+func ParseFS(fsys fs.FS, filename string) (*Chart, error) {
 	opts := DefaultParseOptions()
-	opts.Fs = fs
+	opts.Fs = fsys
 	p := NewParser()
 	return p.ParseWithOptions(filename, opts)
 }

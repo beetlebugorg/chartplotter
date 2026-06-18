@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"os"
 	"testing"
-
-	"github.com/spf13/afero"
 )
 
 // TestInvalidFilePath tests that invalid file paths return an error
@@ -22,7 +20,7 @@ func TestInvalidFilePath(t *testing.T) {
 	}
 }
 
-// TestOpenFS tests opening a file with custom afero filesystem
+// TestOpenFS tests opening a file with a custom io/fs.FS
 func TestOpenFS(t *testing.T) {
 	// Given: File data in an in-memory filesystem
 	filepath := "chart.000"
@@ -31,14 +29,10 @@ func TestOpenFS(t *testing.T) {
 		t.Fatalf("Failed to read test file: %v", err)
 	}
 
-	fs := afero.NewMemMapFs()
-	err = afero.WriteFile(fs, filepath, data, 0644)
-	if err != nil {
-		t.Fatalf("Failed to write to memory fs: %v", err)
-	}
+	fsys := MemFS{filepath: data}
 
 	// When: Opening with OpenFS
-	parser, err := OpenFS(fs, filepath)
+	parser, err := OpenFS(fsys, filepath)
 	if err != nil {
 		t.Fatalf("Failed to open with OpenFS: %v", err)
 	}

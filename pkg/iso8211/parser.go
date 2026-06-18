@@ -2,8 +2,7 @@ package iso8211
 
 import (
 	"io"
-
-	"github.com/spf13/afero"
+	"io/fs"
 )
 
 // Parser provides methods to parse ISO 8211 binary files
@@ -29,19 +28,18 @@ func NewParser(r io.Reader) *Parser {
 }
 
 // Open opens an ISO 8211 file from the OS filesystem and returns a Parser
-// Internally uses afero with the OS filesystem
 // The file will be closed when Parser.Close() is called
 // Returns error if file cannot be opened
 func Open(filepath string) (*Parser, error) {
-	return OpenFS(afero.NewOsFs(), filepath)
+	return OpenFS(OSFS(), filepath)
 }
 
-// OpenFS opens an ISO 8211 file from a custom afero filesystem and returns a Parser
-// This allows using custom filesystem implementations (e.g., in-memory, localStorage, etc.)
-// The file will be closed when Parser.Close() is called
-// Returns error if file cannot be opened
-func OpenFS(fs afero.Fs, filepath string) (*Parser, error) {
-	file, err := fs.Open(filepath)
+// OpenFS opens an ISO 8211 file from a custom io/fs.FS and returns a Parser.
+// This allows using custom filesystem implementations (e.g. in-memory; see MemFS).
+// The file will be closed when Parser.Close() is called.
+// Returns error if file cannot be opened.
+func OpenFS(fsys fs.FS, filepath string) (*Parser, error) {
+	file, err := fsys.Open(filepath)
 	if err != nil {
 		return nil, err
 	}

@@ -3,10 +3,10 @@ package parser
 import (
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
-	"github.com/spf13/afero"
 )
 
 // Parser parses S-57 ENC files and extracts features.
@@ -50,7 +50,7 @@ type ParseOptions struct {
 
 	// Fs is the filesystem to use for reading files
 	// If nil, the OS filesystem is used
-	Fs afero.Fs
+	Fs fs.FS
 }
 
 // DefaultParseOptions returns parse options with defaults
@@ -85,25 +85,25 @@ func (p *defaultParser) Parse(filename string) (*Chart, error) {
 // ParseWithOptions parses with custom options
 func (p *defaultParser) ParseWithOptions(filename string, opts ParseOptions) (*Chart, error) {
 	// Use OS filesystem if none specified
-	fs := opts.Fs
-	if fs == nil {
-		fs = afero.NewOsFs()
+	fsys := opts.Fs
+	if fsys == nil {
+		fsys = iso8211.OSFS()
 	}
 
 	// 1. Parse base file and extract raw records
-	baseData, params, metadata, err := parseBaseFile(fs, filename, opts)
+	baseData, params, metadata, err := parseBaseFile(fsys, filename, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	// 2. Discover and apply updates if enabled
 	if opts.ApplyUpdates {
-		updateFiles, err := findUpdateFiles(fs, filename)
+		updateFiles, err := findUpdateFiles(fsys, filename)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover update files: %w", err)
 		}
 		if len(updateFiles) > 0 {
-			if err := applyUpdates(fs, baseData, updateFiles, params); err != nil {
+			if err := applyUpdates(fsys, baseData, updateFiles, params); err != nil {
 				return nil, fmt.Errorf("failed to apply updates: %w", err)
 			}
 		}
@@ -115,9 +115,9 @@ func (p *defaultParser) ParseWithOptions(filename string, opts ParseOptions) (*C
 
 // parseBaseFile extracts raw feature and spatial records without building geometries.
 // This allows update files to be applied before geometry construction.
-func parseBaseFile(fs afero.Fs, filename string, opts ParseOptions) (*chartData, datasetParams, *datasetMetadata, error) {
+func parseBaseFile(fsys fs.FS, filename string, opts ParseOptions) (*chartData, datasetParams, *datasetMetadata, error) {
 	// Open ISO 8211 file from filesystem using OpenFS
-	parser, err := iso8211.OpenFS(fs, filename)
+	parser, err := iso8211.OpenFS(fsys, filename)
 	if err != nil {
 		return nil, datasetParams{}, nil, fmt.Errorf("failed to open file: %w", err)
 	}

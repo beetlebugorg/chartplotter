@@ -34,9 +34,13 @@
 
     // 1) load the wasm baker + the raw cell bytes.
     const t0 = performance.now();
-    const cellBytes = new Uint8Array(await (await fetch("./demo-cell.000")).arrayBuffer());
-    const res = await loadCells({ US5MD1MC: cellBytes });
-    log(`baker loaded ${res.names?.length} cell(s) in ${res.ms} ms — panning bakes tiles live`);
+    const [cellBuf, wasmBuf] = await Promise.all([
+      fetch("./demo-cell.000").then((r) => r.arrayBuffer()),
+      fetch("./chartplotter.wasm").then((r) => r.arrayBuffer()), // just to size it
+    ]);
+    const wasmMB = (wasmBuf.byteLength / 1024 / 1024).toFixed(2);
+    const res = await loadCells({ US5MD1MC: new Uint8Array(cellBuf) });
+    log(`wasm baker ${wasmMB} MB · loaded ${res.names?.length} cell in ${res.ms} ms\nAnnapolis Harbor — every tile baked live as you pan/zoom`);
 
     // 2) register the cp:// protocol (real-time tiles + two-layer cache).
     const cache = registerTileProtocol(maplibregl, { namespace: "demo", memCap: 512*1024*1024, diskCap: 1024*1024*1024 });
@@ -72,9 +76,9 @@
     globalThis.cpBakeTile = (z, x, y) => { baked++; return orig(z, x, y); };
     map.on("idle", () => {
       const u = cache.usage();
-      log(`baker: ${res.names?.length} cell · ${res.ms} ms\n` +
-          `tiles baked: ${baked} · L1 ${(u.memBytes/1024).toFixed(0)} KB / ${u.memTiles} · L2 ${(u.diskBytes/1024).toFixed(0)} KB\n` +
-          `hits L1 ${u.l1Hit} L2 ${u.l2Hit} · miss ${u.miss}`);
+      log(`wasm baker ${wasmMB} MB · ${res.names?.length} cell · ${res.ms} ms load\n` +
+          `tiles baked live: ${baked} · cache L1 ${(u.memBytes/1024).toFixed(0)} KB/${u.memTiles} · L2 ${(u.diskBytes/1024).toFixed(0)} KB\n` +
+          `cache hits L1 ${u.l1Hit} L2 ${u.l2Hit} · miss ${u.miss}`);
     });
     window._map = map; window._cache = cache;
   </script>

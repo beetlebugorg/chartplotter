@@ -4,13 +4,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/spf13/afero"
+	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 )
 
 func TestAutoDiscoverUpdates(t *testing.T) {
 	baseFile := "../../../testdata/US4MD81M.000"
 
-	updates, err := findUpdateFiles(afero.NewOsFs(), baseFile)
+	updates, err := findUpdateFiles(iso8211.OSFS(), baseFile)
 	if err != nil {
 		t.Fatal(err)
 	}
