@@ -17,7 +17,7 @@
 
 import "./chartplotter.mjs"; // defines <chart-plotter> (the renderer we wrap)
 import { ChartStore } from "./chart-store.mjs";
-import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
+import { readCentralDirectory, cellEntries, extractEntry, remoteZipBlob } from "./zip-import.mjs";
 
 const SCHEMES = ["day", "dusk", "night", "day_bright"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night", day_bright: "Bright" };
@@ -49,6 +49,10 @@ const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a"
 // Native min Web-Mercator zoom per band (matches CHART_BANDS in chartplotter.mjs).
 // Below it a cell's chart detail isn't baked, so we draw its coverage outline.
 const BAND_MINZOOM = { overview: 0, general: 7, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
+// At/above this many cells in one download, pull them out of NOAA's All_ENCs.zip
+// in-browser (one Range-read source) instead of fetching each cell's own zip
+// separately — cheaper than that many round-trips (see _downloadArea).
+const BULK_THRESHOLD = 100;
 
 // Curated quick-pick regions for the Charts selector. NOAA's catalog has no
 // human-readable region names (only the 20 numeric `rg` ENC regions), so these
@@ -1209,19 +1213,28 @@ export class ChartPlotterApp extends HTMLElement {
     for (const name of removed) {
       try { await this._store.remove(name); this._installed.delete(name); } catch (e) { console.warn("[store] remove", name, e); }
     }
-    // 2) fetch added cells into the store (the shim downloads from NOAA + caches).
-    let done = 0, failed = 0;
-    for (const name of added) {
-      this._setProgress({ label: `Downloading ${added.length} chart${added.length !== 1 ? "s" : ""}`, sub: `${name} · ${done + 1} of ${added.length}`, frac: added.length ? done / added.length : null });
-      try {
-        const c = this._byName.get(name);
-        const url = "api/cell/" + encodeURIComponent(name) + (c && c.z ? "?url=" + encodeURIComponent(c.z) : "");
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        await this._store.put(name, new Uint8Array(await resp.arrayBuffer()));
-        this._installed.add(name);
-      } catch (e) { console.warn("[download]", name, e.message); failed++; }
-      done++;
+    // 2) fetch added cells. When grabbing a lot at once, pull them straight out
+    // of NOAA's All_ENCs.zip in-browser (one source, random-access via Range) —
+    // cheaper than thousands of separate per-cell round-trips. Otherwise fetch
+    // each cell on its own. The server is only ever a dumb byte proxy here.
+    let done = 0, failed = 0, bulkOk = false;
+    if (added.length >= BULK_THRESHOLD) {
+      try { failed = await this._bulkExtract(added); bulkOk = true; }
+      catch (e) { console.warn("[bulk] failed — falling back to per-cell:", e.message); }
+    }
+    if (!bulkOk) {
+      for (const name of added) {
+        this._setProgress({ label: `Downloading ${added.length} chart${added.length !== 1 ? "s" : ""}`, sub: `${name} · ${done + 1} of ${added.length}`, frac: added.length ? done / added.length : null });
+        try {
+          const c = this._byName.get(name);
+          const url = "api/cell/" + encodeURIComponent(name) + (c && c.z ? "?url=" + encodeURIComponent(c.z) : "");
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          await this._store.put(name, new Uint8Array(await resp.arrayBuffer()));
+          this._installed.add(name);
+        } catch (e) { console.warn("[download]", name, e.message); failed++; }
+        done++;
+      }
     }
     // 3) re-bake the whole store in-browser.
     this._setProgress({ label: "Baking tiles…", sub: failed ? `${failed} cell${failed !== 1 ? "s" : ""} failed` : "", frac: 1 });
@@ -1233,6 +1246,49 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
     if (failed) console.warn(`[download] ${failed} of ${added.length} cell(s) failed`);
+  }
+
+  // The URL of NOAA's All_ENCs.zip, derived from any catalog cell's per-cell zip
+  // URL (same directory) so it tracks the catalog's host.
+  _allEncsUrl() {
+    const any = this._catalog.find((c) => c.z);
+    return any ? any.z.replace(/[^/]+$/, "All_ENCs.zip") : "https://www.charts.noaa.gov/ENCs/All_ENCs.zip";
+  }
+
+  // Bulk path: pull `added` cells out of the remote All_ENCs.zip in-browser via
+  // random-access Range reads (the server is a dumb byte/Range proxy). Reads the
+  // zip's central directory once, then slices + inflates only the wanted base
+  // cells into the store. Returns the count that failed. Throws if the archive
+  // can't be opened (caller falls back to per-cell downloads).
+  async _bulkExtract(added) {
+    const proxy = "api/proxy?url=" + encodeURIComponent(this._allEncsUrl());
+    this._setProgress({ label: "Opening All_ENCs.zip…", sub: `${added.length} charts — reading the index`, frac: null });
+    // Probe total size (Content-Range from a 1-byte range), then read by range.
+    const probe = await fetch(proxy, { headers: { Range: "bytes=0-0" } });
+    if (!probe.ok && probe.status !== 206) throw new Error("proxy HTTP " + probe.status);
+    let size = 0;
+    const cr = probe.headers.get("Content-Range");
+    if (cr) { const m = cr.match(/\/(\d+)\s*$/); if (m) size = +m[1]; }
+    if (!size) size = +probe.headers.get("Content-Length") || 0;
+    if (!size) throw new Error("could not determine All_ENCs.zip size (no Range support?)");
+
+    const blob = remoteZipBlob(size, (s, e) => fetch(proxy, { headers: { Range: `bytes=${s}-${e - 1}` } }));
+    const byName = new Map(cellEntries(await readCentralDirectory(blob)).map((c) => [c.name, c]));
+
+    const want = new Set(added);
+    let done = 0, failed = 0;
+    for (const name of added) {
+      this._setProgress({ label: `Extracting ${added.length} charts from All_ENCs.zip`, sub: `${name} · ${done + 1} of ${added.length}`, frac: added.length ? done / added.length : null });
+      const rec = byName.get(name);
+      if (!rec || !rec.base) { console.warn("[bulk]", name, "not in All_ENCs.zip"); failed++; done++; continue; }
+      try {
+        await this._store.put(name, await extractEntry(blob, rec.base));
+        this._installed.add(name);
+      } catch (e) { console.warn("[bulk]", name, e.message); failed++; }
+      done++;
+    }
+    console.log(`[bulk] extracted ${added.length - failed}/${added.length} from All_ENCs.zip via Range`);
+    return failed;
   }
 
   // -- cell list (browse + inspect, req: detailed list & cell info) --------

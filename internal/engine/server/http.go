@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -97,6 +98,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"ok":true}`)
 	case strings.HasPrefix(r.URL.Path, "/api/cell/"):
 		s.serveCell(w, r) // GET raw .000 — the 100%-wasm path: NOAA download proxy + cache
+	case r.URL.Path == "/api/proxy":
+		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
 	default:
 		apiErr(w, http.StatusNotFound, "unknown endpoint")
 	}
@@ -124,6 +127,54 @@ func (s *Server) serveCell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(data)
+}
+
+// serveProxy is a dumb CORS proxy that streams a NOAA URL through to the browser
+// (which can't fetch charts.noaa.gov cross-origin — no CORS headers there). It
+// forwards Range so the client's random-access ZIP reader can pull just the
+// cells it needs out of the multi-GB All_ENCs.zip without downloading it whole.
+// No parsing, no caching, no extraction — all of that is done in-browser (wasm).
+// Restricted to NOAA hosts so it isn't an open relay.
+func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		apiErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	raw := r.URL.Query().Get("url")
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !isNOAAHost(u.Hostname()) {
+		apiErr(w, http.StatusBadRequest, "url must be a charts.noaa.gov URL")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, raw, nil)
+	if err != nil {
+		apiErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng) // forward range for random-access reads
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		apiErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Expose-Headers", "content-range,accept-ranges,content-length")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// isNOAAHost reports whether host is one of NOAA's chart download hosts.
+func isNOAAHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "charts.noaa.gov" || host == "www.charts.noaa.gov"
 }
 
 // isCellName accepts the alphanumeric NOAA cell ids (e.g. US5MD1MC) — a safe
