@@ -202,6 +202,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (this.hasAttribute("cell-url")) plotter.setAttribute("cell-url", this.getAttribute("cell-url"));
     plotter.setAttribute("assets", this._assets);
     plotter.setAttribute("basemap", this.getAttribute("basemap") || "coastline");
+    plotter.setAttribute("tiles", "realtime"); // 100%-wasm: bake tiles in-browser from stored cells
     this._plotter = plotter;
     this.shadowRoot.getElementById("map").appendChild(plotter);
 
@@ -239,6 +240,11 @@ export class ChartPlotterApp extends HTMLElement {
     await this._catalogReady;
     this.addCatalogOverlay(map);
     await this.restoreArchive();
+    // 100%-wasm path: bake whatever cells are already stored (imported offline).
+    try {
+      const rt = await this._plotter.loadStoreCells();
+      if (rt && rt.ok && rt.names && rt.names.length) { this._hasArchive = true; this.updateEmptyState(); }
+    } catch (e) { console.warn("[realtime] loadStoreCells", e); }
     await this._seedAreaCells();
     this.updateEmptyState();
     this.renderCharts();
@@ -1933,8 +1939,22 @@ export class ChartPlotterApp extends HTMLElement {
     }
     this.updateEmptyState();
     this.renderArchiveList();
-    // Dropping raw cells is a complete action — bake them in, then show them.
-    if (rawInstalled.length) { await this.rebakeArchive(); this.launchInto(rawInstalled); }
+    // Re-bake the in-browser wasm tiles from the now-larger stored cell set.
+    await this._refreshRealtime();
+  }
+
+  // Reload every stored cell into the wasm baker (the 100%-wasm render path) and
+  // reflect coverage in the empty state. Called after any import.
+  async _refreshRealtime() {
+    if (!this._plotter) return;
+    try {
+      const rt = await this._plotter.loadStoreCells();
+      if (rt && rt.ok && rt.names && rt.names.length) {
+        this._hasArchive = true;
+        this.updateEmptyState();
+        this._frameCells(rt.names);
+      }
+    } catch (e) { console.warn("[realtime] refresh", e); }
   }
 
   toggleSelect(name) {
@@ -2043,14 +2063,14 @@ export class ChartPlotterApp extends HTMLElement {
       }
       done++;
     }
-    this._setProgress({ label: `Imported ${imported.length} chart${imported.length > 1 ? "s" : ""}`, sub: "Baking tiles next…", frac: 1 });
+    this._setProgress({ label: `Imported ${imported.length} chart${imported.length > 1 ? "s" : ""}`, sub: "Ready", frac: 1 });
     this.updateEmptyState();
     this.renderCharts();
     this.refreshBoxes();
     this.renderArchiveList();
-    // New cells stored → bake everything into one .pmtiles, then frame them.
-    if (imported.length) { await this.rebakeArchive(); this.launchInto(imported); }
-    else setTimeout(() => this._setProgress(null), 1200);
+    // New cells stored → the wasm baker renders them on demand (no pre-bake).
+    if (imported.length) await this._refreshRealtime();
+    setTimeout(() => this._setProgress(null), 1200);
   }
 
   // Bake every installed cell into ONE static .pmtiles (the bake-once path),

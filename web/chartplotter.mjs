@@ -570,6 +570,7 @@ export class ChartPlotter extends HTMLElement {
   // across every band so it overzooms correctly (see `_fanBands`). Tiles still
   // stream by viewport.
   async addArchive(src, band = "all") {
+    if (this._realtime) return null; // realtime renders from cells, not pmtiles archives
     const resolved = this._resolveSrc(src);
     let a = null;
     for (const b of this._fanBands(band)) {
@@ -586,6 +587,7 @@ export class ChartPlotter extends HTMLElement {
   // add/remove a region just reloads the manifest's set — no re-bake). An empty
   // list clears the map.
   async loadRegions(urls) {
+    if (this._realtime) return; // realtime renders from cells, not pmtiles archives
     this._bands = {};
     for (const u of urls) {
       try { await this.addArchive(u, "all"); } catch (e) { console.warn("[chartplotter] region", u, e); }
@@ -615,6 +617,7 @@ export class ChartPlotter extends HTMLElement {
   // string or `{src, band}`; bad sources are skipped (logged). Returns the
   // opened archives.
   async addArchives(entries) {
+    if (this._realtime) return []; // realtime renders from cells, not pmtiles archives
     const norm = entries.map((e) => (typeof e === "object" && e && e.src !== undefined ? e : { src: e, band: "all" }));
     const arcs = await Promise.all(norm.map((e) => {
       const band = e.band || "all";
