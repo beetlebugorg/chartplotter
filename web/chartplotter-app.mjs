@@ -2655,7 +2655,7 @@ export class ChartPlotterApp extends HTMLElement {
         @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
         /* Per-cell status popup, opening upward from the overlay's right edge. */
         #cell-status-pop { position:absolute; right:0; bottom:100%; margin-bottom:10px; z-index:9;
-          width:min(340px,calc(100vw - 24px)); max-height:min(66vh,520px); overflow:auto;
+          width:min(400px,calc(100vw - 24px)); max-height:min(66vh,520px); overflow:auto;
           background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:12px;
           box-shadow:0 10px 32px rgba(0,0,0,.24); padding:14px 16px; }
         #cell-status-pop[hidden] { display:none; }
@@ -2665,10 +2665,10 @@ export class ChartPlotterApp extends HTMLElement {
         .csp-clear { flex:none; border:1px solid #cf3b3b; color:#cf3b3b; background:transparent; cursor:pointer;
           border-radius:9px; padding:4px 10px; font:600 10px/1 system-ui,sans-serif; text-transform:none; letter-spacing:0; }
         .csp-clear:hover { background:#cf3b3b; color:#fff; }
-        .csp-stats { display:grid; grid-template-columns:1fr 1fr; gap:9px 18px; padding:0 0 14px; margin-bottom:12px; border-bottom:1px solid var(--ui-border); }
-        .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font:500 12px/1.5 system-ui,sans-serif; }
-        .csp-stats span { color:var(--ui-text-dim); text-transform:uppercase; letter-spacing:.03em; font-size:9.5px; }
-        .csp-stats b { color:var(--ui-text); font-weight:600; font-variant-numeric:tabular-nums; }
+        .csp-stats { display:grid; grid-template-columns:1fr 1fr; gap:9px 16px; padding:0 0 14px; margin-bottom:12px; border-bottom:1px solid var(--ui-border); }
+        .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:10px; font:500 12px/1.5 system-ui,sans-serif; white-space:nowrap; }
+        .csp-stats span { color:var(--ui-text-dim); text-transform:uppercase; letter-spacing:.03em; font-size:9.5px; white-space:nowrap; flex:none; }
+        .csp-stats b { color:var(--ui-text); font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; flex:none; }
         .csp-list { list-style:none; margin:0; padding:0; }
         .csp-row { display:flex; align-items:center; gap:10px; padding:8px 0; font:500 12.5px/1.3 system-ui,sans-serif; }
         .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
