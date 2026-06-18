@@ -212,9 +212,12 @@ export class ChartPlotter extends HTMLElement {
     this._map = map;
     this.map = map; // public handle
 
-    // Graphical bar scale (ECDIS/S-52 expectation): a linear distance scale in
-    // nautical miles, complementing the numeric 1:N readout in the app HUD.
-    map.addControl(new maplibregl.ScaleControl({ maxWidth: 140, unit: "nautical" }), "bottom-left");
+    // Graphical bar scale, complementing the numeric 1:N readout in the app HUD.
+    // Follows the mariner unit setting: metric (m/km) or imperial (ft/mi); MapLibre
+    // auto-picks the small/large unit by distance. Kept on the instance so a later
+    // unit change can switch it live (see setMariner).
+    this._scaleControl = new maplibregl.ScaleControl({ maxWidth: 140, unit: this._scaleUnit() });
+    map.addControl(this._scaleControl, "bottom-left");
 
     map.on("styleimagemissing", (e) => {
       if (this._patterns[e.id]) this.registerPattern(e.id);
@@ -352,6 +355,11 @@ export class ChartPlotter extends HTMLElement {
       ["<", ["get", "drval1"], sfc],
       [">=", ["coalesce", ["get", "drval2"], ["get", "drval1"]], sfc]];
   }
+
+  // Bar-scale unit following the mariner depth-unit setting: imperial (ft/mi) when
+  // depths are in feet, otherwise metric (m/km). MapLibre picks the small vs large
+  // unit by the current distance.
+  _scaleUnit() { return this._mariner.depthUnit === "ft" ? "imperial" : "metric"; }
 
   // SAFCON01 (S-52 §13.2.13): the depth-contour value label. Drawn client-side
   // along DEPCNT lines from the baked VALDCO (whole metres, or whole feet when
@@ -714,6 +722,7 @@ export class ChartPlotter extends HTMLElement {
       if (keys.includes("depthUnit")) {
         this._eachLayer("soundings", (id) => map.setLayoutProperty(id, "icon-image", this.soundingsIconImage()));
         this._eachLayer("contour-labels", (id) => map.setLayoutProperty(id, "text-field", this.contourLabelField()));
+        if (this._scaleControl) this._scaleControl.setUnit(this._scaleUnit()); // m/km ↔ ft/mi
       }
       // Shallow pattern: visibility on its toggle (a fill layer).
       if (keys.includes("shallowPattern")) {
