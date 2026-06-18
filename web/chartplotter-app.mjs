@@ -2048,24 +2048,16 @@ export class ChartPlotterApp extends HTMLElement {
     }
     const feats = this._inspectFeats || [];
     const pick = this._inspectMulti ? feats.slice(0, 80) : (feats.length ? [feats[Math.min(this._inspectIdx, feats.length - 1)]] : []);
-    // Render diagnostics: do the complex-linestyle SYMBOL layers (lc-marks) exist,
-    // are their images registered, and do they actually place anything in view?
-    // (Pins "lines show but symbols don't" without a screenshot.)
+    // Render diagnostics: complex linestyles are tessellated in the baker — the
+    // dash "on" segments land in the complex-lines layer and the embedded marks
+    // in point_symbols. Report how many of each are in view. (Pins "lines blank /
+    // symbols missing" without a screenshot.)
     let render = null;
     if (m && m.getStyle) {
-      const layers = (m.getStyle().layers || []).map((l) => l.id);
-      const markIds = layers.filter((id) => id.startsWith("lc-marks"));
-      const lineIds = layers.filter((id) => /^lc-line/.test(id));
-      const cnt = (ids) => { if (!ids.length) return 0; try { return m.queryRenderedFeatures({ layers: ids }).length; } catch { return -1; } };
-      const images = {};
-      for (const n of ["EMAREMG1", "EMAREGR1", "EMACHRE2", "EMCBLSU1", "EMRESAR1", "EMRECTR1"]) {
-        images[n] = !!(m.hasImage && m.hasImage(n));
-      }
+      const cnt = (ids) => { try { return m.queryRenderedFeatures({ layers: ids }).length; } catch { return -1; } };
       render = {
-        markLayerCount: markIds.length,
-        markFeaturesInView: cnt(markIds),
-        complexLineFeaturesInView: cnt(lineIds),
-        markImagesRegistered: images,
+        complexLineSegmentsInView: cnt(["complex-lines"]),
+        pointSymbolsInView: cnt(["point_symbols"]),
       };
     }
     const snap = {

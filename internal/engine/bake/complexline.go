@@ -1,0 +1,243 @@
+package bake
+
+import (
+	"math"
+
+	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
+	"github.com/beetlebugorg/chartplotter/pkg/s52"
+)
+
+// Complex (symbolised) linestyles are tessellated PER ZOOM at emit time, exactly
+// like sector lights (their period is screen-px sized, so a fixed lat/lon
+// geometry can't carry it). For each tile we walk the line by arc length —
+// anchored at the line's first vertex so the pattern is continuous across tile
+// boundaries (tile.ClipLinePhased keeps that phase) — and emit, per period:
+//   - the dash "on" runs as real line segments into the restyleable complex_lines
+//     layer (colour stays a client expression → Day/Dusk/Night switches live);
+//   - each embedded symbol as a point into point_symbols, rotated to the local
+//     line tangent (so chevrons/anchors/"!" sit ON the line at every zoom with no
+//     pattern-stretch).
+// This replaces drawing the polyline once + a client-side line-pattern (which
+// stretched during zoom) or a phase-free symbol pass (symbols drifted off).
+
+// lsOnRun is one drawn dash run within a period, in screen px from period start.
+type lsOnRun struct{ lo, hi float64 }
+
+// lsEmbed is one embedded symbol within a period.
+type lsEmbed struct {
+	offset float64 // screen px from period start
+	name   string
+}
+
+// lsInfo is the per-zoom-independent geometry of one complex linestyle.
+type lsInfo struct {
+	periodPx   float64
+	onRuns     []lsOnRun
+	symbols    []lsEmbed
+	colorToken string
+	widthPx    float64
+}
+
+// lsFeatureScale is screen px per 0.01-mm PresLib unit — the scale the dash/
+// symbol offsets are measured in (matches the assets + portrayal backend).
+const lsFeatureScale = float64(0.01 / 0.35278)
+
+// buildLinestyleTable analyses every PresLib linestyle into its period geometry
+// once (the baker reuses it for every tile). Mirrors assets.analyzeLinestyle but
+// keeps raw (unmerged) on-runs and symbol names — what the tessellator needs.
+func buildLinestyleTable(lib *s52.Library) map[string]*lsInfo {
+	out := make(map[string]*lsInfo)
+	for _, id := range lib.ListLineStyles() {
+		ls, err := lib.GetLineStyle(id)
+		if err != nil || ls.BBoxWidth == 0 {
+			continue
+		}
+		period := float64(ls.BBoxWidth) * lsFeatureScale
+		if period < 0.5 {
+			continue
+		}
+		bboxX := float64(ls.BBoxX)
+		info := &lsInfo{periodPx: period}
+		haveColor := false
+		for i := range ls.VectorCommands {
+			c := &ls.VectorCommands[i]
+			switch {
+			case c.Type == "PD":
+				pts := c.Points
+				for j := 0; j+1 < len(pts); j++ {
+					lo := clampf64((math.Min(pts[j].X, pts[j+1].X)-bboxX)*lsFeatureScale, 0, period)
+					hi := clampf64((math.Max(pts[j].X, pts[j+1].X)-bboxX)*lsFeatureScale, 0, period)
+					if hi-lo < 1e-6 {
+						continue
+					}
+					if !haveColor {
+						info.colorToken = ls.Colors.Roles[c.Role]
+						info.widthPx = float64(c.StrokeWidth) * 32.0 * lsFeatureScale
+						haveColor = true
+					}
+					info.onRuns = append(info.onRuns, lsOnRun{lo: lo, hi: hi})
+				}
+			case c.Type == "SC" && c.SymbolCall != nil:
+				info.symbols = append(info.symbols, lsEmbed{
+					offset: (c.SymbolCall.CallPosition.X - bboxX) * lsFeatureScale,
+					name:   c.SymbolCall.SymbolName,
+				})
+			}
+		}
+		if info.widthPx < 0.6 {
+			info.widthPx = 0.9 // a drawn pen is at least hairline-visible
+		}
+		out[id] = info
+	}
+	return out
+}
+
+// emitComplexLine tessellates one complex-line prim into this tile at coord.Z.
+func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, z uint32, extent uint32, tb *mvt.TileBuilder, scratch *[]tile.FPoint) {
+	info := r.ls
+	if info == nil || len(r.nline) < 2 {
+		return
+	}
+	pts := projectNormRing(r.nline, proj, *scratch)
+	*scratch = pts
+	if len(pts) < 2 {
+		return
+	}
+	// Cumulative arc length (tile-pixel units) along the full projected line.
+	arc := make([]float64, len(pts))
+	for i := 1; i < len(pts); i++ {
+		arc[i] = arc[i-1] + math.Hypot(pts[i].X-pts[i-1].X, pts[i].Y-pts[i-1].Y)
+	}
+
+	// Screen px -> tile units. The baker lays figures out in 256-px-per-tile space
+	// (see sectorRadiusNorm/expandSector); one tile is `extent` units wide.
+	pxScale := float64(extent) / 256.0
+	period := info.periodPx * pxScale
+	if period < 1e-6 {
+		return
+	}
+
+	dashAttrs := append(append([]mvt.KeyValue(nil), r.attrs...),
+		mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(info.widthPx + 0.5))})
+	symBase := r.attrs // class/cell/draw_prio/cat/bnd (+inspector extras)
+	symScale := float64(0.01 / 0.35278)
+
+	var dashPaths [][]mvt.IPoint
+	var symPts []mvt.IPoint
+	var symAttrs [][]mvt.KeyValue
+
+	// Phase-stable clip: each run carries Arc0 (global arc at its first vertex).
+	for _, run := range tile.ClipLinePhased(pts, arc, rect) {
+		rp := run.Points
+		if len(rp) < 2 {
+			continue
+		}
+		rarc := make([]float64, len(rp))
+		for i := 1; i < len(rp); i++ {
+			rarc[i] = rarc[i-1] + math.Hypot(rp[i].X-rp[i-1].X, rp[i].Y-rp[i-1].Y)
+		}
+		g0 := run.Arc0
+		runEnd := g0 + rarc[len(rarc)-1]
+		kStart := int(math.Floor(g0 / period))
+		for k := kStart; float64(k)*period < runEnd; k++ {
+			base := float64(k) * period
+			// Dash on-runs.
+			for _, on := range info.onRuns {
+				lo := math.Max(base+on.lo*pxScale, g0)
+				hi := math.Min(base+on.hi*pxScale, runEnd)
+				if hi-lo < 1e-6 {
+					continue
+				}
+				if sub := subPathByArc(rp, rarc, lo-g0, hi-g0); len(sub) >= 2 {
+					dashPaths = append(dashPaths, quantizeRing(sub))
+				}
+			}
+			// Embedded symbols.
+			for _, sym := range info.symbols {
+				if sym.name == "" {
+					continue
+				}
+				gp := base + sym.offset*pxScale
+				if gp < g0 || gp > runEnd {
+					continue
+				}
+				pt, ok, dx, dy := pointAndTangent(rp, rarc, gp-g0)
+				if !ok {
+					continue
+				}
+				rot := math.Atan2(dy, dx) * 180.0 / math.Pi
+				symPts = append(symPts, tile.Quantize(pt))
+				symAttrs = append(symAttrs, append(append([]mvt.KeyValue(nil), symBase...),
+					mvt.KeyValue{Key: "symbol_name", Value: mvt.StringVal(sym.name)},
+					mvt.KeyValue{Key: "rotation_deg", Value: mvt.FloatVal(float32(rot))},
+					mvt.KeyValue{Key: "scale", Value: mvt.FloatVal(float32(symScale))},
+				))
+			}
+		}
+	}
+
+	if len(dashPaths) > 0 {
+		tb.Layer("complex_lines").AddLines(dashPaths, dashAttrs)
+	}
+	// AddPoints shares one attr set per call, so emit each symbol on its own (their
+	// rotations differ).
+	lay := tb.Layer("point_symbols")
+	for i := range symPts {
+		lay.AddPoints(symPts[i:i+1], symAttrs[i])
+	}
+}
+
+// subPathByArc returns the sub-polyline of rp between local arc distances d0..d1
+// (rarc is the per-vertex cumulative arc). Endpoints are interpolated.
+func subPathByArc(rp []tile.FPoint, rarc []float64, d0, d1 float64) []tile.FPoint {
+	total := rarc[len(rarc)-1]
+	d0 = clampf64(d0, 0, total)
+	d1 = clampf64(d1, 0, total)
+	if d1-d0 < 1e-9 {
+		return nil
+	}
+	out := []tile.FPoint{lerpArc(rp, rarc, d0)}
+	for i := range rp {
+		if rarc[i] > d0 && rarc[i] < d1 {
+			out = append(out, rp[i])
+		}
+	}
+	out = append(out, lerpArc(rp, rarc, d1))
+	return out
+}
+
+// pointAndTangent returns the point at local arc d plus the (un-normalised)
+// tangent direction (dx,dy) of the segment containing it.
+func pointAndTangent(rp []tile.FPoint, rarc []float64, d float64) (tile.FPoint, bool, float64, float64) {
+	total := rarc[len(rarc)-1]
+	d = clampf64(d, 0, total)
+	for i := 0; i+1 < len(rp); i++ {
+		if d <= rarc[i+1] || i+2 == len(rp) {
+			seg := rarc[i+1] - rarc[i]
+			t := 0.0
+			if seg > 1e-12 {
+				t = (d - rarc[i]) / seg
+			}
+			p := tile.FPoint{X: rp[i].X + t*(rp[i+1].X-rp[i].X), Y: rp[i].Y + t*(rp[i+1].Y-rp[i].Y)}
+			return p, true, rp[i+1].X - rp[i].X, rp[i+1].Y - rp[i].Y
+		}
+	}
+	return tile.FPoint{}, false, 0, 0
+}
+
+// lerpArc returns the point at local arc distance d along rp.
+func lerpArc(rp []tile.FPoint, rarc []float64, d float64) tile.FPoint {
+	p, _, _, _ := pointAndTangent(rp, rarc, d)
+	return p
+}
+
+func clampf64(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}

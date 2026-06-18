@@ -429,14 +429,15 @@ func (w *walker) linestyleColor(name string) string {
 }
 
 func (w *walker) emitSymbol(symbolName string, rotationDeg float32, g geom) {
-	var anchor geo.LatLon
-	switch g.kind {
-	case geomPoint:
-		anchor = g.point
-	default:
-		return // symbols anchor to points / sounding points only
+	// A point feature symbolises at its point; an area/line feature carries its
+	// SY() as a *centred* symbol at the centroid/midpoint (S-52 §8.3.1) — e.g.
+	// CTNARE's "!" (CTNARE51) or ACHARE's anchor (ACHARE51). Use the same anchor
+	// resolution as centred text so symbol and label sit together.
+	anchor, ok := textAnchor(g)
+	if !ok {
+		return
 	}
-	isSounding := isSoundingDigit(symbolName)
+	isSounding := g.kind == geomPoint && isSoundingDigit(symbolName)
 	var halo *SymbolHalo
 	soundingDepth := nan32
 	if isSounding {

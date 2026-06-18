@@ -173,6 +173,11 @@ type routed struct {
 	zMin, zMax                 uint32  // display zoom span
 	natMin, natMax             uint32  // native band zoom span (for suppression)
 
+	// ls (non-nil only for a complex_lines prim) is the linestyle's period
+	// geometry; when set the prim is tessellated per zoom at emit (emitComplexLine)
+	// instead of drawn as a plain polyline.
+	ls *lsInfo
+
 	attrs []mvt.KeyValue
 }
 
@@ -201,9 +206,10 @@ type Baker struct {
 	// instead of scanning all of b.prims — turning the whole bake from
 	// O(#tiles × #prims) into O(Σ prims-on-tile). nil ⇒ EmitTileInto falls back to
 	// the full scan (the EmitTile convenience path / tests). Read-only after build.
-	emitIndex map[uint64][]int32
-	bbox      geo.BoundingBox
-	curCell   string // dataset name of the cell currently being added (stamped on each feature)
+	emitIndex  map[uint64][]int32
+	linestyles map[string]*lsInfo // complex-linestyle period geometry, built once (lazily) from the PresLib
+	bbox       geo.BoundingBox
+	curCell    string // dataset name of the cell currently being added (stamped on each feature)
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
@@ -295,6 +301,9 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	b.curCell = chart.DatasetName()
 	if i := strings.LastIndexByte(b.curCell, '.'); i > 0 {
 		b.curCell = b.curCell[:i]
+	}
+	if b.linestyles == nil {
+		b.linestyles = buildLinestyleTable(lib)
 	}
 	band := BandForScale(uint32(chart.CompilationScale()))
 	zr := band.ZoomRange()
@@ -501,12 +510,19 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		)
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.LinePattern:
+		// Stored as a polyline + its linestyle; emitComplexLine tessellates the
+		// period (dashes → these complex_lines segments, symbols → point_symbols)
+		// per zoom at emit time. colour_token drives the live restyle of the dashes.
 		r.layer, r.kind, r.nline = "complex_lines", mvt.GeomLineString, normPts(v.Points)
-		extra := []mvt.KeyValue{{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)}}
-		if v.ColorToken != "" {
-			extra = append(extra, mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)})
+		r.ls = b.linestyles[v.LinestyleName]
+		ct := v.ColorToken
+		if ct == "" && r.ls != nil {
+			ct = r.ls.colorToken
 		}
-		r.attrs = common(extra...)
+		r.attrs = common(
+			mvt.KeyValue{Key: "linestyle_name", Value: mvt.StringVal(v.LinestyleName)},
+			mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(ct)},
+		)
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.DrawText:
 		r.layer, r.kind, r.npoint = "text", mvt.GeomPoint, normPt(v.Anchor)
@@ -820,6 +836,11 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				emptyGeom++
 			}
 		case mvt.GeomLineString:
+			if r.ls != nil {
+				// Complex (symbolised) linestyle: tessellate its period per zoom.
+				b.emitComplexLine(r, proj, rect, coord.Z, extent, tb, &scratch)
+				continue
+			}
 			scratch = projectNormRing(r.nline, proj, scratch)
 			runs := tile.ClipLine(scratch, rect)
 			paths := make([][]mvt.IPoint, 0, len(runs))
