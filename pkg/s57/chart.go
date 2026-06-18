@@ -508,6 +508,13 @@ type Geometry struct {
 	// First ring(s) with Usage=1 or 3 are exterior boundaries.
 	// Rings with Usage=2 are interior boundaries (holes).
 	Rings []Ring
+
+	// BoundaryLines holds the polylines of a polygon's DRAWABLE boundary edges —
+	// those NOT masked (FSPT MASK={1}) and NOT data-limit/cell-boundary edges
+	// (USAG={3}). Per S-52 PresLib §8.6.2 those edges must not be drawn, though
+	// the fill keeps them (§8.6.3). Renderers stroke the border from these (one
+	// polyline per drawable edge); empty ⇒ stroke the Rings instead.
+	BoundaryLines [][][]float64
 }
 
 // GeometryType represents the type of geometry.
@@ -579,9 +586,10 @@ func convertChart(internal *parser.Chart) *Chart {
 			id:          f.ID,
 			objectClass: f.ObjectClass,
 			geometry: Geometry{
-				Type:        GeometryType(f.Geometry.Type),
-				Coordinates: f.Geometry.Coordinates,
-				Rings:       rings,
+				Type:          GeometryType(f.Geometry.Type),
+				Coordinates:   f.Geometry.Coordinates,
+				Rings:         rings,
+				BoundaryLines: f.Geometry.BoundaryLines,
 			},
 			attributes: attributes,
 		}

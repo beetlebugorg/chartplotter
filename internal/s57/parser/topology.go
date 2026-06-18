@@ -92,6 +92,34 @@ func (r *polygonBuilder) getFullEdgeCoordinates(edge *edge, orientation int) [][
 	return coords
 }
 
+// drawableBoundaryLines builds the polylines of a polygon's DRAWABLE boundary
+// edges. Per S-52 PresLib §8.6.2, edges with the FSPT MASK subfield = {1} or the
+// USAG subfield = {3} (cell-boundary / data-limit edges) must not be drawn — so
+// they are excluded here. They remain in the fill rings (§8.6.3). One polyline
+// per drawable edge (oriented per its FSPT orientation).
+func (r *polygonBuilder) drawableBoundaryLines(edgeRefs []spatialRef) [][][]float64 {
+	var lines [][][]float64
+	for _, er := range edgeRefs {
+		if er.Mask == 1 || er.Usage == 3 {
+			continue // masked or data-limit edge — must not be drawn
+		}
+		edge, err := r.loadEdge(er.RCID)
+		if err != nil || edge == nil {
+			continue
+		}
+		coords := r.getFullEdgeCoordinates(edge, er.Orientation)
+		if len(coords) < 2 {
+			continue
+		}
+		line := make([][]float64, len(coords))
+		for i, c := range coords {
+			line[i] = []float64{c[0], c[1]}
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 // loadEdge loads an edge from spatial records, with caching
 // Returns cached edge if already loaded, otherwise loads from spatial record
 func (r *polygonBuilder) loadEdge(edgeID int64) (*edge, error) {

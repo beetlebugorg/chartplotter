@@ -81,6 +81,14 @@ type Geometry struct {
 	// Only populated for Polygon geometry type
 	// First ring with Usage=1 is exterior, Usage=2 are holes, Usage=3 are truncated exterior
 	Rings []Ring
+
+	// BoundaryLines holds the polylines of a polygon's DRAWABLE boundary edges:
+	// edges that are NOT masked (FSPT MASK={1}) and NOT cell-boundary/data-limit
+	// edges (USAG={3}). Per S-52 PresLib §8.6.2 those edges "must not be drawn",
+	// while the area fill must still include them (§8.6.3) — so the fill uses
+	// Rings (complete) and the border stroke uses BoundaryLines (edges dropped).
+	// One polyline per drawable edge; empty/nil ⇒ fall back to stroking Rings.
+	BoundaryLines [][][]float64
 }
 
 // constructGeometry builds a Geometry from feature and spatial records
@@ -394,9 +402,10 @@ func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spat
 		}
 
 		return Geometry{
-			Type:        GeometryTypePolygon,
-			Coordinates: allCoords, // Flattened for backward compatibility
-			Rings:       rings,     // Structured rings with usage indicators
+			Type:          GeometryTypePolygon,
+			Coordinates:   allCoords, // Flattened for backward compatibility
+			Rings:         rings,     // Structured rings with usage indicators
+			BoundaryLines: resolver.drawableBoundaryLines(edgeRefs),
 		}, nil
 	}
 

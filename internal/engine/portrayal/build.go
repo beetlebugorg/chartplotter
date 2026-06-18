@@ -35,6 +35,7 @@ type geom struct {
 	point        geo.LatLon
 	line         []geo.LatLon
 	area         [][]geo.LatLon
+	boundary     [][]geo.LatLon // drawable border polylines (masked/data-limit edges removed); nil ⇒ stroke `area`
 	currentDepth float64
 	hasDepth     bool
 }
@@ -360,7 +361,14 @@ func (w *walker) emitStroke(colorToken string, dash Dash, widthPx float32, g geo
 	case geomLine:
 		w.emitStrokeOne(colorToken, dash, widthPx, g.line)
 	case geomArea:
-		for _, ring := range g.area {
+		// S-52 §8.6.2: stroke the drawable border (masked / data-limit edges
+		// removed) when the parser provided it; otherwise fall back to the full
+		// rings (cells whose topology didn't resolve to per-edge boundaries).
+		borders := g.boundary
+		if borders == nil {
+			borders = g.area
+		}
+		for _, ring := range borders {
 			w.emitStrokeOne(colorToken, dash, widthPx, ring)
 		}
 	}
@@ -378,7 +386,13 @@ func (w *walker) emitLinePattern(linestyleName string, g geom) {
 	case geomLine:
 		w.emitLinePatternOne(linestyleName, g.line)
 	case geomArea:
-		for _, ring := range g.area {
+		// S-52 §8.6.2: stroke the drawable border (masked / data-limit edges
+		// removed) when available; otherwise the full rings.
+		borders := g.boundary
+		if borders == nil {
+			borders = g.area
+		}
+		for _, ring := range borders {
 			w.emitLinePatternOne(linestyleName, ring)
 		}
 	}
@@ -599,7 +613,15 @@ func geometryOf(g s57.Geometry) geom {
 		} else if len(g.Coordinates) > 0 {
 			rings = append(rings, coordsToLatLon(g.Coordinates))
 		}
-		return geom{kind: geomArea, area: rings}
+		// Drawable border polylines (masked / data-limit edges already removed by
+		// the parser, S-52 §8.6.2). The fill still uses the complete rings.
+		var boundary [][]geo.LatLon
+		for _, bl := range g.BoundaryLines {
+			if pts := coordsToLatLon(bl); len(pts) >= 2 {
+				boundary = append(boundary, pts)
+			}
+		}
+		return geom{kind: geomArea, area: rings, boundary: boundary}
 	default:
 		return geom{kind: geomNone}
 	}

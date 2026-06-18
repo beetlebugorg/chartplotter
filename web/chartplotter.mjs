@@ -183,7 +183,10 @@ export class ChartPlotter extends HTMLElement {
       this._rt = await import("./wasm-tiles.mjs");
       await this._rt.initBaker(assets);
       this._rtCache = this._rt.registerTileProtocol(maplibregl, {
-        namespace: "rt",
+        // Namespace scopes the persistent tile cache. BUMP THE VERSION SUFFIX when
+        // the baker's tile output changes, so stale cached tiles are abandoned.
+        // rt2: S-52 §8.6.2 masked/data-limit boundary suppression.
+        namespace: "rt2",
         // Surface live bake activity so the app can show a "generating tiles"
         // indicator; fires whenever the worker's in-flight tile count changes.
         onActivity: (n) => this.dispatchEvent(new CustomEvent("bake-activity", { detail: { inflight: n }, bubbles: true })),
