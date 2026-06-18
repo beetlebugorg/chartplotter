@@ -329,20 +329,28 @@ export class ChartPlotterApp extends HTMLElement {
     if (loading) parts.push(`${loading} loading`);
     if (failed) parts.push(`${failed} failed`);
     const head = parts.join(" · ");
-    const STAT = { queued: ["idle", "csp-queued"], loading: ["loading…", "csp-loading"], ready: ["loaded", "csp-ready"], failed: ["failed", "csp-failed"] };
+    const STAT = { loading: ["loading…", "csp-loading"], ready: ["loaded", "csp-ready"], failed: ["failed", "csp-failed"] };
+    // Only list cells that are actually loaded (or loading / failed) — with lazy
+    // loading most installed cells are idle, which is just noise. Each row shows
+    // the chart name first, then the cell code.
     const rows = names.map((n) => {
+      const st = this._cellStatus.get(n) || (this._installed.has(n) ? "queued" : "ready");
+      if (!STAT[st]) return ""; // skip idle/queued cells
       const c = this._byName.get(n);
       const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
-      const st = this._cellStatus.get(n) || (this._installed.has(n) ? "queued" : "ready");
-      const [lbl, cls] = STAT[st] || STAT.queued;
+      const [lbl, cls] = STAT[st];
       const err = st === "failed" ? this._cellError.get(n) : "";
-      // Failed cells show the parse error inline (and as a tooltip) so you can
-      // see why; everything else just shows the chart title on hover.
+      const title = (c && c.l) || n;
       return `<li class="csp-row${err ? " is-fail" : ""}"><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
-        + `<span class="csp-name" title="${esc(err || (c && c.l) || n)}">${esc(n)}`
+        + `<span class="csp-name">`
+        + `<span class="csp-title" title="${esc(title)}">${esc(title)}</span>`
+        + `<span class="csp-code">${esc(n)}</span>`
         + (err ? `<span class="csp-err">${esc(err)}</span>` : "")
         + `</span><span class="csp-stat ${cls}">${lbl}</span></li>`;
     }).join("");
+    const emptyMsg = this._installed.size
+      ? "No charts loaded yet — pan or zoom to chart coverage"
+      : "No charts installed";
     const clearBtn = failed
       ? `<button id="csp-clear-failed" class="csp-clear" type="button">Remove ${failed} failed</button>` : "";
     const u = this._plotter && this._plotter.realtimeStats && this._plotter.realtimeStats();
@@ -357,7 +365,7 @@ export class ChartPlotterApp extends HTMLElement {
       + `</div>` : "";
     pop.innerHTML = `<div class="csp-head"><span>${esc(head)}</span>${clearBtn}</div>`
       + statsHtml
-      + `<ul class="csp-list">${rows || '<li class="csp-empty">No charts installed</li>'}</ul>`;
+      + `<ul class="csp-list">${rows || `<li class="csp-empty">${esc(emptyMsg)}</li>`}</ul>`;
     pop.querySelector("#csp-clear-failed")?.addEventListener("click", (e) => { e.stopPropagation(); this._removeFailedCells(); });
     pop.hidden = false;
   }
@@ -2655,7 +2663,8 @@ export class ChartPlotterApp extends HTMLElement {
         @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
         /* Per-cell status popup, opening upward from the overlay's right edge. */
         #cell-status-pop { position:absolute; right:0; bottom:100%; margin-bottom:10px; z-index:9;
-          width:min(400px,calc(100vw - 24px)); max-height:min(66vh,520px); overflow:auto;
+          width:min(400px,calc(100vw - 24px)); max-height:min(70vh,560px); overflow:hidden;
+          display:flex; flex-direction:column;
           background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:12px;
           box-shadow:0 10px 32px rgba(0,0,0,.24); padding:14px 16px; }
         #cell-status-pop[hidden] { display:none; }
@@ -2669,12 +2678,15 @@ export class ChartPlotterApp extends HTMLElement {
         .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:10px; font:500 12px/1.5 system-ui,sans-serif; white-space:nowrap; }
         .csp-stats span { color:var(--ui-text-dim); text-transform:uppercase; letter-spacing:.03em; font-size:9.5px; white-space:nowrap; flex:none; }
         .csp-stats b { color:var(--ui-text); font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; flex:none; }
-        .csp-list { list-style:none; margin:0; padding:0; }
+        /* The cell list scrolls within the popup; header + stats stay fixed. */
+        .csp-list { list-style:none; margin:0 -4px; padding:0 4px; flex:1 1 auto; min-height:60px; overflow-y:auto; }
         .csp-row { display:flex; align-items:center; gap:10px; padding:8px 0; font:500 12.5px/1.3 system-ui,sans-serif; }
         .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
         .csp-row.is-fail { align-items:flex-start; }
-        .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:2px; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
-        .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; font-variant-numeric:tabular-nums; color:var(--ui-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:3px; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
+        .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; color:var(--ui-text); }
+        .csp-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .csp-code { font-size:11px; color:var(--ui-text-dim); font-variant-numeric:tabular-nums; letter-spacing:.02em; }
         .csp-err { font:500 10.5px/1.35 system-ui,sans-serif; color:#cf3b3b; white-space:normal; word-break:break-word; }
         .csp-stat { flex:none; font-weight:600; font-size:11px; }
         .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
