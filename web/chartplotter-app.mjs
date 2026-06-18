@@ -47,6 +47,25 @@ const BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing
 const BAND_LABEL = { overview: "Overview", general: "General", coastal: "Coastal", approach: "Approach", harbor: "Harbor", berthing: "Berthing" };
 const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a", approach: "#9ccc65", harbor: "#ffa726", berthing: "#ef5350" };
 
+// Curated quick-pick regions for the Charts selector. NOAA's catalog has no
+// human-readable region names (only the 20 numeric `rg` ENC regions), so these
+// are defined by bounding box [w,s,e,n] over the catalog; clicking one selects
+// every cell it covers (band-filtered) and frames the map there. `all:true`
+// (Entire US) selects the whole catalog. Boxes intentionally overlap at edges
+// (e.g. Florida) — a cell can belong to two regions. The Pacific box reaches
+// past the antimeridian (negative wrapped lng, as the catalog stores it) to
+// catch Guam/Mariana/Wake alongside Hawaii.
+const REGIONS = [
+  { id: "ec", name: "US East Coast", bb: [-82, 23.5, -65, 45.5] },
+  { id: "gulf", name: "Gulf Coast", bb: [-98, 24, -80.5, 31] },
+  { id: "wc", name: "US West Coast", bb: [-128, 31, -116.5, 49.5] },
+  { id: "gl", name: "Great Lakes", bb: [-93, 40.5, -74, 49.5] },
+  { id: "ak", name: "Alaska", bb: [-190, 50, -129, 73] },
+  { id: "pac", name: "Hawaii & Pacific", bb: [-230, 0, -150, 30] },
+  { id: "car", name: "Caribbean", bb: [-68.5, 16.5, -64, 19.2] },
+  { id: "all", name: "Entire US", all: true, bb: [-180, 13, -60, 74] },
+];
+
 // Escape text for safe innerHTML insertion (inspector panel renders feature
 // properties straight from the tiles).
 function esc(s) {
@@ -138,8 +157,7 @@ export class ChartPlotterApp extends HTMLElement {
     }
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
     this._agreed = localStorage.getItem(LS_AGREE) === "1"; // NOAA ENC agreement accepted
-    this._areaCells = new Set();        // cell names picked by drag-a-box area selection (union)
-    this._loadAreaCells();
+    this._areaCells = new Set();        // selected cells — seeded from what's downloaded on load (see _seedAreaCells)
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
     // which verb) the server doesn't know. `_poll` is the polling interval handle.
@@ -194,7 +212,7 @@ export class ChartPlotterApp extends HTMLElement {
     // Optional — the picker just shows nothing if absent. Also load the hosted
     // per-district archive manifest (charts-index.json, written by --bake-districts).
     const cat = fetch(this._assets + "catalog.json")
-      .then((r) => (r.ok ? r.json() : null)).then((j) => (j && j.cells) || []).catch(() => [])
+      .then((r) => (r.ok ? r.json() : null)).then((j) => { this._catalogDate = (j && j.date) || ""; return (j && j.cells) || []; }).catch(() => [])
       .then((cells) => { this._catalog = cells; for (const c of cells) this._byName.set(c.n, c); });
     const man = fetch(this._assets + "charts-index.json")
       .then((r) => (r.ok ? r.json() : null)).then((j) => { this._districts = (j && j.districts) || []; }).catch(() => { this._districts = []; });
@@ -217,22 +235,49 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
     this.renderCharts();
     this._assessCoverage();
+    // If the user opened Charts before the renderer was ready (the drawer's
+    // already on the charts panel), engage selection mode now that the map exists
+    // — otherwise they'd be left in a half state (panel open, map not framed). The
+    // drawer's resize already fired (map was null then), so size + frame directly.
+    if (this._section === "charts" && this._drawerOpen()) {
+      this._enterChartsMode();
+      this._pendingChartsFrame = false;
+      map.resize();
+      this._frameChartsWorld();
+    }
     // Refresh-resume: if a provision job is still running on the server, re-attach
     // (show the pill + start polling). A finished/idle task is ignored.
     this._reattachTask();
 
     // Persist the view so a refresh resumes where you were; refresh the coverage
     // panel's in-view cell list for the new viewport.
-    map.on("moveend", () => { this.saveView(); this._assessCoverage(); });
+    map.on("moveend", () => {
+      this.saveView();
+      this._assessCoverage();
+      // Keep the Charts panel's "in view" cell list in step with the map when no
+      // search query is pinning it to catalog-wide matches.
+      if (this._chartsMode && this._drawerOpen() && !(this._cellQuery || "").trim()) this._renderCellListInto();
+    });
 
     // Live zoom/scale/band readout (left of the statusbar).
     this._updateHud();
     map.on("move", () => this._updateHud());
 
     // Close any pinned band-pill popup when clicking elsewhere (pill/cell clicks
-    // stopPropagation, so this only fires for clicks outside them).
-    this.shadowRoot.addEventListener("click", () => {
+    // stopPropagation, so this only fires for clicks outside them). Also tuck the
+    // on-map search back into its tab when clicking away while it's empty (map
+    // clicks bubble out of the renderer's shadow root to here).
+    this.shadowRoot.addEventListener("click", (e) => {
       this.shadowRoot.querySelectorAll(".sb-band-wrap.open").forEach((w) => w.classList.remove("open"));
+      const search = this.shadowRoot.getElementById("search");
+      if (search && !search.hidden) {
+        const onSearch = e.composedPath().some((n) => n === search || (n.id === "search-tab"));
+        const si = this.shadowRoot.getElementById("search-input");
+        if (!onSearch && !(si && si.value.trim())) {
+          search.hidden = true;
+          this.shadowRoot.getElementById("search-tab").hidden = false;
+        }
+      }
     });
   }
 
@@ -304,7 +349,7 @@ export class ChartPlotterApp extends HTMLElement {
   // overlap, so "contains the centre" can't pick THE district — but it reliably
   // answers "is the centre covered at all", which is all we need here.)
   _frameInitial() {
-    if (loadJSON(LS_VIEW, null) || !this._districts.length) return;
+    if (this._chartsMode || loadJSON(LS_VIEW, null) || !this._districts.length) return;
     const c = this._map.getCenter();
     const covered = (d) => d.bounds && c.lng >= d.bounds[0] && c.lng <= d.bounds[2] && c.lat >= d.bounds[1] && c.lat <= d.bounds[3];
     if (this._districts.some(covered)) return;
@@ -404,7 +449,7 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
     this.shadowRoot.getElementById("empty").hidden = true;
     this.renderCharts();
-    this._setCellOverlay(true);
+    this._enterChartsMode();
     this.setDrawerOpen(true);
   }
 
@@ -578,8 +623,12 @@ export class ChartPlotterApp extends HTMLElement {
     if (!el) return;
     this.shadowRoot.getElementById("dtitle").textContent = "Charts";
     el.innerHTML = `
-      ${this._renderAreaSelect()}
+      ${this._renderRegions()}
+      ${this._renderToolToggle()}
+      ${this._renderCellSearch()}
+      ${this._renderSelectionBar()}
       ${this._renderBandToggles()}
+      ${this._renderCellList()}
       ${this._renderOwned()}
       <details class="import-more">
         <summary>Import from a file</summary>
@@ -587,12 +636,119 @@ export class ChartPlotterApp extends HTMLElement {
         <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
         <div id="import-log" class="muted"></div>
         <div id="archive-list"></div>
-      </details>`;
-    this._wireAreaSelect();
+      </details>
+      ${this._renderDataFreshness()}`;
+    this._wireRegions();
+    this._wireToolToggle();
+    this._wireCellSearch();
+    this._wireSelectionBar();
     this._wireBandToggles();
+    this._wireCellList();
     this.shadowRoot.getElementById("owned-remove")?.addEventListener("click", () => this._removeDownloaded());
     this.shadowRoot.getElementById("owned-rebake")?.addEventListener("click", () => this._rebakeDownloaded());
     this._wireImport();
+  }
+
+  // Quick-pick geographic regions: one click selects every catalog cell the
+  // region covers (band-filtered) and frames the map there. A fast path to a
+  // whole coast; box-select + search refine from there.
+  _renderRegions() {
+    const chips = REGIONS.map((rgn) => {
+      const cells = this._regionCells(rgn);
+      const on = cells.length > 0 && cells.every((n) => this._areaCells.has(n)); // fully selected → active
+      return `<button class="region-btn${on ? " on" : ""}" data-region="${rgn.id}" title="${on ? "Click to deselect" : "Select"} · ${cells.length} chart${cells.length !== 1 ? "s" : ""}">${rgn.name}<span class="rb-n">${cells.length}</span></button>`;
+    }).join("");
+    const any = this._areaCells.size > 0;
+    return `<div class="set-section">
+      <div class="rg-head"><h3>Jump to a region</h3>${any ? `<button class="linkbtn rg-clear" id="rg-clear">Reset selection</button>` : ""}</div>
+      <div class="region-grid">${chips}</div>
+    </div>`;
+  }
+  _regionCells(rgn) {
+    const out = [];
+    for (const c of this._catalog) {
+      const b = c.bb;
+      if (!Array.isArray(b) || b.length !== 4 || !this._bandOn(c)) continue;
+      if (rgn.all || !(b[2] < rgn.bb[0] || b[0] > rgn.bb[2] || b[3] < rgn.bb[1] || b[1] > rgn.bb[3])) out.push(c.n);
+    }
+    return out;
+  }
+  _wireRegions() {
+    this.shadowRoot.querySelectorAll(".region-btn[data-region]").forEach((b) =>
+      (b.onclick = () => this._selectRegion(b.dataset.region)));
+    this.shadowRoot.getElementById("rg-clear")?.addEventListener("click", () => this._clearArea());
+  }
+  // Region buttons are toggles: if the region is fully selected, clicking clears
+  // its cells; otherwise it adds them. No map movement — the selection just lights
+  // up in place on the zoomed-out map (cells shared with another region follow
+  // this region's footprint).
+  _selectRegion(id) {
+    const rgn = REGIONS.find((r) => r.id === id);
+    if (!rgn) return;
+    const cells = this._regionCells(rgn);
+    const on = cells.length > 0 && cells.every((n) => this._areaCells.has(n));
+    if (on) for (const n of cells) this._areaCells.delete(n);
+    else for (const n of cells) this._areaCells.add(n);
+    this._saveAreaCells();
+    this._refreshCellSel();
+    this.renderCharts();
+  }
+
+  // Find-a-chart search box (filters the cell list below over the whole catalog).
+  _renderCellSearch() {
+    const q = this._cellQuery || "";
+    return `<input id="cell-search" class="region-search" type="search" placeholder="Search a port or chart name…" autocomplete="off" spellcheck="false" value="${esc(q)}">`;
+  }
+  _wireCellSearch() {
+    const i = this.shadowRoot.getElementById("cell-search");
+    if (!i) return;
+    i.oninput = () => { this._cellQuery = i.value; this._renderCellListInto(); };
+  }
+
+  // Pan ⇄ Select tool toggle. Box-select (the default) disables map-drag, so this
+  // is how you switch back to panning the map; zoom (wheel/pinch) works in both.
+  _renderToolToggle() {
+    const sel = this._selectTool !== false;
+    return `<div class="tool-seg seg">
+      <button data-tool="select" class="${sel ? "sel" : ""}">▭ Select</button>
+      <button data-tool="pan" class="${sel ? "" : "sel"}">✋ Pan</button>
+    </div>`;
+  }
+  _wireToolToggle() {
+    this.shadowRoot.querySelectorAll(".tool-seg [data-tool]").forEach((b) =>
+      (b.onclick = () => this._setSelectTool(b.dataset.tool === "select")));
+  }
+
+  // The selection bar: live count + size + Download/Clear once cells are picked,
+  // a hint otherwise. Box-select is armed by default, so no "pick" button here.
+  _renderSelectionBar() {
+    let bytes = 0, have = 0;
+    for (const n of this._effectiveAreaCells()) {
+      const c = this._byName.get(n);
+      if (c) { have++; if (typeof c.zs === "number") bytes += c.zs; }
+    }
+    const busy = this._taskRunning();
+    if (!have) {
+      return `<div class="sel-bar empty"><span class="muted">Pick charts: tap a region, drag a box on the map, or search below.</span></div>`;
+    }
+    const mb = (bytes / 1e6).toFixed(1);
+    return `<div class="sel-bar">
+      <div class="sel-count"><b>${have}</b> chart${have !== 1 ? "s" : ""} selected <span class="muted">· ~${mb} MB</span></div>
+      <button class="add-dl" id="area-dl"${busy ? " disabled" : ""}>${busy ? "Downloading…" : `⬇ Download ${have} chart${have !== 1 ? "s" : ""}`}</button>
+      <button class="linkbtn" id="area-clear"${busy ? " disabled" : ""}>Clear selection</button>
+    </div>`;
+  }
+  _wireSelectionBar() {
+    const r = this.shadowRoot;
+    r.getElementById("area-dl")?.addEventListener("click", () => this._downloadArea());
+    r.getElementById("area-clear")?.addEventListener("click", () => this._clearArea());
+  }
+
+  // NOAA data freshness footer (req: show when the catalog data is from).
+  _renderDataFreshness() {
+    if (!this._catalogDate) return "";
+    const total = this._catalog.length.toLocaleString();
+    return `<div class="data-fresh">NOAA chart data current as of <b>${fmtIssue(this._catalogDate)}</b> · ${total} charts available</div>`;
   }
 
   // Navigational-purpose band on/off chips — control which cells the selector
@@ -682,25 +838,30 @@ export class ChartPlotterApp extends HTMLElement {
   // and they accumulate without re-downloading overlaps). Downloading bakes the
   // whole union into ONE charts-user.pmtiles, so you get a small package fast.
 
-  _loadAreaCells() {
-    const arr = loadJSON(LS_AREACELLS, null);
-    if (Array.isArray(arr)) for (const n of arr) this._areaCells.add(n);
-  }
   _saveAreaCells() {
     try { localStorage.setItem(LS_AREACELLS, JSON.stringify(Array.from(this._areaCells))); } catch {}
   }
-  // Seed the set from the server's existing bake so the summary reflects it even
-  // on a fresh browser. Union with whatever was in localStorage.
+  // Default the selection to exactly what's already downloaded on this device, so
+  // the selector opens reflecting the charts you have (edit from there). This is
+  // authoritative on load — it replaces any stale persisted selection that may
+  // have drifted from what was actually downloaded.
   async _seedAreaCells() {
+    const have = new Set();
+    // 1) the map-selected bake (charts-user.pmtiles) — the server's record of it.
     try {
       const r = await fetch("charts/charts-user.json?t=" + Date.now());
-      if (!r.ok) return;
-      const j = await r.json();
-      if (j && Array.isArray(j.cells) && j.cells.length) {
-        for (const n of j.cells) this._areaCells.add(n);
-        this._saveAreaCells();
-      }
+      if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.cells)) for (const n of j.cells) have.add(n); }
     } catch {}
+    // 2) locally imported cells (OPFS).
+    for (const n of this._installed) have.add(n);
+    // 3) every catalog cell covered by a downloaded NOAA region archive.
+    if (this._dlRegions && this._dlRegions.size) {
+      for (const c of this._catalog) {
+        if (Array.isArray(c.rg) && c.rg.some((n) => this._dlRegions.has(n))) have.add(c.n);
+      }
+    }
+    this._areaCells = have;
+    this._saveAreaCells();
   }
 
   // Selector bands (navigational purpose) the user has enabled. Default: all.
@@ -746,6 +907,14 @@ export class ChartPlotterApp extends HTMLElement {
       const b = this._map.unproject([Math.max(start[0], p[0]), Math.max(start[1], p[1])]);
       return [Math.min(a.lng, b.lng), Math.min(a.lat, b.lat), Math.max(a.lng, b.lng), Math.max(a.lat, b.lat)];
     };
+    // resetDrag clears the in-progress rectangle but leaves the tool ARMED — the
+    // selector stays live across drags (box-select is the default Charts gesture),
+    // so you can grab area after area without re-arming. Full teardown is cleanup.
+    const resetDrag = () => {
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+      box = null; start = null;
+      this._setPreviewBox(null);
+    };
     const cleanup = () => {
       map.removeEventListener("mousedown", onDown);
       map.removeEventListener("mousemove", onMove);
@@ -753,9 +922,7 @@ export class ChartPlotterApp extends HTMLElement {
       map.removeEventListener("touchstart", onDown);
       map.removeEventListener("touchmove", onMove);
       window.removeEventListener("touchend", onUp);
-      if (box && box.parentNode) box.parentNode.removeChild(box);
-      box = null; start = null;
-      this._setPreviewBox(null);
+      resetDrag();
       if (this._map) { this._map.dragPan.enable(); }
       map.style.cursor = prevCursor;
       this._areaCleanup = null;
@@ -782,12 +949,14 @@ export class ChartPlotterApp extends HTMLElement {
       this._setPreviewBox(geoBox(p)); // live amber preview of cells under the box
     };
     const onUp = (ev) => {
-      if (!start) { cleanup(); return; }
+      if (!start) return;
       const p = ev.changedTouches ? ptOf({ touches: [ev.changedTouches[0]] }) : ptOf(ev);
       const dx = Math.abs(p[0] - start[0]), dy = Math.abs(p[1] - start[1]);
-      const bbox = dx >= 5 && dy >= 5 ? geoBox(p) : null;
-      cleanup();
+      const drag = dx >= 5 && dy >= 5;
+      const bbox = drag ? geoBox(p) : null;
+      resetDrag(); // stay armed for the next box
       if (bbox) this._addAreaBox(bbox); // commit; re-renders the panel + selected fill
+      else this._pickCellAt(p); // a plain click inspects the single cell under it
     };
     map.addEventListener("mousedown", onDown);
     map.addEventListener("mousemove", onMove);
@@ -799,6 +968,23 @@ export class ChartPlotterApp extends HTMLElement {
 
   // Tear down an armed/active box-drag (leaving Charts mode, Home, etc.).
   _cancelAreaSelect() { if (this._areaCleanup) this._areaCleanup(); }
+
+  // A plain click in select mode: focus the finest (largest-scale) enabled cell
+  // whose footprint contains the clicked point — highlights it on the map and
+  // opens its detail in the panel, so you can inspect/add one cell at a time.
+  _pickCellAt([px, py]) {
+    if (!this._map) return;
+    const ll = this._map.unproject([px, py]);
+    let best = null;
+    for (const c of this._catalog) {
+      const b = c.bb;
+      if (!Array.isArray(b) || b.length !== 4 || !this._bandOn(c)) continue;
+      if (ll.lng >= b[0] && ll.lng <= b[2] && ll.lat >= b[1] && ll.lat <= b[3]) {
+        if (!best || (c.s || 0) < (best.s || 0)) best = c; // finest = smallest scale denom
+      }
+    }
+    if (best) this._focusListCell(best.n, false);
+  }
 
   // Add every catalog cell whose bbox intersects the drawn box to the union.
   _addAreaBox([w, s, e, n]) {
@@ -848,32 +1034,106 @@ export class ChartPlotterApp extends HTMLElement {
     this._startPolling();
   }
 
-  // The area-selection panel rendered above the region list: pick-on-map button
-  // plus a live count + estimated size + download/clear once cells are picked.
-  _renderAreaSelect() {
-    let bytes = 0, have = 0;
-    for (const n of this._effectiveAreaCells()) {
-      const c = this._byName.get(n);
-      if (c) { have++; if (typeof c.zs === "number") bytes += c.zs; }
-    }
-    const busy = this._taskRunning();
-    let body = `<button class="cta" id="area-pick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="1.5" stroke-dasharray="4 3.2"/><path d="M12 9v6M9 12h6"/></svg>Select area on map</button>`;
-    if (have > 0) {
-      const mb = (bytes / 1e6).toFixed(1);
-      body += `<div class="muted" style="margin:8px 0 6px">${have} chart${have !== 1 ? "s" : ""} selected · ~${mb} MB</div>`;
-      body += `<button class="add-dl" id="area-dl"${busy ? " disabled" : ""}>${busy ? "Downloading…" : `⬇ Download ${have} chart${have !== 1 ? "s" : ""}`}</button>`;
-      body += `<button class="linkbtn" id="area-clear"${busy ? " disabled" : ""}>Clear selection</button>`;
-    } else {
-      body += `<div class="muted" style="margin-top:8px">Drag a box on the map to grab the charts inside it.</div>`;
-    }
-    return `<div class="area-select">${body}</div>`;
+  // -- cell list (browse + inspect, req: detailed list & cell info) --------
+  // The browsable list under the search box. With a query, lists catalog matches;
+  // otherwise lists the cells in the current viewport (band-filtered, finest
+  // first), capped so a world-zoom view stays manageable. Selected cells are
+  // ticked; clicking a row highlights the cell on the map and expands its detail.
+  _cellListCells() {
+    const q = (this._cellQuery || "").trim().toLowerCase();
+    let cells;
+    if (q.length >= 2) {
+      cells = this._catalog.filter((c) => Array.isArray(c.bb) && c.bb.length === 4 && this._bandOn(c) &&
+        ((c.l || "").toLowerCase().includes(q) || c.n.toLowerCase().includes(q)));
+      cells.sort((a, b) => (b.s || 0) - (a.s || 0)); // coarsest first — overview lands first
+    } else if (this._map) {
+      const b = this._map.getBounds();
+      const vw = b.getWest(), ve = b.getEast(), vs = b.getSouth(), vn = b.getNorth();
+      cells = this._catalog.filter((c) => Array.isArray(c.bb) && c.bb.length === 4 && this._bandOn(c) &&
+        !(c.bb[2] < vw || c.bb[0] > ve || c.bb[3] < vs || c.bb[1] > vn));
+      cells.sort((a, z) => (a.s || 0) - (z.s || 0) || a.n.localeCompare(z.n)); // finest first
+    } else cells = [];
+    return cells;
   }
-
-  _wireAreaSelect() {
-    const root = this.shadowRoot;
-    root.getElementById("area-pick")?.addEventListener("click", () => this._enterAreaSelect());
-    root.getElementById("area-dl")?.addEventListener("click", () => this._downloadArea());
-    root.getElementById("area-clear")?.addEventListener("click", () => this._clearArea());
+  _renderCellList() {
+    return `<div class="set-section cell-list-sec">
+      <h3 id="cell-list-head"></h3>
+      <div id="cell-list"></div>
+    </div>`;
+  }
+  _renderCellListInto() {
+    const list = this.shadowRoot.getElementById("cell-list");
+    const head = this.shadowRoot.getElementById("cell-list-head");
+    if (!list || !head) return;
+    const q = (this._cellQuery || "").trim();
+    const all = this._cellListCells();
+    const CAP = 250;
+    const cells = all.slice(0, CAP);
+    head.textContent = q.length >= 2
+      ? `${all.length} match${all.length !== 1 ? "es" : ""}`
+      : `${all.length} chart${all.length !== 1 ? "s" : ""} in view`;
+    if (!cells.length) {
+      list.innerHTML = `<div class="cl-empty">${q.length >= 2 ? "No charts match." : "Zoom to some coverage, or pick a region above."}</div>`;
+      return;
+    }
+    list.innerHTML = cells.map((c) => this._renderCellRow(c)).join("") +
+      (all.length > CAP ? `<div class="cl-more">+${(all.length - CAP).toLocaleString()} more — zoom in or search to narrow.</div>` : "");
+    list.querySelectorAll(".cl-row[data-name]").forEach((row) => {
+      const name = row.dataset.name;
+      row.querySelector(".cl-main").onclick = () => this._focusListCell(name, true);
+      const tg = row.querySelector(".cl-toggle");
+      if (tg) tg.onclick = (e) => { e.stopPropagation(); this._toggleAreaCell(name); };
+    });
+  }
+  _renderCellRow(c) {
+    const band = bandForScale(c.s);
+    const sel = this._areaCells.has(c.n);
+    const open = this._focusedCell === c.n;
+    return `<div class="cl-row${open ? " open" : ""}${sel ? " sel" : ""}" data-name="${c.n}">
+      <div class="cl-main">
+        <span class="cl-dot" style="background:${BAND_COLOR[band]}"></span>
+        <span class="cl-text"><span class="cl-title">${esc(c.l || c.n)}</span><span class="cl-sub">${c.n} · 1:${(c.s || 0).toLocaleString()}</span></span>
+        <button class="cl-toggle${sel ? " on" : ""}" title="${sel ? "Remove from selection" : "Add to selection"}">${sel ? "✓" : "+"}</button>
+      </div>
+      ${open ? this._renderCellDetail(c) : ""}
+    </div>`;
+  }
+  _renderCellDetail(c) {
+    const band = bandForScale(c.s), f = freshness(c.d);
+    const mb = typeof c.zs === "number" ? `~${(c.zs / 1e6).toFixed(1)} MB` : "—";
+    const ed = c.e ? `Ed ${c.e}/${c.u ?? 0}` : "—";
+    const rg = Array.isArray(c.rg) && c.rg.length ? c.rg.join(", ") : "—";
+    return `<div class="cl-detail">
+      <span class="k">Band</span><span class="v"><span class="cl-dot sm" style="background:${BAND_COLOR[band]}"></span>${BAND_LABEL[band]}</span>
+      <span class="k">Scale</span><span class="v">1:${(c.s || 0).toLocaleString()}</span>
+      <span class="k">Edition</span><span class="v">${ed}</span>
+      <span class="k">Issued</span><span class="v">${fmtIssue(c.d)} <span class="fresh ${f.cls}">${f.label}</span></span>
+      <span class="k">Size</span><span class="v">${mb}</span>
+      <span class="k">NOAA region</span><span class="v">${rg}</span>
+    </div>`;
+  }
+  _wireCellList() { this._renderCellListInto(); }
+  _toggleAreaCell(name) {
+    if (this._areaCells.has(name)) this._areaCells.delete(name); else this._areaCells.add(name);
+    this._saveAreaCells();
+    this._refreshCellSel();
+    // Re-render the selection bar + list in place (keep the rest of the panel).
+    const bar = this.shadowRoot.querySelector(".sel-bar");
+    if (bar) bar.outerHTML = this._renderSelectionBar(), this._wireSelectionBar();
+    this._renderCellListInto();
+  }
+  // Focus one cell: outline + frame it on the map, open its detail row.
+  _focusListCell(name, frame) {
+    const c = this._byName.get(name);
+    if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) return;
+    this._focusedCell = this._focusedCell === name ? null : name; // click again to collapse
+    const [w, s, e, n] = c.bb;
+    const src = this._map && this._map.getSource("focus");
+    if (src) src.setData(this._focusedCell
+      ? { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } }] }
+      : { type: "FeatureCollection", features: [] });
+    if (this._focusedCell && frame && this._map) this._map.fitBounds([[w, s], [e, n]], { padding: 60, maxZoom: 11, duration: 600 });
+    this._renderCellListInto();
   }
 
   // Remove ALL regions at once (DELETE /api/charts), then reflect empty by
@@ -906,6 +1166,10 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   saveView() {
+    // Don't persist the Charts-mode selection framing (the zoomed-out world view):
+    // a refresh should resume where the user was actually looking at charts, not
+    // on the picker. The pre-Charts position stays the last saved view.
+    if (this._chartsMode) return;
     const c = this._map.getCenter();
     try { localStorage.setItem(LS_VIEW, JSON.stringify({ center: [c.lng, c.lat], zoom: this._map.getZoom() })); } catch {}
   }
@@ -921,7 +1185,7 @@ export class ChartPlotterApp extends HTMLElement {
     map.addLayer({ id: "focus-line", type: "line", source: "focus", paint: { "line-color": "#1565c0", "line-width": 2.5 } });
     // All catalog cells, shown only while selecting. `sel`=1 → already chosen.
     map.addSource("selcells", { type: "geojson", data: empty });
-    map.addLayer({ id: "selcells-line", type: "line", source: "selcells", layout: { visibility: "none" }, paint: { "line-color": "#1565c0", "line-opacity": 0.3, "line-width": 0.5 } });
+    map.addLayer({ id: "selcells-line", type: "line", source: "selcells", layout: { visibility: "none" }, paint: { "line-color": "#1565c0", "line-opacity": 0.42, "line-width": 0.6 } });
     map.addLayer({ id: "selcells-fill", type: "fill", source: "selcells", filter: ["==", ["get", "sel"], 1], layout: { visibility: "none" }, paint: { "fill-color": "#1565c0", "fill-opacity": 0.18 } });
     map.addLayer({ id: "selcells-sel-line", type: "line", source: "selcells", filter: ["==", ["get", "sel"], 1], layout: { visibility: "none" }, paint: { "line-color": "#1565c0", "line-width": 1.3 } });
     // Live preview of cells under the current drag box.
@@ -1128,6 +1392,53 @@ export class ChartPlotterApp extends HTMLElement {
     }
   }
 
+  // Copy a debug snapshot of the current inspector selection — the picked
+  // feature's source/layer, baked properties, and GeoJSON geometry (the exact
+  // lon/lat MapLibre read from the tile, for diagnosing placement) plus the map
+  // view — to the clipboard AND POST it to /api/debug so it can be pulled
+  // server-side. Works on a plain-http LAN origin via copyText's fallback.
+  async _copyInspectDebug(btn) {
+    const m = this._map;
+    let view = null;
+    if (m) {
+      const c = m.getCenter();
+      view = { center: [+c.lng.toFixed(6), +c.lat.toFixed(6)], zoom: +m.getZoom().toFixed(3), bearing: +m.getBearing().toFixed(1) };
+    }
+    const feats = this._inspectFeats || [];
+    const pick = this._inspectMulti ? feats.slice(0, 80) : (feats.length ? [feats[Math.min(this._inspectIdx, feats.length - 1)]] : []);
+    // Render diagnostics: do the complex-linestyle SYMBOL layers (lc-marks) exist,
+    // are their images registered, and do they actually place anything in view?
+    // (Pins "lines show but symbols don't" without a screenshot.)
+    let render = null;
+    if (m && m.getStyle) {
+      const layers = (m.getStyle().layers || []).map((l) => l.id);
+      const markIds = layers.filter((id) => id.startsWith("lc-marks"));
+      const lineIds = layers.filter((id) => /^lc-line/.test(id));
+      const cnt = (ids) => { if (!ids.length) return 0; try { return m.queryRenderedFeatures({ layers: ids }).length; } catch { return -1; } };
+      const images = {};
+      for (const n of ["EMAREMG1", "EMAREGR1", "EMACHRE2", "EMCBLSU1", "EMRESAR1", "EMRECTR1"]) {
+        images[n] = !!(m.hasImage && m.hasImage(n));
+      }
+      render = {
+        markLayerCount: markIds.length,
+        markFeaturesInView: cnt(markIds),
+        complexLineFeaturesInView: cnt(lineIds),
+        markImagesRegistered: images,
+      };
+    }
+    const snap = {
+      when: new Date().toISOString(),
+      view,
+      count: feats.length,
+      features: pick.map((f) => ({ source: f.source, sourceLayer: f.sourceLayer, geometry: f.geometry, properties: f.properties })),
+      render,
+    };
+    const text = JSON.stringify(snap, null, 2);
+    const ok = await copyText(text);
+    fetch("api/debug", { method: "POST", headers: { "content-type": "application/json" }, body: text }).catch(() => {});
+    flashBtn(btn, ok ? "✓" : "✗");
+  }
+
   // Isolate one feature from the area list: paint it cyan over the dim red set
   // and mark its card, so you can see its exact footprint and judge overlap.
   _focusInspectFeature(i) {
@@ -1239,6 +1550,96 @@ export class ChartPlotterApp extends HTMLElement {
   _refreshCellSel() {
     const s = this._map && this._map.getSource("selcells");
     if (s) s.setData(this._cellsFC(this._catalog, true));
+  }
+
+  // -- chart-select map mode ----------------------------------------------
+  // Charts view turns the map into a dedicated selection surface: the rendered
+  // ENC symbology is hidden so only the offline basemap (land/sea) + the catalog
+  // cell boxes show, framed out to a wide overview, with box-select armed. Home
+  // restores the chart render and the view you came from.
+
+  // Toggle visibility of the ENC render: every per-band chart layer
+  // (source:"chart-…") plus the world "no chart data" hatch. The offline basemap
+  // (source:"coastline"), the sea background, and the selection overlays stay put,
+  // so Charts mode reads as a clean land/sea map with just the cell boxes on top.
+  _setChartLayersVisible(on) {
+    const map = this._map;
+    if (!map || !map.getStyle) return;
+    const vis = on ? "visible" : "none";
+    for (const l of map.getStyle().layers || []) {
+      if ((l.source && l.source.startsWith("chart-")) || l.id === "nodata") map.setLayoutProperty(l.id, "visibility", vis);
+    }
+  }
+
+  // Enter selection mode: hide the ENC render, show the cell overlay, frame to a
+  // wide view (remembering where we were so Home can fly back), and arm box-select.
+  _enterChartsMode() {
+    if (!this._map) return;
+    const first = !this._chartsMode;
+    if (first) this._preChartsView = { center: this._map.getCenter(), zoom: this._map.getZoom() };
+    this._chartsMode = true;
+    this._setChartLayersVisible(false);
+    this._setCellOverlay(true);
+    const wb = this.shadowRoot.getElementById("world-btn");
+    if (wb) wb.hidden = false; // "All charts" jump-to-world control
+    if (this._selectTool !== false) this._enterAreaSelect(); // box-select is the default tool
+    // Zoom all the way out so every catalog cell is in frame at once (small) — the
+    // "show the world" selection map. Framed after the drawer finishes opening (it
+    // resizes the map at ~230ms) so the coverage centres in the narrower map area
+    // rather than the full pre-open width. See setDrawerOpen's resize callback.
+    if (first) this._pendingChartsFrame = true;
+  }
+  // Extent that frames essentially all NOAA coverage, centred on the bulk (cached).
+  // Uses the 2nd–98th percentile of cell centres rather than the raw union: a
+  // handful of far-flung EEZ/territory cells (Guam, American Samoa, the Arctic,
+  // mid-Atlantic) would otherwise stretch the box across an empty ocean and push
+  // the mainland into a corner. Those outliers are a region-button tap away.
+  _catalogBounds() {
+    if (this._catBounds) return this._catBounds;
+    const xs = [], ys = [];
+    for (const c of this._catalog) {
+      const b = c.bb;
+      if (!Array.isArray(b) || b.length !== 4) continue;
+      xs.push((b[0] + b[2]) / 2); ys.push((b[1] + b[3]) / 2);
+    }
+    if (!xs.length) return null;
+    xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+    const q = (arr, p) => arr[Math.floor((arr.length - 1) * p)];
+    this._catBounds = [[q(xs, 0.02) - 2, Math.max(q(ys, 0.02) - 2, -84)], [q(xs, 0.98) + 2, Math.min(q(ys, 0.98) + 2, 84)]];
+    return this._catBounds;
+  }
+  // Frame the selection map to the full coverage extent, centred in the visible
+  // (drawer-open) map area.
+  _frameChartsWorld() {
+    const b = this._catalogBounds();
+    if (this._map && b) this._map.fitBounds(b, { padding: 26, duration: 400 });
+  }
+
+  // Leave selection mode: disarm box-select, restore the ENC render + the
+  // pre-Charts view, drop the cell overlay.
+  _exitChartsMode() {
+    this._cancelAreaSelect();
+    this._setCellOverlay(false);
+    this._clearFocus();
+    const wb = this.shadowRoot.getElementById("world-btn");
+    if (wb) wb.hidden = true;
+    if (!this._chartsMode) return;
+    this._chartsMode = false;
+    this._setChartLayersVisible(true);
+    if (this._preChartsView && this._map) {
+      const v = this._preChartsView;
+      this._preChartsView = null;
+      // Defer past the drawer-close resize (230ms) so the restore isn't truncated.
+      setTimeout(() => { if (!this._chartsMode && this._map) this._map.easeTo({ center: v.center, zoom: v.zoom, duration: 400 }); }, 280);
+    }
+  }
+
+  // Pan ⇄ Select toggle (box-select disables map drag, so this hands panning back).
+  _setSelectTool(on) {
+    this._selectTool = on;
+    if (on) this._enterAreaSelect(); else this._cancelAreaSelect();
+    this.shadowRoot.querySelectorAll(".tool-seg [data-tool]").forEach((b) =>
+      b.classList.toggle("sel", b.dataset.tool === (on ? "select" : "pan")));
   }
 
   // Live amber preview of the cells the current drag box ([w,s,e,n]) will grab.
@@ -1534,6 +1935,7 @@ export class ChartPlotterApp extends HTMLElement {
         W = Math.min(W, b[0]); S = Math.min(S, b[1]); E = Math.max(E, b[2]); N = Math.max(N, b[3]); any = true;
       }
     }
+    if (this._chartsMode) return; // user already opened the selection map — don't yank it
     if (any && this._map) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
   }
 
@@ -1683,9 +2085,6 @@ export class ChartPlotterApp extends HTMLElement {
         .band-chip .sw { width:11px; height:11px; border-radius:3px; }
         .band-chip.off { opacity:.38; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
-        .area-select { margin-bottom:14px; }
-        .area-select .cta { width:100%; }
-        .area-select .linkbtn { padding-top:4px; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
         .cta { flex:1; background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:8px; padding:11px 12px; font:inherit;
@@ -1750,6 +2149,7 @@ export class ChartPlotterApp extends HTMLElement {
         .region-empty { color:var(--ui-text-faint); text-align:center; padding:20px; }
         /* "On this device" coverage rows */
         .owned-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 2px; border-bottom:1px solid var(--ui-border-2); }
+        .owned-row:last-of-type { border-bottom:none; }
         .owned-row b { font-weight:600; }
         .owned-actions { display:flex; align-items:center; gap:12px; flex:none; }
         .region-title { margin:4px 0 2px; font-size:16px; }
@@ -1773,6 +2173,45 @@ export class ChartPlotterApp extends HTMLElement {
         /* settings */
         .set-section { margin:0 0 22px; }
         .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 4px; font-weight:700; }
+        /* charts selector: region quick-picks */
+        .rg-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+        .rg-head > h3 { margin-bottom:8px; }
+        .rg-clear { padding:0 0 8px; font-size:12px; }
+        .region-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+        .region-btn { display:flex; align-items:center; justify-content:space-between; gap:8px; border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text); border-radius:8px; padding:9px 11px; font:inherit; font-size:13px; font-weight:500; cursor:pointer; text-align:left; }
+        .region-btn:hover { background:var(--ui-hover); border-color:var(--ui-accent); }
+        .region-btn .rb-n { color:var(--ui-text-faint); font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; }
+        .region-btn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
+        .region-btn.on .rb-n { color:var(--ui-accent-text); opacity:.8; }
+        /* pan/select map-tool toggle */
+        .tool-seg { display:flex; width:100%; margin:0 0 12px; }
+        .tool-seg button { flex:1; }
+        /* selection bar */
+        .sel-bar { margin:0 0 16px; }
+        .sel-bar.empty { background:var(--ui-surface-2); border-radius:8px; padding:10px 12px; }
+        .sel-bar.empty .muted { font-size:12px; line-height:1.45; }
+        .sel-bar .sel-count { margin-bottom:8px; font-size:13px; }
+        /* cell list (browse + inspect) */
+        .cell-list-sec { margin-bottom:18px; }
+        .cl-row { border-bottom:1px solid var(--ui-border-2); }
+        .cl-row:last-child { border-bottom:none; }
+        .cl-main { display:flex; align-items:center; gap:9px; padding:8px 2px; cursor:pointer; }
+        .cl-main:hover, .cl-row.open > .cl-main { background:var(--ui-hover); }
+        .cl-dot { width:10px; height:10px; border-radius:3px; flex:none; }
+        .cl-dot.sm { width:9px; height:9px; display:inline-block; vertical-align:-1px; margin-right:5px; border-radius:2px; }
+        .cl-text { flex:1; min-width:0; display:flex; flex-direction:column; }
+        .cl-title { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cl-sub { color:var(--ui-text-faint); font-size:12px; font-variant-numeric:tabular-nums; }
+        .cl-toggle { flex:none; width:26px; height:26px; border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:7px; cursor:pointer; font-size:14px; line-height:1; display:inline-flex; align-items:center; justify-content:center; }
+        .cl-toggle:hover { border-color:var(--ui-accent); color:var(--ui-accent); }
+        .cl-toggle.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
+        .cl-detail { padding:4px 2px 12px 31px; display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:12px; }
+        .cl-detail .k { color:var(--ui-text-faint); }
+        .cl-detail .v { color:var(--ui-text); }
+        .cl-empty { color:var(--ui-text-faint); font-size:13px; text-align:center; padding:14px 0; }
+        .cl-more { color:var(--ui-text-faint); font-size:12px; text-align:center; padding:10px 0 2px; }
+        /* NOAA data freshness footer */
+        .data-fresh { color:var(--ui-text-faint); font-size:11.5px; text-align:center; line-height:1.5; padding:14px 0 4px; border-top:1px solid var(--ui-border-2); margin-top:4px; }
         .set-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:10px 0; border-bottom:1px solid var(--ui-border-2); }
         .set-row:last-child { border-bottom:none; }
         .set-row .lbl { display:flex; flex-direction:column; min-width:0; }
@@ -1900,7 +2339,8 @@ export class ChartPlotterApp extends HTMLElement {
         .ins-kv { display:grid; grid-template-columns:minmax(80px,auto) 1fr; gap:3px 12px; padding:8px 10px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .ins-kv .k { color:var(--ui-text-dim); }
         .ins-kv .v { color:var(--ui-text); word-break:break-word; }
-        .dhead strong { flex:1; }
+        .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
+        .dhead strong { flex:1; font-size:14px; }
         .body { overflow:auto; padding:12px; flex:1; }
         .panel { display:none; } .panel.sel { display:block; }
         .drop { border:2px dashed var(--ui-border-strong); border-radius:8px; padding:18px; text-align:center; color:var(--ui-text-dim); margin-bottom:10px; }
@@ -1941,6 +2381,22 @@ export class ChartPlotterApp extends HTMLElement {
         #empty .welcome-sub { margin-top:12px; font-size:13px; color:var(--ui-text-faint); }
         #empty .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
         /* geo search */
+        /* On-map search is collapsed behind a small tab button by default;
+           clicking it reveals the input, which collapses again when left empty. */
+        #search-tab { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; width:38px; height:38px; border-radius:50%;
+          border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); cursor:pointer;
+          display:flex; align-items:center; justify-content:center; box-shadow:0 1px 4px rgba(0,0,0,.25); }
+        #search-tab:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
+        #search-tab svg { width:18px; height:18px; }
+        #search-tab[hidden], #search[hidden] { display:none; }
+        /* "All charts" — jump back to the zoomed-out world view (Charts mode only).
+           Sits at the top-left of the map area, which starts past the open drawer. */
+        #world-btn { position:absolute; top:12px; left:calc(56px + var(--drawer-w) + 12px); z-index:5; display:inline-flex; align-items:center; gap:6px;
+          border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:18px; padding:7px 13px 7px 10px;
+          font:600 12px system-ui,sans-serif; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.25); transition:left .2s; }
+        #world-btn:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
+        #world-btn svg { width:16px; height:16px; }
+        #world-btn[hidden] { display:none; }
         #search { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; width:340px; max-width:44%; }
         #search input { width:100%; box-sizing:border-box; border:1px solid var(--ui-border-strong); border-radius:20px; padding:8px 16px;
           font:inherit; background:var(--ui-surface); color:var(--ui-text); box-shadow:0 1px 4px rgba(0,0,0,.3); outline:none; }
@@ -1967,7 +2423,14 @@ export class ChartPlotterApp extends HTMLElement {
           <span class="cap">Settings</span>
         </button>
       </div>
-      <div id="search"><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
+      <button id="search-tab" title="Search a port or area">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
+      <div id="search" hidden><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
+      <button id="world-btn" hidden title="Zoom out to all charts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z"/></svg>
+        <span>All charts</span>
+      </button>
       <div id="statusbar">
         <button id="inspect-toggle" class="sb-btn" title="Inspect features — hover to highlight, click to lock, SHIFT+drag to capture an area">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12 4 9l16-5-5 16-3-8Z"/><path d="m12 12 7 7"/></svg>
@@ -2026,7 +2489,7 @@ export class ChartPlotterApp extends HTMLElement {
         </div>
       </div>
       <div id="inspect" class="inspect">
-        <div class="ins-head"><strong>Feature inspector</strong><button id="ins-close" class="btn" title="Close">✕</button></div>
+        <div class="ins-head"><strong>Feature inspector</strong><button id="ins-copy" class="btn" title="Copy debug data (clipboard + server)">⧉</button><button id="ins-close" class="btn" title="Close">✕</button></div>
         <div id="inspect-body" class="ins-body"></div>
       </div>`;
 
@@ -2040,6 +2503,7 @@ export class ChartPlotterApp extends HTMLElement {
     $("rail-settings").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
     $("ins-close").onclick = () => this._setInspectMode(false);
+    $("ins-copy").onclick = (e) => this._copyInspectDebug(e.currentTarget);
     $("inspect-toggle").onclick = () => this._setInspectMode(!this._inspectMode);
     // Esc exits the feature inspector.
     window.addEventListener("keydown", (e) => { if (e.key === "Escape" && this._inspectMode) this._setInspectMode(false); });
@@ -2051,15 +2515,23 @@ export class ChartPlotterApp extends HTMLElement {
     $("agree-accept").onclick = () => this._resolveAgreement(true);
     $("agree-decline").onclick = () => this._resolveAgreement(false);
 
-    // Geo search (offline, over the catalog titles).
+    // Geo search (offline, over the catalog titles). Collapsed behind a tab: the
+    // button reveals the input; it tucks away again once blurred while empty.
     const si = $("search-input");
+    const collapseSearch = () => { $("search").hidden = true; $("search-tab").hidden = false; };
+    $("search-tab").onclick = () => { $("search").hidden = false; $("search-tab").hidden = true; si.focus(); };
+    // "All charts" — re-frame the selection map to the zoomed-out world view.
+    $("world-btn").onclick = () => this._frameChartsWorld();
     si.oninput = () => this.doSearch(si.value);
     si.onkeydown = (e) => {
       if (e.key === "Enter") this.gotoSearchHit(0);
-      else if (e.key === "Escape") { $("search-results").hidden = true; si.blur(); }
+      else if (e.key === "Escape") { $("search-results").hidden = true; si.value = ""; si.blur(); }
     };
     si.onfocus = () => { if (si.value.trim().length >= 2) this.doSearch(si.value); };
-    si.onblur = () => setTimeout(() => { const sr = $("search-results"); if (sr) sr.hidden = true; }, 150);
+    si.onblur = () => setTimeout(() => {
+      const sr = $("search-results"); if (sr) sr.hidden = true;
+      if (!si.value.trim()) collapseSearch(); // empty → tuck back into the tab
+    }, 150);
 
     this.renderSettings();
   }
@@ -2077,8 +2549,8 @@ export class ChartPlotterApp extends HTMLElement {
     // Charts is the "get & see charts" mode: overlay every catalog cell on the
     // map (selected ones highlighted) so you can see and box-select coverage.
     // Any other section is just chrome over the live viewer — no overlay.
-    if (name === "charts") { this.renderCharts(); this._setCellOverlay(true); }
-    else this._setCellOverlay(false);
+    if (name === "charts") { this.renderCharts(); this._enterChartsMode(); }
+    else this._exitChartsMode();
     this.setDrawerOpen(true);
   }
 
@@ -2102,11 +2574,17 @@ export class ChartPlotterApp extends HTMLElement {
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
     // Home is "active" whenever the drawer is shut — i.e. the bare chart viewer.
     r.getElementById("rail-home").classList.toggle("on", !open);
-    // Closing the drawer drops the open region + the cell overlay (Charts mode),
-    // so clear the region highlight and cancel any in-progress box drag.
-    if (!open) { this._clearFocus(); this._setCellOverlay(false); this._cancelAreaSelect(); }
+    // Closing the drawer leaves Charts mode: restore the ENC render + prior view,
+    // clear the region highlight, and cancel any in-progress box drag.
+    if (!open) this._exitChartsMode();
     this.updateEmptyState(); // the welcome card hides while the drawer is open
-    setTimeout(() => { if (this._map) this._map.resize(); }, 230);
+    setTimeout(() => {
+      if (!this._map) return;
+      this._map.resize();
+      // Frame the selection map only AFTER the resize — so the fit centres the
+      // coverage in the now-narrower (drawer-open) map area, not the full width.
+      if (this._pendingChartsFrame) { this._pendingChartsFrame = false; this._frameChartsWorld(); }
+    }, 230);
   }
 
   // Empty only when there's nothing to show AND nothing to pick: no archive
