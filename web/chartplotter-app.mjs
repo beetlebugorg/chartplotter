@@ -698,12 +698,15 @@ export class ChartPlotterApp extends HTMLElement {
       const n = this._installed.size;
       label = `${n} chart${n !== 1 ? "s" : ""}` + (failed ? ` · ${failed} failed` : "");
     } else {
-      el.hidden = true; el.classList.remove("busy"); return;
+      el.hidden = true; el.classList.remove("busy");
+      const sb = root.getElementById("statusbar"); if (sb) sb.hidden = true;
+      return;
     }
     txt.textContent = label;
     el.classList.toggle("busy", busy);
     el.classList.toggle("has-fail", failed > 0);
     el.hidden = false;
+    const sb = root.getElementById("statusbar"); if (sb) sb.hidden = false;
   }
 
   // Subtle "loading more while data is shown" cue: a thin indeterminate bar at the
@@ -954,7 +957,8 @@ export class ChartPlotterApp extends HTMLElement {
       `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
       `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
       `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-z">z${z.toFixed(1)}</span></span>`;
+      `<span class="hud-z">z${z.toFixed(1)}</span><span class="hud-sep">·</span>` +
+      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span></span>`;
   }
 
 
@@ -1510,6 +1514,16 @@ export class ChartPlotterApp extends HTMLElement {
     this._task = { status: "done", _flourish: true };
     this._renderTaskUI();
     this._clearTaskSoon(1200);
+  }
+
+  // Public: open the viewport on a position at a target paper scale or zoom — a
+  // shell-level entry to the <chart-plotter> primitive (see its setView for the
+  // option shape). The map's move/moveend then update the readout and persist the
+  // view as if the user had navigated there. Examples:
+  //   app.setView({ lat: 37.81, lng: -122.45, scale: 20000 })   // 1:20,000
+  //   app.setView({ lat: 37.81, lng: -122.45, zoom: 14, animate: true })
+  setView(opts) {
+    return this._plotter ? this._plotter.setView(opts) : null;
   }
 
   saveView() {
@@ -3323,14 +3337,26 @@ export class ChartPlotterApp extends HTMLElement {
         .csp-stat { flex:none; font-weight:600; font-size:11px; }
         .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
         .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:8px 0; }
-        /* The chip hugs its content; left edge is anchored, so the leading dot+band
-           stay put as the scale digits change (tabular figures). */
-        .sb-readout { flex:none; }
+        /* Scale/zoom/position readout — its own fixed-size pill, pinned to the
+           bottom-MIDDLE. Every field below has a fixed width + tabular figures so
+           the pill's size never changes and nothing shifts as the scale, zoom, or
+           centre coordinates update (panning changes only the position field). */
+        .sb-readout { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 8px);
+          transform:translateX(-50%); z-index:6; box-sizing:border-box;
+          display:inline-flex; align-items:center; padding:5px 12px; max-width:calc(100vw - 20px);
+          background:color-mix(in srgb, var(--ui-surface) 82%, transparent); border:1px solid rgba(0,0,0,.06);
+          border-radius:11px; backdrop-filter:blur(6px);
+          box-shadow:inset 0 1px 2px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.4), 0 1px 0 rgba(255,255,255,.4);
+          font:11px system-ui,sans-serif; color:var(--ui-text); }
+        .sb-readout:empty { display:none; }
         .sb-readout .hud-main { display:flex; align-items:center; gap:6px;
           font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:1px; }
-        .sb-readout .hud-scale { color:var(--ui-accent); }
-        .sb-readout .hud-z { color:var(--ui-text-dim); }
+        /* Fixed-width fields (left-aligned) so the pill is a constant size. */
+        .sb-readout .hud-band { display:inline-block; width:56px; }
+        .sb-readout .hud-scale { display:inline-block; width:74px; color:var(--ui-accent); }
+        .sb-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
+        .sb-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
         .sb-readout .hud-sep { color:var(--ui-text-faint); }
         /* In-view band pills, right-aligned; each opens a cell-list popup. */
         .sb-bands { display:flex; align-items:center; gap:8px; min-width:0; margin-left:auto; }
@@ -3571,13 +3597,13 @@ export class ChartPlotterApp extends HTMLElement {
         }
       </style>
       <div id="map"></div>
-      <div id="statusbar">
+      <div id="statusbar" hidden>
         <button id="bake-status" class="sb-bake" type="button" hidden title="Chart tile generation — click for per-cell status">
           <span class="sb-bake-spin"></span><span class="sb-bake-txt"></span>
         </button>
-        <div id="cov-readout" class="sb-readout"></div>
         <div id="cell-status-pop" hidden></div>
       </div>
+      <div id="cov-readout" class="sb-readout"></div>
       <div id="load-bar" class="load-bar" aria-hidden="true"></div>
       <div id="rail">
         <div class="rail-tabs">
@@ -4033,6 +4059,22 @@ function fmtScale(d) {
   if (!isFinite(d) || d <= 0) return "—";
   const mag = Math.pow(10, Math.max(0, Math.floor(Math.log10(d)) - 2));
   return (Math.round(d / mag) * mag).toLocaleString();
+}
+
+// Map-centre position as fixed-width degrees-decimal-minutes, e.g.
+// "39°27.6′N 104°39.6′W". Degrees are zero-padded (lat 2, lon 3) and minutes to
+// "MM.M", so the character count never changes — with tabular figures, the
+// centred status pill never reflows as you pan. Longitude is normalised to ±180.
+function fmtLatLon(lat, lng) {
+  const dm = (v, degDigits) => {
+    let a = Math.abs(v);
+    let d = Math.floor(a);
+    let m = (a - d) * 60;
+    if (m >= 59.95) { m = 0; d += 1; } // round-up carry: 59.95′ rolls to next degree
+    return String(d).padStart(degDigits, "0") + "°" + m.toFixed(1).padStart(4, "0") + "′";
+  };
+  const x = ((((lng + 180) % 360) + 360) % 360) - 180; // wrap to [-180, 180)
+  return dm(lat, 2) + (lat >= 0 ? "N" : "S") + " " + dm(x, 3) + (x >= 0 ? "E" : "W");
 }
 
 // True when the page was opened as a shared-view link (<origin>/#share or

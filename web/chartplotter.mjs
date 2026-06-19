@@ -55,6 +55,15 @@ const FALLBACK = "#ff00ff";
 const FEATURE_SCALE = 0.01 / 0.35278;
 const FONT = ["Noto Sans Regular"];
 const M_TO_FT = 3.280839895; // depth-unit conversion (metric ↔ imperial)
+// Web-Mercator zoom that renders a paper scale of 1:`scale` at `lat` — the
+// inverse of the HUD's scaleDenom (mpp = 156543.034·cos φ / 2^z; scale = mpp/
+// 0.00028). Latitude-dependent because a given scale is a different zoom at each
+// latitude. Clamped to [0,24]; the map's own max-zoom further caps over-fine views.
+function zoomForScale(scale, lat) {
+  if (!(scale > 0)) return 0;
+  const z = Math.log2(156543.03392804097 * Math.cos((lat * Math.PI) / 180) / (0.00028 * scale));
+  return Math.max(0, Math.min(24, z));
+}
 // S-57 meta objects whose boundary draws as a region/coverage line (nautical
 // publication, nav-system, coverage, compilation scale). These are administrative
 // indicators (S-52 PresLib gives M_NPUB a line only as a pick-report hint); they
@@ -726,6 +735,33 @@ export class ChartPlotter extends HTMLElement {
 
   // Stop following and release the camera to the user.
   clearFollow() { this._followFix = null; this._cameraMode = "free"; }
+
+  // Open the viewport on a geographic position at a target paper scale. Public API.
+  //   setView({ lat, lng, scale })            — centre + 1:N scale (jump)
+  //   setView({ lat, lng, zoom })             — centre + explicit web-Mercator zoom
+  //   setView({ scale })                      — restage scale, keep the centre
+  //   setView({ lat, lng, scale, animate:true, duration:800 }) — fly instead of jump
+  // `scale` is the paper-chart denominator (1:N) and is converted to the zoom that
+  // yields that scale at the target latitude (web-Mercator scale is latitude-
+  // dependent), the inverse of the HUD's scale readout. `bearing`/`pitch` pass
+  // through. Omitted fields hold their current value. Returns the resolved
+  // { center:[lng,lat], zoom }. The map's own max-zoom (scale floor) still
+  // clamps an over-fine request, exactly as user zoom does.
+  setView({ lat, lng, scale, zoom, bearing, pitch, animate = false, duration = 800 } = {}) {
+    const map = this._map;
+    if (!map) return null;
+    const c = map.getCenter();
+    // Clamp to the web-Mercator latitude limit so an out-of-range lat can't drive
+    // cos(φ) negative and yield a NaN zoom (and so the centre is itself valid).
+    const la = Math.max(-85.051129, Math.min(85.051129, Number.isFinite(lat) ? lat : c.lat));
+    const lo = Number.isFinite(lng) ? lng : c.lng;
+    let z = Number.isFinite(zoom) ? zoom : (Number.isFinite(scale) ? zoomForScale(scale, la) : map.getZoom());
+    const cam = { center: [lo, la], zoom: z };
+    if (Number.isFinite(bearing)) cam.bearing = bearing;
+    if (Number.isFinite(pitch)) cam.pitch = pitch;
+    if (animate) map.easeTo({ ...cam, duration }); else map.jumpTo(cam);
+    return { center: [lo, la], zoom: z };
+  }
 
   // Every MapLibre SourceCache backing the chart source(s). v4 had one at
   // map.style.sourceCaches[id]; v5 renamed that property and can hold a separate
