@@ -1013,11 +1013,14 @@ export class ChartPlotter extends HTMLElement {
   }
   buildLayers() {
     // Over an OSM basemap (raster or vector), let its detailed land show through:
-    // drop the chart's own land-area (LNDARE) fill so OSM land isn't painted over
-    // (the no-data hatch is hidden too — see buildStyle).
+    // drop the chart's own land fills so OSM land isn't painted over. Filter by
+    // colour token, not class, so it catches LNDARE (LANDA) AND built-up land
+    // BUAARE (CHBRN) and any other land-coloured area. (No-data hatch hidden too —
+    // see buildStyle.)
     const osm = this._osmBasemap();
+    const notLand = ["match", ["get", "color_token"], ["LANDA", "CHBRN"], false, true];
     const base = [
-      { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: ["!=", ["get", "class"], "LNDARE"] } : {}), paint: { "fill-color": this.areasFillColor() } },
+      { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}), paint: { "fill-color": this.areasFillColor() } },
       { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["coalesce", ["get", "pattern_name"], ""] } },
       // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
       // the shallow side of the live safety contour, shown only when the
