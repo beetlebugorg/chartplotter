@@ -3051,7 +3051,7 @@ export class ChartPlotterApp extends HTMLElement {
            attribution line sits just above it. Anchors the per-cell popup above it. */
         #statusbar { position:absolute; right:calc(10px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 8px); z-index:6;
           display:inline-flex; align-items:center; gap:10px; padding:5px 11px; box-sizing:border-box;
-          max-width:calc(100vw - 20px); overflow:hidden;
+          max-width:calc(100vw - 20px); /* no overflow:hidden — it would clip the cell-status popup */
           background:color-mix(in srgb, var(--ui-surface) 82%, transparent); border:1px solid rgba(0,0,0,.06);
           border-radius:11px; backdrop-filter:blur(6px);
           box-shadow:inset 0 1px 2px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.4), 0 1px 0 rgba(255,255,255,.4);
