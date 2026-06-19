@@ -3205,16 +3205,26 @@ export class ChartPlotterApp extends HTMLElement {
         .cov-empty { font:12px system-ui,sans-serif; color:var(--ui-text-faint); }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
-        /* Panel sheet. MOBILE (base): a full-screen modal rising from the bottom
-           bar. DESKTOP: a 40%-wide panel overlaying the left of the map (see the
-           min-width media query). Fully hidden (visibility) when closed so nothing
-           lingers over the map. */
-        #drawer { position:absolute; left:0; top:0; bottom:var(--botbar-h); width:100vw; z-index:6;
-          background:var(--ui-bg); color:var(--ui-text); border-radius:16px 16px 0 0; overflow:hidden;
-          box-shadow:0 -6px 28px rgba(0,0,0,.28); display:flex; flex-direction:column;
-          transform:translateY(100%); visibility:hidden;
-          transition:transform .25s ease, visibility 0s linear .25s; }
-        #drawer.open { transform:translateY(0); visibility:visible; transition:transform .25s ease; }
+        /* Panels are dialog popovers that pop FROM their tab, with a little caret
+           arrow pointing back to it. MOBILE (base): above the bottom bar, caret
+           down. DESKTOP: right of the dock, caret left (see min-width query). The
+           caret position (--caret-left / --caret-top) is set in JS to the active
+           tab's centre. Pops in with a fade+scale from the caret edge; fully
+           hidden (visibility) when closed. */
+        #drawer, #search { --caret:9px; }
+        #drawer { position:absolute; left:8px; right:8px; bottom:calc(var(--botbar-h) + 14px); width:auto; max-height:76vh; z-index:6;
+          background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border); border-radius:14px;
+          box-shadow:0 12px 38px rgba(0,0,0,.30); display:flex; flex-direction:column; overflow:hidden;
+          transform-origin:bottom center; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
+          transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
+        #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
+        /* caret (base = pointing down at the tab below) */
+        #drawer::after, #search::after { content:""; position:absolute; bottom:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
+          width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
+          border-top:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 2px 1px rgba(0,0,0,.10)); }
+        #search::after { border-top-color:var(--ui-surface); }
+        /* Settings lays its sections in responsive columns to use the panel width. */
+        #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0 28px; align-items:start; }
         /* Settings lays its sections in responsive columns to use the panel width. */
         #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0 28px; align-items:start; }
         /* Feature inspector — slides in from the RIGHT (overlays the map). */
@@ -3319,7 +3329,7 @@ export class ChartPlotterApp extends HTMLElement {
         /* Search sits beside the day/night toggle (the .rail-end group); tapping it
            opens the tiny flyout. */
         #rail .search-toggle.on { background:var(--ui-accent); color:var(--ui-accent-text); }
-        #search[hidden] { display:none; }
+        #search[hidden] { display:block; } /* defeat UA hidden so the popover can fade out (base styles keep it invisible/non-interactive) */
         /* "All charts" — jump back to the zoomed-out world view (Charts mode only).
            Sits at the top-left of the map area, which starts past the open drawer. */
         #world-btn { position:absolute; top:12px; left:12px; z-index:5; display:inline-flex; align-items:center; gap:6px;
@@ -3328,12 +3338,14 @@ export class ChartPlotterApp extends HTMLElement {
         #world-btn:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
         #world-btn svg { width:16px; height:16px; }
         #world-btn[hidden] { display:none; }
-        /* Tiny search flyout — a dialog-style card holding the input, expanding
-           downward as results arrive. Bottom-left above the bar (phone); the
-           desktop media query re-anchors it beside the dock. */
-        #search { position:absolute; right:12px; left:auto; bottom:calc(var(--botbar-h) + 12px); z-index:8; width:min(320px, calc(100vw - 24px));
+        /* Search: same caret-popover as the panels — a dialog card with the input
+           on top and results filling in underneath, popping from the search tab. */
+        #search { position:absolute; right:8px; left:auto; bottom:calc(var(--botbar-h) + 14px); z-index:8; width:min(340px, calc(100vw - 16px));
           background:var(--ui-surface); border:1px solid var(--ui-border); border-radius:14px;
-          box-shadow:0 12px 36px rgba(0,0,0,.30); overflow:hidden; }
+          box-shadow:0 12px 38px rgba(0,0,0,.30); overflow:hidden;
+          transform-origin:bottom center; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
+          transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
+        #search:not([hidden]) { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #search input { width:100%; box-sizing:border-box; border:none; border-radius:14px; padding:11px 16px;
           font:inherit; background:transparent; color:var(--ui-text); outline:none; }
         #search-results { border-top:1px solid var(--ui-border-2); max-height:min(50vh, 360px); overflow-y:auto; }
@@ -3355,12 +3367,10 @@ export class ChartPlotterApp extends HTMLElement {
         :host([data-scheme="night"]) .load-bar::before, :host([data-scheme="dusk"]) .load-bar::before {
           background:linear-gradient(90deg, transparent, #6aaef0 45%, #6aaef0 55%, transparent); box-shadow:0 0 8px rgba(106,174,240,.6); }
         @keyframes load-slide { 0% { left:-40%; } 100% { left:100%; } }
-        /* ---- Phone (base): full-screen modal sheet + reflowed content -------
-           A grabber hints the swipe-down feel; chart packs go one-per-row and
-           settings rows wrap their control under the label. */
+        /* ---- Phone (base): popover content reflow --------------------------
+           Chart packs go one-per-row and settings rows wrap their control under
+           the label so they fit the narrower popover. */
         @media (max-width: 640px) {
-          #drawer::before { content:""; flex:none; width:36px; height:4px; margin:7px auto 1px;
-            border-radius:2px; background:var(--ui-border-strong); }
           #empty .card { max-width:min(360px, calc(100vw - 48px)); }
           .pack-grid { grid-template-columns:1fr; }
           .set-row { flex-wrap:wrap; gap:8px 14px; }
@@ -3388,15 +3398,20 @@ export class ChartPlotterApp extends HTMLElement {
           #rail .rail-end { flex-direction:column; gap:4px; margin-top:6px; padding-top:10px;
             border-top:1px solid var(--ui-border-2); }
           #rail .scheme-toggle, #rail .search-toggle { width:64px; }
-          #drawer { left:100px; right:auto; top:14px; bottom:14px; width:min(40vw, 560px); height:auto;
-            border-radius:16px; box-shadow:0 12px 36px rgba(0,0,0,.30);
-            transform:translateX(calc(-100% - 110px));
-            transition:transform .25s ease, visibility 0s linear .25s; }
-          #drawer.open { transform:translateX(0); }
           .load-bar { top:0; bottom:auto; }
-          /* Search flyout anchored where the panel opens (top-left, from the dock),
-             matching its width; it just grows down with results instead of filling. */
-          #search { left:100px; right:auto; top:14px; bottom:auto; width:min(40vw, 560px); max-height:calc(100% - 28px); }
+          /* Popovers sit right of the dock and pop from the left (caret points at
+             the dock tab). The panel is the tall 40% left overlay; search is a
+             compact card near the bottom (by the search tab). */
+          #drawer, #search { right:auto; transform-origin:left center; transform:translateX(-6px) scale(.985); }
+          #drawer.open, #search:not([hidden]) { transform:none; }
+          #drawer { left:90px; top:14px; bottom:14px; width:min(40vw, 520px); max-height:none; }
+          #search { left:90px; top:auto; bottom:14px; width:340px; max-height:calc(100vh - 28px); }
+          /* caret points LEFT toward the dock tab */
+          #drawer::after, #search::after { left:calc(-1 * var(--caret)); right:auto; bottom:auto; top:var(--caret-top,50%);
+            transform:translateY(-50%); border-left:none;
+            border-top:var(--caret) solid transparent; border-bottom:var(--caret) solid transparent;
+            border-right:var(--caret) solid var(--ui-bg); }
+          #search::after { border-right-color:var(--ui-surface); }
         }
       </style>
       <div id="map"></div>
@@ -3526,7 +3541,7 @@ export class ChartPlotterApp extends HTMLElement {
     // button toggles a tiny flyout with the input + results.
     const si = $("search-input");
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
-    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); si.focus(); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._positionCaret($("search"), $("search-tab")); si.focus(); };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
     // "All charts" — re-frame the selection map to the zoomed-out world view.
     $("world-btn").onclick = () => this._frameChartsWorld();
@@ -3574,6 +3589,21 @@ export class ChartPlotterApp extends HTMLElement {
   // Slide the panel sheet up/down from the tab bar. data-sec drives its per-section
   // size (Charts wide+short, Settings/Dev tall); set before opening so it animates
   // in at the right size.
+  // Point a popover's caret at the tab it opened from. Sets --caret-left (mobile,
+  // caret on the bottom edge) or --caret-top (desktop, caret on the left edge) to
+  // the tab's centre, clamped to the popover's edges. Measures the popover with its
+  // pop-in transform removed so the rect is the final resting position.
+  _positionCaret(pop, tab) {
+    if (!pop || !tab) return;
+    const desktop = window.matchMedia("(min-width:641px)").matches;
+    const tr = tab.getBoundingClientRect();
+    const prev = pop.style.transform; pop.style.transform = "none";
+    const pr = pop.getBoundingClientRect();
+    pop.style.transform = prev;
+    if (desktop) pop.style.setProperty("--caret-top", `${Math.max(16, Math.min(pr.height - 16, tr.top + tr.height / 2 - pr.top))}px`);
+    else pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
+  }
+
   setDrawerOpen(open) {
     const r = this.shadowRoot;
     const drawer = r.getElementById("drawer");
@@ -3582,6 +3612,10 @@ export class ChartPlotterApp extends HTMLElement {
     r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
     r.getElementById("dev-toggle").classList.toggle("on", open && this._section === "inspect");
+    if (open) {
+      const tabId = this._section === "settings" ? "rail-settings" : this._section === "inspect" ? "dev-toggle" : "rail-menu";
+      this._positionCaret(drawer, r.getElementById(tabId));
+    }
     // Home is "active" whenever the drawer is shut — i.e. the bare chart viewer.
     r.getElementById("rail-home").classList.toggle("on", !open);
     // Closing the drawer leaves Charts mode: restore the ENC render + prior view,
