@@ -24,6 +24,39 @@ const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night", day_bright: "Br
 const M_TO_FT = 3.280839895; // depth-setting display conversion (values stored in metres)
 const LS_SCHEME = "chartplotter:scheme";
 const LS_MARINER = "chartplotter:mariner";
+// Canonical mariner defaults — the single source of truth on the client, kept in
+// step with the engine's defaultMarinerSettings() (pkg/s52/mariner_settings.go).
+// Depths are stored in METRES (the renderer's depth expressions are all metric);
+// the settings form converts to feet for display only. Per S-52 these are the
+// internally consistent set: shallow 2 < safety 10 = safetyDepth 10 < deep 30.
+const DEFAULT_MARINER = {
+  shallowContour: 2,
+  safetyContour: 10,
+  safetyDepth: 10,
+  deepContour: 30,
+  depthUnit: "ft", // US/NOAA preference (engine default DepthUnitFeet)
+  // Display categories (S-52 §10.2). Base is the minimum safe-navigation set and
+  // can NEVER be deselected by the mariner — it is forced on at boot. Default
+  // display is Standard; Other is opt-in.
+  displayBase: true,
+  displayStandard: true,
+  displayOther: false,
+  boundaryStyle: "symbolized", // IMO/S-52 default (vs "plain")
+  simplifiedPoints: false,     // paper-chart point symbols (engine SimplifiedPoints=false)
+  fourShadeWater: true,        // four depth shades (engine TwoShades=false)
+  showNoData: true,
+  // Individually-selectable "Other" items (S-52/IMO), all default on.
+  showSoundings: true,
+  showLightDescriptions: true,
+  showNames: true,
+  // Off by default.
+  showFullSectorLines: false,        // 25mm legs (engine ShowFullLengthSectorLines=false, avoids clutter)
+  showIsolatedDangersShallow: false, // ISODGR01 at DisplayBase (engine default); on → Standard category
+  shallowPattern: false,
+  showContourLabels: false,
+  dataQuality: false,
+  showMetaBounds: false,
+};
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
 const LS_AGREE = "chartplotter:enc-agreement"; // NOAA ENC User Agreement acceptance
@@ -175,7 +208,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._inspectIdx = 0;               // which one of the stack is shown
     this._inspectMulti = false;         // true after a SHIFT+drag area capture (list all, no cycler)
     this._hasArchive = false;           // is a chart archive currently loaded?
-    this._mariner = loadJSON(LS_MARINER, {});
+    this._mariner = { ...DEFAULT_MARINER, ...loadJSON(LS_MARINER, {}) };
     // Migrate the old single-value display category (base|standard|other) to
     // the multi-select Base/Standard/Other booleans (now client-side filters).
     if (this._mariner.displayCategory) {
@@ -185,6 +218,9 @@ export class ChartPlotterApp extends HTMLElement {
       this._mariner.displayOther = c === "other";
       delete this._mariner.displayCategory;
     }
+    // S-52 §10.2: Display Base is the minimum safe-navigation set and can never
+    // be deselected. Force it on regardless of any (stale) persisted value.
+    this._mariner.displayBase = true;
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
     this._agreed = localStorage.getItem(LS_AGREE) === "1"; // NOAA ENC agreement accepted
     this._activeDistrict = null;        // Coast Guard district (cg) currently previewed on the map, or null
@@ -3429,7 +3465,8 @@ export class ChartPlotterApp extends HTMLElement {
     // Depth settings are STORED in metres (the renderer's expressions are all
     // metric); the row just displays/accepts feet when imperial, converting on
     // edit (see the input handler below). `defM` is the metric default.
-    const depthRow = (key, label, defM) => {
+    const depthRow = (key, label) => {
+      const defM = DEFAULT_MARINER[key];
       const v = ft ? Math.round((m[key] ?? defM) * M_TO_FT) : (m[key] ?? defM);
       return `<div class="set-row"><div class="lbl"><span class="t">${label}</span></div>
         <div class="ctl"><input type="number" step="${ft ? "1" : "0.1"}" data-key="${key}" data-depth="1" value="${v}"><span class="unit">${ft ? "ft" : "m"}</span></div></div>`;
@@ -3451,26 +3488,32 @@ export class ChartPlotterApp extends HTMLElement {
           <div class="ctl"><div class="seg" id="unit-seg">
             <button data-unit="m" class="${ft ? "" : "sel"}">Metric</button>
             <button data-unit="ft" class="${ft ? "sel" : ""}">Imperial</button></div></div></div>
-        ${depthRow("shallowContour", "Shallow contour", 2)}
-        ${depthRow("safetyContour", "Safety contour", 10)}
-        ${depthRow("deepContour", "Deep contour", 20)}
-        ${depthRow("safetyDepth", "Safety depth", 30)}
+        ${depthRow("shallowContour", "Shallow contour")}
+        ${depthRow("safetyContour", "Safety contour")}
+        ${depthRow("deepContour", "Deep contour")}
+        ${depthRow("safetyDepth", "Safety depth")}
       </div>
       <div class="set-section">
         <h3>Display</h3>
-        <div class="set-row"><div class="lbl"><span class="t">Detail level</span><span class="d">Which feature categories are drawn</span></div>
+        <div class="set-row"><div class="lbl"><span class="t">Detail level</span><span class="d">Which feature categories are drawn — Base is always on (S-52)</span></div>
           <div class="ctl"><div class="seg-multi">
-            <label class="chk"><input type="checkbox" data-key="displayBase" ${m.displayBase === false ? "" : "checked"}>Base</label>
+            <label class="chk" title="Display Base is the minimum safe-navigation set and cannot be turned off (S-52 §10.2)"><input type="checkbox" checked disabled>Base</label>
             <label class="chk"><input type="checkbox" data-key="displayStandard" ${m.displayStandard === false ? "" : "checked"}>Standard</label>
             <label class="chk"><input type="checkbox" data-key="displayOther" ${m.displayOther ? "checked" : ""}>Other</label></div></div></div>
         <div class="set-row"><div class="lbl"><span class="t">Area boundaries</span></div>
           <div class="ctl"><select data-key="boundaryStyle">${["plain", "symbolized"].map((v) =>
             `<option ${(m.boundaryStyle || "symbolized") === v ? "selected" : ""}>${v}</option>`).join("")}</select></div></div>
+        ${toggle("simplifiedPoints", "Simplified symbols", "Simplified point symbols instead of paper-chart shapes (buoys, beacons)", !!m.simplifiedPoints)}
         ${toggle("fourShadeWater", "Four-shade water", "Four depth shades instead of two", m.fourShadeWater !== false)}
         ${toggle("showNoData", "No-data hatch", "Mark areas with no chart data (off shows the plain basemap)", m.showNoData !== false)}
         <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline + name of installed cells when zoomed out past their detail</span></div>
           <label class="switch"><input type="checkbox" data-app-key="showCellBounds" ${this._showCellBounds ? "checked" : ""}><span class="sl"></span></label></div>
         ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
+        ${toggle("showSoundings", "Spot soundings", "Individual depth soundings", m.showSoundings !== false)}
+        ${toggle("showLightDescriptions", "Light descriptions", "Light characteristics text (e.g. Fl(2)R 10s)", m.showLightDescriptions !== false)}
+        ${toggle("showFullSectorLines", "Full sector lines", "Extend light sector legs to their nominal range instead of short 25mm stubs", !!m.showFullSectorLines)}
+        ${toggle("showIsolatedDangersShallow", "Isolated dangers (shallow)", "Show isolated-danger symbols only at Standard detail instead of always (S-52 UDWHAZ05)", !!m.showIsolatedDangersShallow)}
+        ${toggle("showNames", "Place names", "Geographic names and object labels", m.showNames !== false)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
         ${toggle("showMetaBounds", "Metadata boundaries", "Coverage/region indicator lines (nautical-publication, nav-system, coverage)", !!m.showMetaBounds)}

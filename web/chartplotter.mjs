@@ -321,7 +321,7 @@ export class ChartPlotter extends HTMLElement {
   // wins → first match in a `case`). `>= X && > X` on both bounds per the spec.
   seabedTokenExpr() {
     const m = this._mariner;
-    const shc = m.shallowContour ?? 2, sfc = m.safetyContour ?? 10, dpc = m.deepContour ?? 20;
+    const shc = m.shallowContour ?? 2, sfc = m.safetyContour ?? 10, dpc = m.deepContour ?? 30;
     const d1 = ["coalesce", ["get", "drval1"], -1];
     const d2 = ["coalesce", ["get", "drval2"], 0];
     const band = (x) => ["all", [">=", d1, x], [">", d2, x]];
@@ -388,7 +388,7 @@ export class ChartPlotter extends HTMLElement {
   // (the number changes), so synthesize a `snd:` image name from the numeric
   // depth + palette; `registerImage` builds the converted glyph composite.
   soundingsIconImage() {
-    const sd = this._mariner.safetyDepth ?? 30;
+    const sd = this._mariner.safetyDepth ?? 10;
     if (this._mariner.depthUnit === "ft") {
       const pal = ["case", ["<=", ["coalesce", ["get", "depth"], 0], sd], "S", "G"];
       // Key by deci-metres (a stable integer) so MapLibre caches one image per
@@ -432,7 +432,14 @@ export class ChartPlotter extends HTMLElement {
     if (m.displayBase !== false) en.push(0);
     if (m.displayStandard !== false) en.push(1);
     if (m.displayOther === true) en.push(2);
-    const inCat = ["in", ["coalesce", ["get", "cat"], 1], ["literal", en]];
+    // Isolated dangers (ISODGR01, S-52 UDWHAZ05): the mariner picks their display
+    // category — DisplayBase (0, always shown; the default) or, when "isolated
+    // dangers in shallow water" is on, Standard (1). The symbol is the marker;
+    // VALSOU dangers became DANGER01 (live danger_depth swap), so ISODGR01 here
+    // is exactly the isolated-danger set. Every other feature uses its baked cat.
+    const isoCat = m.showIsolatedDangersShallow ? 1 : 0;
+    const cat = ["case", ["==", ["get", "symbol_name"], "ISODGR01"], isoCat, ["coalesce", ["get", "cat"], 1]];
+    const inCat = ["in", cat, ["literal", en]];
     // The M_QUAL data-quality overlay (CATZOC DQUAL* area patterns + boundary)
     // is baked display-category Other, so enabling Other dumped it on top of
     // everything — too cluttered. Decouple it into its own `dataQuality` toggle:
@@ -457,11 +464,32 @@ export class ChartPlotter extends HTMLElement {
     return ["in", ["coalesce", ["get", "bnd"], 2], ["literal", [2, rank]]];
   }
 
+  // Point-symbol style (S-52 §11.2.2), client-side: point features that resolve
+  // differently under the simplified vs paper-chart LUP tables are baked twice,
+  // tagged `pts` — 2 = style-independent (always shown), 0 = paper-chart, 1 =
+  // simplified. Show common (2) + the active style. Missing `pts` (non-point /
+  // identical-in-both / stale tile) defaults to common. Default PAPER (rank 0)
+  // per the engine default (SimplifiedPoints=false).
+  pointStyleFilter() {
+    const rank = this._mariner.simplifiedPoints ? 1 : 0;
+    return ["in", ["coalesce", ["get", "pts"], 2], ["literal", [2, rank]]];
+  }
+
+  // Light sector leg length (S-52 LIGHTS06 note 1), client-side: each sector
+  // light's legs are baked twice, tagged `sleg` — 0 = the 25 mm short leg
+  // (default, avoids clutter), 1 = the full VALNMR nominal-range leg. Arcs/rings
+  // are untagged (coalesce 2 → always shown). Show common (2) + the active
+  // length. Default SHORT (rank 0) per the engine (ShowFullLengthSectorLines=false).
+  sectorLegFilter() {
+    const rank = this._mariner.showFullSectorLines ? 1 : 0;
+    return ["in", ["coalesce", ["get", "sleg"], 2], ["literal", [2, rank]]];
+  }
+
   // Combine a layer's intrinsic (base) filter with the live category +
   // boundary-style filters (the two client-side portrayal axes baked as
   // per-feature `cat`/`bnd`).
   combineFilters(base) {
-    const parts = ["all", this.categoryFilter(), this.boundaryFilter()];
+    const parts = ["all", this.categoryFilter(), this.boundaryFilter(), this.pointStyleFilter(), this.sectorLegFilter()];
     // Meta-object coverage/region boundary lines are gated separately from the
     // "Other" display category (mariner.showMetaBounds, off by default), since
     // they read as cell boundaries and aren't useful alongside other "Other" data.
@@ -769,10 +797,23 @@ export class ChartPlotter extends HTMLElement {
       if (keys.includes("showNoData")) {
         this._eachLayer("nodata", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showNoData === false ? "none" : "visible"));
       }
+      // S-52 individually-selectable "Other" items, each a plain visibility
+      // toggle on its own layer (all default on): spot soundings, light
+      // descriptions (LIGHTS06 text), and geographic names / object labels.
+      if (keys.includes("showSoundings")) {
+        this._eachLayer("soundings", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showSoundings === false ? "none" : "visible"));
+      }
+      if (keys.includes("showLightDescriptions")) {
+        this._eachLayer("light-text", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showLightDescriptions === false ? "none" : "visible"));
+      }
+      if (keys.includes("showNames")) {
+        const vis = this._mariner.showNames === false ? "none" : "visible";
+        for (const v of TEXT_VARIANTS) this._eachLayer(v.id, (id) => map.setLayoutProperty(id, "visibility", vis));
+      }
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
-      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "dataQuality" || k === "showMetaBounds")) {
+      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds")) {
         this.applyFeatureFilters();
       }
   }
@@ -918,6 +959,9 @@ export class ChartPlotter extends HTMLElement {
         "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
         "text-size": ["coalesce", ["get", "font_size_px"], 11], "text-anchor": v.anchor,
         "text-allow-overlap": false, "text-optional": true,
+        // Geographic names / object labels — an individually-selectable "Other"
+        // item per S-52 (default on). Light text has its own layer below.
+        visibility: this._mariner.showNames === false ? "none" : "visible",
       },
       paint: {
         // Legible at dusk/night (bright ink + dark halo) — see textColor.
@@ -951,7 +995,9 @@ export class ChartPlotter extends HTMLElement {
     ];
     const top = [
       { id: "point_symbols", type: "symbol", source: "chart", "source-layer": "point_symbols", layout: { "icon-image": this.pointSymbolImage(), "icon-size": this.iconSizeForScale(), "icon-rotate": ["coalesce", ["get", "rotation_deg"], 0], "icon-rotation-alignment": "map", "icon-allow-overlap": true, "icon-ignore-placement": true, "symbol-z-order": "source" } },
-      { id: "soundings", type: "symbol", source: "chart", "source-layer": "soundings", layout: { "icon-image": this.soundingsIconImage(), "icon-size": this.iconSizeForScale(), "icon-allow-overlap": false } },
+      // Spot soundings — an individually-selectable "Other" item per S-52/IMO
+      // (default on). A plain visibility toggle on showSoundings.
+      { id: "soundings", type: "symbol", source: "chart", "source-layer": "soundings", layout: { "icon-image": this.soundingsIconImage(), "icon-size": this.iconSizeForScale(), "icon-allow-overlap": false, visibility: this._mariner.showSoundings === false ? "none" : "visible" } },
       // Contour labels (SAFCON01, client-side): VALDCO along DEPCNT lines,
       // toggled by the mariner's "contour labels" setting — no re-bake.
       { id: "contour-labels", type: "symbol", source: "chart", "source-layer": "lines",
@@ -968,7 +1014,10 @@ export class ChartPlotter extends HTMLElement {
           // Left-justify so a merged multi-line light label's lines align on their
           // left edge (e.g. stacked "Mo(U)W 20s 50m 17M" / "Mo(U)R 20s 50m 15M").
           "text-justify": "left",
-          "text-allow-overlap": true, "text-ignore-placement": true },
+          "text-allow-overlap": true, "text-ignore-placement": true,
+          // Light descriptions (LIGHTS06 characteristics) — individually
+          // selectable per S-52 (default on); toggled by showLightDescriptions.
+          visibility: this._mariner.showLightDescriptions === false ? "none" : "visible" },
         paint: { "text-color": this.textColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.4, "text-halo-blur": 0.5 } },
     ];
     // Template chart layers (source "chart" is a placeholder rewritten per band

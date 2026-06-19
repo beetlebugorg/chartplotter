@@ -194,6 +194,12 @@ type sectorPrim struct {
 	band     Band
 	zMin     uint32
 	natMax   uint32
+	// legNorm is the full-length leg reach (VALNMR nominal range) as a fraction
+	// of the normalized world — a fixed GROUND distance, so zoom-independent
+	// (unlike the 25 mm short legs / ring, which are screen-px). Drives the tile
+	// enumeration + emit margin so the long legs aren't culled near tile edges.
+	// 0 when the light has no VALNMR (only the screen-px figure spills).
+	legNorm float64
 }
 
 // Baker accumulates routed primitives from many cells, then tiles them.
@@ -357,6 +363,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		for _, pass := range portrayal.BuildFeaturePasses(lib, mariner, f) {
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
+			pts := int64(pass.Pts)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
@@ -378,7 +385,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 						names = append(names, nsc.SymbolName)
 						pi++
 					}
-					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd)
+					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd, pts)
 					continue
 				}
 				// Co-located lights (S-52 LIGHTS06): a non-primary light drops its
@@ -401,7 +408,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 						}
 					}
 				}
-				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd, drval1, drval2)
+				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd, pts, drval1, drval2)
 			}
 		}
 	}
@@ -410,7 +417,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 // routeSoundingGroup emits one soundings feature for a whole sounding number
 // (the comma-joined digit-glyph list), carrying depth + both palette variants so
 // the client runs SNDFRM04's safety-depth split live.
-func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd int64) {
+func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd, pts int64) {
 	joined := strings.Join(names, ",")
 	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
 	attrs := []mvt.KeyValue{
@@ -421,6 +428,9 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 		{Key: "bnd", Value: mvt.IntVal(bnd)},
 		{Key: "symbol_names", Value: mvt.StringVal(joined)},
 		{Key: "scale", Value: mvt.FloatVal(sc.Scale)},
+	}
+	if pts != ptsAlwaysShown {
+		attrs = append(attrs, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(pts)})
 	}
 	if !isNaN32(sc.SoundingDepthM) {
 		attrs = append(attrs,
@@ -454,6 +464,12 @@ func catRank(displayCategory int) int64 {
 // (1) split from portrayal.BuildFeaturePasses, so the boundary-style toggle works.
 const bndAlwaysShown int64 = 2
 
+// ptsAlwaysShown is the point-symbol-style tag the client's pointStyleFilter
+// always passes (2 = style-independent). Emitted only for the paper/simplified
+// variant passes (0/1) of point features that actually differ between the two
+// LUP tables; every other feature omits `pts` and the client coalesces to 2.
+const ptsAlwaysShown int64 = 2
+
 func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.bbox.ExtendBox(bb)
 	r.wMinX = normX(bb.MinLon)
@@ -463,7 +479,7 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.prims = append(b.prims, r)
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd int64, drval1, drval2 float32) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2 float32) {
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
@@ -471,6 +487,11 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 			{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
 			{Key: "cat", Value: mvt.IntVal(catRank(cat))},
 			{Key: "bnd", Value: mvt.IntVal(bnd)},
+		}
+		// pts is omitted for the common case (2): only paper/simplified variant
+		// passes (0/1) carry it, so most features stay lean.
+		if pts != ptsAlwaysShown {
+			base = append(base, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(pts)})
 		}
 		// Inspector extras — only when present, to avoid bloating every feature.
 		if b.curObjnam != "" {
@@ -554,6 +575,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		b.sectors = append(b.sectors, sectorPrim{
 			anchor: v.Anchor, params: v.Sector, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, band: band, zMin: zMin, natMax: zr.Max,
+			legNorm: sectorLegFullNorm(v.Anchor.Lat, v.Sector.RadiusNM),
 		})
 	}
 }
@@ -604,7 +626,9 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 		sp := &b.sectors[i]
 		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
 		for z := sp.zMin; z <= sp.natMax; z++ {
-			r := sectorRadiusNorm(z)
+			// Full-length legs (sp.legNorm, a fixed ground distance) can reach far
+			// past the screen-px figure, so enumerate every tile they cross.
+			r := math.Max(sectorRadiusNorm(z), sp.legNorm)
 			bb := geo.BoundingBox{
 				MinLat: unnormY(ay + r), MinLon: (ax-r)*360 - 180,
 				MaxLat: unnormY(ay - r), MaxLon: (ax+r)*360 - 180,
@@ -864,15 +888,17 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 
 	// Sector lights: tessellate per zoom into the lines layer. Their screen-px
 	// geometry can spill into neighbouring tiles, so reject with a margin sized to
-	// the largest radius (the ring's 26 mm) plus the clip buffer. The figure is
-	// laid out in 256-px-per-tile space, so the radius term divides by 256 (NOT
-	// the MVT extent) — matching sectorRadiusNorm and TileCoords' enumeration.
-	margin := sectorRadiusNorm(coord.Z) + (buffer/float64(extent))/n
+	// the largest radius (the ring's 26 mm, or the longer full-length leg) plus the
+	// clip buffer. The figure is laid out in 256-px-per-tile space, so the radius
+	// term divides by 256 (NOT the MVT extent) — matching sectorRadiusNorm and
+	// TileCoords' enumeration. The full-leg term is per-sector (its VALNMR reach).
+	spill := (buffer / float64(extent)) / n
 	for i := range b.sectors {
 		sp := &b.sectors[i]
 		if coord.Z < sp.zMin || coord.Z > sp.natMax {
 			continue
 		}
+		margin := math.Max(sectorRadiusNorm(coord.Z), sp.legNorm) + spill
 		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
 		if ax < tnx0-margin || ax > tnx1+margin || ay < tny0-margin || ay > tny1+margin {
 			continue
@@ -892,7 +918,7 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			if st.dashed {
 				dash = "dashed"
 			}
-			tb.Layer("lines").AddLines(paths, []mvt.KeyValue{
+			attrs := []mvt.KeyValue{
 				{Key: "class", Value: mvt.StringVal(sp.class)},
 				{Key: "cell", Value: mvt.StringVal(sp.cell)},
 				{Key: "color_token", Value: mvt.StringVal(st.colorToken)},
@@ -901,7 +927,13 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				{Key: "cat", Value: mvt.IntVal(catRank(sp.cat))},
 				{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
 				{Key: "draw_prio", Value: mvt.IntVal(int64(sp.drawPrio))},
-			})
+			}
+			// Leg-length variant tag — only on the short/full legs (0/1); arcs and
+			// rings (sleg -1) stay untagged so the client always shows them.
+			if st.sleg >= 0 {
+				attrs = append(attrs, mvt.KeyValue{Key: "sleg", Value: mvt.IntVal(int64(st.sleg))})
+			}
+			tb.Layer("lines").AddLines(paths, attrs)
 		}
 	}
 
@@ -958,13 +990,34 @@ func (b *Baker) DebugTilePolyOverlap(coord tile.TileCoord, buffer float64, exten
 // the wasm baker turns it on via cpSetTileDiag; tests set it directly.
 var TileDiag func(string)
 
+// earthCircumM is the Web-Mercator equatorial circumference (m), used to convert
+// a VALNMR nominal range (nautical miles) into a normalized-world fraction.
+const earthCircumM = 40075016.686
+
+// sectorLegFullNorm is the full-length sector-leg reach (VALNMR nautical miles) as
+// a fraction of the normalized world at the light's latitude — a ground distance,
+// so zoom-independent. 0 when no/!positive VALNMR.
+func sectorLegFullNorm(lat, radiusNM float64) float64 {
+	if radiusNM <= 0 {
+		return 0
+	}
+	cosLat := math.Cos(lat * math.Pi / 180.0)
+	if cosLat < 1e-6 {
+		return 0
+	}
+	return radiusNM * 1852.0 / (cosLat * earthCircumM)
+}
+
 // sectorStroke is one tessellated piece of sector geometry: a lat/lon polyline
-// plus the S-52 pen token + width the lines layer carries.
+// plus the S-52 pen token + width the lines layer carries. sleg tags leg-length
+// variants for the client's full-length-sector toggle: -1 = no tag / always shown
+// (arcs, rings), 0 = the 25 mm short leg, 1 = the full VALNMR-length leg.
 type sectorStroke struct {
 	points     []geo.LatLon
 	colorToken string
 	widthPx    float32
 	dashed     bool
+	sleg       int
 }
 
 // expandSector tessellates a LIGHTS06 sector at anchor into lat/lon line strokes
@@ -991,10 +1044,19 @@ func expandSector(anchor geo.LatLon, p portrayal.SectorParams, z uint32) []secto
 	if a2 <= a1 {
 		a2 += 360.0
 	}
-	legLen := 25.0 * pxPerMM
+	legShort := 25.0 * pxPerMM
+	// Full leg extends to the VALNMR nominal range (S-52 LIGHTS06 note 1). Never
+	// shorter than the 25 mm default, so the "full length" toggle only ever grows
+	// the leg. Both variants are baked (tagged sleg 0/1); the client shows one.
+	legFull := sectorLegFullNorm(anchor.Lat, p.RadiusNM) * worldPx
+	if legFull < legShort {
+		legFull = legShort
+	}
 	var out []sectorStroke
-	out = emitLeg(out, ax, ay, worldPx, a1, legLen)
-	out = emitLeg(out, ax, ay, worldPx, a2, legLen)
+	out = emitLeg(out, ax, ay, worldPx, a1, legShort, 0)
+	out = emitLeg(out, ax, ay, worldPx, a2, legShort, 0)
+	out = emitLeg(out, ax, ay, worldPx, a1, legFull, 1)
+	out = emitLeg(out, ax, ay, worldPx, a2, legFull, 1)
 	out = emitArc(out, ax, ay, worldPx, 20.0, color, a1, a2, pxPerMM)
 	return out
 }
@@ -1008,7 +1070,7 @@ func sunproject(x, y, worldPx float64) geo.LatLon {
 	return geo.LatLon{Lat: unnormY(y / worldPx), Lon: x/worldPx*360 - 180}
 }
 
-func emitLeg(out []sectorStroke, ax, ay, worldPx, bearingDeg, lenPx float64) []sectorStroke {
+func emitLeg(out []sectorStroke, ax, ay, worldPx, bearingDeg, lenPx float64, sleg int) []sectorStroke {
 	if lenPx <= 0 {
 		return out
 	}
@@ -1017,7 +1079,7 @@ func emitLeg(out []sectorStroke, ax, ay, worldPx, bearingDeg, lenPx float64) []s
 		sunproject(ax, ay, worldPx),
 		sunproject(ax+dx*lenPx, ay+dy*lenPx, worldPx),
 	}
-	return append(out, sectorStroke{points: pts, colorToken: "CHBLK", widthPx: 1, dashed: true})
+	return append(out, sectorStroke{points: pts, colorToken: "CHBLK", widthPx: 1, dashed: true, sleg: sleg})
 }
 
 func emitArc(out []sectorStroke, ax, ay, worldPx, radiusMM float64, color string, a1, a2, pxPerMM float64) []sectorStroke {
@@ -1036,11 +1098,12 @@ func emitArc(out []sectorStroke, ax, ay, worldPx, radiusMM float64, color string
 		dx, dy := bearingToScreen(brg)
 		pts[i] = sunproject(ax+dx*radius, ay+dy*radius, worldPx)
 	}
-	// OUTLW underlay (4 px) beneath, then the coloured arc (2 px) on top.
+	// OUTLW underlay (4 px) beneath, then the coloured arc (2 px) on top. Arcs/
+	// rings carry no leg tag (sleg -1) — always shown, regardless of the toggle.
 	pts2 := make([]geo.LatLon, len(pts))
 	copy(pts2, pts)
-	out = append(out, sectorStroke{points: pts, colorToken: "OUTLW", widthPx: 4, dashed: false})
-	out = append(out, sectorStroke{points: pts2, colorToken: color, widthPx: 2, dashed: false})
+	out = append(out, sectorStroke{points: pts, colorToken: "OUTLW", widthPx: 4, dashed: false, sleg: -1})
+	out = append(out, sectorStroke{points: pts2, colorToken: color, widthPx: 2, dashed: false, sleg: -1})
 	return out
 }
 

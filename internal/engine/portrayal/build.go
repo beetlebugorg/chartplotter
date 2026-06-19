@@ -109,11 +109,25 @@ const (
 	BndSymbolized = 1
 )
 
-// FeatureBuildPass is one boundary-symbolization pass: the built primitives plus
-// the bnd tag the baker stamps on every primitive of the pass.
+// Point-symbol style tags (S-52 §11.2.2) stamped on each primitive's baked
+// `pts`, which the client's pointStyleFilter keys off — the same mechanism as
+// `bnd`, but for the simplified vs paper-chart POINT lookup tables: 2 =
+// style-independent (always shown), 0 = paper-chart pass, 1 = simplified pass.
+// Geometry-disjoint from bnd: simplified/paper only applies to point features,
+// plain/symbolized only to area boundaries.
+const (
+	PtsCommon     = 2
+	PtsPaper      = 0
+	PtsSimplified = 1
+)
+
+// FeatureBuildPass is one display-variant pass: the built primitives plus the
+// bnd (boundary-style) and pts (point-symbol-style) tags the baker stamps on
+// every primitive of the pass, so the client toggles each axis live (no re-bake).
 type FeatureBuildPass struct {
 	Build FeatureBuild
 	Bnd   int
+	Pts   int
 }
 
 // BuildFeaturePasses expands a feature into its boundary-symbolization passes
@@ -128,8 +142,16 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 		mariner = s52.DefaultMarinerSettings()
 	}
 	objClass := f.ObjectClass()
-	geomCode := geometryCode(f.Geometry().Type)
+	gtype := f.Geometry().Type
+	geomCode := geometryCode(gtype)
 	attrs := f.Attributes()
+
+	// Point features: the only style axis is simplified vs paper-chart symbols
+	// (matchesTableName switches the point LUP set on SimplifiedPoints).
+	// SymbolizedBoundaries is area-only, so points never split on bnd.
+	if gtype == s57.GeometryTypePoint {
+		return pointPasses(lib, mariner, f, objClass, geomCode, attrs)
+	}
 
 	mPlain := *mariner
 	mPlain.SymbolizedBoundaries = false
@@ -139,8 +161,8 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 		return nil
 	}
 	buildP := buildFromSet(lib, &mPlain, f, setP)
-	one := []FeatureBuildPass{{Build: buildP, Bnd: BndCommon}}
-	if f.Geometry().Type != s57.GeometryTypePolygon {
+	one := []FeatureBuildPass{{Build: buildP, Bnd: BndCommon, Pts: PtsCommon}}
+	if gtype != s57.GeometryTypePolygon {
 		return one
 	}
 	mSym := *mariner
@@ -155,8 +177,35 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 	// Symbolized boundaries differ — build the second pass, reusing setS.
 	buildS := buildFromSet(lib, &mSym, f, setS)
 	return []FeatureBuildPass{
-		{Build: buildP, Bnd: BndPlain},
-		{Build: buildS, Bnd: BndSymbolized},
+		{Build: buildP, Bnd: BndPlain, Pts: PtsCommon},
+		{Build: buildS, Bnd: BndSymbolized, Pts: PtsCommon},
+	}
+}
+
+// pointPasses builds a point feature under both the paper-chart and simplified
+// point lookup tables (S-52 §11.2.2). Most point classes resolve identically in
+// both (one pass, pts=2); buoys/beacons and the like differ — those get two
+// passes (paper pts=0 / simplified pts=1) so the client's "simplified symbols"
+// toggle swaps them live with no re-bake.
+func pointPasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, objClass, geomCode string, attrs map[string]interface{}) []FeatureBuildPass {
+	mPaper := *mariner
+	mPaper.SimplifiedPoints = false
+	setPaper := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mPaper)
+	if setPaper == nil {
+		return nil
+	}
+	buildPaper := buildFromSet(lib, &mPaper, f, setPaper)
+	one := []FeatureBuildPass{{Build: buildPaper, Bnd: BndCommon, Pts: PtsCommon}}
+	mSimp := *mariner
+	mSimp.SimplifiedPoints = true
+	setSimp := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mSimp)
+	if setSimp == nil || !instructionSetsDiffer(setPaper, setSimp) {
+		return one
+	}
+	buildSimp := buildFromSet(lib, &mSimp, f, setSimp)
+	return []FeatureBuildPass{
+		{Build: buildPaper, Bnd: BndCommon, Pts: PtsPaper},
+		{Build: buildSimp, Bnd: BndCommon, Pts: PtsSimplified},
 	}
 }
 

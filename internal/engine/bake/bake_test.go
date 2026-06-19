@@ -353,20 +353,33 @@ func TestSoundingGrouping(t *testing.T) {
 }
 
 func TestSectorLights(t *testing.T) {
-	// expandSector: a sector -> 2 dashed legs + OUTLW underlay + coloured arc.
+	// expandSector: a sector -> 2 short legs (sleg 0) + 2 full-length legs
+	// (sleg 1) + OUTLW underlay + coloured arc (both sleg -1, always shown).
 	anchor := mustLatLon(38.97, -76.49)
 	strokes := expandSector(anchor, sp(0, 90, "LITRD"), 14)
-	if len(strokes) != 4 {
-		t.Fatalf("sector strokes = %d, want 4", len(strokes))
+	if len(strokes) != 6 {
+		t.Fatalf("sector strokes = %d, want 6", len(strokes))
 	}
-	if !strokes[0].dashed || strokes[0].colorToken != "CHBLK" {
-		t.Error("leg 0 should be dashed CHBLK")
+	if !strokes[0].dashed || strokes[0].colorToken != "CHBLK" || strokes[0].sleg != 0 {
+		t.Error("stroke 0 should be the dashed CHBLK short leg (sleg 0)")
 	}
-	if strokes[2].colorToken != "OUTLW" || strokes[2].widthPx != 4 {
-		t.Error("stroke 2 should be 4px OUTLW underlay")
+	if !strokes[2].dashed || strokes[2].colorToken != "CHBLK" || strokes[2].sleg != 1 {
+		t.Error("stroke 2 should be the dashed CHBLK full-length leg (sleg 1)")
 	}
-	if strokes[3].colorToken != "LITRD" || strokes[3].widthPx != 2 || strokes[3].dashed {
-		t.Error("stroke 3 should be 2px solid LITRD arc")
+	if strokes[4].colorToken != "OUTLW" || strokes[4].widthPx != 4 || strokes[4].sleg != -1 {
+		t.Error("stroke 4 should be the 4px OUTLW arc underlay (sleg -1)")
+	}
+	if strokes[5].colorToken != "LITRD" || strokes[5].widthPx != 2 || strokes[5].dashed || strokes[5].sleg != -1 {
+		t.Error("stroke 5 should be the 2px solid LITRD arc (sleg -1)")
+	}
+	// A light with a VALNMR nominal range emits full legs (sleg 1) longer than
+	// the 25 mm short legs (sleg 0) — the toggle's whole point.
+	spR := sp(0, 90, "LITRD")
+	spR.RadiusNM = 8
+	withR := expandSector(anchor, spR, 14)
+	legLen := func(s sectorStroke) float64 { return absf(s.points[1].Lat-s.points[0].Lat) + absf(s.points[1].Lon-s.points[0].Lon) }
+	if legLen(withR[2]) <= legLen(withR[0]) {
+		t.Errorf("full leg (%.6f) should be longer than short leg (%.6f)", legLen(withR[2]), legLen(withR[0]))
 	}
 	// Screen-fixed: lat span ~halves per zoom level.
 	r14 := expandSector(anchor, sp(0, 0, "LITYW"), 14) // ring
