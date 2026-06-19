@@ -76,7 +76,10 @@ func cpCellBounds(_ js.Value, args []js.Value) any {
 		return js.ValueOf(map[string]any{"ok": false, "error": err.Error()})
 	}
 	bb := chart.Bounds()
-	return js.ValueOf(map[string]any{"ok": true, "bounds": []any{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat}})
+	return js.ValueOf(map[string]any{
+		"ok": true, "bounds": []any{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
+		"scale": int(chart.CompilationScale()), // CSCL → the app picks a detail zoom
+	})
 }
 
 // cpBakeTile(z, x, y) — bake one MVT tile from the current session by full-scan

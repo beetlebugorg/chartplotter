@@ -227,6 +227,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
     this._cellBounds = new Map();       // name -> [w,s,e,n] footprint (from the baker), to locate uploaded cells
+    this._cellScale = new Map();        // name -> compilation scale (CSCL) of uploaded cells, for picking a detail zoom
     this._cellUsage = { bytes: 0, count: 0 }; // raw cell store disk usage (refreshed on popup open / load)
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
@@ -785,7 +786,12 @@ export class ChartPlotterApp extends HTMLElement {
     if (!bb || !this._map) return;
     this._cellPopOpen = false; clearInterval(this._cellPopTimer); this._renderCellStatusPopup();
     this.closeDrawer();
-    this._map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 60, maxZoom: 14, duration: 800 });
+    // Zoom to the cell's detail level — a large-scale cell only renders at high
+    // zoom, so fitting its small footprint at ~z14 would still show only basemap.
+    const need = this._cellTargetZoom(name);
+    const cam = this._map.cameraForBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 60 });
+    const zoom = Math.min(18, Math.max(cam ? cam.zoom : 13, need ? need + 0.5 : 0));
+    this._map.easeTo({ center: cam ? cam.center : [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2], zoom, duration: 800 });
   }
 
   // A deploy-time config value from an attribute, overridable per-load by the
@@ -2842,15 +2848,28 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   // Frame the map to the combined extent of the given catalog cells.
+  // The minimum zoom at which a cell actually renders — its band's start zoom
+  // (large-scale harbour/berthing cells only bake at z13/16+, so fitting their
+  // small footprint at ~z14 would show nothing).
+  _cellTargetZoom(name) {
+    const c = this._byName.get(name);
+    const scale = (c && typeof c.s === "number" && c.s) || this._cellScale.get(name) || 0;
+    return scale ? (BAND_MINZOOM[bandForScale(scale)] || 0) : 0;
+  }
+
   _frameCells(names) {
-    let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false;
+    let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false, need = 0;
     for (const n of names) {
       const bb = this._cellLocation(n); // catalog bbox OR baker/parsed bounds (foreign cells)
       if (bb) {
         W = Math.min(W, bb[0]); S = Math.min(S, bb[1]); E = Math.max(E, bb[2]); N = Math.max(N, bb[3]); any = true;
+        need = Math.max(need, this._cellTargetZoom(n)); // zoom in enough to actually render
       }
     }
-    if (any && this._map) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
+    if (!any || !this._map) return;
+    const cam = this._map.cameraForBounds([[W, S], [E, N]], { padding: 60 });
+    const zoom = Math.min(18, Math.max(cam ? cam.zoom : 12, need ? need + 0.5 : 0));
+    this._map.easeTo({ center: cam ? cam.center : [(W + E) / 2, (S + N) / 2], zoom, duration: 800 });
   }
 
   // For installed cells with no catalog footprint (foreign uploads), parse their
@@ -2866,8 +2885,12 @@ export class ChartPlotterApp extends HTMLElement {
       try {
         const bytes = await this._store.getBytes(name);
         if (!bytes) continue;
-        const bb = await this._plotter.cellBounds(name, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
-        if (Array.isArray(bb) && bb.length === 4 && bb[0] <= bb[2]) this._cellBounds.set(name, bb);
+        const res = await this._plotter.cellBounds(name, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+        const bb = res && res.bounds;
+        if (Array.isArray(bb) && bb.length === 4 && bb[0] <= bb[2]) {
+          this._cellBounds.set(name, bb);
+          if (res.scale) this._cellScale.set(name, res.scale);
+        }
       } catch (e) { /* best-effort */ }
     }
   }
