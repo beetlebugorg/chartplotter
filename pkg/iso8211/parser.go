@@ -117,8 +117,15 @@ func (p *Parser) parseDDR() (*DataDescriptiveRecord, error) {
 		return nil, NewParseError(p.offset, "DDR directory", err)
 	}
 
-	// Read field area
+	// Read field area. A leader record length of 0 means "length not stored —
+	// compute it from the directory" (legal ISO 8211); recover the true field-area
+	// size from the parsed directory entries and backfill RecordLength so offset
+	// tracking and downstream length checks stay correct.
 	fieldAreaSize := leader.RecordLength - leader.FieldAreaStart
+	if leader.RecordLength == 0 {
+		fieldAreaSize = fieldAreaSizeFromDirectory(directory)
+		leader.RecordLength = leader.FieldAreaStart + fieldAreaSize
+	}
 	fieldArea := make([]byte, fieldAreaSize)
 	n, err := io.ReadFull(p.getReader(), fieldArea)
 	if err != nil {
@@ -162,8 +169,15 @@ func (p *Parser) parseDataRecord(ddr *DataDescriptiveRecord) (*DataRecord, error
 		return nil, NewParseError(p.offset, "data record directory", err)
 	}
 
-	// Read field area
+	// Read field area. A leader record length of 0 means "length not stored —
+	// compute it from the directory" (legal ISO 8211); recover the true field-area
+	// size from the parsed directory entries and backfill RecordLength so offset
+	// tracking and downstream length checks stay correct.
 	fieldAreaSize := leader.RecordLength - leader.FieldAreaStart
+	if leader.RecordLength == 0 {
+		fieldAreaSize = fieldAreaSizeFromDirectory(directory)
+		leader.RecordLength = leader.FieldAreaStart + fieldAreaSize
+	}
 	fieldArea := make([]byte, fieldAreaSize)
 	n, err := io.ReadFull(p.getReader(), fieldArea)
 	if err != nil {
@@ -185,4 +199,18 @@ func (p *Parser) parseDataRecord(ddr *DataDescriptiveRecord) (*DataRecord, error
 		Directory: directory,
 		Fields:    fields,
 	}, nil
+}
+
+// fieldAreaSizeFromDirectory computes a record's field-area size from its parsed
+// directory entries, for records whose leader carries a record length of 0
+// (ISO 8211 §"length not specified"). Entries are positioned as an offset from
+// the field-area start, so the size is the furthest entry's end (Position+Length).
+func fieldAreaSizeFromDirectory(dir []*DirectoryEntry) int {
+	max := 0
+	for _, e := range dir {
+		if end := e.Position + e.Length; end > max {
+			max = end
+		}
+	}
+	return max
 }

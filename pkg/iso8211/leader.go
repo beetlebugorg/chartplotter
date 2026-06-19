@@ -48,11 +48,15 @@ func (p *Parser) parseLeader() (*Leader, error) {
 	}
 	leader.RecordLength = recordLength
 
-	// A record length of 0 means this isn't a real record: some S-57 producers
-	// pad the file after the last record with spaces/zeros (which parse to 0).
-	// Signal end-of-records so the data-record loop stops cleanly instead of
-	// failing leader validation. (A genuine empty file errors in parseDDR.)
-	if recordLength == 0 {
+	// A record length of 0 is legal ISO 8211: the length is NOT stored in the
+	// leader and must be computed from the directory (some S-57 producers, e.g.
+	// USACE Inland ENCs, encode all their data records this way). Only treat a
+	// zero length as end-of-records (trailing padding) when the leader is NOT a
+	// real record header — a genuine record still carries its 'D'/'L' identifier,
+	// and its true length is recovered after the directory is read (see
+	// parseDataRecord / parseDDR). Pure space/zero padding is already caught by
+	// the blank-leader check above.
+	if recordLength == 0 && buf[6] != 'D' && buf[6] != 'L' {
 		return nil, io.EOF
 	}
 
@@ -157,8 +161,10 @@ func parseASCIIInt(buf []byte) (int, error) {
 
 // validateLeader validates the leader structure
 func validateLeader(leader *Leader) error {
-	// Record length must be positive and at least 24 bytes (leader size)
-	if leader.RecordLength < 24 {
+	// Record length must be at least the 24-byte leader — except 0, the legal
+	// ISO 8211 "length not stored, compute it from the directory" convention,
+	// which parseDataRecord/parseDDR resolve after reading the directory.
+	if leader.RecordLength != 0 && leader.RecordLength < 24 {
 		return fmt.Errorf("record length must be >= 24, got %d", leader.RecordLength)
 	}
 
