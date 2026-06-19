@@ -984,8 +984,12 @@ export class ChartPlotter extends HTMLElement {
     }));
   }
   buildLayers() {
+    // Over an OSM basemap, let its detailed land show through: drop the chart's
+    // own land-area (LNDARE) fill so OSM land isn't painted over (the no-data
+    // hatch is hidden too — see buildStyle).
+    const osm = (this.getAttribute("basemap") || "none") === "osm";
     const base = [
-      { id: "areas", type: "fill", source: "chart", "source-layer": "areas", paint: { "fill-color": this.areasFillColor() } },
+      { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: ["!=", ["get", "class"], "LNDARE"] } : {}), paint: { "fill-color": this.areasFillColor() } },
       { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["coalesce", ["get", "pattern_name"], ""] } },
       // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
       // the shallow side of the live safety contour, shown only when the
@@ -1155,7 +1159,9 @@ export class ChartPlotter extends HTMLElement {
     // hatch instead of looking like surveyed sea. (The pattern image loads lazily
     // via `styleimagemissing` → registerPattern.)
     sources.nodata = { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[-180, -85.0511], [180, -85.0511], [180, 85.0511], [-180, 85.0511], [-180, -85.0511]]] } } };
-    layers.push({ id: "nodata", type: "fill", source: "nodata", layout: { visibility: this._mariner.showNoData === false ? "none" : "visible" }, paint: { "fill-pattern": "NODATA03" } });
+    // No-data hatch is hidden over OSM (its land/water fills the gaps instead).
+    const hideNoData = this._mariner.showNoData === false || basemap === "osm";
+    layers.push({ id: "nodata", type: "fill", source: "nodata", layout: { visibility: hideNoData ? "none" : "visible" }, paint: { "fill-pattern": "NODATA03" } });
 
     return {
       version: 8,
