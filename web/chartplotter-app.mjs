@@ -16,6 +16,8 @@
 // listCharts/setScheme/setMariner and its `map` handle) plus the shared ChartStore.
 
 import "./chartplotter.mjs"; // defines <chart-plotter> (the renderer we wrap)
+import "./pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import { ChartDownloader } from "./chart-downloader.mjs"; // chart discovery + acquisition
 import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 
@@ -221,12 +223,18 @@ const S57_CLASS = {
 // Fallback label for a chart MVT source-layer when a feature has no `class`.
 const INSPECT_LAYER_LABEL = { point_symbols: "Symbol", soundings: "Sounding", lines: "Line", complex_lines: "Boundary", areas: "Area", area_patterns: "Area pattern", text: "Label" };
 
+// Geometry-primitive rank for pick-report sorting (rule 9): points, then lines,
+// then areas; labels last. (Decode/render lives in <pick-report>.)
+function pickGeomRank(layer) {
+  return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[layer] ?? 9;
+}
+
 export class ChartPlotterApp extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._catalog = [];                 // [{n,l,s,e,u,d,z,zs,bb}]
-    this._byName = new Map();           // name -> catalog entry
+    // NOAA catalogue/discovery lives in this._dl (ChartDownloader, created in
+    // boot); _catalog/_byName/_districts/_catalogDate are proxy getters onto it.
     this._installed = new Set();        // all stored cell names
     this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
@@ -237,7 +245,6 @@ export class ChartPlotterApp extends HTMLElement {
     this._selected = new Set();         // names ticked for import / NOAA download
     this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
     this._regionArchives = [];          // [{num,file,bounds}] — one pmtiles per installed region
-    this._districts = [];               // hosted per-district archives (charts-index.json)
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage outlines on/off (default on)
@@ -294,6 +301,14 @@ export class ChartPlotterApp extends HTMLElement {
     return a;
   }
 
+  // NOAA catalogue/discovery state lives in the ChartDownloader (this._dl); these
+  // proxies keep the shell's existing readers working. Guarded for the brief
+  // window before _dl is created in boot.
+  get _catalog() { return this._dl ? this._dl.catalog : []; }
+  get _byName() { return this._dl ? this._dl.byName : new Map(); }
+  get _districts() { return this._dl ? this._dl.districts : []; }
+  get _catalogDate() { return this._dl ? this._dl.catalogDate : ""; }
+
   connectedCallback() {
     this.boot().catch((e) => {
       console.error("[chartplotter-app]", e);
@@ -315,6 +330,14 @@ export class ChartPlotterApp extends HTMLElement {
     // lazily by viewport (see ingestViewport).
     this._store = new ChartStore();
     this._installed = new Set(await this._store.list());
+    // Chart discovery/acquisition domain (NOAA catalogue, packs, download, import).
+    // Reads the installed set live via a getter (boot reassigns _installed above).
+    this._dl = new ChartDownloader({
+      assets: this._assets,
+      cfg: (n) => this._cfg(n),
+      store: this._store,
+      getInstalled: () => this._installed,
+    });
 
     // Catalog drives the picker AND the lazy-load gating (cell bboxes). Kick it
     // off in parallel; ingestViewport awaits it.
@@ -815,25 +838,15 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   loadCatalog() {
-    // Optional — the picker just shows nothing if absent. Also load the hosted
-    // per-district archive manifest (charts-index.json). The manifest URL is
-    // configurable (catalog="…" / ?catalog=…) so it (and the .pmtiles it lists)
-    // can live on an external host while the app is served from GitHub Pages.
-    const manUrl = this._cfg("catalog") || (this._assets + "charts-index.json");
-    const cat = fetch(this._assets + "catalog.json")
-      .then((r) => (r.ok ? r.json() : null)).then((j) => { this._catalogDate = (j && j.date) || ""; return (j && j.cells) || []; }).catch(() => [])
-      .then((cells) => {
-        // NOAA catalog titles are HTML-encoded (e.g. "Hawai&#39;i"). Decode once
-        // to plain text so esc() can re-encode them safely for display instead of
-        // double-encoding the entity into a literal "&#39;".
-        const ta = document.createElement("textarea");
-        const decode = (s) => { if (!s || s.indexOf("&") < 0) return s; ta.innerHTML = s; return ta.value; };
-        for (const c of cells) { if (c.l) c.l = decode(c.l); }
-        this._catalog = cells; for (const c of cells) this._byName.set(c.n, c);
-      });
-    const man = fetch(manUrl)
-      .then((r) => (r.ok ? r.json() : null)).then((j) => { this._districts = (j && j.districts) || []; }).catch(() => { this._districts = []; });
-    return Promise.all([cat, man]);
+    // NOAA chart catalogue + hosted-archive manifest — owned by the downloader.
+    const dl = this._dl.loadCatalog();
+    // S-57 object/attribute catalogue for the cursor-pick report (decodes class
+    // and attribute names, enumerated values and units — S-52 PresLib §10.8).
+    // Independent of the chart catalogue; the report degrades to raw acronyms if absent.
+    this._s57cat = { classes: {}, attributes: {} };
+    fetch(this._assets + "s57-catalogue.json")
+      .then((r) => (r.ok ? r.json() : null)).then((j) => { if (j) this._s57cat = j; }).catch(() => {});
+    return dl;
   }
 
   async onReady(map) {
@@ -1293,30 +1306,10 @@ export class ChartPlotterApp extends HTMLElement {
 
   // -- chart packs (Coast Guard districts) ---------------------------------
   // The cells in a district pack (every catalog cell tagged with that `cg`).
-  _districtCellNames(cg) {
-    const out = [];
-    for (const c of this._catalog) if (c.cg === cg) out.push(c.n);
-    return out;
-  }
-  // Counts + download size for a pack's card: how many of its cells exist in the
-  // catalog, how many are already on this device, and the total download bytes.
-  _districtStat(cg) {
-    let total = 0, have = 0, bytes = 0;
-    for (const c of this._catalog) {
-      if (c.cg !== cg) continue;
-      total++;
-      if (typeof c.zs === "number") bytes += c.zs;
-      if (this._installed.has(c.n)) have++;
-    }
-    return { total, have, bytes };
-  }
-  // NOAA's per-district bundle URL (NNCGD_ENCs.zip), derived from any catalog
-  // cell's per-cell zip URL so it tracks the catalog's host. cg is zero-padded.
-  _districtZipUrl(cg) {
-    const any = this._catalog.find((c) => c.z);
-    const dir = any ? any.z.replace(/[^/]+$/, "") : "https://www.charts.noaa.gov/ENCs/";
-    return dir + String(cg).padStart(2, "0") + "CGD_ENCs.zip";
-  }
+  // Discovery helpers delegate to the downloader (this._dl).
+  _districtCellNames(cg) { return this._dl.districtCellNames(cg); }
+  _districtStat(cg) { return this._dl.districtStat(cg); }
+  _districtZipUrl(cg) { return this._dl.districtZipUrl(cg); }
 
   // The pack grid: one card per Coast Guard district. Tap a card to preview its
   // coverage on the map; the button downloads the whole pack (or uninstalls it).
@@ -1510,10 +1503,7 @@ export class ChartPlotterApp extends HTMLElement {
 
   // The URL of NOAA's All_ENCs.zip, derived from any catalog cell's per-cell zip
   // URL (same directory) so it tracks the catalog's host.
-  _allEncsUrl() {
-    const any = this._catalog.find((c) => c.z);
-    return any ? any.z.replace(/[^/]+$/, "All_ENCs.zip") : "https://www.charts.noaa.gov/ENCs/All_ENCs.zip";
-  }
+  _allEncsUrl() { return this._dl.allEncsUrl(); }
 
   // Bulk path: download a NOAA zip bundle ONCE (streamed through the dumb byte
   // proxy into a disk-backed Blob), then slice + inflate the wanted base cells
@@ -1629,6 +1619,12 @@ export class ChartPlotterApp extends HTMLElement {
     map.addLayer({ id: "inspect-focus-fill", type: "fill", source: "inspect-focus", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#00e5ff", "fill-opacity": 0.25 } });
     map.addLayer({ id: "inspect-focus-line", type: "line", source: "inspect-focus", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#00b8d4", "line-width": 3.5 } });
     map.addLayer({ id: "inspect-focus-pt", type: "circle", source: "inspect-focus", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 13, "circle-color": "rgba(0,229,255,0.25)", "circle-stroke-color": "#00b8d4", "circle-stroke-width": 3 } });
+    // ECDIS cursor-pick highlight (the picked feature's geometry) — accent-coloured,
+    // distinct from the dev inspector's red. See _pickReportAt (S-52 PresLib §10.8).
+    map.addSource("pick", { type: "geojson", data: empty });
+    map.addLayer({ id: "pick-fill", type: "fill", source: "pick", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#ffb300", "fill-opacity": 0.18 } });
+    map.addLayer({ id: "pick-line", type: "line", source: "pick", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#ff8f00", "line-width": 3 } });
+    map.addLayer({ id: "pick-pt", type: "circle", source: "pick", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 12, "circle-color": "rgba(255,179,0,0.18)", "circle-stroke-color": "#ff8f00", "circle-stroke-width": 3 } });
     // Dev tile inspector: sampled coverage-hole points (Inspect → Coverage → Measure).
     map.addSource("tile-holes", { type: "geojson", data: empty });
     map.addLayer({ id: "tile-holes", type: "circle", source: "tile-holes", paint: { "circle-radius": 4, "circle-color": "#ff1744", "circle-opacity": 0.75, "circle-stroke-color": "#fff", "circle-stroke-width": 1 } });
@@ -1723,9 +1719,14 @@ export class ChartPlotterApp extends HTMLElement {
       // the cell under it (drags pan, and MapLibre only emits "click" for
       // non-pan gestures).
       if (this._chartsMode) { this._pickDistrictAt(e.point.x, e.point.y); return; }
-      if (!this._inspectMode || this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
-      if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
-      this._inspectAt(e.point, true); // lock onto whatever's here
+      if (this._inspectMode) { // dev feature inspector
+        if (this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
+        if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
+        this._inspectAt(e.point, true); // lock onto whatever's here
+        return;
+      }
+      // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
+      this._pickReportAt(e.point, e.originalEvent);
     });
   }
 
@@ -1737,6 +1738,7 @@ export class ChartPlotterApp extends HTMLElement {
     on = !!on;
     if (on === this._inspectMode) return;
     this._inspectMode = on;
+    if (on) this._closePick(); // dev inspector and the user pick report are mutually exclusive
     this._inspectLocked = false;
     this._inspectLastKey = "";
     if (on) this._cancelAreaSelect();
@@ -2092,40 +2094,14 @@ export class ChartPlotterApp extends HTMLElement {
   // A debugging probe — if a stale/empty tile fills in after this, it was cached;
   // if it stays blank, the emptiness is being regenerated (not a cache artifact).
   async _flushTiles(btn) {
-    const pl = this._plotter, map = this._map;
-    if (!pl || !map) return;
+    const pl = this._plotter;
+    if (!pl || !pl.flushTiles) return;
     if (btn) flashBtn(btn, "…");
     try {
-      if (pl._rtCache && pl._rtCache.clear) await pl._rtCache.clear(); // cp two-layer cache
-      // Drop MapLibre's loaded tiles for the chart source. MapLibre 4 exposed
-      // `map.style.sourceCaches[id]`; v5 renamed/minified that and splits a source
-      // into paint + symbol caches — so duck-type every cache-shaped dict on style
-      // keyed by "chart" (clearTiles/update survive minification).
-      for (const sc of this._chartSourceCaches()) {
-        if (sc.clearTiles) { sc.clearTiles(); if (sc.update) sc.update(map.transform); }
-      }
-      if (pl.refresh) pl.refresh(); // bump version → re-request + re-bake
+      await pl.flushTiles();
       console.log("[flush] tile caches cleared, re-baking visible tiles");
       if (btn) flashBtn(btn, "✓");
     } catch (e) { console.warn("[flush]", e); if (btn) flashBtn(btn, "✗"); }
-  }
-
-  // Every MapLibre SourceCache backing the "chart" source. v4 had one at
-  // map.style.sourceCaches["chart"]; v5 renamed that property and can hold a
-  // separate paint + symbol cache, so we duck-type rather than hardcode the name.
-  _chartSourceCaches() {
-    const style = this._map && this._map.style;
-    if (!style) return [];
-    const out = [];
-    const consider = (c) => { if (c && (c._tiles || typeof c.clearTiles === "function") && !out.includes(c)) out.push(c); };
-    const fromDict = (d) => {
-      if (!d || typeof d !== "object") return;
-      if (d instanceof Map) { consider(d.get("chart")); return; }
-      if (Object.prototype.hasOwnProperty.call(d, "chart")) consider(d["chart"]);
-    };
-    fromDict(style.sourceCaches);
-    for (const k of Object.keys(style)) { const v = style[k]; if (v && typeof v === "object") fromDict(v); }
-    return out;
   }
 
   // Cells overlapping the current viewport, tallied per usage band:
@@ -2318,6 +2294,63 @@ export class ChartPlotterApp extends HTMLElement {
     }
   }
 
+  // --- ECDIS cursor pick (S-52 PresLib §10.8) -------------------------------
+  // Report on the chart feature(s) under a tapped point. Queries the rendered
+  // tiles (so it returns only visible objects — rule 7), dedupes, and sorts by
+  // drawing priority then geometry primitive (rule 9), then hands the stack to
+  // the <pick-report> panel, which decodes + renders it. `ev` is the originating
+  // DOM event (its clientX/Y anchor the panel's out-of-the-way placement).
+  _pickReportAt(point, ev) {
+    const map = this._map;
+    if (!map) return;
+    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source));
+    const seen = new Set(), uniq = [];
+    for (const f of feats) {
+      const p = f.properties || {};
+      const key = (f.sourceLayer || "") + "|" + (p.class || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uniq.push(f);
+    }
+    if (!uniq.length) { this._closePick(); return; }
+    uniq.sort((a, b) => {
+      const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
+      if (pa !== pb) return pb - pa; // higher drawing priority (more significant) first
+      return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
+    });
+    const el = this._ensurePickEl();
+    if (!el) return; // <pick-report> module not loaded (degrade quietly)
+    el.setCatalogue(this._s57cat);
+    el.show(uniq, ev ? { x: ev.clientX, y: ev.clientY } : null);
+  }
+
+  // Create the cursor-pick panel on first use and bridge it to the map highlight.
+  // Returns null if <pick-report> hasn't been defined (module failed to load).
+  _ensurePickEl() {
+    if (this._pickEl) return this._pickEl;
+    const el = document.createElement("pick-report");
+    if (typeof el.show !== "function") { console.warn("[pick] <pick-report> not loaded"); return null; }
+    this.shadowRoot.appendChild(el);
+    el.addEventListener("pick-feature", (e) => {
+      const f = e.detail && e.detail.feature;
+      const src = this._map && this._map.getSource("pick");
+      if (src) src.setData({ type: "FeatureCollection", features: f ? [{ type: "Feature", properties: {}, geometry: f.geometry }] : [] });
+    });
+    el.addEventListener("pick-close", () => this._clearPickHi());
+    this._pickEl = el;
+    return el;
+  }
+
+  _closePick() {
+    if (this._pickEl) this._pickEl.hide();
+    this._clearPickHi();
+  }
+
+  _clearPickHi() {
+    const src = this._map && this._map.getSource("pick");
+    if (src) src.setData({ type: "FeatureCollection", features: [] });
+  }
+
   // Build a GeoJSON FeatureCollection of cell footprints. `cells` is an iterable
   // of catalog entries; when `mark` is set, cells of the previewed pack (the
   // active Coast Guard district) are tagged sel=1 so they highlight on the map.
@@ -2391,6 +2424,7 @@ export class ChartPlotterApp extends HTMLElement {
     const first = !this._chartsMode;
     if (first) this._preChartsView = { center: this._map.getCenter(), zoom: this._map.getZoom() };
     this._chartsMode = true;
+    this._closePick(); // the cursor-pick report is for the chart view only
     this._setChartLayersVisible(false);
     this._setCellOverlay(true);
     const wb = this.shadowRoot.getElementById("world-btn");
@@ -3208,6 +3242,8 @@ export class ChartPlotterApp extends HTMLElement {
         #dlpill .dlp-spin { width:13px; height:13px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation:dlspin .8s linear infinite; }
         #dlpill.error .dlp-spin { display:none; }
         @keyframes dlspin { to { transform:rotate(360deg); } }
+        /* The ECDIS cursor-pick report (S-52 PresLib §10.8) is its own element,
+           <pick-report> — see pick-report.mjs (styled via the inherited --ui-* tokens). */
         /* chart info pill (map popup when focusing a chart from the list) */
         .chart-pill { font:13px/1.4 system-ui,sans-serif; min-width:170px; }
         .chart-pill .cp-title { font-weight:600; margin-bottom:2px; }

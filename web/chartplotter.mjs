@@ -23,6 +23,25 @@
 // soundings, text) is assembled client-side from the baker's JSON assets, the
 // same way the dev index.html does — colour is never baked, so Day/Dusk/Night
 // is a restyle. This module supersedes index.html as the shipped surface.
+//
+// ── PUBLIC INTERFACE (the stable contract the shell + plugins build on) ──────
+// This widget is the BASE layer of the app. Everything else — the chart
+// downloader, the cursor-pick report, and overlay plugins (own-ship, AIS) — is a
+// separate component that talks to it ONLY through the surface below. Nothing
+// reaches into private (`_`) fields or MapLibre internals; see specs/web-architecture.md.
+//
+//   Charts:        setArchive · addArchive · addArchives · loadRegions ·
+//                  replaceBand · loadArchiveUrl · loadStoreCells · listCharts
+//   Display:       setScheme · setMariner · setBasemap
+//   Tiles:         refresh · flushTiles
+//   Introspection: realtimeStats · realtimeCoverage · cellBounds
+//   Overlays:      get map · overlayBeforeId · addOverlayLayer · removeOverlay
+//   Camera:        setCameraMode · updateFollow · clearFollow
+//   Events:        ready{map} · bake-activity{inflight} · cell-status{name,status,info}
+//
+// A plugin = a small element/module that, on the `ready` event, takes the `map`
+// handle, adds its own namespaced source + layers (via addOverlayLayer), runs its
+// own data loop, and (for tracking) drives the camera via updateFollow.
 
 // NOTE: in-browser baking (the TinyGo WASM EngineClient) is NOT part of the Go
 // build — all tile generation is a server-side task (`chartplotter provision` /
@@ -627,6 +646,107 @@ export class ChartPlotter extends HTMLElement {
       }
     }
     map.triggerRepaint();
+  }
+
+  // Flush every baked-tile cache and force a re-bake of the visible tiles:
+  // clears the in-browser cp TileCache (memory + IndexedDB), drops MapLibre's
+  // already-loaded tiles for the chart source, and bumps the version token so
+  // tiles refetch. Public so the shell needn't reach into renderer internals or
+  // MapLibre's (version-specific) source-cache layout. Returns when done.
+  async flushTiles() {
+    if (this._rtCache && this._rtCache.clear) await this._rtCache.clear();
+    const map = this._map;
+    if (map) {
+      for (const sc of this._chartSourceCaches()) {
+        if (sc.clearTiles) { sc.clearTiles(); if (sc.update) sc.update(map.transform); }
+      }
+    }
+    this.refresh(); // bump version → re-request + re-bake
+  }
+
+  // -- overlay & camera API (for plugins: own-ship, AIS, …) ----------------
+  // Overlay plugins (own-ship marker, AIS targets, the pick highlight) live in
+  // their own modules and render on top of the chart. They add their own GeoJSON
+  // source via the public `map` handle, then place layers through addOverlayLayer
+  // so z-order against the chart is consistent. See specs/web-architecture.md.
+
+  // The chart layer overlays should insert *before* to sit beneath chart text /
+  // symbol labels; undefined ⇒ append on top of everything. Plugins rarely need
+  // it directly (use addOverlayLayer); exposed for fine z-control.
+  get overlayBeforeId() {
+    const map = this._map;
+    if (!map) return undefined;
+    for (const l of map.getStyle().layers || []) {
+      if (l.type === "symbol" && typeof l.source === "string" && l.source.startsWith("chart")) return l.id;
+    }
+    return undefined;
+  }
+
+  // Add a plugin overlay layer (its source must already be added via `map`).
+  // Default z-order is on top of the chart; pass {belowLabels:true} to slot it
+  // beneath the chart's text/symbol labels. Idempotent. Returns the layer id.
+  addOverlayLayer(layer, { belowLabels = false } = {}) {
+    const map = this._map;
+    if (!map || map.getLayer(layer.id)) return layer.id;
+    map.addLayer(layer, belowLabels ? this.overlayBeforeId : undefined);
+    return layer.id;
+  }
+
+  // Remove plugin overlay layers (and optionally their source) on teardown.
+  removeOverlay(layerIds = [], sourceId) {
+    const map = this._map;
+    if (!map) return;
+    for (const id of [].concat(layerIds)) if (map.getLayer(id)) map.removeLayer(id);
+    if (sourceId && map.getSource(sourceId)) map.removeSource(sourceId);
+  }
+
+  // Camera orientation for own-ship / target-following overlays. A tracking
+  // plugin sets the mode, then pushes each new fix via updateFollow():
+  //   "free"      — user controls the camera (default)
+  //   "north-up"  — recentre on the target, bearing held north
+  //   "course-up" — recentre on the target, chart rotated to the target's course
+  setCameraMode(mode) {
+    this._cameraMode = mode || "free";
+    if (this._map && this._cameraMode === "north-up") this._map.easeTo({ bearing: 0, duration: 300 });
+    if (this._followFix) this.updateFollow(this._followFix);
+    return this._cameraMode;
+  }
+
+  // Push the latest target fix {lng, lat, courseDeg?} from a tracking plugin; the
+  // camera recentres (and, in course-up, rotates) per the active mode. A no-op in
+  // "free" mode, so a plugin can stream fixes regardless of the chosen mode.
+  updateFollow(fix) {
+    this._followFix = fix || null;
+    const map = this._map;
+    if (!map || !fix || (this._cameraMode || "free") === "free") return;
+    const cam = { center: [fix.lng, fix.lat], duration: 250 };
+    if (this._cameraMode === "course-up" && typeof fix.courseDeg === "number") cam.bearing = fix.courseDeg;
+    map.easeTo(cam);
+  }
+
+  // Stop following and release the camera to the user.
+  clearFollow() { this._followFix = null; this._cameraMode = "free"; }
+
+  // Every MapLibre SourceCache backing the chart source(s). v4 had one at
+  // map.style.sourceCaches[id]; v5 renamed that property and can hold a separate
+  // paint + symbol cache, so duck-type any cache-shaped dict keyed by a chart
+  // source rather than hardcoding the name. (See [[wasm-z7-tile-hole]].)
+  _chartSourceCaches() {
+    const style = this._map && this._map.style;
+    if (!style) return [];
+    const out = [];
+    const consider = (c) => { if (c && (c._tiles || typeof c.clearTiles === "function") && !out.includes(c)) out.push(c); };
+    const keys = this._realtime ? ["chart"] : CHART_BANDS.map((b) => "chart-" + b.slug);
+    const fromDict = (d) => {
+      if (!d || typeof d !== "object") return;
+      for (const k of keys) {
+        if (d instanceof Map) consider(d.get(k));
+        else if (Object.prototype.hasOwnProperty.call(d, k)) consider(d[k]);
+      }
+    };
+    fromDict(style.sourceCaches);
+    for (const k of Object.keys(style)) { const v = style[k]; if (v && typeof v === "object") fromDict(v); }
+    return out;
   }
 
   // -- real-time wasm tiles ------------------------------------------------
