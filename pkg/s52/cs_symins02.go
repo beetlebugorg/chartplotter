@@ -122,7 +122,7 @@ func (s *SYMINS02) parseSingleInstruction(instr string) Instruction {
 		}
 		return s.parseAP(params)
 	case "TX", "TE": // Text - valid for all geometries
-		return s.parseTX(params)
+		return s.parseText(cmd, params)
 	default:
 		return nil // Unrecognized instruction
 	}
@@ -188,19 +188,24 @@ func (s *SYMINS02) parseAP(params string) Instruction {
 	return &APInstruction{PatternID: patternName}
 }
 
-// parseTX parses a TX(...) or TE(...) instruction.
-func (s *SYMINS02) parseTX(params string) Instruction {
-	text := strings.TrimSpace(params)
-	if text == "" {
+// parseText parses a TX(...) or TE(...) instruction using the same full
+// parameter parser as the main LUPT path, so the text string/attribute, the
+// justification/font/offset, and the text-group number (last param) are all
+// extracted properly — instead of stuffing the raw parameter list in as the
+// label (the old stub showed e.g. "'V-AIS',3,2,2,'15110',2,0,CHMGD,11").
+// Malformed instructions are dropped (S-52 §9.1).
+func (s *SYMINS02) parseText(cmd, params string) Instruction {
+	var tx *TXInstruction
+	var err error
+	if cmd == "TE" {
+		tx, err = parseTE(params)
+	} else {
+		tx, err = parseTX(params)
+	}
+	if err != nil || tx == nil {
 		return nil
 	}
-	// Simple text instruction - full parsing would handle positioning, font, etc.
-	return &TXInstruction{
-		TextInstruction: &TextInstruction{
-			Text:  text,
-			HJust: 2, // Center justified
-		},
-	}
+	return tx
 }
 
 // defaultSymbology returns default symbology based on geometry type.
