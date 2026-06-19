@@ -226,6 +226,31 @@ type Baker struct {
 	curLightText string                // merged multi-line characteristic for the primary
 	seenSector   map[sectorKey]struct{} // sector dedup for the current cell
 	coverage     []CellCoverage         // M_COVR data-coverage polygons of added cells (debug)
+
+	// OverzoomAllBands makes EVERY band overzoom DOWN to the world view (like the
+	// general band always does), not just BandGeneral. Set on the realtime/upload
+	// path so a handful of uploaded cells (e.g. a single large-scale inland ENC)
+	// stay visible as a SCAMIN-gated skeleton when you zoom out, instead of
+	// vanishing until their native detail zoom. Left false for the prebaked NOAA
+	// bake, where thousands of cells would bloat low-zoom tiles (the overview /
+	// general bands already supply the zoomed-out skeleton there).
+	OverzoomAllBands bool
+
+	// MaxBakeZoom caps the highest zoom tiles are emitted at (0 = uncapped, use each
+	// prim's native band max). Large-scale cells over a wide area (e.g. an IENC
+	// river network at 1:5000) would otherwise emit tens of millions of z17–18
+	// tiles; capping the bake and letting MapLibre overzoom the vector tiles
+	// client-side keeps the archive small with no visible detail loss (every
+	// feature is already clipped into the capped-zoom tile).
+	MaxBakeZoom uint32
+}
+
+// clampZMax applies MaxBakeZoom to a prim/sector display max (0 = uncapped).
+func (b *Baker) clampZMax(zMax uint32) uint32 {
+	if b.MaxBakeZoom != 0 && zMax > b.MaxBakeZoom {
+		return b.MaxBakeZoom
+	}
+	return zMax
 }
 
 // CellCoverage is one M_COVR (CATCOV=1) data-coverage polygon of an added cell,
@@ -320,7 +345,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	// only fills the gaps. (We don't raise the display ceiling: indexing a
 	// cell-wide prim up to high zoom would blow up the emit index.)
 	dr := zr
-	if band == BandGeneral {
+	if band == BandGeneral || b.OverzoomAllBands {
 		dr.Min = generalOverzoomMin
 	}
 	cb := chart.Bounds()
@@ -618,7 +643,7 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 			MinLat: unnormY(r.wMaxY), MinLon: r.wMinX*360 - 180,
 			MaxLat: unnormY(r.wMinY), MaxLon: r.wMaxX*360 - 180,
 		}
-		out = addRange(out, seen, bb, r.zMin, r.zMax, extent)
+		out = addRange(out, seen, bb, r.zMin, b.clampZMax(r.zMax), extent)
 	}
 	// A sector light's screen-px figure (the 26 mm ring/legs) spills well beyond
 	// its anchor tile — up to ~0.3 tile at any zoom. Enumerate every tile that
@@ -628,7 +653,7 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 	for i := range b.sectors {
 		sp := &b.sectors[i]
 		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
-		for z := sp.zMin; z <= sp.natMax; z++ {
+		for z := sp.zMin; z <= b.clampZMax(sp.natMax); z++ {
 			// Full-length legs (sp.legNorm, a fixed ground distance) can reach far
 			// past the screen-px figure, so enumerate every tile they cross.
 			r := math.Max(sectorRadiusNorm(z), sp.legNorm)

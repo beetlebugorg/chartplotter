@@ -17,10 +17,12 @@ import (
 // in-browser wasm baker produces), for hosting a prebaked deployment. Updates
 // (.001+) are NOT applied — cells are baked at their base .000 edition.
 type bakeCmd struct {
-	In       []string `arg:"" type:"path" help:"ENC inputs: .zip bundles, directories (scanned for *.000), and/or .000 files."`
+	In       []string `arg:"" type:"path" help:"ENC inputs: .zip bundles, directories (scanned for *.000 and *.zip), and/or .000 files."`
 	Out      string   `short:"o" type:"path" default:"charts.pmtiles" help:"Output PMTiles archive."`
 	Manifest string   `help:"Also write a charts-index.json manifest (for the app's catalog=… option)."`
 	BaseURL  string   `name:"base-url" help:"URL/prefix for the archive in the manifest (default: the archive's basename)."`
+	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
+	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
 }
 
 func (c bakeCmd) Run() error {
@@ -37,7 +39,7 @@ func (c bakeCmd) Run() error {
 	}
 	fmt.Fprintf(os.Stderr, "baking %d cell(s) (%d update file(s) applied)…\n", len(cells), nUpd)
 
-	b, ok, err := baker.BuildBakerWithUpdates(cells, func(name string, err error) {
+	b, ok, err := baker.BuildBakerWithUpdates(cells, c.Overzoom, func(name string, err error) {
 		fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
 	})
 	if err != nil {
@@ -45,6 +47,9 @@ func (c bakeCmd) Run() error {
 	}
 	if len(ok) == 0 {
 		return fmt.Errorf("no cells parsed successfully")
+	}
+	if c.MaxZoom > 0 {
+		b.MaxBakeZoom = uint32(c.MaxZoom)
 	}
 
 	lastPct := -1
@@ -157,6 +162,12 @@ func collectCells(paths []string) (map[string]baker.CellData, error) {
 				if encExt(path) != "" {
 					if b, e := os.ReadFile(path); e == nil {
 						add(path, b)
+					}
+				} else if strings.EqualFold(filepath.Ext(path), ".zip") {
+					// A directory of per-cell .zip bundles (e.g. an IENC download) — unpack
+					// each in place rather than requiring the cells be extracted first.
+					if e := addZipCells(path, add); e != nil {
+						fmt.Fprintf(os.Stderr, "  skip zip %s: %v\n", path, e)
 					}
 				}
 				return nil

@@ -56,7 +56,9 @@ func NewSession() (*Session, error) {
 		return nil, err
 	}
 	mariner := s52.DefaultMarinerSettings()
-	return &Session{Baker: bake.New(), lib: lib, mariner: mariner}, nil
+	b := bake.New()
+	b.OverzoomAllBands = true // realtime/upload path: keep a few uploaded cells visible (skeleton) when zoomed out
+	return &Session{Baker: b, lib: lib, mariner: mariner}, nil
 }
 
 // AddCellBytes parses one raw cell and adds it to the session's Baker. The caller
@@ -129,8 +131,12 @@ func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (
 }
 
 // BuildBakerWithUpdates is BuildBaker, but each cell's update files are applied.
-// cells maps a cell name (the base filename) to its base+update bytes.
-func BuildBakerWithUpdates(cells map[string]CellData, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
+// cells maps a cell name (the base filename) to its base+update bytes. When
+// overzoom is true every band overzooms DOWN to the world view (Baker
+// .OverzoomAllBands) so a standalone large-scale set (e.g. an IENC bundle with no
+// overview cells) stays visible zoomed out; leave it false for a full NOAA bake
+// whose overview/general bands already supply the zoomed-out skeleton.
+func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
 	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
 	if err != nil {
 		return nil, nil, err
@@ -144,6 +150,7 @@ func BuildBakerWithUpdates(cells map[string]CellData, onSkip func(name string, e
 	sort.Strings(names)
 
 	b := bake.New()
+	b.OverzoomAllBands = overzoom
 	var ok []string
 	for _, name := range names {
 		cd := cells[name]

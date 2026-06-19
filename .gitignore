@@ -5,8 +5,14 @@
 *.out
 coverage.*
 
+# Large downloaded ENC datasets (IENC bundles, NOAA All_ENCs, etc.)
+/testdata/full/
+/All_ENCs.zip
+
 # Generated tile archives / runtime chart state (never committed)
 *.pmtiles
+web/noaa.pmtiles
+web/ienc.pmtiles
 web/.cellcache-*.000
 web/.regioncache-*.zip
 web/charts-user.*
