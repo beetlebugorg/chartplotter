@@ -199,11 +199,13 @@ export class ChartPlotter extends HTMLElement {
       this._rt = await import("./wasm-tiles.mjs");
       await this._rt.initBaker(assets);
       // HYBRID: a hosted prebaked archive (prebaked="<url>") fills tiles your
-      // uploaded cells don't cover. Absent → pure offline (wasm-only) rendering.
+      // uploaded cells don't cover. The URL is a single .pmtiles, OR a
+      // charts-index.json manifest (its district files are opened into one
+      // MultiArchive). Absent → pure offline (wasm-only) rendering.
       let fallback = null;
       const preUrl = this.getAttribute("prebaked") || "";
       if (preUrl) {
-        this._prebakedArchive = await new PMTilesArchive(preUrl).init().catch((e) => { console.warn("[chartplotter] prebaked", preUrl, e); return null; });
+        this._prebakedArchive = await this._openPrebaked(preUrl).catch((e) => { console.warn("[chartplotter] prebaked", preUrl, e); return null; });
         fallback = this._prebakedArchive;
       }
       this._rtCache = this._rt.registerTileProtocol(maplibregl, {
@@ -576,6 +578,22 @@ export class ChartPlotter extends HTMLElement {
     }
     this.setAttribute("basemap", m);
     if (this._map) this._map.setStyle(this.buildStyle());
+  }
+
+  // Open a prebaked source for the hybrid fallback: a single .pmtiles, or a
+  // charts-index.json manifest whose district files are opened into one
+  // MultiArchive (each file URL resolved relative to the manifest).
+  async _openPrebaked(url) {
+    if (!url.endsWith(".json")) return new PMTilesArchive(url).init();
+    const j = await fetch(url).then((r) => (r.ok ? r.json() : null));
+    const districts = (j && j.districts) || [];
+    const base = new URL(url, location.href);
+    const ma = new MultiArchive();
+    for (const d of districts) {
+      if (!d.file) continue;
+      try { await ma.add(new URL(d.file, base).href); } catch (e) { console.warn("[chartplotter] prebaked district", d.file, e); }
+    }
+    return ma.archives.length ? ma : null;
   }
 
   // Is the active basemap any OSM variant (raster or vector)? Used to let the OSM

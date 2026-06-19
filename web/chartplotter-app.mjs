@@ -330,7 +330,9 @@ export class ChartPlotterApp extends HTMLElement {
     // Prod is HYBRID: a hosted prebaked archive (pmtiles="…") fills tiles your
     // uploads don't cover. Dev/offline is wasm-only (no prebaked).
     plotter.setAttribute("tiles", "realtime");
-    const prebaked = this._prod ? this._cfg("pmtiles") : "";
+    // Hybrid prebaked fallback: a charts-index.json manifest (multiple archives)
+    // if configured, else a single pmtiles= archive.
+    const prebaked = this._prod ? (this._cfg("catalog") || this._cfg("pmtiles")) : "";
     if (prebaked) { plotter.setAttribute("prebaked", prebaked); this._hasArchive = true; }
     this._plotter = plotter;
     this.shadowRoot.getElementById("map").appendChild(plotter);
