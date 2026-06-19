@@ -98,9 +98,13 @@ func (o *OBSTRN07) depthLabelInstruction() *TXInstruction {
 
 	return &TXInstruction{
 		TextInstruction: &TextInstruction{
-			Text:    depthStr,
-			HJust:   3, // Center
-			VJust:   2, // Bottom
+			Text: depthStr,
+			// S-52 SHOWTEXT justification codes (HJUST 1=centre/2=right/3=left,
+			// VJUST 1=bottom/2=centre/3=top). Centre the depth over the danger
+			// symbol and bottom-justify so it sits ABOVE it — was 3/2 (left/centre),
+			// which anchored the number at the symbol centre and overlapped it.
+			HJust:   1, // Centre
+			VJust:   1, // Bottom (text sits above the anchor point)
 			Space:   2,
 			Font:    FontSpec{Style: 1, Weight: 5, Slant: 1, BodySize: 10},
 			XOffset: 0,
