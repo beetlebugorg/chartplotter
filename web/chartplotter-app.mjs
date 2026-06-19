@@ -2709,9 +2709,19 @@ export class ChartPlotterApp extends HTMLElement {
       const band = c && typeof c.s === "number" ? bandForScale(c.s) : "overview";
       // 999 is a sentinel min-zoom the baker's `z < minzoom` gate never satisfies,
       // so the cell never bakes; 0 means "bake at any zoom".
+      // Overzoom-down loading is scoped to FOREIGN uploads (cells with no catalog
+      // entry, hence no overview/general coverage of their own): they load at ANY
+      // zoom so the baker can draw their zoomed-out skeleton (Baker.OverzoomAllBands).
+      // Catalog (NOAA) cells keep band-gated loading — with a large installed set
+      // (e.g. 1700+ cells) a minzoom of 0 would make every overlapping cell try to
+      // load per tile, overwhelming the worker and starving the prebaked fallback
+      // (empty tiles → no-data hatch). The overview/general bands already supply
+      // the zoomed-out skeleton for catalog charts.
+      const isForeign = !this._byName.has(name);
       let minzoom;
       if (solo) minzoom = this._renderSel.has(name) ? 0 : 999;
-      else minzoom = this._bandsOff.has(band) ? 999 : (BAND_MINZOOM[band] || 0);
+      else if (this._bandsOff.has(band)) minzoom = 999;
+      else minzoom = isForeign ? 0 : (BAND_MINZOOM[band] || 0);
       meta.set(name, { bb, minzoom });
     }
     return meta;
@@ -2723,17 +2733,32 @@ export class ChartPlotterApp extends HTMLElement {
     const src = this._map && this._map.getSource("inst-bounds");
     if (!src) return;
     const feats = [];
+    const missing = []; // foreign cells with no footprint yet → parse one once
     for (const name of this._installed) {
+      const bb = this._cellLocation(name); // catalog bb OR a parsed foreign footprint
+      if (!bb) {
+        if (!this._byName.has(name) && !(this._foreignTried && this._foreignTried.has(name))) missing.push(name);
+        continue;
+      }
       const c = this._byName.get(name);
-      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      const [w, s, e, n] = c.bb;
+      const scale = (c && typeof c.s === "number" && c.s) || this._cellScale.get(name) || 0;
+      const band = scale ? bandForScale(scale) : "harbor"; // unknown scale → assume large-scale
+      const [w, s, e, n] = bb;
       feats.push({
         type: "Feature",
-        properties: { name, band: bandForScale(c.s), status: this._cellStatus.get(name) || "queued" },
+        properties: { name, band, status: this._cellStatus.get(name) || "queued" },
         geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
       });
     }
     src.setData({ type: "FeatureCollection", features: feats });
+    // Foreign cells carry no catalog footprint, so they'd be invisible when zoomed
+    // out. Parse each one's bounds ONCE (best-effort) then rebuild, so an uploaded
+    // harbour shows a coverage outline at z0 you can see and zoom into.
+    if (missing.length) {
+      this._foreignTried = this._foreignTried || new Set();
+      missing.forEach((n) => this._foreignTried.add(n));
+      this._ensureForeignBounds(missing).then(() => this._refreshInstalledBounds()).catch(() => {});
+    }
   }
 
   // Show/hide the installed-cell coverage outlines (the inst-* overlay layers).

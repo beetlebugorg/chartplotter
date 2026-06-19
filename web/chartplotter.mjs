@@ -212,7 +212,11 @@ export class ChartPlotter extends HTMLElement {
         // Namespace scopes the persistent tile cache. BUMP THE VERSION SUFFIX when
         // the baker's tile output changes, so stale cached tiles are abandoned.
         // rt6: load cells for every tile (not just misses) + don't cache empties.
-        namespace: "rt6",
+        // rt7: overzoom-down for all bands, QUESMRK1 for unknown classes, ISO 8211
+        //   record-length-0 parse fix, and the known-empty tile cache — all change
+        //   tile output, so prior rt6 tiles must not be reused (they cause stale
+        //   holes after a code update without a manual cache clear).
+        namespace: "rt7",
         fallback,
         // Surface live bake activity so the app can show a "generating tiles"
         // indicator; fires whenever the worker's in-flight tile count changes.

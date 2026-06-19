@@ -192,7 +192,11 @@ export function registerTileProtocol(maplibregl, opts = {}) {
       // does zero parsing. Cells load lazily, on demand, the first time an area
       // is baked.
       const bytes = await cache.get(+z, +x, +y, async (z, x, y) => {
-        await ensureCellsForTile(z, x, y); // miss: cells must be parsed before baking
+        // Parse the cells this tile needs. A load failure must NOT abort the whole
+        // tile — we still bake whatever loaded and (crucially) fall through to the
+        // prebaked fallback below, so one bad cell can't blank an area that the
+        // hosted archive covers.
+        try { await ensureCellsForTile(z, x, y); } catch (e) { console.warn("[cp] cell load", z, x, y, e && e.message); }
         tick(1); // a real bake in the worker (cache miss)
         let out;
         try { const r = await call("tile", { z, x, y }); out = r.tile ? new Uint8Array(r.tile) : null; }

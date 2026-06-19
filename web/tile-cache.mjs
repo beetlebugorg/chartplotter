@@ -14,6 +14,7 @@
 
 const MEM_CAP_DEFAULT = 512 * 1024 * 1024; // 512 MB
 const DISK_CAP_DEFAULT = 1024 * 1024 * 1024; // 1 GB
+const EMPTY_CAP_DEFAULT = 16384; // max remembered "known-empty" tile keys (see _empty)
 const DB_NAME = "cp-tilecache";
 const STORE = "tiles";
 const DB_VERSION = 1;
@@ -31,6 +32,16 @@ export class TileCache {
     this._mem = new Map(); // key -> Uint8Array
     this._memBytes = 0;
 
+    // "Known-empty" tiles — z/x/y that baked to no features for the CURRENT cell
+    // set (the bake runs only after ensureCellsForTile has awaited the covering
+    // cells, so an empty result is genuinely empty, not a not-yet-loaded cell).
+    // Remembering them stops a re-bake storm when you pan/zoom over a no-data area
+    // (the reported "keeps re-queuing the same tiles" bug). Insertion-ordered =
+    // LRU; bounded by entry count (0-byte tiles can't drive the byte-based mem
+    // eviction). Memory-only and cleared whenever the cell set changes (clear()).
+    this._empty = new Map(); // key -> true (Map for cheap LRU re-insert)
+    this._emptyCap = EMPTY_CAP_DEFAULT;
+
     // L2 bookkeeping. `_atime` is a monotonic counter (ties-free recency stamp);
     // `_diskBytes` is the running total, summed once on open.
     this._atime = 1;
@@ -39,7 +50,7 @@ export class TileCache {
     this._db = null;
     this._ready = this._open();
 
-    this.stats = { l1Hit: 0, l2Hit: 0, miss: 0, evictedMem: 0, evictedDisk: 0 };
+    this.stats = { l1Hit: 0, l2Hit: 0, emptyHit: 0, miss: 0, evictedMem: 0, evictedDisk: 0 };
   }
 
   _key(z, x, y) { return `${this.ns}|${z}/${x}/${y}`; }
@@ -86,12 +97,12 @@ export class TileCache {
 
   // -- public API ---------------------------------------------------------
   // Return the tile bytes (Uint8Array) for z/x/y, baking via bake(z,x,y) on a
-  // full miss. EMPTY tiles are NOT cached: with lazy cell loading an "empty" tile
-  // often just means the covering cell hadn't parsed yet (or failed transiently),
-  // so caching it would permanently show no-data over an area that has data. Not
-  // caching empties means they re-bake (and re-load their cells) until they fill
-  // in — at the cost of re-baking genuinely-empty (open-ocean) tiles, which is
-  // cheap (no features).
+  // full miss. An EMPTY bake result is remembered in the bounded `_empty` set so
+  // the same no-data tile isn't re-baked every time you pan/zoom across it; the
+  // bake only runs after ensureCellsForTile has awaited the covering cells, so an
+  // empty result is genuinely empty for the current cell set (which is fully
+  // cleared via clear() whenever the installed cells change). Non-empty tiles go
+  // to L1 (memory) + L2 (IndexedDB) as before.
   async get(z, x, y, bake) {
     const key = this._key(z, x, y);
 
@@ -101,6 +112,13 @@ export class TileCache {
       this._mem.delete(key); this._mem.set(key, m); // bump LRU
       this.stats.l1Hit++;
       return m.length ? m : null;
+    }
+
+    // Known-empty (memory-only): serve immediately, no re-bake / no DB round-trip.
+    if (this._empty.has(key)) {
+      this._empty.delete(key); this._empty.set(key, true); // bump LRU
+      this.stats.emptyHit++;
+      return null;
     }
 
     // L2
@@ -120,12 +138,22 @@ export class TileCache {
     let bytes = await bake(z, x, y);
     if (bytes == null) bytes = new Uint8Array(0);
     else if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
-    // Only cache NON-empty tiles (see above) — an empty result re-bakes next time.
     if (bytes.length) {
       this._memPut(key, bytes);
       if (this._db) this._dbPut(key, bytes);
+    } else {
+      this._emptyPut(key); // remember no-data tiles so they don't re-bake
     }
     return bytes.length ? bytes : null;
+  }
+
+  // Record a known-empty tile, evicting the least-recently-used key once over cap.
+  _emptyPut(key) {
+    this._empty.delete(key);
+    this._empty.set(key, true);
+    while (this._empty.size > this._emptyCap) {
+      this._empty.delete(this._empty.keys().next().value); // front = LRU
+    }
   }
 
   // -- L1 (memory) --------------------------------------------------------
@@ -198,6 +226,7 @@ export class TileCache {
   // Drop everything (e.g. when the installed chart set changes).
   async clear() {
     this._mem.clear(); this._memBytes = 0;
+    this._empty.clear();
     await this._ready;
     if (this._db) {
       await new Promise((res) => { const r = this._tx("readwrite").clear(); r.onsuccess = r.onerror = () => res(); });
@@ -209,6 +238,7 @@ export class TileCache {
     return {
       memBytes: this._memBytes, memCap: this.memCap, memTiles: this._mem.size,
       diskBytes: this._diskBytes, diskCap: this.diskCap, diskTiles: this._diskCount,
+      emptyTiles: this._empty.size,
       ...this.stats,
     };
   }
