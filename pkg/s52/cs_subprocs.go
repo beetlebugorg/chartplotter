@@ -295,9 +295,12 @@ func (l *Library) csUDWHAZ05(depthValue float64, attributes map[string]interface
 		return false, displayPriority, 14050
 	}
 
-	// Step 3: isolated-danger test. With underlying depth areas, the hazard is
-	// isolated only if it sits in safe water (an underlying DEPARE/DRGARE with
-	// DRVAL1 >= SAFETY_CONTOUR). Without that context, assume it is (conservative).
+	// Step 3: isolated-danger test. The hazard is isolated only if CONFIRMED to sit
+	// in safe water (an underlying DEPARE/DRGARE with DRVAL1 >= SAFETY_CONTOUR).
+	// When that can't be confirmed (no spatial context, or no deep underlying
+	// area), it is NOT treated as isolated — a sounded hazard then falls to the
+	// live DANGER01/02 swap, which is itself a danger indication, rather than
+	// over-showing the ISODGR01 ring.
 	if !inSafeWater(spatial, mariner.SafetyContour) {
 		return false, displayPriority, viewingGroup
 	}
@@ -310,27 +313,24 @@ func (l *Library) csUDWHAZ05(depthValue float64, attributes map[string]interface
 	return showIsolatedDanger, displayPriority, viewingGroup
 }
 
-// inSafeWater reports whether any underlying depth area is deeper than the safety
-// contour (DRVAL1 >= safetyContour). Returns true (conservative) when no spatial
-// context / no underlying depth areas are available, so a hazard is never
-// silently dropped for lack of topology.
+// inSafeWater reports whether the hazard is CONFIRMED to sit in safe water — an
+// underlying DEPARE/DRGARE deeper than the safety contour (DRVAL1 >=
+// safetyContour). Returns false when it can't be confirmed (no spatial context,
+// or no deep underlying area), so ISODGR01 is shown only for genuinely isolated
+// dangers and everything else falls to the live DANGER01/02 swap.
 func inSafeWater(spatial *SpatialContext, safetyContour float64) bool {
-	if spatial == nil || len(spatial.UnderlyingObjects) == 0 {
-		return true
+	if spatial == nil {
+		return false
 	}
-	sawDepthArea := false
 	for _, u := range spatial.UnderlyingObjects {
 		if u.ObjectClass != "DEPARE" && u.ObjectClass != "DRGARE" {
 			continue
 		}
-		sawDepthArea = true
 		if v, ok := u.Attributes["DRVAL1"]; ok && getFloatValue(v) >= safetyContour {
 			return true
 		}
 	}
-	// Underlying depth areas exist but all are shallow → not isolated. If none
-	// were depth areas at all, we still can't tell → conservative true.
-	return !sawDepthArea
+	return false
 }
 
 // csQUAPNT02 - Quality of Point Sub-Procedure

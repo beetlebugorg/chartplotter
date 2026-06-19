@@ -114,10 +114,12 @@ func TestUDWHAZ05_IsolatedDanger(t *testing.T) {
 		ShowIsolatedDangersInShallowWater: false,
 	}
 
-	// Underwater danger within safety contour
+	// Underwater danger within safety contour, CONFIRMED in safe (deep) water.
+	deep := &SpatialContext{UnderlyingObjects: []UnderlyingObject{
+		{ObjectClass: "DEPARE", Attributes: map[string]interface{}{"DRVAL1": 40.0}}}}
 	showIsolated, priority, viewGroup := lib.csUDWHAZ05(20.0, map[string]interface{}{
 		"WATLEV": 3, // Always underwater
-	}, nil, mariner)
+	}, deep, mariner)
 
 	assert.True(t, showIsolated, "Should show isolated danger symbol")
 	assert.Equal(t, 8, priority, "Should have display priority 8")
@@ -160,7 +162,7 @@ func TestUDWHAZ05_SpatialDeepWaterTest(t *testing.T) {
 	assert.False(t, show, "hazard already in shallow water is NOT isolated")
 
 	show, _, _ = lib.csUDWHAZ05(10.0, attrs, nil, mariner)
-	assert.True(t, show, "without spatial context, conservatively show the danger")
+	assert.False(t, show, "without spatial context, not confirmed isolated → live DANGER swap")
 }
 
 // TestDEPVAL02_Spatial verifies depth derivation from underlying areas.

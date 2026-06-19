@@ -96,7 +96,7 @@ func buildFromSet(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 
 	pg := geometryOf(g)
 	b.emit(set.Instructions, pg, 0)
-	b.out = applyDangerDepth(b.out, objClass, attrs, pg)
+	b.out = applyDangerDepth(b.out, objClass, attrs)
 	return FeatureBuild{Primitives: b.out, DisplayPriority: set.DisplayPriority, DisplayCategory: set.DisplayCategory}
 }
 
@@ -234,64 +234,37 @@ func instructionSetsDiffer(a, b *s52.InstructionSet) bool {
 	return false
 }
 
-// applyDangerDepth reproduces the net OBSTRN06/WRECKS05 danger behaviour (S-52
-// §13.2.6/§13.2.20): a sounded obstruction/wreck (one with VALSOU) is portrayed
-// as the dangerous symbol DANGER01 carrying its depth + the deep variant
-// DANGER02, so the client swaps shallow<->deep against the LIVE safety contour
-// with no re-bake. The reused Go CSPs resolve this at bake time (ISODGR01/
-// OBSTRNxx) instead, so we override here. Non-symbol primitives (e.g. the dotted
-// foul boundary) are kept; the CSP's symbol(s) are replaced by the one
-// danger-tagged DANGER01.
-func applyDangerDepth(prims []Primitive, class string, attrs map[string]interface{}, g geom) []Primitive {
-	if class != "OBSTRN" && class != "WRECKS" {
+// applyDangerDepth tags the DANGER01/DANGER02 symbol of a sounded obstruction /
+// wreck / rock (one with VALSOU) with its depth and the deep variant, so the
+// client swaps shallow<->deep (DANGER01<->DANGER02) against the LIVE safety
+// contour with no re-bake (S-52 §13.2.x). It ONLY touches the DANGER01/02 pair —
+// soundings, ISODGR01, OBSTRN11, DANGER03 and every other primitive the CSP
+// emitted are left exactly as placed. The base symbol is normalised to DANGER01
+// (the shallow variant) so the client's coalesce picks DANGER01/DANGER02 by the
+// live contour.
+//
+// (The CSPs — OBSTRN07 Continuation A, WRECKS05 — now emit DANGER01/02 + the
+// sounding directly, so this is a post-tag rather than the old symbol-replacing
+// override that dropped the sounding glyphs.)
+func applyDangerDepth(prims []Primitive, class string, attrs map[string]interface{}) []Primitive {
+	if class != "OBSTRN" && class != "WRECKS" && class != "UWTROC" {
 		return prims
 	}
 	valsou, ok := floatAttr(attrs, "VALSOU")
 	if !ok {
 		return prims
 	}
-	anchor, hasAnchor := dangerAnchor(prims, g)
-	if !hasAnchor {
-		return prims
-	}
-	danger := SymbolCall{
-		Anchor:         anchor,
-		SymbolName:     "DANGER01",
-		Scale:          DefaultPxPerSymbolUnit,
-		SoundingDepthM: nan32,
-		DangerDepthM:   float32(valsou),
-		DeepSymbolName: "DANGER02",
-	}
-	out := make([]Primitive, 0, len(prims))
-	replaced := false
-	for _, p := range prims {
-		if _, isSym := p.(SymbolCall); isSym {
-			if !replaced {
-				out = append(out, danger)
-				replaced = true
-			}
-			continue // drop the CSP's other symbols
+	for i := range prims {
+		sc, ok := prims[i].(SymbolCall)
+		if !ok || (sc.SymbolName != "DANGER01" && sc.SymbolName != "DANGER02") {
+			continue
 		}
-		out = append(out, p)
+		sc.SymbolName = "DANGER01"
+		sc.DangerDepthM = float32(valsou)
+		sc.DeepSymbolName = "DANGER02"
+		prims[i] = sc
 	}
-	if !replaced {
-		out = append(out, danger)
-	}
-	return out
-}
-
-// dangerAnchor is the anchor for the replacement danger symbol: the first emitted
-// SymbolCall's anchor, else the feature's point geometry.
-func dangerAnchor(prims []Primitive, g geom) (geo.LatLon, bool) {
-	for _, p := range prims {
-		if sc, ok := p.(SymbolCall); ok {
-			return sc.Anchor, true
-		}
-	}
-	if g.kind == geomPoint {
-		return g.point, true
-	}
-	return geo.LatLon{}, false
+	return prims
 }
 
 func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {

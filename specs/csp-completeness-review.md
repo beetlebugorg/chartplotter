@@ -60,9 +60,26 @@ flowcharts; verdicts are **CONFIRMED** (code matches the gap as described),
   path. A fully-live ISODGR01 (bake the surrounding `DRVAL1`, let the client pick
   ISODGR01 vs DANGER01/02 live) is recorded as optional future work, not a bug.
 
-**Still open** — see backlog below: OBSTRN07 geometry arms + SNDFRM04 + UWTROC
-`WATLEV==3` rule, LIGHTS06 LITVIS, QUALIN01 (per-edge QUAPOS — needs spatial
-*components*, a different index), SAFCON01 glyphs, DATCVR02.
+- ✅ **OBSTRN07 Continuation A (point, P1 #7)** — implemented faithfully from the
+  Figure 12 flowchart: QUAPNT02 low-accuracy, UDWHAZ05 → ISODGR01, then the
+  symbol + sounding selection (UWTROC `WATLEV==3`→UWTROC03 else UWTROC04; OBSTRN
+  CATOBS/WATLEV → OBSTRN01/11/03; sounded dangers → DANGER01/02/03), with
+  **SNDFRM04 sounding glyphs** (not the old text label) and LOWACC01. This
+  **corrects the earlier UWTROC commit** (it keyed on VALSOU, not WATLEV).
+  - `applyDangerDepth` was refactored from a **symbol-replacer** into a **tagger**:
+    it now only tags the DANGER01/02 pair with `danger_depth`+`sym_deep` (live
+    swap) and leaves soundings / ISODGR01 / OBSTRN11 / DANGER03 intact — which
+    also restored sounded WRECKS' depth glyphs (previously dropped). Client
+    unchanged. Line/area OBSTRN keep the prior DANGER01/02 path until
+    Continuations B/C land.
+  - **UDWHAZ05 fallback flipped:** ISODGR01 now shows only when deep surrounding
+    water is *confirmed*; otherwise a sounded hazard falls to the live DANGER01/02
+    swap (consistent with the P0 #2 decision), rather than the earlier
+    conservative "always show ISODGR01".
+
+**Still open** — see backlog below: **OBSTRN07 Continuations B/C** (line/area
+geometry — fill/boundary/FOULAR01), LIGHTS06 LITVIS, QUALIN01 (per-edge QUAPOS —
+needs spatial *components*, a different index), SAFCON01 glyphs, DATCVR02.
 
 ## Architecture context (why several gaps don't affect the web client)
 
@@ -354,19 +371,13 @@ should be checked against the symbol library, not the CSP doc.
 
 ---
 
-## ⚠️ Note on the recent OBSTRN07 / UWTROC commits
+## Note on the OBSTRN07 / UWTROC commits (now resolved)
 
-Commits `fcd8144` (UWTROC symbols + awash-label suppression) and `80faf91`
-(centre depth label) improved the *reported* feature but, against the verified
-spec, the approach is off and should be revisited under P1 #7:
-- **UWTROC selection should key on `WATLEV==3` (→ UWTROC03) else UWTROC04**, on
-  the **no-VALSOU** branch — not on `VALSOU<=0`. (Our logic happens to produce
-  UWTROC04 for the reported WATLEV-4/5 rock, so the visible result is correct, but
-  the rule is wrong for WATLEV 1/2 and for VALSOU-present rocks.)
-- **The depth label should be SNDFRM04 sounding glyphs**, not a `TX()` label — so
-  the "centre the label" and "suppress for VALSOU≤0" changes are cosmetic
-  improvements to a non-spec path (though suppressing the sounding for awash
-  WATLEV 4/5 *is* consistent with the spec's `SOUNDING=FALSE`).
+The early commits `fcd8144` (UWTROC symbols) and `80faf91` (centre depth label)
+were superseded by the OBSTRN07 Continuation A implementation above: UWTROC now
+keys on `WATLEV==3` per the Figure 12 flowchart, and point obstruction soundings
+use SNDFRM04 glyphs rather than the `TX()` label. The legacy text-label path
+remains only for line/area obstructions pending Continuations B/C.
 
 ## Verification provenance
 

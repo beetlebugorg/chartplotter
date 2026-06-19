@@ -125,7 +125,12 @@ func TestDangerDepth(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	mariner := s52.DefaultMarinerSettings()
-	var checked int
+	// A sounded OBSTRN/WRECKS that resolves to the live-swap danger symbol must be
+	// the normalised DANGER01 base carrying its depth + the DANGER02 deep variant,
+	// so the client swaps shallow/deep against the live safety contour. (Other
+	// outcomes — DANGER03, OBSTRN11, ISODGR01, sounding glyphs — are valid and not
+	// checked here.)
+	var tagged int
 	for _, f := range chart.Features() {
 		cls := f.ObjectClass()
 		if cls != "OBSTRN" && cls != "WRECKS" {
@@ -140,20 +145,20 @@ func TestDangerDepth(t *testing.T) {
 		}
 		for _, p := range fb.Primitives {
 			sc, ok := p.(SymbolCall)
-			if !ok {
+			if !ok || sc.SymbolName != "DANGER01" {
 				continue
 			}
-			checked++
-			if sc.SymbolName != "DANGER01" {
-				t.Errorf("%s w/ VALSOU: symbol %q, want DANGER01", cls, sc.SymbolName)
-			}
+			tagged++
 			if sc.DeepSymbolName != "DANGER02" {
-				t.Errorf("%s: deep symbol %q, want DANGER02", cls, sc.DeepSymbolName)
+				t.Errorf("%s DANGER01: deep symbol %q, want DANGER02", cls, sc.DeepSymbolName)
 			}
 			if math.IsNaN(float64(sc.DangerDepthM)) {
-				t.Errorf("%s: danger depth not set", cls)
+				t.Errorf("%s DANGER01: danger depth not set", cls)
 			}
 		}
 	}
-	t.Logf("checked %d sounded OBSTRN/WRECKS danger symbols", checked)
+	if tagged == 0 {
+		t.Error("expected at least one tagged DANGER01 among sounded OBSTRN/WRECKS")
+	}
+	t.Logf("verified %d tagged DANGER01 symbols", tagged)
 }
