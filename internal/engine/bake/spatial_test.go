@@ -26,7 +26,7 @@ func TestPointInRings(t *testing.T) {
 
 // underlyingAt returns the depth areas (with DRVAL1) containing a point.
 func TestDepthIndexUnderlyingAt(t *testing.T) {
-	idx := &depthIndex{areas: []depthArea{{
+	idx := &cellIndex{areas: []depthArea{{
 		class:  "DEPARE",
 		attrs:  map[string]interface{}{"DRVAL1": 35.0},
 		rings:  [][][]float64{{{0, 0}, {10, 0}, {10, 10}, {0, 10}, {0, 0}}},

@@ -1,6 +1,8 @@
 package bake
 
 import (
+	"math"
+
 	"github.com/beetlebugorg/chartplotter/pkg/s52"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
@@ -15,59 +17,104 @@ type depthArea struct {
 	minLon, minLat, maxLon, maxLat float64
 }
 
-// depthIndex is a per-cell index of depth areas, used to answer "which depth
-// area(s) underlie this point" for UDWHAZ05 (isolated-danger deep-water test) and
-// DEPVAL02 (least-depth derivation). A bbox-filtered linear scan — depth areas
-// are bounded per cell and hazards are few, so no grid is needed yet.
-type depthIndex struct {
-	areas []depthArea
+// posKey quantises a coordinate to ~0.1 m so a topmark and the buoy/beacon it
+// sits on (sharing the same S-57 node) hash to the same bucket.
+type posKey struct{ lat, lon int64 }
+
+func makePosKey(lat, lon float64) posKey {
+	const q = 1e6
+	return posKey{int64(math.Round(lat * q)), int64(math.Round(lon * q))}
 }
 
-// buildDepthIndex collects the cell's DEPARE/DRGARE polygons.
-func buildDepthIndex(chart *s57.Chart) *depthIndex {
-	idx := &depthIndex{}
+// cellIndex is a per-cell spatial index: depth-area polygons (for "which depth
+// area underlies this point" — UDWHAZ05/DEPVAL02) plus co-located floating-
+// platform point aids keyed by position (for TOPMAR01's floating-vs-rigid test).
+// A bbox-filtered linear scan for areas; a hash bucket for points — depth areas
+// are bounded per cell and aids are few, so no grid is needed yet.
+type cellIndex struct {
+	areas  []depthArea
+	points map[posKey][]s52.AdjacentObject
+}
+
+// buildCellIndex collects the cell's DEPARE/DRGARE polygons and floating-platform
+// point aids (LITFLT/LITVES/MORFAC/BOY*).
+func buildCellIndex(chart *s57.Chart) *cellIndex {
+	idx := &cellIndex{points: map[posKey][]s52.AdjacentObject{}}
 	features := chart.Features()
 	for i := range features {
 		f := &features[i]
 		cls := f.ObjectClass()
-		if cls != "DEPARE" && cls != "DRGARE" {
-			continue
-		}
 		g := f.Geometry()
-		if g.Type != s57.GeometryTypePolygon {
-			continue
-		}
-		rings := geometryRings(g)
-		if len(rings) == 0 {
-			continue
-		}
-		da := depthArea{class: cls, attrs: f.Attributes(), rings: rings}
-		da.minLon, da.minLat = rings[0][0][0], rings[0][0][1]
-		da.maxLon, da.maxLat = da.minLon, da.minLat
-		for _, r := range rings {
-			for _, c := range r {
-				if c[0] < da.minLon {
-					da.minLon = c[0]
-				}
-				if c[0] > da.maxLon {
-					da.maxLon = c[0]
-				}
-				if c[1] < da.minLat {
-					da.minLat = c[1]
-				}
-				if c[1] > da.maxLat {
-					da.maxLat = c[1]
+
+		if cls == "DEPARE" || cls == "DRGARE" {
+			if g.Type != s57.GeometryTypePolygon {
+				continue
+			}
+			rings := geometryRings(g)
+			if len(rings) == 0 {
+				continue
+			}
+			da := depthArea{class: cls, attrs: f.Attributes(), rings: rings}
+			da.minLon, da.minLat = rings[0][0][0], rings[0][0][1]
+			da.maxLon, da.maxLat = da.minLon, da.minLat
+			for _, r := range rings {
+				for _, c := range r {
+					if c[0] < da.minLon {
+						da.minLon = c[0]
+					}
+					if c[0] > da.maxLon {
+						da.maxLon = c[0]
+					}
+					if c[1] < da.minLat {
+						da.minLat = c[1]
+					}
+					if c[1] > da.maxLat {
+						da.maxLat = c[1]
+					}
 				}
 			}
+			idx.areas = append(idx.areas, da)
+			continue
 		}
-		idx.areas = append(idx.areas, da)
+
+		if isPlatformCandidate(cls) && g.Type == s57.GeometryTypePoint &&
+			len(g.Coordinates) > 0 && len(g.Coordinates[0]) >= 2 {
+			lat, lon := g.Coordinates[0][1], g.Coordinates[0][0]
+			k := makePosKey(lat, lon)
+			idx.points[k] = append(idx.points[k], s52.AdjacentObject{ObjectClass: cls, Attributes: f.Attributes()})
+		}
 	}
 	return idx
 }
 
+// isPlatformCandidate reports whether a point class is a platform a topmark can
+// sit on (S-52 TOPMAR01) — BOTH floating (BOY*/LITFLT/LITVES/MORFAC) and rigid
+// (BCN*/DAYMAR/PILPNT/…) candidates are indexed, so the procedure can tell a
+// co-located beacon (→ rigid) from no co-located object at all (→ BCNSHP
+// fallback). The floating-vs-rigid decision itself is made by isFloatingPlatform.
+func isPlatformCandidate(cls string) bool {
+	if len(cls) >= 3 && (cls[:3] == "BOY" || cls[:3] == "BCN") {
+		return true
+	}
+	switch cls {
+	case "LITFLT", "LITVES", "MORFAC", // floating
+		"DAYMAR", "PILPNT", "OFSPLF", "LNDMRK", "BUISGL", "PYLONS", "SILTNK", "FORSTC": // rigid
+		return true
+	}
+	return false
+}
+
+// colocatedAt returns the platform aids at (lat, lon).
+func (idx *cellIndex) colocatedAt(lat, lon float64) []s52.AdjacentObject {
+	if idx == nil || idx.points == nil {
+		return nil
+	}
+	return idx.points[makePosKey(lat, lon)]
+}
+
 // underlyingAt returns the depth areas whose polygon contains (lat, lon), as
 // s52.UnderlyingObjects (class + attributes). nil if none.
-func (idx *depthIndex) underlyingAt(lat, lon float64) []s52.UnderlyingObject {
+func (idx *cellIndex) underlyingAt(lat, lon float64) []s52.UnderlyingObject {
 	if idx == nil {
 		return nil
 	}
@@ -85,24 +132,25 @@ func (idx *depthIndex) underlyingAt(lat, lon float64) []s52.UnderlyingObject {
 }
 
 // spatialFor builds a SpatialContext for a feature, or nil if the class doesn't
-// need spatial topology. Only the danger CSPs (OBSTRN/WRECKS/UWTROC, via
-// UDWHAZ05/DEPVAL02) consume underlying depth areas today, so resolving is
-// limited to those to keep the bake cheap.
-func (idx *depthIndex) spatialFor(f *s57.Feature) *s52.SpatialContext {
-	switch f.ObjectClass() {
-	case "OBSTRN", "WRECKS", "UWTROC":
-	default:
-		return nil
-	}
+// need spatial topology: danger CSPs (OBSTRN/WRECKS/UWTROC) get the underlying
+// depth areas (UDWHAZ05/DEPVAL02); TOPMAR gets the co-located floating-platform
+// aids (TOPMAR01). Resolution is limited to these classes to keep the bake cheap.
+func (idx *cellIndex) spatialFor(f *s57.Feature) *s52.SpatialContext {
 	lat, lon, ok := featurePoint(f)
 	if !ok {
 		return nil
 	}
-	under := idx.underlyingAt(lat, lon)
-	if len(under) == 0 {
-		return nil
+	switch f.ObjectClass() {
+	case "OBSTRN", "WRECKS", "UWTROC":
+		if under := idx.underlyingAt(lat, lon); len(under) > 0 {
+			return &s52.SpatialContext{UnderlyingObjects: under}
+		}
+	case "TOPMAR":
+		if adj := idx.colocatedAt(lat, lon); len(adj) > 0 {
+			return &s52.SpatialContext{AdjacentObjects: adj}
+		}
 	}
-	return &s52.SpatialContext{UnderlyingObjects: under}
+	return nil
 }
 
 // geometryRings returns a polygon's rings as [lon,lat] lists, preferring the Rings

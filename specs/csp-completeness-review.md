@@ -47,13 +47,22 @@ flowcharts; verdicts are **CONFIRMED** (code matches the gap as described),
     (in safe water). Falls back to the old conservative "show it" when no topology.
   - ✅ **DEPVAL02** — derives LEAST/SEABED depth from the shoalest underlying
     DRVAL1 (UNSARE → unknown), instead of always returning unknown.
+- ✅ **TOPMAR01 float/rigid (P0 #4)** — the cell index now also holds co-located
+  platform point aids; `determinePlatformType` follows S-52 (floating iff a
+  co-located floating platform — BOY*/LITFLT/LITVES/MORFAC CATMOR=7 — else rigid),
+  falling back to the BCNSHP heuristic only when no co-located platform is indexed.
+- ✅ **WRECKS ISODGR01 (P0 #2) — resolved by decision.** The live DANGER01/02 swap
+  (baked `danger_depth`, client-swapped against the live safety contour) is the
+  *intended, mariner-responsive* design for VALSOU dangers — better than a static
+  baked ISODGR01, and forcing ISODGR01 to win would over-show it wherever spatial
+  context is absent. The genuine defect (UDWHAZ05 flagging *every* underwater
+  hazard isolated) is fixed above, which corrects the VALSOU-**less** ISODGR01
+  path. A fully-live ISODGR01 (bake the surrounding `DRVAL1`, let the client pick
+  ISODGR01 vs DANGER01/02 live) is recorded as optional future work, not a bug.
 
-**Still open** (need a design call or further work) — see backlog below: WRECKS
-ISODGR01 ownership (vs applyDangerDepth), OBSTRN07 geometry arms + SNDFRM04 +
-UWTROC `WATLEV==3` rule, TOPMAR01 float/rigid default (needs co-located *point*
-objects in the index — only depth areas indexed so far), LIGHTS06 LITVIS,
-QUALIN01 (per-edge QUAPOS — needs spatial *components*, a different index),
-SAFCON01 glyphs, DATCVR02.
+**Still open** — see backlog below: OBSTRN07 geometry arms + SNDFRM04 + UWTROC
+`WATLEV==3` rule, LIGHTS06 LITVIS, QUALIN01 (per-edge QUAPOS — needs spatial
+*components*, a different index), SAFCON01 glyphs, DATCVR02.
 
 ## Architecture context (why several gaps don't affect the web client)
 

@@ -38,6 +38,26 @@ func TestTOPMAR01_RigidStructure(t *testing.T) {
 	assert.Equal(t, "TOPMAR22", sy.SymbolID, "Should use rigid topmark for beacon")
 }
 
+// TestTOPMAR01_CoLocatedPlatform exercises the S-52 floating-vs-rigid rule from
+// the co-located object class: a buoy → floating symbol, a beacon → rigid.
+func TestTOPMAR01_CoLocatedPlatform(t *testing.T) {
+	lib := &Library{}
+	sym := func(adj []AdjacentObject) string {
+		ctx := NewCSContext(map[string]interface{}{"TOPSHP": 1}, "Point",
+			&SpatialContext{AdjacentObjects: adj}, nil)
+		ctx.ObjectClass = "TOPMAR"
+		ins, err := NewTOPMAR01(ctx, lib).Execute()
+		require.NoError(t, err)
+		require.Len(t, ins, 1)
+		return ins[0].(*SYInstruction).SymbolID
+	}
+	// TOPSHP 1 → floating TOPMAR02 / rigid TOPMAR22.
+	assert.Equal(t, "TOPMAR02", sym([]AdjacentObject{{ObjectClass: "BOYLAT"}}), "buoy → floating")
+	assert.Equal(t, "TOPMAR22", sym([]AdjacentObject{{ObjectClass: "BCNLAT"}}), "beacon → rigid")
+	assert.Equal(t, "TOPMAR02", sym([]AdjacentObject{
+		{ObjectClass: "MORFAC", Attributes: map[string]interface{}{"CATMOR": 7}}}), "mooring buoy → floating")
+}
+
 func TestTOPMAR01_NoTOPSHP(t *testing.T) {
 	ctx := NewCSContext(map[string]interface{}{}, "", nil, nil)
 

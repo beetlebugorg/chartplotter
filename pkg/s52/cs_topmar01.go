@@ -56,18 +56,36 @@ func (t *TOPMAR01) selectSymbol() string {
 // Uses spatial.AdjacentObjects when available, otherwise uses attribute heuristics.
 // Default to floating (most common case).
 func determinePlatformType(csctx *CSContext) bool {
-	// TODO: Use csctx.HasAdjacentObjects() to check co-located objects
-	// Floating platforms: LITFLT, LITVES, BOY*, or MORFAC with CATMOR=7
-	// Rigid platforms: BCN*, BRIDGE, BUISGL, DAYMAR, LNDMRK, MORFAC (not CATMOR=7),
-	//                  OFSPLF, PILPNT, SLCONS, CRANES, FLODOC, FORSTC, FSHFAC,
-	//                  HULKES, PONTON, OBSTRN, PYLONS, SILTNK, WRECKS
-
-	// Simplified heuristic: check for beacon attributes
-	if csctx.Has("BCNSHP") {
-		return false // Rigid
+	// S-52 TOPMAR01: the topmark is FLOATING only if a co-located object is a
+	// floating platform (LITFLT/LITVES/BOY*/MORFAC with CATMOR=7); otherwise RIGID
+	// (the default). Uses the co-located aids resolved into the spatial context.
+	if csctx.Spatial != nil && len(csctx.Spatial.AdjacentObjects) > 0 {
+		for _, a := range csctx.Spatial.AdjacentObjects {
+			if isFloatingPlatform(a.ObjectClass, a.Attributes) {
+				return true
+			}
+		}
+		return false // co-located objects exist, none floating → rigid
 	}
+	// No co-location info: fall back to the BCNSHP heuristic (beacon → rigid).
+	if csctx.Has("BCNSHP") {
+		return false
+	}
+	return true
+}
 
-	return true // Default to floating
+// isFloatingPlatform reports whether a co-located object class (+attrs) is a
+// floating platform per S-52 TOPMAR01.
+func isFloatingPlatform(cls string, attrs map[string]interface{}) bool {
+	switch {
+	case cls == "LITFLT", cls == "LITVES":
+		return true
+	case len(cls) >= 3 && cls[:3] == "BOY":
+		return true
+	case cls == "MORFAC" && getIntValue(attrs["CATMOR"]) == 7:
+		return true
+	}
+	return false
 }
 
 // Topmark symbol lookup maps (package level for efficiency)
