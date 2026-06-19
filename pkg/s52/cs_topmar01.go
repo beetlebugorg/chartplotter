@@ -105,7 +105,7 @@ var (
 		29: "TOPMAR02", // Cone, point up
 		30: "TOPMAR17", // Upright cross
 		31: "TOPMAR14", // Rhombus
-		32: "TOPMAR08", // 2 cones, point to point
+		32: "TOPMAR10", // per S-52 TOPMAR table (was TOPMAR08)
 		33: "TMARDEF2", // Other shape
 	}
 
@@ -141,7 +141,7 @@ var (
 		29: "TOPMAR22", // Cone, point up
 		30: "TOPMAR86", // Upright cross
 		31: "TOPMAR14", // Rhombus
-		32: "TOPMAR28", // 2 cones, point to point
+		32: "TOPMAR30", // per S-52 TOPMAR table (was TOPMAR28)
 		33: "TMARDEF1", // Default
 	}
 )

@@ -120,15 +120,17 @@ func (w *WRECKS05) calculateDepthValue() {
 func (w *WRECKS05) wreckSymbolInstruction() *SYInstruction {
 	var symbolID string
 
-	// Check if dangerous and use DANGER symbols
-	if w.hasVALSOU && w.depthValue <= w.ctx.Mariner.SafetyDepth {
-		if w.depthValue <= w.ctx.Mariner.SafetyDepth/2 {
+	// S-52 WRECKS05 Continuation A: a sounded wreck (VALSOU present) is the
+	// dangerous symbol DANGER01 when VALSOU <= SAFETY DEPTH, else DANGER02 — a
+	// single threshold (the earlier SafetyDepth/2 split was not in the spec).
+	// Wrecks without a sounding use the standard CATWRK/WATLEV lookup.
+	if w.hasVALSOU {
+		if w.depthValue <= w.ctx.Mariner.SafetyDepth {
 			symbolID = "DANGER01"
 		} else {
 			symbolID = "DANGER02"
 		}
 	} else {
-		// Use standard wreck symbology per lookup table
 		symbolID = selectWreckSymbol(w.ctx.Attributes)
 	}
 

@@ -133,27 +133,28 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 		}
 	}
 
-	// Check for unreliable sounding (QUASOU attribute)
+	// Unreliable sounding: QUASOU (3,4,5,8,9) OR STATUS (18). S-52 SNDFRM04 ORs
+	// these into a SINGLE "C2" decoration (the earlier code appended one per
+	// attribute, stacking up to 3×).
+	unreliable := false
 	if quasou, ok := attributes["QUASOU"]; ok {
-		quasouInt := getIntValue(quasou)
-		// Values 3,4,5,8,9 indicate unreliable
-		if quasouInt == 3 || quasouInt == 4 || quasouInt == 5 || quasouInt == 8 || quasouInt == 9 {
-			symbols = append(symbols, prefix+"C2")
+		q := getIntValue(quasou)
+		if q == 3 || q == 4 || q == 5 || q == 8 || q == 9 {
+			unreliable = true
 		}
 	}
-
-	// Check for uncertain sounding (STATUS attribute)
 	if status, ok := attributes["STATUS"]; ok {
-		statusInt := getIntValue(status)
-		if statusInt == 18 { // 18 = uncertain sounding
-			symbols = append(symbols, prefix+"C2")
+		if getIntValue(status) == 18 { // uncertain sounding
+			unreliable = true
 		}
 	}
+	if unreliable {
+		symbols = append(symbols, prefix+"C2")
+	}
 
-	// Check for position quality (QUAPOS attribute on spatial object)
+	// Position quality (QUAPOS not 1/10/11) is a SEPARATE C2 (so at most two).
 	if quapos, ok := attributes["QUAPOS"]; ok {
 		quaposInt := getIntValue(quapos)
-		// Values NOT 1, 10, or 11 indicate uncertain position
 		if quaposInt != 0 && quaposInt != 1 && quaposInt != 10 && quaposInt != 11 {
 			symbols = append(symbols, prefix+"C2")
 		}
@@ -165,13 +166,9 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 		displayDepth = -displayDepth // Make positive for digit extraction
 	}
 
-	// Apply depth formatting algorithm based on depth range
-	// Spec: "Truncate all digits after the decimal. Do not round up."
-	// Note: For fraction extraction, we need to round to avoid floating point errors
-	//
-	// Special rule for feet: omit fractions below 20ft for cleaner display
-	suppressFraction := depthUnit == DepthUnitFeet && displayDepth < 20.0
-
+	// Apply depth formatting algorithm based on depth range.
+	// Spec: "Truncate all digits after the decimal. Do not round up." Fractions
+	// are shown for depths < 31 m (S-52 SNDFRM04) regardless of display unit.
 	if displayDepth < 10.0 {
 		// Algorithm 1: Depths < 10 with fraction (e.g., 3.6)
 		leadingDigit := int(displayDepth)
@@ -182,7 +179,7 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 		// error (0.7*10 = 6.9999…→7); it never reaches 10, so the glyph index
 		// stays 0–9 (rounding here produced an invalid "SOUNDS510" for X.95+).
 		fraction := int((displayDepth-float64(leadingDigit))*10.0 + 1e-6)
-		if fraction > 0 && !suppressFraction {
+		if fraction > 0 {
 			symbols = append(symbols, fmt.Sprintf("%s5%d", prefix, fraction))
 		}
 
@@ -197,7 +194,7 @@ func (l *Library) csSONDFRM04(depthValue float64, attributes map[string]interfac
 
 		symbols = append(symbols, fmt.Sprintf("%s2%d", prefix, tensDigit))
 		symbols = append(symbols, fmt.Sprintf("%s1%d", prefix, onesDigit))
-		if fraction > 0 && !suppressFraction {
+		if fraction > 0 {
 			symbols = append(symbols, fmt.Sprintf("%s5%d", prefix, fraction))
 		}
 

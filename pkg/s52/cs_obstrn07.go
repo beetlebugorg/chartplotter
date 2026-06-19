@@ -106,9 +106,10 @@ func (o *OBSTRN07) isAwash() bool {
 	return o.watlev == 4 || o.watlev == 5
 }
 
-// isDangerous returns true if the obstruction is shallower than safety depth.
+// isDangerous returns true if the obstruction is at or shallower than the safety
+// depth (S-52 OBSTRN07: VALSOU <= SAFETY DEPTH).
 func (o *OBSTRN07) isDangerous() bool {
-	return o.valsouExists && o.valsou < o.ctx.Mariner.SafetyDepth
+	return o.valsouExists && o.valsou <= o.ctx.Mariner.SafetyDepth
 }
 
 // depthLabelInstruction creates a text instruction showing the depth value.

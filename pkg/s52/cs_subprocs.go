@@ -71,95 +71,130 @@ func (l *Library) csSAFCON01(depth float64, mariner *MarinerSettings) ([]Instruc
 	}, nil
 }
 
-// csRESCSP02 - Restriction Sub-Procedure
-// Returns AP() instructions for restriction patterns (used by DEPARE03 for DRGARE)
+// csRESCSP02 - Restriction Sub-Procedure (S-52 PresLib 4.0, Figure 28, p.71-76).
+// Selects ONE centred restriction symbol from the RESTRN value set, by family:
+// entry (ENTRES) / anchoring (ACHRES) / fishing (FSHRES) / other (CTYARE) /
+// information-only (INFARE) / unknown (RSRDEF), each with a base (51), "additional
+// restriction !" (61), or "information i" (71) variant. Used by RESTRN01 and
+// DEPARE03 (DRGARE). No boundary — that's the calling procedure's job.
 func (l *Library) csRESCSP02(attributes map[string]interface{}, mariner *MarinerSettings) ([]Instruction, error) {
-	// This is essentially the same logic as RESTRN01, but called as a sub-procedure
-	// Get RESTRN attribute
-	restrn, ok := attributes["RESTRN"]
-	if !ok {
-		// No restriction, return empty
+	vals := restrnValues(attributes)
+	if len(vals) == 0 {
 		return nil, nil
 	}
-
-	// Convert to string
-	var restrnStr string
-	switch v := restrn.(type) {
-	case string:
-		restrnStr = v
-	case int:
-		restrnStr = intToString(v)
-	case float64:
-		restrnStr = intToString(int(v))
-	default:
-		return nil, nil
+	has := func(set ...int) bool {
+		for _, s := range set {
+			if vals[s] {
+				return true
+			}
+		}
+		return false
 	}
+	// "Information" secondary set (own-ship restrictions) → the 71 "i" variant,
+	// shared across families.
+	info := []int{9, 10, 11, 12, 15, 18, 19, 20, 21, 22}
 
-	// Split multiple values
-	values := splitAndTrim(restrnStr, ",")
-	if len(values) == 0 {
-		return nil, nil
-	}
-
-	// Determine symbol based on RESTRN value priority
-	// S-52 Section 13.2.11 (Figure 27): RESCSP02 uses SYMBOLS, not patterns
-	// Priority order (first match wins):
-	// 1. Entry prohibited/restricted (7,8,14) -> SY(ENTRES61) or SY(ENTRES71)
-	// 2. Other restrictions (9-12,15,18-22) -> SY(ENTRES51)
-	// 3. Anchoring/fishing (1-6,13,16,17,23-27) -> Check more specific
-
-	hasEntryRestricted := false  // 7,8,14
-	hasOtherRestriction := false // 9-12,15,18-22
-	hasAnchorFishing := false    // 1-6,13,16,17,23-27
-
-	for _, val := range values {
-		valInt := stringToInt(val)
-		if valInt == 0 {
-			continue
-		}
-
-		// Check for entry restrictions (highest priority)
-		if valInt == 7 || valInt == 8 || valInt == 14 {
-			hasEntryRestricted = true
-			break
-		}
-
-		// Check for other restrictions
-		if valInt == 9 || valInt == 10 || valInt == 11 || valInt == 12 ||
-			valInt == 15 || (valInt >= 18 && valInt <= 22) {
-			hasOtherRestriction = true
-		}
-
-		// Check for anchor/fishing restrictions
-		if (valInt >= 1 && valInt <= 6) || valInt == 13 || valInt == 16 ||
-			valInt == 17 || (valInt >= 23 && valInt <= 27) {
-			hasAnchorFishing = true
-		}
-	}
-
-	// Determine which symbol to use (per S-52 Figure 27)
 	var symbolID string
-	if hasEntryRestricted {
-		// Entry restricted or prohibited
-		// Use ENTRES61 for restricted, ENTRES71 for prohibited
-		// For simplicity, use ENTRES61 (the spec doesn't clearly distinguish)
-		symbolID = "ENTRES61"
-	} else if hasOtherRestriction {
-		symbolID = "ENTRES51"
-	} else if hasAnchorFishing {
-		// Continue checking for more specific symbols
-		// For anchoring restrictions (1,2) - use ENTRES51
-		symbolID = "ENTRES51"
+	switch {
+	case has(7, 8, 14): // entry prohibited / restricted / area to be avoided
+		switch {
+		case has(1, 2, 3, 4, 5, 6, 13, 16, 17, 23, 24, 25, 26, 27):
+			symbolID = "ENTRES61"
+		case has(info...):
+			symbolID = "ENTRES71"
+		default:
+			symbolID = "ENTRES51"
+		}
+	case has(1, 2): // anchoring prohibited / restricted
+		switch {
+		case has(3, 4, 5, 6, 13, 16, 17, 23, 24, 25, 26, 27):
+			symbolID = "ACHRES61"
+		case has(info...):
+			symbolID = "ACHRES71"
+		default:
+			symbolID = "ACHRES51"
+		}
+	case has(3, 4, 5, 6, 24): // fishing / trawling prohibited or restricted
+		switch {
+		case has(13, 16, 17, 23, 25, 26, 27):
+			symbolID = "FSHRES61"
+		case has(info...):
+			symbolID = "FSHRES71"
+		default:
+			symbolID = "FSHRES51"
+		}
+	case has(13, 16, 17, 23, 25, 26, 27): // other restrictions
+		if has(info...) {
+			symbolID = "CTYARE71"
+		} else {
+			symbolID = "CTYARE51"
+		}
+	case has(info...): // information / own-ship restrictions only
+		symbolID = "INFARE51"
+	default:
+		symbolID = "RSRDEF51" // restriction of an unknown nature
 	}
 
-	if symbolID == "" {
-		return nil, nil
-	}
+	return []Instruction{&SYInstruction{SymbolID: symbolID}}, nil
+}
 
-	// Return symbol instruction (no boundary - that's added by calling procedure)
-	return []Instruction{
-		&SYInstruction{SymbolID: symbolID},
-	}, nil
+// restrnValues parses the RESTRN attribute (string "1,3", int, float, or a list)
+// into the set of restriction codes present. Codes <= 0 are ignored.
+func restrnValues(attributes map[string]interface{}) map[int]bool {
+	out := map[int]bool{}
+	v, ok := attributes["RESTRN"]
+	if !ok || v == nil {
+		return out
+	}
+	addStr := func(s string) {
+		for _, p := range splitAndTrim(s, ",") {
+			if n := stringToInt(p); n > 0 {
+				out[n] = true
+			}
+		}
+	}
+	switch t := v.(type) {
+	case string:
+		addStr(t)
+	case int:
+		if t > 0 {
+			out[t] = true
+		}
+	case int64:
+		if t > 0 {
+			out[int(t)] = true
+		}
+	case float64:
+		if t > 0 {
+			out[int(t)] = true
+		}
+	case []int:
+		for _, n := range t {
+			if n > 0 {
+				out[n] = true
+			}
+		}
+	case []interface{}:
+		for _, e := range t {
+			switch x := e.(type) {
+			case int:
+				if x > 0 {
+					out[x] = true
+				}
+			case float64:
+				if x > 0 {
+					out[int(x)] = true
+				}
+			case string:
+				addStr(x)
+			}
+		}
+	case []string:
+		for _, s := range t {
+			addStr(s)
+		}
+	}
+	return out
 }
 
 // csDEPVAL02 - Depth Value Sub-Procedure

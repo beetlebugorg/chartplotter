@@ -78,28 +78,14 @@ func (lt *LIGHTS06) Execute() ([]Instruction, error) {
 		Rotation: lt.normalizeRotation(rotation),
 	})
 
-	// Step 5: Add sector arc/legs if light has sectors
+	// Step 5: Add sector arc/legs if light has sectors. Sector colour is keyed on
+	// the COLOUR *set* (S-52 combination table), not a single value.
 	if lt.hasSectors && !lt.isNoSector() {
-		// Determine sector color based on light colour
-		var sectorColor string
-		switch lt.colour {
-		case 1: // White
-			sectorColor = "LITYW"
-		case 3: // Red
-			sectorColor = "LITRD"
-		case 4: // Green
-			sectorColor = "LITGN"
-		case 6, 11: // Yellow, Orange
-			sectorColor = "LITYW"
-		default:
-			sectorColor = "CHMGD" // Magenta for unknown
-		}
-
 		instructions = append(instructions, &SectorInstruction{
 			StartAngle:   lt.sector1,
 			EndAngle:     lt.sector2,
 			Radius:       lt.valnmr,
-			Color:        sectorColor,
+			Color:        sectorColorToken(lightColours(lt.ctx.Attributes)),
 			Transparency: 0, // Opaque
 			ShowLegs:     true,
 		})
@@ -148,6 +134,67 @@ func (lt *LIGHTS06) selectSymbolAndRotation() (string, float64) {
 	}
 
 	return symbol, rotation
+}
+
+// lightColours parses the COLOUR (or ATTR_75) attribute into the set of S-52
+// colour codes present. COLOUR may be a single value, a comma/colon-separated
+// string ("3,1" or "(1:1)"), or a list.
+func lightColours(attributes map[string]interface{}) []int {
+	val, ok := attributes["COLOUR"]
+	if !ok {
+		val, ok = attributes["ATTR_75"]
+	}
+	if !ok {
+		return nil
+	}
+	switch v := val.(type) {
+	case int:
+		return []int{v}
+	case float64:
+		return []int{int(v)}
+	case string:
+		cleaned := v
+		if len(v) > 0 && v[0] == '(' {
+			cleaned = trimString(v, "()")
+		}
+		cleaned = replaceAll(cleaned, ":", ",")
+		var out []int
+		for _, p := range splitString(cleaned, ",") {
+			out = append(out, stringToInt(trimSpace(p)))
+		}
+		return out
+	case []int:
+		return v
+	case []interface{}:
+		out := make([]int, 0, len(v))
+		for _, item := range v {
+			out = append(out, getIntValue(item))
+		}
+		return out
+	}
+	return nil
+}
+
+// sectorColorToken maps a light's COLOUR set to the sector arc colour token per
+// the S-52 LIGHTS06 combination table (p.31): red (incl. white+red) → LITRD;
+// green (incl. white+green) → LITGN; white / yellow / orange (incl. blue+yellow)
+// → LITYW; anything else → CHMGD. Keyed on the SET, so multi-colour sectors no
+// longer collapse to magenta.
+func sectorColorToken(colours []int) string {
+	set := map[int]bool{}
+	for _, c := range colours {
+		set[c] = true
+	}
+	switch {
+	case set[3]:
+		return "LITRD"
+	case set[4]:
+		return "LITGN"
+	case set[1] || set[6] || set[11]:
+		return "LITYW"
+	default:
+		return "CHMGD"
+	}
 }
 
 // isNoSector returns true if the light has no sector or the sector covers all directions.
@@ -285,43 +332,8 @@ func buildLightCharacteristic(attributes map[string]interface{}) string {
 		return "" // No characteristic specified
 	}
 
-	// Get COLOUR (light color)
-	// Check both friendly name and attribute code (ATTR_75)
-	var colours []int
-	var val interface{}
-	var ok bool
-	if val, ok = attributes["COLOUR"]; !ok {
-		val, ok = attributes["ATTR_75"]
-	}
-	if ok {
-		// COLOUR can be single or multiple values
-		switch v := val.(type) {
-		case int:
-			colours = []int{v}
-		case float64:
-			colours = []int{int(v)}
-		case string:
-			// Handle both formats: "3,1" and "(1:1)"
-			cleaned := v
-			// Remove parentheses if present
-			if len(v) > 0 && v[0] == '(' {
-				cleaned = trimString(v, "()")
-			}
-			// Replace colons with commas
-			cleaned = replaceAll(cleaned, ":", ",")
-			// Parse comma-separated string
-			parts := splitString(cleaned, ",")
-			for _, p := range parts {
-				colours = append(colours, stringToInt(trimSpace(p)))
-			}
-		case []int:
-			colours = v
-		case []interface{}:
-			for _, item := range v {
-				colours = append(colours, getIntValue(item))
-			}
-		}
-	}
+	// Get COLOUR (light color) — single or multiple values.
+	colours := lightColours(attributes)
 
 	// Get SIGPER (signal period, s), SIGGRP (flash group), HEIGHT (m), VALNMR (range, M)
 	sigper := 0.0

@@ -65,11 +65,11 @@ func TestRESCSP02_RestrictionPatterns(t *testing.T) {
 		restrn     interface{}
 		wantSymbol string
 	}{
-		{"Anchoring prohibited (1)", 1, "ENTRES51"},
-		{"Entry prohibited (7)", 7, "ENTRES61"},
-		{"Diving prohibited (12)", 12, "ENTRES51"},
-		{"No wake (15)", 15, "ENTRES51"},
-		{"Multiple values - entry wins (7,1)", "7,1", "ENTRES61"},
+		{"Anchoring prohibited (1)", 1, "ACHRES51"},
+		{"Entry prohibited (7)", 7, "ENTRES51"},
+		{"Diving prohibited (12)", 12, "INFARE51"},
+		{"No wake (15)", 15, "INFARE51"},
+		{"Multiple values - entry+anchoring (7,1)", "7,1", "ENTRES61"},
 	}
 
 	for _, tt := range tests {
