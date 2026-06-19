@@ -708,9 +708,13 @@ export class ChartPlotterApp extends HTMLElement {
       + `<div><span>Tile disk</span><b>${this._fmtBytes(u.diskBytes)} / ${this._fmtBytes(u.diskCap)}</b></div>`
       + `<div><span>Cache</span><b>${u.l1Hit + u.l2Hit} hit · ${u.miss} baked</b></div>`
       + `</div>` : "";
+    // The popup re-renders on a timer (live stats); preserve the cell list's
+    // scroll position so the user can actually scroll it without it snapping back.
+    const prevScroll = pop.querySelector(".csp-list")?.scrollTop || 0;
     pop.innerHTML = `<div class="csp-head"><span>${esc(head)}</span>${clearBtn}</div>`
       + statsHtml
       + `<ul class="csp-list">${rows || `<li class="csp-empty">${esc(emptyMsg)}</li>`}</ul>`;
+    const list = pop.querySelector(".csp-list"); if (list && prevScroll) list.scrollTop = prevScroll;
     pop.querySelector("#csp-clear-failed")?.addEventListener("click", (e) => { e.stopPropagation(); this._removeFailedCells(); });
     pop.hidden = false;
   }
@@ -2560,6 +2564,27 @@ export class ChartPlotterApp extends HTMLElement {
 
   // Footprint + render-start zoom for each installed cell, from the catalog —
   // drives lazy loading (which cells a tile needs) and the coverage outlines.
+  // NOAA region (rg) → bounding box, unioned from every catalog cell that HAS a
+  // footprint. Used to bound cells whose own bbox is missing (≈195 small-scale
+  // overview charts in NOAA's catalog have no <vertex> coverage) to their region
+  // instead of the whole world — otherwise a no-bb Alaska overview cell overlaps
+  // every tile and lazy-loads everywhere. Cached after first build.
+  _regionBBoxes() {
+    if (this._rgBBox) return this._rgBBox;
+    if (!this._catalog || !this._catalog.length) return new Map(); // catalog not ready — don't cache empty
+    const m = new Map();
+    for (const c of this._catalog) {
+      if (!Array.isArray(c.bb) || c.bb.length !== 4 || !Array.isArray(c.rg)) continue;
+      for (const r of c.rg) {
+        const cur = m.get(r);
+        if (!cur) m.set(r, c.bb.slice());
+        else { cur[0] = Math.min(cur[0], c.bb[0]); cur[1] = Math.min(cur[1], c.bb[1]); cur[2] = Math.max(cur[2], c.bb[2]); cur[3] = Math.max(cur[3], c.bb[3]); }
+      }
+    }
+    this._rgBBox = m;
+    return m;
+  }
+
   _realtimeCellMeta() {
     // Debug solo: when cells are hand-picked (debug mode), render ONLY those — at
     // any zoom — and exclude everything else. The render selection overrides the
@@ -2568,7 +2593,20 @@ export class ChartPlotterApp extends HTMLElement {
     const meta = new Map();
     for (const name of this._installed) {
       const c = this._byName.get(name);
-      const bb = c && Array.isArray(c.bb) && c.bb.length === 4 ? c.bb : null;
+      let bb = c && Array.isArray(c.bb) && c.bb.length === 4 ? c.bb : null;
+      // No catalog footprint → bound to the union of the cell's region bboxes so
+      // it only loads near its actual area (not globally). Null only as a last
+      // resort (no regions either), which setCellRegistry treats as world-wide.
+      if (!bb && c && Array.isArray(c.rg) && c.rg.length) {
+        const rm = this._regionBBoxes();
+        let u = null;
+        for (const r of c.rg) {
+          const rb = rm.get(r); if (!rb) continue;
+          if (!u) u = rb.slice();
+          else { u[0] = Math.min(u[0], rb[0]); u[1] = Math.min(u[1], rb[1]); u[2] = Math.max(u[2], rb[2]); u[3] = Math.max(u[3], rb[3]); }
+        }
+        if (u) bb = u;
+      }
       const band = c && typeof c.s === "number" ? bandForScale(c.s) : "overview";
       // 999 is a sentinel min-zoom the baker's `z < minzoom` gate never satisfies,
       // so the cell never bakes; 0 means "bake at any zoom".
