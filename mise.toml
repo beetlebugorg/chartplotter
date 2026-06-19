@@ -1,2 +1,5 @@
 [tools]
 go = "1.25.11"
+# tinygo builds the smaller real-time baker wasm (`make wasm`); stock-go fallback
+# is `make wasm-go`. Run `mise install` then `make wasm`.
+tinygo = "latest"
