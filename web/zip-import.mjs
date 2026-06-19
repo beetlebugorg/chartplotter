@@ -144,7 +144,12 @@ export async function extractEntry(blob, entry) {
 // Cells without a base .000 are skipped (the engine ingests a base only; .NNN
 // update application is a follow-up).
 export function cellEntries(entries) {
-  const re = /(?:^|\/)([A-Z]{2}\d[A-Z0-9]{4,})\.(\d{3})$/;
+  // Detect cells by EXTENSION, not by name pattern: any `<name>.000` is a base
+  // cell, `<name>.NNN` its updates. S-57 dataset names vary by producer (US cells
+  // are "US…", foreign cells can start with a digit, e.g. "1R7YM012"), so the
+  // extension is the reliable indicator (matches the CLI's bake path). The cell
+  // name is just the filename stem.
+  const re = /(?:^|\/)([^/]+)\.(\d{3})$/;
   const byName = new Map();
   for (const e of entries) {
     const m = e.name.match(re);
