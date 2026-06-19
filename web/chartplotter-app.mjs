@@ -287,6 +287,11 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   async boot() {
+    // Prod (prebaked) mode: enabled by the `prod` attribute OR `?prod` (so a dev
+    // build can be tested without rebuilding). Reflect it as the attribute so the
+    // :host([prod]) styles apply either way.
+    this._prod = this.hasAttribute("prod") || new URLSearchParams(location.search).has("prod");
+    if (this._prod) this.setAttribute("prod", "");
     this.renderChrome();
 
     // What's already stored? We do NOT eagerly load it (that's the slow part on
@@ -743,9 +748,20 @@ export class ChartPlotterApp extends HTMLElement {
     pop.hidden = false;
   }
 
+  // A deploy-time config value from an attribute, overridable per-load by the
+  // same-named query param (so a hosted build can be re-pointed without a rebuild,
+  // e.g. ?pmtiles=… or ?catalog=…).
+  _cfg(name) {
+    const q = new URLSearchParams(location.search).get(name);
+    return q != null ? q : (this.getAttribute(name) || "");
+  }
+
   loadCatalog() {
     // Optional — the picker just shows nothing if absent. Also load the hosted
-    // per-district archive manifest (charts-index.json, written by --bake-districts).
+    // per-district archive manifest (charts-index.json). The manifest URL is
+    // configurable (catalog="…" / ?catalog=…) so it (and the .pmtiles it lists)
+    // can live on an external host while the app is served from GitHub Pages.
+    const manUrl = this._cfg("catalog") || (this._assets + "charts-index.json");
     const cat = fetch(this._assets + "catalog.json")
       .then((r) => (r.ok ? r.json() : null)).then((j) => { this._catalogDate = (j && j.date) || ""; return (j && j.cells) || []; }).catch(() => [])
       .then((cells) => {
@@ -757,7 +773,7 @@ export class ChartPlotterApp extends HTMLElement {
         for (const c of cells) { if (c.l) c.l = decode(c.l); }
         this._catalog = cells; for (const c of cells) this._byName.set(c.n, c);
       });
-    const man = fetch(this._assets + "charts-index.json")
+    const man = fetch(manUrl)
       .then((r) => (r.ok ? r.json() : null)).then((j) => { this._districts = (j && j.districts) || []; }).catch(() => { this._districts = []; });
     return Promise.all([cat, man]);
   }
@@ -1187,7 +1203,20 @@ export class ChartPlotterApp extends HTMLElement {
   renderCharts() {
     const el = this.shadowRoot.getElementById("charts-body");
     if (!el) return;
-    this.shadowRoot.getElementById("dtitle").textContent = "Chart library";
+    this.shadowRoot.getElementById("dtitle").textContent = this._prod ? "Add charts" : "Chart library";
+    // Prod (prebaked) build: no NOAA download/region picker — the Library is just
+    // an importer for your own charts (baked in-browser, stored offline alongside
+    // the hosted prebaked charts).
+    if (this._prod) {
+      el.innerHTML = `
+        <p class="add-hint">Add your own charts — drop a NOAA <code>.zip</code> / <code>.000</code>, or a baked <code>.pmtiles</code>. They're baked right here in your browser and kept offline alongside the prebaked charts.</p>
+        <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
+        <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
+        <div id="import-log" class="muted"></div>
+        <div id="archive-list"></div>`;
+      this._wireImport();
+      return;
+    }
     el.innerHTML = `
       ${this._renderPackSearch()}
       ${this._renderPacks()}
@@ -2977,6 +3006,12 @@ export class ChartPlotterApp extends HTMLElement {
         #rail .ri.on { background:var(--ui-accent); color:var(--ui-accent-text); }
         #rail .ri svg { width:20px; height:20px; display:block; }
         #rail .ri .cap { font-size:9.5px; font-weight:500; letter-spacing:.02em; }
+        /* Prod / prebaked deployment: charts load from a configured hosted archive
+           (pmtiles="…" / catalog="…"); there's no NOAA download and no Dev tools.
+           The Library tab stays but becomes import-only (drop your own ENC, baked
+           in-browser) — see renderCharts. */
+        :host([prod]) #dev-toggle,
+        :host([prod]) #empty-add, :host([prod]) #empty .welcome-sub { display:none; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
