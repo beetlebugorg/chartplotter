@@ -534,6 +534,7 @@ func (w *walker) emitText(tx *s52.TextInstruction, g geom) {
 		VAlign:     mapVJust(tx.VJust),
 		OffsetXPx:  float32(tx.XOffset) * fontSizePx,
 		OffsetYPx:  float32(tx.YOffset) * fontSizePx,
+		Group:      tx.Display,
 	})
 }
 

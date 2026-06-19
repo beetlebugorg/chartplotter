@@ -585,6 +585,9 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 			mvt.KeyValue{Key: "offset_y", Value: mvt.FloatVal(v.OffsetYPx)},
 			mvt.KeyValue{Key: "halo_color_token", Value: mvt.StringVal(haloTextColor(v.Halo))},
 			mvt.KeyValue{Key: "halo_width", Value: mvt.FloatVal(haloTextWidth(v.Halo))},
+			// S-52 §14.4 text grouping (DISPLAY param) so the client can toggle
+			// text groups (§14.5) live: 11=important, 21/26/29=names, 23=light, …
+			mvt.KeyValue{Key: "tgrp", Value: mvt.IntVal(int64(v.Group))},
 		)
 		b.add(r, ptBbox(v.Anchor))
 	case portrayal.SymbolCall:

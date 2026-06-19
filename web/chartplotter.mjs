@@ -870,9 +870,14 @@ export class ChartPlotter extends HTMLElement {
       if (keys.includes("showLightDescriptions")) {
         this._eachLayer("light-text", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showLightDescriptions === false ? "none" : "visible"));
       }
-      if (keys.includes("showNames")) {
-        const vis = this._mariner.showNames === false ? "none" : "visible";
-        for (const v of TEXT_VARIANTS) this._eachLayer(v.id, (id) => map.setLayoutProperty(id, "visibility", vis));
+      // S-52 §14.5 text groups: re-derive each text variant's BASE filter (so it
+      // survives a later applyFeatureFilters category re-apply) when any group
+      // toggle (or light descriptions, which also feeds the general group-23
+      // clause) changes. Instant — no re-bake.
+      if (keys.some((k) => k === "textImportant" || k === "textNames" || k === "textOther" || k === "showLightDescriptions")) {
+        const notLight = ["!=", ["get", "class"], "LIGHTS"];
+        const grp = this.textGroupFilter();
+        for (const v of TEXT_VARIANTS) this.setBaseFilter(v.id, ["all", notLight, v.filter, grp]);
       }
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
@@ -1011,6 +1016,25 @@ export class ChartPlotter extends HTMLElement {
       paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] },
     }];
   }
+  // S-52 PresLib §14.5 text-group selection. Each text feature carries the baked
+  // `tgrp` tag (the DISPLAY param of its TX/TE, §14.4); the mariner toggles which
+  // groups are visible, independent of display category. Returns a MapLibre filter
+  // expression selecting the enabled groups (false = hide all). Light descriptions
+  // (group 23) are the LIGHTS layer's own toggle (showLightDescriptions); a stray
+  // non-light group-23 label is folded in here too.
+  textGroupFilter() {
+    const m = this._mariner;
+    const g = ["coalesce", ["get", "tgrp"], -1];
+    const named = ["match", g, [21, 26, 29], true, false]; // §14.5 Names
+    const clauses = [];
+    if (m.textImportant !== false) clauses.push(["==", g, 11]);     // §14.5 Important text
+    if (m.textNames !== false) clauses.push(named);
+    if (m.showLightDescriptions !== false) clauses.push(["==", g, 23]); // Light description
+    // Other: everything not already claimed above (incl. missing tgrp = -1, so
+    // text in tiles baked before tgrp existed stays visible when "Other" is on).
+    if (m.textOther !== false) clauses.push(["all", ["!=", g, 11], ["!=", g, 23], ["match", g, [21, 26, 29], false, true]]);
+    return clauses.length ? ["any", ...clauses] : false;
+  }
   textLayers() {
     // LIGHTS characteristic text is drawn by its OWN always-on layer (see the
     // "light-text" layer in buildLayers) so it can't be decluttered behind a
@@ -1018,14 +1042,12 @@ export class ChartPlotter extends HTMLElement {
     const notLight = ["!=", ["get", "class"], "LIGHTS"];
     return TEXT_VARIANTS.map((v) => ({
       id: v.id, type: "symbol", source: "chart", "source-layer": "text",
-      filter: ["all", notLight, v.filter],
+      filter: ["all", notLight, v.filter, this.textGroupFilter()],
       layout: {
         "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
         "text-size": ["coalesce", ["get", "font_size_px"], 11], "text-anchor": v.anchor,
         "text-allow-overlap": false, "text-optional": true,
-        // Geographic names / object labels — an individually-selectable "Other"
-        // item per S-52 (default on). Light text has its own layer below.
-        visibility: this._mariner.showNames === false ? "none" : "visible",
+        visibility: "visible",
       },
       paint: {
         // Legible at dusk/night (bright ink + dark halo) — see textColor.

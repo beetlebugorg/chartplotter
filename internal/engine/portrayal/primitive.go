@@ -121,6 +121,12 @@ type DrawText struct {
 	VAlign     VAlign
 	OffsetXPx  float32
 	OffsetYPx  float32
+	// Group is the S-52 text grouping (the DISPLAY parameter — last argument of
+	// TX()/TE()), per PresLib 4.0 §14.4: 11=important (clearances, bearings),
+	// 21/26/29=names, 23=light description, 25=seabed, 27=mag variation, etc.
+	// Baked as the `tgrp` tag so the client can toggle text groups (§14.5) live
+	// without re-baking.
+	Group int
 }
 
 // TextHalo is the optional CHWHT outline under chart text (S-52 §10.3.6).

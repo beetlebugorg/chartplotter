@@ -48,8 +48,12 @@ const DEFAULT_MARINER = {
   showNoData: true,
   // Individually-selectable "Other" items (S-52/IMO), all default on.
   showSoundings: true,
-  showLightDescriptions: true,
-  showNames: true,
+  // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
+  // independent of display category (each TX/TE carries a group number, §14.4).
+  showLightDescriptions: true, // group 23: light characteristics (e.g. Fl(2)R 10s)
+  textImportant: true,         // group 11: bridge/cable/pipeline clearances, route/track bearings
+  textNames: true,             // groups 21/26/29: buoy/beacon/geographic names, berth numbers
+  textOther: true,             // groups 0-10/22/24/25/27/28/30/32-49: notes, seabed, mag variation, heights
   // Off by default.
   showFullSectorLines: false,        // 25mm legs (engine ShowFullLengthSectorLines=false, avoids clutter)
   showIsolatedDangersShallow: false, // ISODGR01 at DisplayBase (engine default); on → Standard category
@@ -259,6 +263,14 @@ export class ChartPlotterApp extends HTMLElement {
       this._mariner.displayOther = c === "other";
       delete this._mariner.displayCategory;
     }
+    // Migrate the old coarse "showNames" (which gated ALL non-light text) to the
+    // S-52 §14.5 text-group toggles: off → hide every general text group.
+    if (this._mariner.showNames === false) {
+      this._mariner.textImportant = false;
+      this._mariner.textNames = false;
+      this._mariner.textOther = false;
+    }
+    delete this._mariner.showNames;
     // S-52 §10.2: Display Base is the minimum safe-navigation set and can never
     // be deselected. Force it on regardless of any (stale) persisted value.
     this._mariner.displayBase = true;
@@ -3941,7 +3953,9 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("showLightDescriptions", "Light descriptions", "Light characteristics text (e.g. Fl(2)R 10s)", m.showLightDescriptions !== false)}
         ${toggle("showFullSectorLines", "Full sector lines", "Extend light sector legs to their nominal range instead of short 25mm stubs", !!m.showFullSectorLines)}
         ${toggle("showIsolatedDangersShallow", "Isolated dangers (shallow)", "Show isolated-danger symbols only at Standard detail instead of always (S-52 UDWHAZ05)", !!m.showIsolatedDangersShallow)}
-        ${toggle("showNames", "Place names", "Geographic names and object labels", m.showNames !== false)}
+        ${toggle("textImportant", "Important text", "Clearances (bridges/cables/pipelines) and route/track bearings (S-52 text group 11)", m.textImportant !== false)}
+        ${toggle("textNames", "Names", "Buoy/beacon/geographic names and berth numbers (S-52 text groups 21/26/29)", m.textNames !== false)}
+        ${toggle("textOther", "Other text", "Notes, nature of seabed, magnetic variation, heights (remaining S-52 text groups)", m.textOther !== false)}
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
         ${toggle("showMetaBounds", "Metadata boundaries", "Coverage/region indicator lines (nautical-publication, nav-system, coverage)", !!m.showMetaBounds)}
