@@ -71,6 +71,15 @@ function zoomForScale(scale, lat) {
 // off by default, rather than riding the "Other" display category. M_QUAL is NOT
 // here — it has its own "Data quality" (CATZOC) toggle.
 const META_BOUND_CLASSES = ["M_NPUB", "M_NSYS", "M_COVR", "M_CSCL"];
+// Fill-pattern (AP) images live under this id prefix so they never collide with
+// point-symbol (SY) images of the SAME PresLib name. Several names are BOTH a
+// point symbol and an area fill pattern (QUESMRK1, AIRARE02, FSHFAC03, MARCUL02):
+// e.g. an unknown object is SY(QUESMRK1) — a 26×46 "?" mark — while an unknown
+// AREA could be AP(QUESMRK1) — a 178×392 tiled "?" fill. MapLibre keys images by a
+// single id, so without this prefix the pattern atlas cell hijacked the symbol
+// (styleimagemissing fires before registerAllSymbols → pattern won, first-wins),
+// rendering the point "?" as a stretched fragment. Symbols keep their bare names.
+const PAT_PREFIX = "pat:";
 
 // NOAA ENC navigational-purpose bands (the rescheming standard) → one vector
 // source each, baked over [min,max] and overzoomed above max (see bake.zig
@@ -282,7 +291,9 @@ export class ChartPlotter extends HTMLElement {
     map.addControl(this._scaleControl, "bottom-left");
 
     map.on("styleimagemissing", (e) => {
-      if (this._patterns[e.id]) this.registerPattern(e.id);
+      // Pattern images are requested under the `pat:` namespace (fill-pattern
+      // exprs add the prefix); everything else is a point/sounding symbol.
+      if (e.id.startsWith(PAT_PREFIX)) this.registerPattern(e.id.slice(PAT_PREFIX.length));
       else this.registerImage(e.id);
     });
     map.on("load", async () => {
@@ -1106,9 +1117,13 @@ export class ChartPlotter extends HTMLElement {
     ctx.drawImage(img, cell.x, cell.y, cell.w, cell.h, 0, 0, cell.w, cell.h);
     return ctx.getImageData(0, 0, cell.w, cell.h);
   }
-  registerPattern(id) {
-    if (!this._patternsImg || this._map.hasImage(id)) return;
-    const cell = this._patterns[id];
+  // `name` is the bare PresLib pattern name; the image is registered under the
+  // `pat:` namespace so it can't clash with a same-named point symbol.
+  registerPattern(name) {
+    if (!this._patternsImg) return;
+    const id = PAT_PREFIX + name;
+    if (this._map.hasImage(id)) return;
+    const cell = this._patterns[name];
     if (!cell || cell.w === undefined) return;
     try { this._map.addImage(id, this.rawCell(this._patternsImg, cell), { pixelRatio: this._patternPixelRatio }); }
     catch (e) { console.warn("registerPattern", id, e); }
@@ -1116,7 +1131,7 @@ export class ChartPlotter extends HTMLElement {
   registerAllPatterns() {
     if (!this._patternsImg) return;
     for (const name in this._patterns) {
-      if (name === "_meta" || this._map.hasImage(name)) continue;
+      if (name === "_meta") continue;
       this.registerPattern(name);
     }
   }
@@ -1224,12 +1239,12 @@ export class ChartPlotter extends HTMLElement {
     const notLand = ["match", ["get", "color_token"], ["LANDA", "CHBRN"], false, true];
     const base = [
       { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}), paint: { "fill-color": this.areasFillColor() } },
-      { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["coalesce", ["get", "pattern_name"], ""] } },
+      { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
       // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
       // the shallow side of the live safety contour, shown only when the
       // mariner toggle is on. Filter/visibility update on safetyContour /
       // shallowPattern — no re-bake.
-      { id: "shallow-pattern", type: "fill", source: "chart", "source-layer": "areas", filter: this.shallowPatternFilter(), layout: { visibility: this._mariner.shallowPattern ? "visible" : "none" }, paint: { "fill-pattern": "DIAMOND1" } },
+      { id: "shallow-pattern", type: "fill", source: "chart", "source-layer": "areas", filter: this.shallowPatternFilter(), layout: { visibility: this._mariner.shallowPattern ? "visible" : "none" }, paint: { "fill-pattern": PAT_PREFIX + "DIAMOND1" } },
       { id: "lines-solid", type: "line", source: "chart", "source-layer": "lines", filter: ["==", ["coalesce", ["get", "dash"], "solid"], "solid"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] } },
       { id: "lines-dashed", type: "line", source: "chart", "source-layer": "lines", filter: ["==", ["get", "dash"], "dashed"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [4, 3] } },
       { id: "lines-dotted", type: "line", source: "chart", "source-layer": "lines", filter: ["all", ["==", ["get", "dash"], "dotted"], ["!", ["has", "danger_depth"]]], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [1, 2] } },
@@ -1409,7 +1424,7 @@ export class ChartPlotter extends HTMLElement {
     sources.nodata = { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[-180, -85.0511], [180, -85.0511], [180, 85.0511], [-180, 85.0511], [-180, -85.0511]]] } } };
     // No-data hatch is hidden over OSM (its land/water fills the gaps instead).
     const hideNoData = this._mariner.showNoData === false || basemap === "osm" || basemap === "osmvec";
-    layers.push({ id: "nodata", type: "fill", source: "nodata", layout: { visibility: hideNoData ? "none" : "visible" }, paint: { "fill-pattern": "NODATA03" } });
+    layers.push({ id: "nodata", type: "fill", source: "nodata", layout: { visibility: hideNoData ? "none" : "visible" }, paint: { "fill-pattern": PAT_PREFIX + "NODATA03" } });
 
     return {
       version: 8,
