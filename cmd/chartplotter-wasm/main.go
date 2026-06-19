@@ -53,10 +53,14 @@ func cpBakeAddCell(_ js.Value, args []js.Value) any {
 	u8 := args[1]
 	buf := make([]byte, u8.Get("length").Int())
 	js.CopyBytesToGo(buf, u8)
-	if err := session.AddCellBytes(name, buf); err != nil {
+	bb, err := session.AddCellBytes(name, buf)
+	if err != nil {
 		return js.ValueOf(map[string]any{"ok": false, "name": name, "error": err.Error()})
 	}
-	return js.ValueOf(map[string]any{"ok": true, "name": name, "ms": time.Since(start).Milliseconds()})
+	return js.ValueOf(map[string]any{
+		"ok": true, "name": name, "ms": time.Since(start).Milliseconds(),
+		"bounds": []any{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat}, // [W,S,E,N] — locate the cell
+	})
 }
 
 // cpBakeTile(z, x, y) — bake one MVT tile from the current session by full-scan

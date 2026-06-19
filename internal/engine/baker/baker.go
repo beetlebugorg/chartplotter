@@ -62,13 +62,13 @@ func NewSession() (*Session, error) {
 // AddCellBytes parses one raw cell and adds it to the session's Baker. The caller
 // should rebuild the emit index (Baker.BuildEmitIndex) before baking tiles after
 // any add.
-func (s *Session) AddCellBytes(name string, data []byte) error {
+func (s *Session) AddCellBytes(name string, data []byte) (s57.Bounds, error) {
 	chart, err := ParseCellBytes(name, data)
 	if err != nil {
-		return err
+		return s57.Bounds{}, err
 	}
 	s.Baker.AddCell(chart, s.lib, s.mariner)
-	return nil
+	return chart.Bounds(), nil
 }
 
 // BuildBaker parses and adds each named cell to a fresh Baker. cells maps a

@@ -44,7 +44,7 @@ func TestTileFunnel(t *testing.T) {
 			t.Fatal(err)
 		}
 		name := strings.TrimSuffix(filepath.Base(cp), ".000")
-		if err := sess.AddCellBytes(name, data); err != nil {
+		if _, err := sess.AddCellBytes(name, data); err != nil {
 			t.Fatalf("AddCellBytes %s: %v", name, err)
 		}
 		t.Logf("loaded %s (%d bytes)", name, len(data))

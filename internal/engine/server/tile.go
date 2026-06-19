@@ -55,7 +55,7 @@ func (s *Server) serveTile(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue // skip cells that aren't in the cache
 		}
-		if err := sess.AddCellBytes(name, data); err == nil {
+		if _, err := sess.AddCellBytes(name, data); err == nil {
 			added++
 		}
 	}

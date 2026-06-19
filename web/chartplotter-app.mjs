@@ -226,6 +226,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._installed = new Set();        // all stored cell names
     this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
+    this._cellBounds = new Map();       // name -> [w,s,e,n] footprint (from the baker), to locate uploaded cells
     this._cellUsage = { bytes: 0, count: 0 }; // raw cell store disk usage (refreshed on popup open / load)
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
@@ -348,7 +349,11 @@ export class ChartPlotterApp extends HTMLElement {
     if (!this._cellStatus) this._cellStatus = new Map();
     this._cellStatus.set(name, status);
     if (status === "loading") console.log(`[charts] loading ${name}…`);
-    else if (status === "ready") { this._cellError.delete(name); console.log(`[charts] ${name} ready${info && info.ms != null ? ` (${info.ms}ms)` : ""}`); }
+    else if (status === "ready") {
+      this._cellError.delete(name);
+      if (info && Array.isArray(info.bounds) && info.bounds.length === 4) this._cellBounds.set(name, info.bounds);
+      console.log(`[charts] ${name} ready${info && info.ms != null ? ` (${info.ms}ms)` : ""}`);
+    }
     else if (status === "failed") { this._cellError.set(name, (info && info.error) || "parse failed"); console.warn(`[charts] ${name} failed:`, info && info.error); }
     this._updateBakeStatus();
     this._renderCellStatusPopup();
@@ -728,7 +733,8 @@ export class ChartPlotterApp extends HTMLElement {
       const [lbl, cls] = STAT[st];
       const err = st === "failed" ? this._cellError.get(n) : "";
       const title = (c && c.l) || n;
-      return `<li class="csp-row${err ? " is-fail" : ""}"><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
+      const loc = this._cellLocation(n); // clickable → fly to the cell when we know where it is
+      return `<li class="csp-row${err ? " is-fail" : ""}${loc ? " csp-loc" : ""}"${loc ? ` data-cell="${esc(n)}" title="Go to ${esc(title)}"` : ""}><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
         + `<span class="csp-name">`
         + `<span class="csp-title" title="${esc(title)}">${esc(title)}</span>`
         + `<span class="csp-code">${esc(n)}</span>`
@@ -758,7 +764,28 @@ export class ChartPlotterApp extends HTMLElement {
       + `<ul class="csp-list">${rows || `<li class="csp-empty">${esc(emptyMsg)}</li>`}</ul>`;
     const list = pop.querySelector(".csp-list"); if (list && prevScroll) list.scrollTop = prevScroll;
     pop.querySelector("#csp-clear-failed")?.addEventListener("click", (e) => { e.stopPropagation(); this._removeFailedCells(); });
+    pop.querySelectorAll(".csp-row[data-cell]").forEach((li) => li.addEventListener("click", (e) => { e.stopPropagation(); this._flyToCell(li.dataset.cell); }));
     pop.hidden = false;
+  }
+
+  // [w,s,e,n] footprint of a cell: the baker's reported bounds (uploaded cells) or
+  // the catalog footprint (NOAA cells), else null.
+  _cellLocation(name) {
+    const b = this._cellBounds.get(name);
+    if (Array.isArray(b) && b.length === 4) return b;
+    const c = this._byName.get(name);
+    if (c && Array.isArray(c.bb) && c.bb.length === 4) return c.bb;
+    return null;
+  }
+
+  // Fly the map to a cell's footprint — lets you find an uploaded chart you can't
+  // otherwise locate. Closes the popup + drawer so the chart is visible.
+  _flyToCell(name) {
+    const bb = this._cellLocation(name);
+    if (!bb || !this._map) return;
+    this._cellPopOpen = false; clearInterval(this._cellPopTimer); this._renderCellStatusPopup();
+    this.closeDrawer();
+    this._map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 60, maxZoom: 14, duration: 800 });
   }
 
   // A deploy-time config value from an attribute, overridable per-load by the
@@ -3242,6 +3269,8 @@ export class ChartPlotterApp extends HTMLElement {
         .csp-list { list-style:none; margin:0 -4px; padding:0 4px; flex:1 1 auto; min-height:60px; overflow-y:auto; }
         .csp-row { display:flex; align-items:center; gap:10px; padding:8px 0; font:500 12.5px/1.3 system-ui,sans-serif; }
         .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
+        .csp-row.csp-loc { cursor:pointer; margin:0 -6px; padding-left:6px; padding-right:6px; border-radius:7px; }
+        .csp-row.csp-loc:hover { background:var(--ui-hover); }
         .csp-row.is-fail { align-items:flex-start; }
         .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:3px; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
         .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; color:var(--ui-text); }
