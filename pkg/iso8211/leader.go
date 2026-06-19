@@ -25,6 +25,20 @@ func (p *Parser) parseLeader() (*Leader, error) {
 	}
 	p.offset += 24
 
+	// Trailing padding after the last record — a leader of only spaces and/or
+	// null bytes — is end-of-records, not a malformed record. Signal EOF so the
+	// data-record loop stops cleanly (some S-57 producers pad the file end).
+	blank := true
+	for _, b := range buf {
+		if b != 0x00 && b != 0x20 {
+			blank = false
+			break
+		}
+	}
+	if blank {
+		return nil, io.EOF
+	}
+
 	leader := &Leader{}
 
 	// Parse record length (positions 0-4, 5 ASCII digits)
@@ -33,6 +47,14 @@ func (p *Parser) parseLeader() (*Leader, error) {
 		return nil, NewParseError(startOffset, "record length", err)
 	}
 	leader.RecordLength = recordLength
+
+	// A record length of 0 means this isn't a real record: some S-57 producers
+	// pad the file after the last record with spaces/zeros (which parse to 0).
+	// Signal end-of-records so the data-record loop stops cleanly instead of
+	// failing leader validation. (A genuine empty file errors in parseDDR.)
+	if recordLength == 0 {
+		return nil, io.EOF
+	}
 
 	// Parse interchange level (position 5, 1 byte)
 	leader.InterchangeLevel = buf[5]
