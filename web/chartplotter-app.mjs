@@ -2662,7 +2662,7 @@ export class ChartPlotterApp extends HTMLElement {
     const el = this.shadowRoot.getElementById("search-results");
     if (!el) return;
     const needle = q.trim().toLowerCase();
-    if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._searchHits = []; return; }
+    if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._searchHits = []; this._positionSearch(); return; }
     // 1) Catalog cells (chart titles / numbers). Coarser charts first — "Chesapeake"
     // should land on the overview, not an arbitrary harbour inset.
     const cells = [];
@@ -2684,6 +2684,7 @@ export class ChartPlotterApp extends HTMLElement {
       : `<div class="sr-item"><span class="muted">No matches in view</span></div>`;
     el.hidden = false;
     el.querySelectorAll(".sr-item[data-i]").forEach((d) => (d.onmousedown = (e) => { e.preventDefault(); this.gotoSearchHit(+d.dataset.i); }));
+    this._positionSearch(); // re-align to the search tab as the result count changes the height
   }
 
   // Search the loaded chart vector tiles across EVERY attribute value (name, class,
@@ -3542,7 +3543,7 @@ export class ChartPlotterApp extends HTMLElement {
     // button toggles a tiny flyout with the input + results.
     const si = $("search-input");
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
-    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._positionCaret($("search"), $("search-tab")); si.focus(); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._positionSearch(); si.focus(); };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
     // "All charts" — re-frame the selection map to the zoomed-out world view.
     $("world-btn").onclick = () => this._frameChartsWorld();
@@ -3603,6 +3604,28 @@ export class ChartPlotterApp extends HTMLElement {
     pop.style.transform = prev;
     if (desktop) pop.style.setProperty("--caret-top", `${Math.max(16, Math.min(pr.height - 16, tr.top + tr.height / 2 - pr.top))}px`);
     else pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
+  }
+
+  // The search popover grows with results, so unlike the full-height panel it must
+  // be vertically aligned to the search tab (desktop) every time its height
+  // changes — otherwise a short popover sits below the tab and the caret can't
+  // reach it. Called on open and after each query.
+  _positionSearch() {
+    const r = this.shadowRoot;
+    const pop = r.getElementById("search"), tab = r.getElementById("search-tab");
+    if (!pop || pop.hidden || !tab) return;
+    const tr = tab.getBoundingClientRect();
+    if (window.matchMedia("(min-width:641px)").matches) {
+      const h = pop.offsetHeight, vh = window.innerHeight;
+      const top = Math.min(Math.max(tr.top, 14), Math.max(14, vh - h - 14)); // align to tab, clamp on-screen
+      pop.style.bottom = "auto"; pop.style.top = `${top}px`;
+      pop.style.setProperty("--caret-top", `${Math.max(16, Math.min(h - 16, tr.top + tr.height / 2 - top))}px`);
+    } else {
+      pop.style.top = ""; pop.style.bottom = ""; // revert to the CSS bottom anchor
+      const prev = pop.style.transform; pop.style.transform = "none";
+      const pr = pop.getBoundingClientRect(); pop.style.transform = prev;
+      pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
+    }
   }
 
   setDrawerOpen(open) {
