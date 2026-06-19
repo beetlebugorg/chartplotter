@@ -3212,19 +3212,20 @@ export class ChartPlotterApp extends HTMLElement {
            tab's centre. Pops in with a fade+scale from the caret edge; fully
            hidden (visibility) when closed. */
         #drawer, #search { --caret:9px; }
+        /* NB: no overflow:hidden on the popover itself — it would clip the caret.
+           Inner scroll areas (.body / #search-results) round their own corners. */
         #drawer { position:absolute; left:8px; right:8px; bottom:calc(var(--botbar-h) + 14px); width:auto; max-height:76vh; z-index:6;
           background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border); border-radius:14px;
-          box-shadow:0 12px 38px rgba(0,0,0,.30); display:flex; flex-direction:column; overflow:hidden;
+          box-shadow:0 12px 38px rgba(0,0,0,.30); display:flex; flex-direction:column;
           transform-origin:bottom center; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
+        #drawer .body { border-radius:0 0 13px 13px; }
         /* caret (base = pointing down at the tab below) */
         #drawer::after, #search::after { content:""; position:absolute; bottom:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
           width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
-          border-top:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 2px 1px rgba(0,0,0,.10)); }
+          border-top:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 2px 1px rgba(0,0,0,.12)); }
         #search::after { border-top-color:var(--ui-surface); }
-        /* Settings lays its sections in responsive columns to use the panel width. */
-        #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0 28px; align-items:start; }
         /* Settings lays its sections in responsive columns to use the panel width. */
         #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0 28px; align-items:start; }
         /* Feature inspector — slides in from the RIGHT (overlays the map). */
@@ -3342,13 +3343,13 @@ export class ChartPlotterApp extends HTMLElement {
            on top and results filling in underneath, popping from the search tab. */
         #search { position:absolute; right:8px; left:auto; bottom:calc(var(--botbar-h) + 14px); z-index:8; width:min(340px, calc(100vw - 16px));
           background:var(--ui-surface); border:1px solid var(--ui-border); border-radius:14px;
-          box-shadow:0 12px 38px rgba(0,0,0,.30); overflow:hidden;
+          box-shadow:0 12px 38px rgba(0,0,0,.30);
           transform-origin:bottom center; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #search:not([hidden]) { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #search input { width:100%; box-sizing:border-box; border:none; border-radius:14px; padding:11px 16px;
           font:inherit; background:transparent; color:var(--ui-text); outline:none; }
-        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(50vh, 360px); overflow-y:auto; }
+        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(50vh, 360px); overflow-y:auto; border-radius:0 0 13px 13px; }
         #search-results[hidden] { display:none; }
         .sr-item { padding:8px 16px; cursor:pointer; border-bottom:1px solid var(--ui-border-2); }
         .sr-item:last-child { border-bottom:none; }
