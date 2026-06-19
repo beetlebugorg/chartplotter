@@ -72,6 +72,13 @@ export function setCellRegistry(list, onCell) {
   _onCell = onCell || null;
 }
 
+// Parse a cell's footprint [w,s,e,n] without baking it — used to locate/frame an
+// uploaded cell before any of its tiles are requested. null on failure.
+export async function cellBounds(name, bytes) {
+  const r = await call("cellbounds", { name, cell: bytes });
+  return r && r.result && r.result.ok ? r.result.bounds : null;
+}
+
 // Reset the baker to empty and forget what's been loaded — call when the
 // installed set changes. Cells then re-parse lazily as the map needs them.
 export async function resetCells(assets = "./") {

@@ -63,6 +63,22 @@ func cpBakeAddCell(_ js.Value, args []js.Value) any {
 	})
 }
 
+// cpCellBounds(name, bytes) — parse one cell and return its footprint WITHOUT
+// adding it to the session (cheap; used to locate/frame an uploaded cell before
+// it bakes). Returns { ok, bounds:[w,s,e,n] } or { ok:false, error }.
+func cpCellBounds(_ js.Value, args []js.Value) any {
+	name := args[0].String()
+	u8 := args[1]
+	buf := make([]byte, u8.Get("length").Int())
+	js.CopyBytesToGo(buf, u8)
+	chart, err := baker.ParseCellBytes(name, buf)
+	if err != nil {
+		return js.ValueOf(map[string]any{"ok": false, "error": err.Error()})
+	}
+	bb := chart.Bounds()
+	return js.ValueOf(map[string]any{"ok": true, "bounds": []any{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat}})
+}
+
 // cpBakeTile(z, x, y) — bake one MVT tile from the current session by full-scan
 // over the loaded prims (the lazy loader keeps that set small). Returns a
 // Uint8Array (the gzip-less MVT body) or null when the tile is empty.
@@ -133,6 +149,7 @@ func cpSetTileDiag(_ js.Value, args []js.Value) any {
 func main() {
 	js.Global().Set("cpBakeReset", js.FuncOf(cpBakeReset))
 	js.Global().Set("cpBakeAddCell", js.FuncOf(cpBakeAddCell))
+	js.Global().Set("cpCellBounds", js.FuncOf(cpCellBounds))
 	js.Global().Set("cpBakeTile", js.FuncOf(cpBakeTile))
 	js.Global().Set("cpCoverage", js.FuncOf(cpCoverage))
 	js.Global().Set("cpSetTileDiag", js.FuncOf(cpSetTileDiag))

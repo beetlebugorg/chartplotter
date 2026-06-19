@@ -2649,7 +2649,7 @@ export class ChartPlotterApp extends HTMLElement {
       if (rt && rt.ok && rt.names && rt.names.length) {
         this._hasArchive = true;
         this.updateEmptyState();
-        if (frame) this._frameCells(rt.names);
+        if (frame) { await this._ensureForeignBounds(rt.names); this._frameCells(rt.names); }
       }
     } catch (e) { console.warn("[realtime] refresh", e); }
     this._refreshCellUsage();
@@ -2845,12 +2845,31 @@ export class ChartPlotterApp extends HTMLElement {
   _frameCells(names) {
     let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false;
     for (const n of names) {
-      const c = this._byName.get(n);
-      if (c && Array.isArray(c.bb) && c.bb.length === 4) {
-        W = Math.min(W, c.bb[0]); S = Math.min(S, c.bb[1]); E = Math.max(E, c.bb[2]); N = Math.max(N, c.bb[3]); any = true;
+      const bb = this._cellLocation(n); // catalog bbox OR baker/parsed bounds (foreign cells)
+      if (bb) {
+        W = Math.min(W, bb[0]); S = Math.min(S, bb[1]); E = Math.max(E, bb[2]); N = Math.max(N, bb[3]); any = true;
       }
     }
     if (any && this._map) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
+  }
+
+  // For installed cells with no catalog footprint (foreign uploads), parse their
+  // bounds in the wasm (no bake) so we can frame/locate them. Capped so a huge
+  // import doesn't stall; the rest still become locatable once they bake.
+  async _ensureForeignBounds(names, cap = 60) {
+    if (!this._plotter || !this._plotter.cellBounds || !this._store) return;
+    let n = 0;
+    for (const name of names) {
+      if (n >= cap) break;
+      if (this._cellLocation(name)) continue; // already have a footprint
+      n++;
+      try {
+        const bytes = await this._store.getBytes(name);
+        if (!bytes) continue;
+        const bb = await this._plotter.cellBounds(name, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+        if (Array.isArray(bb) && bb.length === 4 && bb[0] <= bb[2]) this._cellBounds.set(name, bb);
+      } catch (e) { /* best-effort */ }
+    }
   }
 
   // Frame to the union bounds of the installed region archives (from the manifest).

@@ -655,6 +655,9 @@ export class ChartPlotter extends HTMLElement {
   // status popup, or null when not on the realtime path.
   realtimeStats() { return this._rtCache ? this._rtCache.usage() : null; }
 
+  // Parse a cell's footprint [w,s,e,n] without baking (locate an uploaded cell).
+  async cellBounds(name, bytes) { return this._rt ? this._rt.cellBounds(name, bytes) : null; }
+
   // GeoJSON of loaded cells' real M_COVR data-coverage polygons (debug overlay).
   async realtimeCoverage() { return this._rt ? this._rt.coverage() : { type: "FeatureCollection", features: [] }; }
 

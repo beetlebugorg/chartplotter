@@ -47,6 +47,11 @@ self.onmessage = async (e) => {
         self.postMessage({ id: m.id, ok: true, result });
         break;
       }
+      case "cellbounds": {
+        const result = self.cpCellBounds(m.name, m.cell);
+        self.postMessage({ id: m.id, ok: true, result });
+        break;
+      }
       case "coverage": {
         self.postMessage({ id: m.id, ok: true, geojson: self.cpCoverage() });
         break;
