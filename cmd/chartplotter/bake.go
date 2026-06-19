@@ -31,9 +31,13 @@ func (c bakeCmd) Run() error {
 	if len(cells) == 0 {
 		return fmt.Errorf("no .000 base cells found in: %s", strings.Join(c.In, ", "))
 	}
-	fmt.Fprintf(os.Stderr, "baking %d cell(s)…\n", len(cells))
+	nUpd := 0
+	for _, cd := range cells {
+		nUpd += len(cd.Updates)
+	}
+	fmt.Fprintf(os.Stderr, "baking %d cell(s) (%d update file(s) applied)…\n", len(cells), nUpd)
 
-	b, ok, err := baker.BuildBaker(cells, func(name string, err error) {
+	b, ok, err := baker.BuildBakerWithUpdates(cells, func(name string, err error) {
 		fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
 	})
 	if err != nil {
@@ -98,30 +102,46 @@ func (c bakeCmd) Run() error {
 	return nil
 }
 
-// cellName is the bare cell name + .000 (path.Base form) used as the bake key.
-func cellNameKey(p string) string {
-	base := filepath.Base(p)
-	if strings.EqualFold(filepath.Ext(base), ".000") {
-		return base
+// encExt reports the 3-digit S-57 cell extension (".000" base, ".001"+ updates)
+// for a path, or "" if it isn't an ENC cell file.
+func encExt(p string) string {
+	ext := strings.ToLower(filepath.Ext(p))
+	if len(ext) == 4 && ext[0] == '.' && ext[1] >= '0' && ext[1] <= '9' && ext[2] >= '0' && ext[2] <= '9' && ext[3] >= '0' && ext[3] <= '9' {
+		return ext
 	}
 	return ""
 }
 
-// collectCells gathers each base .000 cell's bytes from the inputs (zip bundles,
-// directories, or individual .000 files), keyed by cell filename. First wins on
-// a duplicate cell name.
-func collectCells(paths []string) (map[string][]byte, error) {
-	cells := map[string][]byte{}
+// collectCells gathers each cell's base (.000) plus its update files (.001…) from
+// the inputs (zip bundles, directories, and/or individual cell files), grouped by
+// cell name. First base wins on a duplicate; updates accumulate.
+func collectCells(paths []string) (map[string]baker.CellData, error) {
+	type acc struct {
+		base    []byte
+		updates map[string][]byte
+	}
+	byCell := map[string]*acc{} // keyed by cell stem (e.g. US4MD81M)
 	add := func(name string, data []byte) {
-		key := cellNameKey(name)
-		if key == "" {
+		ext := encExt(name)
+		if ext == "" {
 			return
 		}
-		if _, dup := cells[key]; dup {
-			fmt.Fprintf(os.Stderr, "  dup cell %s — keeping first\n", key)
-			return
+		base := filepath.Base(name)
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		a := byCell[stem]
+		if a == nil {
+			a = &acc{updates: map[string][]byte{}}
+			byCell[stem] = a
 		}
-		cells[key] = data
+		if ext == ".000" {
+			if a.base != nil {
+				fmt.Fprintf(os.Stderr, "  dup base %s — keeping first\n", base)
+				return
+			}
+			a.base = data
+		} else {
+			a.updates[base] = data
+		}
 	}
 	for _, p := range paths {
 		info, err := os.Stat(p)
@@ -134,7 +154,7 @@ func collectCells(paths []string) (map[string][]byte, error) {
 				if err != nil || d.IsDir() {
 					return nil
 				}
-				if cellNameKey(path) != "" {
+				if encExt(path) != "" {
 					if b, e := os.ReadFile(path); e == nil {
 						add(path, b)
 					}
@@ -148,15 +168,23 @@ func collectCells(paths []string) (map[string][]byte, error) {
 			if err := addZipCells(p, add); err != nil {
 				return nil, err
 			}
-		case cellNameKey(p) != "":
+		case encExt(p) != "":
 			b, e := os.ReadFile(p)
 			if e != nil {
 				return nil, e
 			}
 			add(p, b)
 		default:
-			fmt.Fprintf(os.Stderr, "  ignoring %s (not a .zip, dir, or .000)\n", p)
+			fmt.Fprintf(os.Stderr, "  ignoring %s (not a .zip, dir, or ENC cell)\n", p)
 		}
+	}
+	cells := map[string]baker.CellData{}
+	for stem, a := range byCell {
+		if a.base == nil {
+			fmt.Fprintf(os.Stderr, "  skip %s — update file(s) with no base .000\n", stem)
+			continue
+		}
+		cells[stem+".000"] = baker.CellData{Base: a.base, Updates: a.updates}
 	}
 	return cells, nil
 }
@@ -168,7 +196,7 @@ func addZipCells(zipPath string, add func(name string, data []byte)) error {
 	}
 	defer zr.Close()
 	for _, e := range zr.File {
-		if cellNameKey(e.Name) == "" {
+		if encExt(e.Name) == "" {
 			continue
 		}
 		rc, err := e.Open()

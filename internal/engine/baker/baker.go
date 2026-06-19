@@ -104,6 +104,62 @@ func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*
 	return b, ok, nil
 }
 
+// CellData is a base cell (.000) plus its sequential update files (.001, .002, …)
+// keyed by filename. Updates are applied in order to bring the cell to its current
+// edition.
+type CellData struct {
+	Base    []byte
+	Updates map[string][]byte
+}
+
+// ParseCellWithUpdates parses a base cell with its update files applied. The base
+// + every update are staged on an in-memory filesystem so the parser discovers
+// and applies the .001/.002/… chain (vs ParseCellBytes, which parses base-only).
+func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+	p := "/" + path.Base(name)
+	fsys := iso8211.MemFS{p: base}
+	dir := path.Dir(p)
+	for un, ub := range updates {
+		fsys[path.Join(dir, path.Base(un))] = ub
+	}
+	opts := s57.DefaultParseOptions()
+	opts.Fs = fsys
+	opts.ApplyUpdates = true
+	return s57.ParseWithOptions(p, opts)
+}
+
+// BuildBakerWithUpdates is BuildBaker, but each cell's update files are applied.
+// cells maps a cell name (the base filename) to its base+update bytes.
+func BuildBakerWithUpdates(cells map[string]CellData, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		return nil, nil, err
+	}
+	mariner := s52.DefaultMarinerSettings()
+
+	names := make([]string, 0, len(cells))
+	for n := range cells {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	b := bake.New()
+	var ok []string
+	for _, name := range names {
+		cd := cells[name]
+		chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
+		if err != nil {
+			if onSkip != nil {
+				onSkip(name, err)
+			}
+			continue
+		}
+		b.AddCell(chart, lib, mariner)
+		ok = append(ok, name)
+	}
+	return b, ok, nil
+}
+
 // BakeToPMTiles bakes every tile from b into a PMTiles builder. Tiles are
 // emitted in parallel across all CPUs (EmitTile only reads the Baker, so it is
 // safe to run concurrently); the encoded bytes are added to the builder in
