@@ -117,6 +117,30 @@ function isChartSource(s) {
   return typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
 }
 
+// Fuzzy match score: does `q` appear as a (possibly non-contiguous) subsequence
+// of `text`? Both must already be lowercase. Returns a score (higher = better) or
+// -1 for no match. Rewards contiguous runs, matches at word starts, and an early
+// first match — so "chesbay" finds "Chesapeake Bay" and a clean substring beats a
+// scattered one. A leading exact-substring hit gets a big bonus so it ranks first.
+function fuzzyScore(q, text) {
+  if (!q) return 0;
+  if (!text) return -1;
+  let qi = 0, score = 0, run = 0, prev = -2;
+  for (let i = 0; i < text.length && qi < q.length; i++) {
+    if (text[i] !== q[qi]) continue;
+    let s = 1;
+    if (prev === i - 1) { run++; s += run * 5; } else run = 0; // contiguous run bonus
+    const before = i === 0 ? " " : text[i - 1];
+    if (i === 0 || before === " " || before === "-" || before === "/" || before === "," || before === ".") s += 10; // word-start bonus
+    if (qi === 0) s += Math.max(0, 8 - i); // earlier first match is better
+    score += s;
+    prev = i; qi++;
+  }
+  if (qi < q.length) return -1; // not all query chars matched, in order
+  if (text.includes(q)) score += 25 + (text.startsWith(q) ? 15 : 0); // contiguous / prefix boost
+  return score;
+}
+
 // A representative [lng,lat] for any GeoJSON geometry (first vertex) — used to fly
 // to a search hit.
 function firstCoord(g) {
@@ -2663,17 +2687,18 @@ export class ChartPlotterApp extends HTMLElement {
     if (!el) return;
     const needle = q.trim().toLowerCase();
     if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._searchHits = []; this._positionSearch(); return; }
-    // 1) Catalog cells (chart titles / numbers). Coarser charts first — "Chesapeake"
-    // should land on the overview, not an arbitrary harbour inset.
+    // 1) Catalog cells (chart titles / numbers), fuzzy-matched. Best score wins;
+    // ties break to the coarser chart (overview before an arbitrary harbour inset).
     const cells = [];
     for (const c of this._catalog) {
       if (!Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      if ((c.l || "").toLowerCase().includes(needle) || c.n.toLowerCase().includes(needle)) cells.push(c);
+      const score = Math.max(fuzzyScore(needle, (c.l || "").toLowerCase()), fuzzyScore(needle, c.n.toLowerCase()));
+      if (score >= 0) cells.push({ c, score });
     }
-    cells.sort((a, b) => (b.s || 0) - (a.s || 0));
-    // 2) Every loaded chart feature, matched across ALL of its attribute data.
+    cells.sort((a, b) => (b.score - a.score) || ((b.c.s || 0) - (a.c.s || 0)));
+    // 2) Every loaded chart feature, fuzzy-matched across its attribute data.
     const feats = this._searchFeatures(needle);
-    const hits = [...cells.slice(0, 5).map((c) => ({ type: "cell", c })), ...feats.slice(0, 8)];
+    const hits = [...cells.slice(0, 5).map(({ c }) => ({ type: "cell", c })), ...feats.slice(0, 8)];
     this._searchHits = hits;
     el.innerHTML = hits.length
       ? hits.map((h, i) => {
@@ -2703,18 +2728,19 @@ export class ChartPlotterApp extends HTMLElement {
           const p = f.properties || {};
           const objnam = p.objnam || "", cls = p.class || "";
           const typeName = S57_CLASS[cls] || INSPECT_LAYER_LABEL[layer] || cls || layer;
-          let match = objnam.toLowerCase().includes(needle) || cls.toLowerCase().includes(needle) || typeName.toLowerCase().includes(needle);
-          if (!match) for (const k in p) { const v = p[k]; if (typeof v === "string" && v.toLowerCase().includes(needle)) { match = true; break; } }
-          if (!match) continue;
+          // Score the name/type strongly; also fuzzy-match the rest of the attribute
+          // data (lower weight) so "search all feature data" still works.
+          let score = Math.max(fuzzyScore(needle, objnam.toLowerCase()), fuzzyScore(needle, typeName.toLowerCase()), fuzzyScore(needle, cls.toLowerCase()));
+          if (score < 0) for (const k in p) { const v = p[k]; if (typeof v === "string") { const s = fuzzyScore(needle, v.toLowerCase()); if (s >= 0) { score = Math.max(score, s - 6); break; } } }
+          if (score < 0) continue;
           const co = firstCoord(f.geometry); if (!co) continue;
           const key = cls + "|" + objnam + "|" + co[0].toFixed(3) + "," + co[1].toFixed(3);
           if (seen.has(key)) continue; seen.add(key);
-          out.push({ type: "feat", label: objnam || typeName, sub: objnam ? typeName : (p.cell ? `▦ ${p.cell}` : typeName), lng: co[0], lat: co[1] });
-          if (out.length >= 60) { out.sort((a, b) => a.label.localeCompare(b.label)); return out; }
+          out.push({ type: "feat", score, label: objnam || typeName, sub: objnam ? typeName : (p.cell ? `▦ ${p.cell}` : typeName), lng: co[0], lat: co[1] });
         }
       }
     }
-    out.sort((a, b) => a.label.localeCompare(b.label)); // named features read better alphabetised
+    out.sort((a, b) => (b.score - a.score) || a.label.localeCompare(b.label)); // best matches first
     return out;
   }
 
