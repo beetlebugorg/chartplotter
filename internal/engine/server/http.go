@@ -1,5 +1,5 @@
 // Package server is the tiny distribution shim for the 100%-wasm chartplotter:
-// it serves the embedded web frontend (static files + the tinygo wasm baker, with
+// it serves the embedded web frontend (static files + the wasm baker, with
 // HTTP Range) and one API endpoint — GET /api/cell/<NAME>?url=… — that downloads
 // a raw NOAA ENC cell and caches it (the shim acting as a CORS proxy, since
 // charts.noaa.gov sends no CORS headers). All parse/bake/render runs in-browser.

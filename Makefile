@@ -15,24 +15,16 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-.PHONY: build wasm wasm-go test vet fmt tidy clean clear-cache serve docs dist
+.PHONY: build wasm test vet fmt tidy clean clear-cache serve docs dist
 
 build: $(ASSETS)/chartplotter.wasm ## Build the self-contained shim (embeds web/ + wasm) into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
 
-# go:embed needs the wasm present; build it (stock go) if it's missing. NOTE: the
-# default is stock go for CORRECTNESS — tinygo (`make wasm`) mis-parses some
-# foreign S-57 cells ("invalid or out-of-range index"; verified with the Belgian
-# BE.zip set), while stock go parses them like the native engine.
+# go:embed needs the wasm present; build it if it's missing.
 $(ASSETS)/chartplotter.wasm:
-	$(MAKE) wasm-go
+	$(MAKE) wasm
 
-wasm: ## [experiment, SMALLER but BUGGY] tinygo wasm — mis-parses some foreign cells; prefer wasm-go
-	tinygo build -o $(ASSETS)/chartplotter.wasm -target=wasm -no-debug ./cmd/chartplotter-wasm
-	cp "$$(tinygo env TINYGOROOT)/targets/wasm_exec.js" $(ASSETS)/vendor/wasm_exec.js
-	@echo "built $(ASSETS)/chartplotter.wasm ($$(du -h $(ASSETS)/chartplotter.wasm | cut -f1)) via tinygo"
-
-wasm-go: ## Build the tile-baker wasm via stock go (larger but correct — the default)
+wasm: ## Build the real-time tile-baker wasm (stock go). (tinygo was dropped — it mis-parsed some foreign S-57 cells.)
 	GOOS=js GOARCH=wasm go build -o $(ASSETS)/chartplotter.wasm ./cmd/chartplotter-wasm
 	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" $(ASSETS)/vendor/wasm_exec.js
 	@echo "built $(ASSETS)/chartplotter.wasm ($$(du -h $(ASSETS)/chartplotter.wasm | cut -f1)) via go"

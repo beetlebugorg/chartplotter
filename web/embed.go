@@ -1,7 +1,7 @@
 // Package web embeds the chartplotter frontend into the binary so the
 // distribution is a single self-contained file: the UI, the S-52 client assets,
-// the basemap, glyphs, MapLibre vendor bundle, the NOAA catalog, and the tinygo
-// wasm ENC baker (chartplotter.wasm + its wasm_exec.js + the wasm-tiles worker).
+// the basemap, glyphs, MapLibre vendor bundle, the NOAA catalog, and the wasm
+// ENC baker (chartplotter.wasm + its wasm_exec.js + the wasm-tiles worker).
 // All parse/bake/render runs in-browser; the binary only serves these assets and
 // proxies NOAA cell downloads.
 //
