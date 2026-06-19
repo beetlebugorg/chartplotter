@@ -3405,8 +3405,8 @@ export class ChartPlotterApp extends HTMLElement {
              compact card near the bottom (by the search tab). */
           #drawer, #search { right:auto; transform-origin:left center; transform:translateX(-6px) scale(.985); }
           #drawer.open, #search:not([hidden]) { transform:none; }
-          #drawer { left:90px; top:14px; bottom:14px; width:min(40vw, 520px); max-height:none; }
-          #search { left:90px; top:auto; bottom:14px; width:340px; max-height:calc(100vh - 28px); }
+          #drawer { left:116px; top:14px; bottom:14px; width:min(40vw, 520px); max-height:none; }
+          #search { left:116px; top:auto; bottom:14px; width:340px; max-height:calc(100vh - 28px); }
           /* caret points LEFT toward the dock tab */
           #drawer::after, #search::after { left:calc(-1 * var(--caret)); right:auto; bottom:auto; top:var(--caret-top,50%);
             transform:translateY(-50%); border-left:none;
