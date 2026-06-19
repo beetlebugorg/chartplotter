@@ -546,6 +546,17 @@ export class ChartPlotter extends HTMLElement {
     setIf("coast-line", "line-color", this.coastColor());
   }
 
+  // Switch the basemap live: "coastline" (offline GSHHG land/lakes) or "osm"
+  // (online OpenStreetMap raster). Rebuilds the style from buildStyle() so the
+  // basemap sources/layers swap cleanly; chart sources, loaded archives and the
+  // tile protocols persist on the instance, so charts re-request and repaint.
+  setBasemap(mode) {
+    const m = mode === "osm" ? "osm" : "coastline";
+    if ((this.getAttribute("basemap") || "coastline") === m) return;
+    this.setAttribute("basemap", m);
+    if (this._map) this._map.setStyle(this.buildStyle());
+  }
+
   // -- runtime chart & settings API (driven by the <chart-plotter-app> shell) --
 
   // Force the chart source to re-request its tiles (after the loaded archive

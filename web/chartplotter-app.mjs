@@ -23,6 +23,7 @@ const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
 const M_TO_FT = 3.280839895; // depth-setting display conversion (values stored in metres)
 const LS_SCHEME = "chartplotter:scheme";
+const LS_BASEMAP = "chartplotter:basemap"; // "coastline" (offline) | "osm" (online)
 const LS_MARINER = "chartplotter:mariner";
 // Canonical mariner defaults — the single source of truth on the client, kept in
 // step with the engine's defaultMarinerSettings() (pkg/s52/mariner_settings.go).
@@ -319,7 +320,9 @@ export class ChartPlotterApp extends HTMLElement {
     plotter.setAttribute("zoom", String(view ? view.zoom : (this.getAttribute("zoom") || 11)));
     if (this.hasAttribute("cell-url")) plotter.setAttribute("cell-url", this.getAttribute("cell-url"));
     plotter.setAttribute("assets", this._assets);
-    plotter.setAttribute("basemap", this.getAttribute("basemap") || "coastline");
+    this._basemap = localStorage.getItem(LS_BASEMAP) || this.getAttribute("basemap") || "coastline";
+    if (this._basemap !== "coastline" && this._basemap !== "osm") this._basemap = "coastline";
+    plotter.setAttribute("basemap", this._basemap);
     // Prod renders prebaked hosted .pmtiles via the per-band pmtiles path; dev
     // bakes in-browser from stored cells (100%-wasm).
     plotter.setAttribute("tiles", this._prod ? "pmtiles" : "realtime");
@@ -2931,6 +2934,14 @@ export class ChartPlotterApp extends HTMLElement {
     this._syncSchemeUI();
   }
 
+  // Basemap under the chart: "coastline" (offline GSHHG land/lakes) or "osm"
+  // (online OpenStreetMap raster).
+  applyBasemap(mode) {
+    this._basemap = mode === "osm" ? "osm" : "coastline";
+    if (this._plotter) this._plotter.setBasemap(this._basemap);
+    localStorage.setItem(LS_BASEMAP, this._basemap);
+  }
+
   // Cycle Day → Dusk → Night → Day from the tab-bar toggle.
   _cycleScheme() {
     const i = SCHEMES.indexOf(this._scheme);
@@ -3789,6 +3800,10 @@ export class ChartPlotterApp extends HTMLElement {
         <div class="set-row"><div class="lbl"><span class="t">Colour scheme</span></div>
           <div class="ctl"><div class="seg" id="scheme-seg">${SCHEMES.map((s) =>
             `<button data-scheme="${s}" class="${this._scheme === s ? "sel" : ""}">${SCHEME_LABEL[s]}</button>`).join("")}</div></div></div>
+        <div class="set-row"><div class="lbl"><span class="t">Basemap</span><span class="d">Land under the chart — offline coastline or online OpenStreetMap</span></div>
+          <div class="ctl"><div class="seg" id="basemap-seg">
+            <button data-basemap="coastline" class="${this._basemap !== "osm" ? "sel" : ""}">Offline</button>
+            <button data-basemap="osm" class="${this._basemap === "osm" ? "sel" : ""}">OSM</button></div></div></div>
       </div>
       <div class="set-section">
         <h3>Depths</h3>
@@ -3829,6 +3844,8 @@ export class ChartPlotterApp extends HTMLElement {
 
     el.querySelectorAll("#scheme-seg button").forEach((b) =>
       (b.onclick = () => { this.applyScheme(b.dataset.scheme); this.renderSettings(); }));
+    el.querySelectorAll("#basemap-seg button").forEach((b) =>
+      (b.onclick = () => { this.applyBasemap(b.dataset.basemap); this.renderSettings(); }));
     el.querySelectorAll("#unit-seg button").forEach((b) =>
       (b.onclick = () => { if (b.dataset.unit !== (ft ? "ft" : "m")) this.applyMariner({ depthUnit: b.dataset.unit }); }));
     el.querySelectorAll("[data-key]").forEach((inp) => {
