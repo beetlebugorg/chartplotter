@@ -58,7 +58,7 @@ func (o *OBSTRN07) Execute() ([]Instruction, error) {
 
 // fetchDepthFromUnderlying calls DEPVAL02 to get depth from underlying depth areas.
 func (o *OBSTRN07) fetchDepthFromUnderlying() {
-	leastDepth, _ := o.lib.csDEPVAL02(o.ctx.Attributes, o.ctx.Mariner)
+	leastDepth, _ := o.lib.csDEPVAL02(o.ctx.Attributes, o.ctx.Spatial, o.ctx.Mariner)
 	if leastDepth >= 0 {
 		o.valsou = leastDepth
 		o.valsouExists = true

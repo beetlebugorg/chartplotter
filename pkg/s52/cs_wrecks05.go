@@ -40,7 +40,7 @@ func NewWRECKS05(csctx *CSContext, lib *Library) *WRECKS05 {
 	w.calculateDepthValue()
 
 	// Check for isolated danger and low accuracy
-	w.showIsolated, _, _ = lib.csUDWHAZ05(w.depthValue, csctx.Attributes, csctx.Mariner)
+	w.showIsolated, _, _ = lib.csUDWHAZ05(w.depthValue, csctx.Attributes, csctx.Spatial, csctx.Mariner)
 	w.showLowAccuracy = lib.csQUAPNT02(csctx.Attributes, csctx.Mariner)
 
 	// Format sounding if applicable
@@ -88,7 +88,7 @@ func (w *WRECKS05) calculateDepthValue() {
 	}
 
 	// Call DEPVAL02 to get depth from underlying area
-	w.leastDepth, w.seabedDepth = w.lib.csDEPVAL02(w.ctx.Attributes, w.ctx.Mariner)
+	w.leastDepth, w.seabedDepth = w.lib.csDEPVAL02(w.ctx.Attributes, w.ctx.Spatial, w.ctx.Mariner)
 
 	if w.leastDepth >= 0 {
 		w.depthValue = w.leastDepth

@@ -99,7 +99,7 @@ func TestDEPVAL02_ReturnsUnknown(t *testing.T) {
 	leastDepth, seabedDepth := lib.csDEPVAL02(map[string]interface{}{
 		"WATLEV": 3,
 		"EXPSOU": 1,
-	}, mariner)
+	}, nil, mariner)
 
 	// Without spatial data, should return unknown
 	assert.Equal(t, -1.0, leastDepth, "Should return unknown least depth")
@@ -117,7 +117,7 @@ func TestUDWHAZ05_IsolatedDanger(t *testing.T) {
 	// Underwater danger within safety contour
 	showIsolated, priority, viewGroup := lib.csUDWHAZ05(20.0, map[string]interface{}{
 		"WATLEV": 3, // Always underwater
-	}, mariner)
+	}, nil, mariner)
 
 	assert.True(t, showIsolated, "Should show isolated danger symbol")
 	assert.Equal(t, 8, priority, "Should have display priority 8")
@@ -126,16 +126,60 @@ func TestUDWHAZ05_IsolatedDanger(t *testing.T) {
 	// Danger deeper than safety contour
 	showIsolated, _, _ = lib.csUDWHAZ05(35.0, map[string]interface{}{
 		"WATLEV": 3,
-	}, mariner)
+	}, nil, mariner)
 
 	assert.False(t, showIsolated, "Depth > safety contour should not show isolated danger")
 
 	// Above water danger
 	showIsolated, _, _ = lib.csUDWHAZ05(20.0, map[string]interface{}{
 		"WATLEV": 1, // Dries
-	}, mariner)
+	}, nil, mariner)
 
 	assert.False(t, showIsolated, "Above water danger should not show isolated danger symbol")
+}
+
+// TestUDWHAZ05_SpatialDeepWaterTest verifies the S-52 isolated-danger rule: a
+// hazard is isolated only when it sits in safe water (an underlying depth area
+// deeper than the safety contour), not when the whole area is already shallow.
+func TestUDWHAZ05_SpatialDeepWaterTest(t *testing.T) {
+	lib := &Library{}
+	mariner := &MarinerSettings{SafetyContour: 30.0}
+	attrs := map[string]interface{}{"WATLEV": 3} // always underwater
+
+	deep := &SpatialContext{UnderlyingObjects: []UnderlyingObject{
+		{ObjectClass: "DEPARE", Attributes: map[string]interface{}{"DRVAL1": 40.0}},
+	}}
+	show, _, vg := lib.csUDWHAZ05(10.0, attrs, deep, mariner)
+	assert.True(t, show, "shoal hazard in deep (safe) water IS an isolated danger")
+	assert.Equal(t, 14010, vg)
+
+	shallow := &SpatialContext{UnderlyingObjects: []UnderlyingObject{
+		{ObjectClass: "DEPARE", Attributes: map[string]interface{}{"DRVAL1": 5.0}},
+	}}
+	show, _, _ = lib.csUDWHAZ05(10.0, attrs, shallow, mariner)
+	assert.False(t, show, "hazard already in shallow water is NOT isolated")
+
+	show, _, _ = lib.csUDWHAZ05(10.0, attrs, nil, mariner)
+	assert.True(t, show, "without spatial context, conservatively show the danger")
+}
+
+// TestDEPVAL02_Spatial verifies depth derivation from underlying areas.
+func TestDEPVAL02_Spatial(t *testing.T) {
+	lib := &Library{}
+	mariner := DefaultMarinerSettings()
+
+	sp := &SpatialContext{UnderlyingObjects: []UnderlyingObject{
+		{ObjectClass: "DEPARE", Attributes: map[string]interface{}{"DRVAL1": 12.0}},
+		{ObjectClass: "DEPARE", Attributes: map[string]interface{}{"DRVAL1": 8.0}},
+	}}
+	ld, sd := lib.csDEPVAL02(map[string]interface{}{"WATLEV": 3, "EXPSOU": 1}, sp, mariner)
+	assert.Equal(t, 8.0, sd, "seabed depth = shoalest underlying DRVAL1")
+	assert.Equal(t, 8.0, ld, "least depth known for WATLEV=3 + EXPSOU=1")
+
+	un := &SpatialContext{UnderlyingObjects: []UnderlyingObject{{ObjectClass: "UNSARE"}}}
+	ld, sd = lib.csDEPVAL02(map[string]interface{}{}, un, mariner)
+	assert.Equal(t, -1.0, ld, "UNSARE underneath → unknown")
+	assert.Equal(t, -1.0, sd)
 }
 
 // TestQUAPNT02_LowAccuracy tests the low accuracy determination

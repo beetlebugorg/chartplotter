@@ -210,39 +210,47 @@ func restrnValues(attributes map[string]interface{}) map[int]bool {
 //	leastDepth - the shallowest DRVAL1 from underlying depth areas (or -1 if unknown)
 //	seabedDepth - the DRVAL1 value for seabed depth calculation (or -1 if unknown)
 //
-// NOTE: This implementation cannot access underlying spatial objects, so it returns
-// unknown values. Full implementation would require spatial queries.
-func (l *Library) csDEPVAL02(attributes map[string]interface{}, mariner *MarinerSettings) (leastDepth float64, seabedDepth float64) {
-	// Initialize to unknown
-	leastDepth = -1.0
-	seabedDepth = -1.0
-
-	// Get WATLEV and EXPSOU attributes
-	watlev := getIntValue(attributes["WATLEV"])
-	expsou := getIntValue(attributes["EXPSOU"])
-
-	// NOTE: In a full implementation, we would:
-	// 1. Loop through all underlying DEPARE/DRGARE objects
-	// 2. Get DRVAL1 from each one
-	// 3. Find the minimum DRVAL1 (least depth)
-	// 4. If UNSARE found, set leastDepth to unknown and exit
-	//
-	// Since we don't have access to spatial relationships in this library,
-	// we return unknown values. The calling procedure will handle this.
-
-	// Check validity conditions per spec
-	// Valid only if WATLEV=3 (always underwater) AND
-	// EXPSOU=1 (within range) OR EXPSOU=3 (deeper than range)
-	if watlev == 3 && (expsou == 1 || expsou == 3) {
-		// Would set seabedDepth = leastDepth here if we had underlying data
-		// For now, both remain unknown (-1.0)
-	} else if leastDepth > 0 {
-		// If conditions not met but we have a least depth,
-		// set seabedDepth but clear leastDepth
-		seabedDepth = leastDepth
-		leastDepth = -1.0
+// When spatial context is available, LEAST_DEPTH/SEABED_DEPTH are derived from the
+// shoalest underlying depth area's DRVAL1; an underlying UNSARE (unsurveyed)
+// leaves them unknown. Without spatial context, returns (-1, -1) and the caller
+// falls back to its CATWRK/WATLEV defaults.
+func (l *Library) csDEPVAL02(attributes map[string]interface{}, spatial *SpatialContext, mariner *MarinerSettings) (leastDepth float64, seabedDepth float64) {
+	leastDepth, seabedDepth = -1.0, -1.0
+	if spatial == nil {
+		return leastDepth, seabedDepth
 	}
 
+	// Shoalest underlying DEPARE/DRGARE DRVAL1. An UNSARE underneath means the
+	// depth is unsurveyed → leave unknown and exit (S-52 DEPVAL02).
+	found := false
+	var least float64
+	for _, u := range spatial.UnderlyingObjects {
+		if u.ObjectClass == "UNSARE" {
+			return -1.0, -1.0
+		}
+		if u.ObjectClass != "DEPARE" && u.ObjectClass != "DRGARE" {
+			continue
+		}
+		if v, ok := u.Attributes["DRVAL1"]; ok {
+			d := getFloatValue(v)
+			if !found || d < least {
+				least, found = d, true
+			}
+		}
+	}
+	if !found {
+		return -1.0, -1.0
+	}
+
+	// SEABED_DEPTH is the underlying least depth. LEAST_DEPTH stays known only for
+	// an always-underwater object whose sounding is within/deeper than its range
+	// (WATLEV==3 && EXPSOU in {1,3}); otherwise it is cleared (S-52 DEPVAL02).
+	seabedDepth = least
+	watlev := getIntValue(attributes["WATLEV"])
+	expsou := getIntValue(attributes["EXPSOU"])
+	if watlev == 3 && (expsou == 1 || expsou == 3) {
+		leastDepth = least
+	}
 	return leastDepth, seabedDepth
 }
 
@@ -267,48 +275,62 @@ func (l *Library) csDEPVAL02(attributes map[string]interface{}, mariner *Mariner
 //	displayPriority - 8 for isolated dangers
 //	viewingGroup - 14010 (DISPLAYBASE) or 24020 (STANDARD)
 //
-// NOTE: This implementation cannot access underlying DEPARE objects, so it uses
-// simplified logic based on depth value alone.
-func (l *Library) csUDWHAZ05(depthValue float64, attributes map[string]interface{}, mariner *MarinerSettings) (showIsolatedDanger bool, displayPriority int, viewingGroup int) {
-	// Initialize return values
+// When spatial context is available, the hazard is an ISOLATED danger only if it
+// lies in otherwise-safe water — i.e. an underlying/surrounding depth area is
+// DEEPER than the safety contour (DRVAL1 >= SAFETY_CONTOUR). Without spatial
+// context we cannot tell, so fall back to the conservative "show it" (safety
+// first), which is the old behaviour.
+func (l *Library) csUDWHAZ05(depthValue float64, attributes map[string]interface{}, spatial *SpatialContext, mariner *MarinerSettings) (showIsolatedDanger bool, displayPriority int, viewingGroup int) {
 	showIsolatedDanger = false
 	displayPriority = 8
 	viewingGroup = 34050 // Default viewing group
 
-	// Step 1: Check if depth is less than or equal to safety contour
+	// Step 1: deeper than the safety contour → not a danger.
 	if depthValue > mariner.SafetyContour {
-		// Not shallow enough to be a danger
 		return false, displayPriority, viewingGroup
 	}
 
-	// Get WATLEV attribute
-	watlev := getIntValue(attributes["WATLEV"])
-
-	// Step 2: Check if above water (not an isolated underwater danger)
-	if watlev == 1 || watlev == 2 {
-		// Above water danger - no isolated danger symbol
-		// But still in DISPLAYBASE category
+	// Step 2: above water (WATLEV 1/2) → not an isolated underwater danger.
+	if watlev := getIntValue(attributes["WATLEV"]); watlev == 1 || watlev == 2 {
 		return false, displayPriority, 14050
 	}
 
-	// NOTE: Full implementation would check underlying DEPARE objects here
-	// to determine if object is within safe deep water.
-	// For simplified implementation, we assume if depth <= safety contour
-	// and underwater, it's an isolated danger.
-
-	// Step 3: Object is underwater and depth <= safety contour
-	// Mark as isolated danger in DISPLAYBASE
-	showIsolatedDanger = true
-	viewingGroup = 14010 // DISPLAYBASE with isolated danger
-
-	// Step 4: Check if mariner wants to show isolated dangers in shallow water
-	// (This would check if object is between 0m and safety contour)
-	if mariner.ShowIsolatedDangersInShallowWater {
-		// If showing shallow water dangers, use STANDARD category
-		viewingGroup = 24020
+	// Step 3: isolated-danger test. With underlying depth areas, the hazard is
+	// isolated only if it sits in safe water (an underlying DEPARE/DRGARE with
+	// DRVAL1 >= SAFETY_CONTOUR). Without that context, assume it is (conservative).
+	if !inSafeWater(spatial, mariner.SafetyContour) {
+		return false, displayPriority, viewingGroup
 	}
 
+	showIsolatedDanger = true
+	viewingGroup = 14010 // DISPLAYBASE with isolated danger
+	if mariner.ShowIsolatedDangersInShallowWater {
+		viewingGroup = 24020 // STANDARD
+	}
 	return showIsolatedDanger, displayPriority, viewingGroup
+}
+
+// inSafeWater reports whether any underlying depth area is deeper than the safety
+// contour (DRVAL1 >= safetyContour). Returns true (conservative) when no spatial
+// context / no underlying depth areas are available, so a hazard is never
+// silently dropped for lack of topology.
+func inSafeWater(spatial *SpatialContext, safetyContour float64) bool {
+	if spatial == nil || len(spatial.UnderlyingObjects) == 0 {
+		return true
+	}
+	sawDepthArea := false
+	for _, u := range spatial.UnderlyingObjects {
+		if u.ObjectClass != "DEPARE" && u.ObjectClass != "DRGARE" {
+			continue
+		}
+		sawDepthArea = true
+		if v, ok := u.Attributes["DRVAL1"]; ok && getFloatValue(v) >= safetyContour {
+			return true
+		}
+	}
+	// Underlying depth areas exist but all are shallow → not isolated. If none
+	// were depth areas at all, we still can't tell → conservative true.
+	return !sawDepthArea
 }
 
 // csQUAPNT02 - Quality of Point Sub-Procedure

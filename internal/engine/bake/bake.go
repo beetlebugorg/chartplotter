@@ -325,6 +325,9 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	}
 	cb := chart.Bounds()
 	cellLat := (cb.MinLat + cb.MaxLat) / 2 // SCAMIN→zoom uses the cell's display scale
+	// Per-cell depth-area index, so the danger CSPs (UDWHAZ05/DEPVAL02) can test
+	// the water depth underlying a hazard. Built once per cell.
+	depthIdx := buildDepthIndex(chart)
 	features := chart.Features()
 	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.
 	lightPrimary, lightSkip := groupCoLocatedLights(features)
@@ -360,7 +363,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
 		// style live; everything else is one pass tagged bnd=2.
-		for _, pass := range portrayal.BuildFeaturePasses(lib, mariner, f) {
+		for _, pass := range portrayal.BuildFeaturePasses(lib, mariner, f, depthIdx.spatialFor(f)) {
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
 			pts := int64(pass.Pts)

@@ -38,11 +38,22 @@ flowcharts; verdicts are **CONFIRMED** (code matches the gap as described),
   collapse to magenta.
 - ✅ **TOPMAR01** — corrected TOPSHP 32 → TOPMAR10/TOPMAR30 (verified against the
   spec table; the earlier audit's TOPSHP-14 claim was a misread — 14 was correct).
+- ✅ **SpatialContext is now populated at bake time** — a per-cell depth-area index
+  (`internal/engine/bake/spatial.go`, point-in-polygon incl. holes) resolves the
+  depth area(s) underlying each hazard and feeds `CSContext.Spatial` through
+  `BuildFeaturePasses`. This unblocked:
+  - ✅ **UDWHAZ05** — the isolated-danger over-trigger is fixed: a hazard is
+    ISODGR01 only when an underlying DEPARE/DRGARE has `DRVAL1 >= SAFETY_CONTOUR`
+    (in safe water). Falls back to the old conservative "show it" when no topology.
+  - ✅ **DEPVAL02** — derives LEAST/SEABED depth from the shoalest underlying
+    DRVAL1 (UNSARE → unknown), instead of always returning unknown.
 
-**Still open** (need infrastructure or a design call) — see backlog below:
-UDWHAZ05 deep-water loop, WRECKS ISODGR01 ownership, OBSTRN07 geometry arms +
-SNDFRM04, OBSTRN07 UWTROC `WATLEV==3` rule, TOPMAR01 float/rigid default,
-LIGHTS06 LITVIS, QUALIN01, SAFCON01 glyphs, SpatialContext wiring, DATCVR02.
+**Still open** (need a design call or further work) — see backlog below: WRECKS
+ISODGR01 ownership (vs applyDangerDepth), OBSTRN07 geometry arms + SNDFRM04 +
+UWTROC `WATLEV==3` rule, TOPMAR01 float/rigid default (needs co-located *point*
+objects in the index — only depth areas indexed so far), LIGHTS06 LITVIS,
+QUALIN01 (per-edge QUAPOS — needs spatial *components*, a different index),
+SAFCON01 glyphs, DATCVR02.
 
 ## Architecture context (why several gaps don't affect the web client)
 

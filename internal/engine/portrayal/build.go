@@ -60,7 +60,7 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 	if set == nil {
 		return FeatureBuild{}, false
 	}
-	return buildFromSet(lib, mariner, f, set), true
+	return buildFromSet(lib, mariner, f, set, nil), true
 }
 
 // buildFromSet runs the S-52 instruction walk for a feature against an
@@ -68,13 +68,13 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 // BuildFeaturePasses calls this directly to REUSE the raw lookups it already
 // performed for the plain/symbolized diff, instead of re-resolving them inside a
 // second BuildFeature call (the 3–4×-per-area-feature lookup cost).
-func buildFromSet(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, set *s52.InstructionSet) FeatureBuild {
+func buildFromSet(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, set *s52.InstructionSet, spatial *s52.SpatialContext) FeatureBuild {
 	objClass := f.ObjectClass()
 	g := f.Geometry()
 	attrs := f.Attributes()
 	geomCode := geometryCode(g.Type)
 
-	b := &walker{lib: lib, mariner: mariner, feature: f, attrs: attrs, geomCode: geomCode}
+	b := &walker{lib: lib, mariner: mariner, feature: f, attrs: attrs, geomCode: geomCode, spatial: spatial}
 
 	// Multi-point soundings: SOUNDG carries one depth per coordinate (the z of
 	// each [lon,lat,depth]). Run the instruction set once per point with that
@@ -137,7 +137,7 @@ type FeatureBuildPass struct {
 // through RESARE04 (the only CSP that reads the boundary style) — gets TWO
 // passes, plain (bnd=0) and symbolized (bnd=1), so the client toggles boundary
 // style live with no re-bake.
-func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature) []FeatureBuildPass {
+func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, spatial *s52.SpatialContext) []FeatureBuildPass {
 	if mariner == nil {
 		mariner = s52.DefaultMarinerSettings()
 	}
@@ -150,7 +150,7 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 	// (matchesTableName switches the point LUP set on SimplifiedPoints).
 	// SymbolizedBoundaries is area-only, so points never split on bnd.
 	if gtype == s57.GeometryTypePoint {
-		return pointPasses(lib, mariner, f, objClass, geomCode, attrs)
+		return pointPasses(lib, mariner, f, objClass, geomCode, attrs, spatial)
 	}
 
 	mPlain := *mariner
@@ -160,7 +160,7 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 	if setP == nil {
 		return nil
 	}
-	buildP := buildFromSet(lib, &mPlain, f, setP)
+	buildP := buildFromSet(lib, &mPlain, f, setP, spatial)
 	one := []FeatureBuildPass{{Build: buildP, Bnd: BndCommon, Pts: PtsCommon}}
 	if gtype != s57.GeometryTypePolygon {
 		return one
@@ -175,7 +175,7 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 		return one
 	}
 	// Symbolized boundaries differ — build the second pass, reusing setS.
-	buildS := buildFromSet(lib, &mSym, f, setS)
+	buildS := buildFromSet(lib, &mSym, f, setS, spatial)
 	return []FeatureBuildPass{
 		{Build: buildP, Bnd: BndPlain, Pts: PtsCommon},
 		{Build: buildS, Bnd: BndSymbolized, Pts: PtsCommon},
@@ -187,14 +187,14 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 // both (one pass, pts=2); buoys/beacons and the like differ — those get two
 // passes (paper pts=0 / simplified pts=1) so the client's "simplified symbols"
 // toggle swaps them live with no re-bake.
-func pointPasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, objClass, geomCode string, attrs map[string]interface{}) []FeatureBuildPass {
+func pointPasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature, objClass, geomCode string, attrs map[string]interface{}, spatial *s52.SpatialContext) []FeatureBuildPass {
 	mPaper := *mariner
 	mPaper.SimplifiedPoints = false
 	setPaper := lib.LookupFeatureRaw(objClass, geomCode, attrs, &mPaper)
 	if setPaper == nil {
 		return nil
 	}
-	buildPaper := buildFromSet(lib, &mPaper, f, setPaper)
+	buildPaper := buildFromSet(lib, &mPaper, f, setPaper, spatial)
 	one := []FeatureBuildPass{{Build: buildPaper, Bnd: BndCommon, Pts: PtsCommon}}
 	mSimp := *mariner
 	mSimp.SimplifiedPoints = true
@@ -202,7 +202,7 @@ func pointPasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature,
 	if setSimp == nil || !instructionSetsDiffer(setPaper, setSimp) {
 		return one
 	}
-	buildSimp := buildFromSet(lib, &mSimp, f, setSimp)
+	buildSimp := buildFromSet(lib, &mSimp, f, setSimp, spatial)
 	return []FeatureBuildPass{
 		{Build: buildPaper, Bnd: BndCommon, Pts: PtsPaper},
 		{Build: buildSimp, Bnd: BndCommon, Pts: PtsSimplified},
@@ -322,6 +322,7 @@ type walker struct {
 	feature  *s57.Feature
 	attrs    map[string]interface{}
 	geomCode string
+	spatial  *s52.SpatialContext // underlying/adjacent objects for CSPs that need topology (nil if none)
 	out      []Primitive
 }
 
@@ -366,7 +367,7 @@ func (w *walker) emit(list []s52.Instruction, g geom, depth int) {
 			if depth >= maxCSPDepth {
 				continue
 			}
-			ctx := s52.NewCSContext(w.csAttrs(g), goGeomType(w.geomCode), nil, w.mariner)
+			ctx := s52.NewCSContext(w.csAttrs(g), goGeomType(w.geomCode), w.spatial, w.mariner)
 			ctx.ObjectClass = w.feature.ObjectClass()
 			generated, err := w.lib.ExecuteCS(in.ProcedureName, ctx)
 			if err != nil {
