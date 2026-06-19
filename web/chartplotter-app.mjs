@@ -326,9 +326,12 @@ export class ChartPlotterApp extends HTMLElement {
     if (!["coastline", "osm", "osmvec"].includes(this._basemap)) this._basemap = "coastline";
     if (this._basemap === "osmvec" && !this._osmVecUrl) this._basemap = "coastline"; // vector not configured
     plotter.setAttribute("basemap", this._basemap);
-    // Prod renders prebaked hosted .pmtiles via the per-band pmtiles path; dev
-    // bakes in-browser from stored cells (100%-wasm).
-    plotter.setAttribute("tiles", this._prod ? "pmtiles" : "realtime");
+    // Both modes use the wasm baker, so uploaded charts always bake in-browser.
+    // Prod is HYBRID: a hosted prebaked archive (pmtiles="…") fills tiles your
+    // uploads don't cover. Dev/offline is wasm-only (no prebaked).
+    plotter.setAttribute("tiles", "realtime");
+    const prebaked = this._prod ? this._cfg("pmtiles") : "";
+    if (prebaked) { plotter.setAttribute("prebaked", prebaked); this._hasArchive = true; }
     this._plotter = plotter;
     this.shadowRoot.getElementById("map").appendChild(plotter);
 

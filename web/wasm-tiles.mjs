@@ -163,6 +163,11 @@ export async function coverage() {
 export function registerTileProtocol(maplibregl, opts = {}) {
   const cache = new TileCache(opts);
   const onActivity = opts.onActivity;
+  // HYBRID mode: an optional prebaked archive (PMTilesArchive/MultiArchive with a
+  // getTile) serving tiles your uploaded cells don't cover. Uploaded cells win
+  // where they exist (a real bake); elsewhere we fall back to the hosted prebaked
+  // tile. One source renders both.
+  const fallback = opts.fallback || null;
   let inflight = 0;
   const tick = (d) => { inflight += d; if (onActivity) onActivity(inflight); };
   maplibregl.addProtocol("cp", async (params) => {
@@ -182,8 +187,14 @@ export function registerTileProtocol(maplibregl, opts = {}) {
       const bytes = await cache.get(+z, +x, +y, async (z, x, y) => {
         await ensureCellsForTile(z, x, y); // miss: cells must be parsed before baking
         tick(1); // a real bake in the worker (cache miss)
-        try { const r = await call("tile", { z, x, y }); return r.tile ? new Uint8Array(r.tile) : null; }
+        let out;
+        try { const r = await call("tile", { z, x, y }); out = r.tile ? new Uint8Array(r.tile) : null; }
         finally { tick(-1); }
+        // No uploaded-cell features here → fall back to the prebaked archive.
+        if ((!out || !out.length) && fallback) {
+          try { const fb = await fallback.getTile(z, x, y); if (fb && fb.length) out = fb; } catch { /* fall through */ }
+        }
+        return out;
       });
       const n = bytes ? bytes.length : 0;
       if (_tileDiagOn) console.log("%c[cp deliver]", "color:#08a", `${z}/${x}/${y} → ${n} bytes`);

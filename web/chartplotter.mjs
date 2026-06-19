@@ -198,11 +198,20 @@ export class ChartPlotter extends HTMLElement {
     if (this._realtime) {
       this._rt = await import("./wasm-tiles.mjs");
       await this._rt.initBaker(assets);
+      // HYBRID: a hosted prebaked archive (prebaked="<url>") fills tiles your
+      // uploaded cells don't cover. Absent → pure offline (wasm-only) rendering.
+      let fallback = null;
+      const preUrl = this.getAttribute("prebaked") || "";
+      if (preUrl) {
+        this._prebakedArchive = await new PMTilesArchive(preUrl).init().catch((e) => { console.warn("[chartplotter] prebaked", preUrl, e); return null; });
+        fallback = this._prebakedArchive;
+      }
       this._rtCache = this._rt.registerTileProtocol(maplibregl, {
         // Namespace scopes the persistent tile cache. BUMP THE VERSION SUFFIX when
         // the baker's tile output changes, so stale cached tiles are abandoned.
         // rt6: load cells for every tile (not just misses) + don't cache empties.
         namespace: "rt6",
+        fallback,
         // Surface live bake activity so the app can show a "generating tiles"
         // indicator; fires whenever the worker's in-flight tile count changes.
         onActivity: (n) => this.dispatchEvent(new CustomEvent("bake-activity", { detail: { inflight: n }, bubbles: true })),
