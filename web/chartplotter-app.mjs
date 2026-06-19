@@ -19,8 +19,8 @@ import "./chartplotter.mjs"; // defines <chart-plotter> (the renderer we wrap)
 import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 
-const SCHEMES = ["day", "dusk", "night", "day_bright"];
-const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night", day_bright: "Bright" };
+const SCHEMES = ["day", "dusk", "night"];
+const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
 const M_TO_FT = 3.280839895; // depth-setting display conversion (values stored in metres)
 const LS_SCHEME = "chartplotter:scheme";
 const LS_MARINER = "chartplotter:mariner";
@@ -115,6 +115,20 @@ function esc(s) {
 // pmtiles path had a "chart-<band>" source per band. (Used by the inspector.)
 function isChartSource(s) {
   return typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
+}
+
+// A representative [lng,lat] for any GeoJSON geometry (first vertex) — used to fly
+// to a search hit.
+function firstCoord(g) {
+  if (!g) return null;
+  const c = g.coordinates;
+  switch (g.type) {
+    case "Point": return c;
+    case "MultiPoint": case "LineString": return c[0];
+    case "MultiLineString": case "Polygon": return c[0] && c[0][0];
+    case "MultiPolygon": return c[0] && c[0][0] && c[0][0][0];
+    default: return null;
+  }
 }
 
 function geomIntersectsBox(g, W, S, E, N) {
@@ -222,6 +236,7 @@ export class ChartPlotterApp extends HTMLElement {
     // be deselected. Force it on regardless of any (stale) persisted value.
     this._mariner.displayBase = true;
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
+    if (!SCHEMES.includes(this._scheme)) this._scheme = "day"; // drop a retired scheme (e.g. bright)
     this._agreed = localStorage.getItem(LS_AGREE) === "1"; // NOAA ENC agreement accepted
     this._activeDistrict = null;        // Coast Guard district (cg) currently previewed on the map, or null
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
@@ -594,8 +609,11 @@ export class ChartPlotterApp extends HTMLElement {
     } else if (this._bakeInflight > 0) {
       busy = true; label = this._bakeInflight > 1 ? `Generating ${this._bakeInflight} tiles…` : "Generating tile…";
     } else if (this._installed.size > 0) {
-      const loaded = this._countStatus("ready");
-      label = `${loaded}/${this._installed.size} loaded` + (failed ? ` · ${failed} failed` : "");
+      // Cells parse lazily (only when an area is baked), so a "loaded" count would
+      // read 0/N after a cached refresh even with charts on screen. Show the chart
+      // count instead — the per-cell popup still has the detailed parse status.
+      const n = this._installed.size;
+      label = `${n} chart${n !== 1 ? "s" : ""}` + (failed ? ` · ${failed} failed` : "");
     } else {
       el.hidden = true; el.classList.remove("busy"); return;
     }
@@ -798,10 +816,9 @@ export class ChartPlotterApp extends HTMLElement {
       const search = this.shadowRoot.getElementById("search");
       if (search && !search.hidden) {
         const onSearch = e.composedPath().some((n) => n === search || (n.id === "search-tab"));
-        const si = this.shadowRoot.getElementById("search-input");
-        if (!onSearch && !(si && si.value.trim())) {
+        if (!onSearch) {
           search.hidden = true;
-          this.shadowRoot.getElementById("search-tab").hidden = false;
+          this.shadowRoot.getElementById("search-tab").classList.remove("on");
         }
       }
     });
@@ -820,8 +837,8 @@ export class ChartPlotterApp extends HTMLElement {
     // bar as their digit counts change.
     el.innerHTML =
       `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
-      `<span class="hud-band">${BAND_LABEL[band]}</span>` +
-      `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span>` +
+      `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
+      `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span><span class="hud-sep">·</span>` +
       `<span class="hud-z">z${z.toFixed(1)}</span></span>`;
   }
 
@@ -1142,7 +1159,7 @@ export class ChartPlotterApp extends HTMLElement {
   renderCharts() {
     const el = this.shadowRoot.getElementById("charts-body");
     if (!el) return;
-    this.shadowRoot.getElementById("dtitle").textContent = "Charts";
+    this.shadowRoot.getElementById("dtitle").textContent = "Chart library";
     el.innerHTML = `
       ${this._renderPackSearch()}
       ${this._renderPacks()}
@@ -2602,40 +2619,78 @@ export class ChartPlotterApp extends HTMLElement {
     this.renderArchiveList();
   }
 
-  // -- geo search (offline, over catalog titles) ---------------------------
+  // -- search: catalog (places/charts) + loaded chart feature data ---------
   doSearch(q) {
     const el = this.shadowRoot.getElementById("search-results");
     if (!el) return;
     const needle = q.trim().toLowerCase();
     if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._searchHits = []; return; }
-    const hits = [];
+    // 1) Catalog cells (chart titles / numbers). Coarser charts first — "Chesapeake"
+    // should land on the overview, not an arbitrary harbour inset.
+    const cells = [];
     for (const c of this._catalog) {
       if (!Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      if ((c.l || "").toLowerCase().includes(needle) || c.n.toLowerCase().includes(needle)) {
-        hits.push(c);
-        if (hits.length >= 60) break;
-      }
+      if ((c.l || "").toLowerCase().includes(needle) || c.n.toLowerCase().includes(needle)) cells.push(c);
     }
-    // Coarser charts first — a name like "Chesapeake" should land you on the
-    // overview, not an arbitrary harbour inset.
-    hits.sort((a, b) => (b.s || 0) - (a.s || 0));
-    this._searchHits = hits.slice(0, 8);
-    el.innerHTML = this._searchHits.length
-      ? this._searchHits.map((c, i) => `<div class="sr-item${i === 0 ? " sel" : ""}" data-i="${i}">
-          <div class="t">${c.l || c.n}</div><div class="s">${c.n} · 1:${(c.s || 0).toLocaleString()}</div></div>`).join("")
-      : `<div class="sr-item"><span class="muted">No matches</span></div>`;
+    cells.sort((a, b) => (b.s || 0) - (a.s || 0));
+    // 2) Every loaded chart feature, matched across ALL of its attribute data.
+    const feats = this._searchFeatures(needle);
+    const hits = [...cells.slice(0, 5).map((c) => ({ type: "cell", c })), ...feats.slice(0, 8)];
+    this._searchHits = hits;
+    el.innerHTML = hits.length
+      ? hits.map((h, i) => {
+          const sel = i === 0 ? " sel" : "";
+          if (h.type === "cell") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">Chart · ${esc(h.c.n)} · 1:${(h.c.s || 0).toLocaleString()}</div></div>`;
+          return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.label)}</div><div class="s">${esc(h.sub)}</div></div>`;
+        }).join("")
+      : `<div class="sr-item"><span class="muted">No matches in view</span></div>`;
     el.hidden = false;
     el.querySelectorAll(".sr-item[data-i]").forEach((d) => (d.onmousedown = (e) => { e.preventDefault(); this.gotoSearchHit(+d.dataset.i); }));
   }
 
+  // Search the loaded chart vector tiles across EVERY attribute value (name, class,
+  // readable type, and any other string field). Limited to currently-loaded tiles
+  // (roughly the area you've viewed), since that's all the data the client holds.
+  _searchFeatures(needle) {
+    const map = this._map; if (!map) return [];
+    let sources;
+    try { sources = Object.keys(map.getStyle().sources || {}).filter(isChartSource); } catch { return []; }
+    const layers = ["point_symbols", "soundings", "areas", "area_patterns", "lines", "complex_lines", "text"];
+    const seen = new Set(), out = [];
+    for (const src of sources) {
+      for (const layer of layers) {
+        let feats; try { feats = map.querySourceFeatures(src, { sourceLayer: layer }); } catch { continue; }
+        for (const f of feats) {
+          const p = f.properties || {};
+          const objnam = p.objnam || "", cls = p.class || "";
+          const typeName = S57_CLASS[cls] || INSPECT_LAYER_LABEL[layer] || cls || layer;
+          let match = objnam.toLowerCase().includes(needle) || cls.toLowerCase().includes(needle) || typeName.toLowerCase().includes(needle);
+          if (!match) for (const k in p) { const v = p[k]; if (typeof v === "string" && v.toLowerCase().includes(needle)) { match = true; break; } }
+          if (!match) continue;
+          const co = firstCoord(f.geometry); if (!co) continue;
+          const key = cls + "|" + objnam + "|" + co[0].toFixed(3) + "," + co[1].toFixed(3);
+          if (seen.has(key)) continue; seen.add(key);
+          out.push({ type: "feat", label: objnam || typeName, sub: objnam ? typeName : (p.cell ? `▦ ${p.cell}` : typeName), lng: co[0], lat: co[1] });
+          if (out.length >= 60) { out.sort((a, b) => a.label.localeCompare(b.label)); return out; }
+        }
+      }
+    }
+    out.sort((a, b) => a.label.localeCompare(b.label)); // named features read better alphabetised
+    return out;
+  }
+
   gotoSearchHit(i) {
-    const c = (this._searchHits || [])[i];
-    if (!c || !this._map) return;
-    this._map.fitBounds([[c.bb[0], c.bb[1]], [c.bb[2], c.bb[3]]], { padding: 80, maxZoom: 13, duration: 800 });
-    const el = this.shadowRoot.getElementById("search-results");
-    if (el) el.hidden = true;
-    const si = this.shadowRoot.getElementById("search-input");
-    if (si) { si.value = ""; si.blur(); }
+    const h = (this._searchHits || [])[i];
+    if (!h || !this._map) return;
+    if (h.type === "feat") this._map.flyTo({ center: [h.lng, h.lat], zoom: Math.max(this._map.getZoom(), 14), duration: 800 });
+    else { const c = h.c; this._map.fitBounds([[c.bb[0], c.bb[1]], [c.bb[2], c.bb[3]]], { padding: 80, maxZoom: 13, duration: 800 }); }
+    const r = this.shadowRoot;
+    const el = r.getElementById("search-results"); if (el) el.hidden = true;
+    // Keep the query (and selected highlight) so reopening search returns you to
+    // the same results — the input is persisted, not cleared.
+    const si = r.getElementById("search-input"); if (si) si.blur();
+    r.getElementById("search").hidden = true;
+    r.getElementById("search-tab").classList.remove("on");
   }
 
   // Drive the drawer's progress card. Pass null to hide it.
@@ -2777,6 +2832,32 @@ export class ChartPlotterApp extends HTMLElement {
     this._plotter.setScheme(name);
     this.setAttribute("data-scheme", name);
     localStorage.setItem(LS_SCHEME, name);
+    this._syncSchemeUI();
+  }
+
+  // Cycle Day → Dusk → Night → Day from the tab-bar toggle.
+  _cycleScheme() {
+    const i = SCHEMES.indexOf(this._scheme);
+    this.applyScheme(SCHEMES[(i + 1) % SCHEMES.length]);
+  }
+
+  // Inner SVG for the scheme toggle, reflecting the current scheme: sun (day),
+  // sun-over-horizon (dusk), moon (night).
+  _schemeSvg(s) {
+    if (s === "night") return `<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>`;
+    if (s === "dusk") return `<path d="M3 18h18M5.5 18a6.5 6.5 0 0 1 13 0"/><path d="M12 3v3M4 8l1.6 1.6M20 8l-1.6 1.6M2.5 13H4M20 13h1.5"/>`;
+    return `<circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M19.4 4.6l-1.7 1.7M6.3 17.7l-1.7 1.7"/>`;
+  }
+
+  // Keep the tab-bar toggle icon and the Settings segmented control in step with
+  // the active scheme (either entry point can change it).
+  _syncSchemeUI() {
+    const r = this.shadowRoot; if (!r) return;
+    const svg = r.getElementById("scheme-svg");
+    if (svg) svg.innerHTML = this._schemeSvg(this._scheme);
+    const tog = r.getElementById("scheme-toggle");
+    if (tog) tog.title = `Colour scheme: ${SCHEME_LABEL[this._scheme]} — tap to cycle`;
+    r.querySelectorAll("#scheme-seg button").forEach((b) => b.classList.toggle("sel", b.dataset.scheme === this._scheme));
   }
 
   applyMariner(patch) {
@@ -2797,30 +2878,40 @@ export class ChartPlotterApp extends HTMLElement {
     r.innerHTML = `
       <style>
         :host { display:block; position:relative; width:100%; height:100%; font:13px/1.4 system-ui,sans-serif;
-          --drawer-w:clamp(340px, 33%, 560px);
+          /* One layout for every width: a full-bleed map over a slim bottom tab
+             bar; panels rise as a sheet from the bar (full-screen on a phone, a
+             contained per-section dialog on desktop). */
+          --botbar-h:calc(54px + env(safe-area-inset-bottom,0px));
           --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2); }
         :host([data-scheme="dusk"]) {
           --ui-bg:#20262b; --ui-surface:#2a3137; --ui-surface-2:#333b42; --ui-text:#cdd6dc; --ui-text-dim:#9aa6ae; --ui-text-faint:#7d8990; --ui-border:#3a434a; --ui-border-2:#333b42; --ui-border-strong:#4a555d; --ui-hover:#353f47; --ui-accent:#4f9be6; --ui-accent-hover:#69abe9; --ui-accent-text:#0c1318; --ui-shadow:rgba(0,0,0,.5); }
         :host([data-scheme="night"]) {
           --ui-bg:#14181b; --ui-surface:#1b2024; --ui-surface-2:#232a2f; --ui-text:#aeb8be; --ui-text-dim:#7e898f; --ui-text-faint:#626c72; --ui-border:#2a3137; --ui-border-2:#232a2f; --ui-border-strong:#38424a; --ui-hover:#232a30; --ui-accent:#3f7fb5; --ui-accent-hover:#4d8cc2; --ui-accent-text:#0a0e11; --ui-shadow:rgba(0,0,0,.6); }
-        /* The map sits right of the 56px rail; when the drawer flies out it shrinks
-           to clear the drawer rather than being overlaid. */
-        #map { position:absolute; inset:0 0 0 56px; transition:left .2s; }
-        #map.with-drawer { left:calc(56px + var(--drawer-w)); }
+        /* Full-bleed map filling everything above the bottom tab bar; panels rise
+           over it as a sheet rather than displacing it. */
+        #map { position:absolute; inset:0 0 var(--botbar-h) 0; }
         #map chart-plotter { width:100%; height:100%; }
         .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
         .btn:hover { background:var(--ui-hover); }
-        /* persistent left rail — the sidebar's docked spine (drawer flies out from it) */
-        #rail { position:absolute; left:0; top:0; bottom:0; width:56px; z-index:7; background:var(--ui-surface); border-right:1px solid var(--ui-border);
-          box-shadow:1px 0 5px rgba(0,0,0,.07); display:flex; flex-direction:column; align-items:center; gap:4px; padding-top:10px; }
-        #rail .ri { width:48px; min-height:48px; border:none; background:none; border-radius:11px; cursor:pointer; color:var(--ui-text-dim);
-          display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; padding:7px 0;
+        /* Bottom bar — the navigation tabs, centred. The drawer flies up over the
+           map above it; the bar itself stays put. (Live status lives in the thin
+           top strip, see #statusbar.) */
+        /* 3-column grid keeps the nav tabs centred in the viewport while the
+           scheme toggle pins to the right edge. */
+        #rail { position:absolute; left:0; right:0; bottom:0; height:var(--botbar-h); z-index:7;
+          background:var(--ui-surface); border-top:1px solid var(--ui-border); box-shadow:0 -1px 5px rgba(0,0,0,.07);
+          display:grid; grid-template-columns:1fr auto 1fr; align-items:center;
+          padding:0 6px env(safe-area-inset-bottom,0px); box-sizing:border-box; }
+        #rail .rail-tabs { grid-column:2; display:flex; flex-direction:row; align-items:center; justify-content:center; gap:8px; }
+        #rail .rail-end { grid-column:3; justify-self:end; display:flex; flex-direction:row; align-items:center; gap:2px; }
+        #rail .scheme-toggle, #rail .search-toggle { width:44px; }
+        #rail .ri { flex:none; width:64px; height:44px; border:none; background:none; border-radius:12px; cursor:pointer; color:var(--ui-text-dim);
+          display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
           transition:background .12s, color .12s; }
         #rail .ri:hover { background:var(--ui-surface-2); color:var(--ui-accent); }
         #rail .ri.on { background:var(--ui-accent); color:var(--ui-accent-text); }
-        #rail .ri svg { width:21px; height:21px; display:block; }
+        #rail .ri svg { width:20px; height:20px; display:block; }
         #rail .ri .cap { font-size:9.5px; font-weight:500; letter-spacing:.02em; }
-        #rail .spacer { flex:1; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
@@ -2882,7 +2973,7 @@ export class ChartPlotterApp extends HTMLElement {
         .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:8px 0; display:block; }
         .linkbtn.danger { color:#c0392b; }
         /* persistent in-flight download/import pill (bottom-centre) */
-        #dlpill { position:absolute; bottom:42px; left:50%; transform:translateX(-50%); z-index:7; display:inline-flex; align-items:center;
+        #dlpill { position:absolute; bottom:calc(var(--botbar-h) + 12px); left:50%; transform:translateX(-50%); z-index:7; display:inline-flex; align-items:center;
           gap:9px; background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:22px; padding:8px 16px; font:inherit; font-size:13px; font-weight:600;
           cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.28); }
         #dlpill[hidden] { display:none; }
@@ -2955,24 +3046,26 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
-        /* Status overlay: a compact floating pill in the bottom-right corner
-           showing only tile status + band · scale · zoom. */
-        #statusbar { position:absolute; right:12px; bottom:12px; z-index:6;
-          display:inline-flex; align-items:center; gap:12px; padding:5px 12px; box-sizing:border-box;
-          background:var(--ui-surface); border:1px solid rgba(0,0,0,.08); border-radius:12px;
-          box-shadow:0 2px 10px rgba(0,0,0,.14); backdrop-filter:blur(5px);
-          font:12px system-ui,sans-serif; color:var(--ui-text); }
-        /* NOAA attribution — a pill DEBOSSED into the chart: faint inset fill +
-           inset shadow (pressed-in) with a light bottom bevel, under an engraved
-           letterpress text effect, so the whole pill reads as embossed in the map. */
-        #noaa-attr { position:absolute; right:12px; bottom:52px; z-index:5; pointer-events:auto;
-          font:600 11px/1.4 system-ui,sans-serif; letter-spacing:.01em;
-          color:var(--ui-text-dim); text-shadow:0 1px 0 rgba(255,255,255,.7);
-          background:var(--ui-surface); border-radius:10px; padding:3px 10px; border:1px solid rgba(0,0,0,.06);
-          box-shadow:inset 0 1px 2px rgba(0,0,0,.22), inset 0 -1px 0 rgba(255,255,255,.5), 0 1px 0 rgba(255,255,255,.45); }
+        /* Live status as a small chip embedded in the bottom-right corner (the
+           scale bar owns the bottom-left), over a full-bleed map; the subtle
+           attribution line sits just above it. Anchors the per-cell popup above it. */
+        #statusbar { position:absolute; right:calc(10px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 8px); z-index:6;
+          display:inline-flex; align-items:center; gap:10px; padding:5px 11px; box-sizing:border-box;
+          max-width:calc(100vw - 20px); overflow:hidden;
+          background:color-mix(in srgb, var(--ui-surface) 82%, transparent); border:1px solid rgba(0,0,0,.06);
+          border-radius:11px; backdrop-filter:blur(6px);
+          box-shadow:inset 0 1px 2px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.4), 0 1px 0 rgba(255,255,255,.4);
+          font:11px system-ui,sans-serif; color:var(--ui-text); }
+        /* NOAA attribution + "not for navigation" — subtle one-line text tucked
+           under the status chip (no box), kept legible over the chart with a soft
+           halo in the current surface colour. */
+        #noaa-attr { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 40px); z-index:5; pointer-events:auto;
+          font:500 10px/1.35 system-ui,sans-serif; letter-spacing:.01em; white-space:nowrap; text-align:right;
+          color:var(--ui-text-dim);
+          text-shadow:0 0 3px var(--ui-surface), 0 0 3px var(--ui-surface), 0 1px 1px var(--ui-surface); }
         #noaa-attr a, #noaa-attr .attr-link { color:inherit; text-shadow:inherit; cursor:pointer;
-          text-decoration:underline; text-decoration-color:rgba(33,40,48,.32); text-underline-offset:2px; }
-        #noaa-attr a:hover, #noaa-attr .attr-link:hover { color:rgba(18,24,31,.82); }
+          text-decoration:underline; text-decoration-color:var(--ui-text-faint); text-underline-offset:2px; }
+        #noaa-attr a:hover, #noaa-attr .attr-link:hover { color:var(--ui-accent); }
         #noaa-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
         /* NOAA ENC user-agreement gate (shown before the first download). */
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
@@ -2993,9 +3086,10 @@ export class ChartPlotterApp extends HTMLElement {
         /* Tile/cell generation indicator — inline in the status overlay, clickable
            to open the per-cell status popup. Spinner shows only while busy
            (loading cells or baking tiles); otherwise it's a resting "N charts". */
-        .sb-bake { flex:none; display:inline-flex; align-items:center; gap:6px; color:var(--ui-accent); cursor:pointer;
+        .sb-bake { flex:0 1 auto; min-width:0; display:inline-flex; align-items:center; gap:6px; color:var(--ui-accent); cursor:pointer;
           border:1px solid transparent; background:transparent; border-radius:9px; padding:2px 6px; margin:-2px -2px -2px -4px;
           font:600 11px/1 system-ui,sans-serif; white-space:nowrap; font-variant-numeric:tabular-nums; }
+        .sb-bake .sb-bake-txt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
         .sb-bake:hover { border-color:var(--ui-border-strong); background:var(--ui-surface-2); }
         .sb-bake[hidden] { display:none; }
         .sb-bake.has-fail { color:#cf3b3b; }
@@ -3006,8 +3100,8 @@ export class ChartPlotterApp extends HTMLElement {
         .sb-bake.busy .sb-bake-spin { display:inline-block; }
         @keyframes sb-bake-spin { to { transform:rotate(360deg); } }
         @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
-        /* Per-cell status popup, opening upward from the overlay's right edge. */
-        #cell-status-pop { position:absolute; right:0; bottom:100%; margin-bottom:10px; z-index:9;
+        /* Per-cell status popup, opening upward from the chip's right edge. */
+        #cell-status-pop { position:absolute; bottom:calc(100% + 8px); right:0; z-index:9;
           width:min(400px,calc(100vw - 24px)); max-height:min(70vh,560px); overflow:hidden;
           display:flex; flex-direction:column;
           background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:12px;
@@ -3036,12 +3130,15 @@ export class ChartPlotterApp extends HTMLElement {
         .csp-stat { flex:none; font-weight:600; font-size:11px; }
         .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
         .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:8px 0; }
+        /* The chip hugs its content; left edge is anchored, so the leading dot+band
+           stay put as the scale digits change (tabular figures). */
         .sb-readout { flex:none; }
-        .sb-readout .hud-main { display:inline-flex; align-items:center; gap:10px; font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
-        .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:-4px; }
-        .sb-readout .hud-band { display:inline-block; min-width:62px; }
-        .sb-readout .hud-scale { color:var(--ui-accent); display:inline-block; min-width:92px; }
-        .sb-readout .hud-z { display:inline-block; min-width:42px; color:var(--ui-text-dim); }
+        .sb-readout .hud-main { display:flex; align-items:center; gap:6px;
+          font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+        .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:1px; }
+        .sb-readout .hud-scale { color:var(--ui-accent); }
+        .sb-readout .hud-z { color:var(--ui-text-dim); }
+        .sb-readout .hud-sep { color:var(--ui-text-faint); }
         /* In-view band pills, right-aligned; each opens a cell-list popup. */
         .sb-bands { display:flex; align-items:center; gap:8px; min-width:0; margin-left:auto; }
         .sb-band-wrap { position:relative; flex:none; }
@@ -3070,9 +3167,18 @@ export class ChartPlotterApp extends HTMLElement {
         .cov-empty { font:12px system-ui,sans-serif; color:var(--ui-text-faint); }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
-        #drawer { position:absolute; top:0; left:56px; width:var(--drawer-w); height:100%; background:var(--ui-bg); color:var(--ui-text);
-          box-shadow:2px 0 8px rgba(0,0,0,.25); z-index:6; transform:translateX(calc(-100% - 56px)); transition:transform .2s; display:flex; flex-direction:column; }
-        #drawer.open { transform:none; }
+        /* Panel sheet. MOBILE (base): a full-screen modal rising from the bottom
+           bar. DESKTOP: a 40%-wide panel overlaying the left of the map (see the
+           min-width media query). Fully hidden (visibility) when closed so nothing
+           lingers over the map. */
+        #drawer { position:absolute; left:0; top:0; bottom:var(--botbar-h); width:100vw; z-index:6;
+          background:var(--ui-bg); color:var(--ui-text); border-radius:16px 16px 0 0; overflow:hidden;
+          box-shadow:0 -6px 28px rgba(0,0,0,.28); display:flex; flex-direction:column;
+          transform:translateY(100%); visibility:hidden;
+          transition:transform .25s ease, visibility 0s linear .25s; }
+        #drawer.open { transform:translateY(0); visibility:visible; transition:transform .25s ease; }
+        /* Settings lays its sections in responsive columns to use the panel width. */
+        #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0 28px; align-items:start; }
         /* Feature inspector — slides in from the RIGHT (overlays the map). */
         .ins-body { overflow:auto; padding:12px 0; }
         .ins-empty { color:var(--ui-text-faint); text-align:center; padding:24px 10px; }
@@ -3162,7 +3268,7 @@ export class ChartPlotterApp extends HTMLElement {
         .import-more[open] > summary:before { content:"▾ "; }
         .legend { display:flex; gap:12px; font-size:12px; margin-bottom:10px; flex-wrap:wrap; }
         .legend i { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
-        #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:4; pointer-events:none; }
+        #empty { position:absolute; inset:0 0 var(--botbar-h) 0; display:flex; align-items:center; justify-content:center; z-index:4; pointer-events:none; }
         #empty[hidden] { display:none; }
         #empty .card { pointer-events:auto; background:var(--ui-surface); color:var(--ui-text); border-radius:16px; padding:30px 30px 24px; max-width:360px;
           text-align:center; box-shadow:0 8px 34px rgba(0,0,0,.22); }
@@ -3172,37 +3278,36 @@ export class ChartPlotterApp extends HTMLElement {
         #empty .welcome-cta { display:inline-flex; align-items:center; gap:8px; width:auto; padding:11px 22px; font-size:15px; }
         #empty .welcome-sub { margin-top:12px; font-size:13px; color:var(--ui-text-faint); }
         #empty .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
-        /* geo search */
-        /* On-map search is collapsed behind a small tab button by default;
-           clicking it reveals the input, which collapses again when left empty. */
-        #search-tab { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; width:38px; height:38px; border-radius:50%;
-          border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); cursor:pointer;
-          display:flex; align-items:center; justify-content:center; box-shadow:0 1px 4px rgba(0,0,0,.25); }
-        #search-tab:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
-        #search-tab svg { width:18px; height:18px; }
-        #search-tab[hidden], #search[hidden] { display:none; }
+        /* Search sits beside the day/night toggle (the .rail-end group); tapping it
+           opens the tiny flyout. */
+        #rail .search-toggle.on { background:var(--ui-accent); color:var(--ui-accent-text); }
+        #search[hidden] { display:none; }
         /* "All charts" — jump back to the zoomed-out world view (Charts mode only).
            Sits at the top-left of the map area, which starts past the open drawer. */
-        #world-btn { position:absolute; top:12px; left:calc(56px + var(--drawer-w) + 12px); z-index:5; display:inline-flex; align-items:center; gap:6px;
+        #world-btn { position:absolute; top:12px; left:12px; z-index:5; display:inline-flex; align-items:center; gap:6px;
           border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:18px; padding:7px 13px 7px 10px;
           font:600 12px system-ui,sans-serif; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.25); transition:left .2s; }
         #world-btn:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
         #world-btn svg { width:16px; height:16px; }
         #world-btn[hidden] { display:none; }
-        #search { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; width:340px; max-width:44%; }
-        #search input { width:100%; box-sizing:border-box; border:1px solid var(--ui-border-strong); border-radius:20px; padding:8px 16px;
-          font:inherit; background:var(--ui-surface); color:var(--ui-text); box-shadow:0 1px 4px rgba(0,0,0,.3); outline:none; }
-        #search input:focus { border-color:var(--ui-accent); box-shadow:0 1px 6px rgba(21,101,192,.4); }
-        #search-results { margin-top:5px; background:var(--ui-surface); border-radius:12px; box-shadow:0 6px 22px rgba(0,0,0,.25); overflow:hidden; }
+        /* Tiny search flyout — a dialog-style card holding the input, expanding
+           downward as results arrive. Bottom-left above the bar (phone); the
+           desktop media query re-anchors it beside the dock. */
+        #search { position:absolute; right:12px; left:auto; bottom:calc(var(--botbar-h) + 12px); z-index:8; width:min(320px, calc(100vw - 24px));
+          background:var(--ui-surface); border:1px solid var(--ui-border); border-radius:14px;
+          box-shadow:0 12px 36px rgba(0,0,0,.30); overflow:hidden; }
+        #search input { width:100%; box-sizing:border-box; border:none; border-radius:14px; padding:11px 16px;
+          font:inherit; background:transparent; color:var(--ui-text); outline:none; }
+        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(50vh, 360px); overflow-y:auto; }
         #search-results[hidden] { display:none; }
         .sr-item { padding:8px 16px; cursor:pointer; border-bottom:1px solid var(--ui-border-2); }
         .sr-item:last-child { border-bottom:none; }
         .sr-item:hover, .sr-item.sel { background:var(--ui-hover); }
         .sr-item .t { font-weight:600; } .sr-item .s { color:var(--ui-text-faint); font-size:12px; }
-        /* Subtle "loading more while data is shown" cue: a thin indeterminate bar
-           along the top of the map. Opacity-controlled (always in DOM) so it fades
-           in/out; the slide animation runs continuously (cheap). */
-        .load-bar { position:absolute; top:0; left:0; right:0; height:6px; z-index:25; pointer-events:none; overflow:hidden;
+        /* Subtle "loading more while data is shown" cue: a hairline indeterminate
+           bar riding the top edge of the bottom tab bar. Opacity-controlled (always
+           in DOM) so it fades in/out; the slide animation runs continuously. */
+        .load-bar { position:absolute; bottom:var(--botbar-h); left:0; right:0; height:3px; z-index:25; pointer-events:none; overflow:hidden;
           opacity:0; transition:opacity .2s ease; background:rgba(13,71,161,.3); }
         .load-bar.on { opacity:1; }
         .load-bar::before { content:""; position:absolute; top:0; height:100%; width:40%;
@@ -3212,36 +3317,51 @@ export class ChartPlotterApp extends HTMLElement {
         :host([data-scheme="night"]) .load-bar::before, :host([data-scheme="dusk"]) .load-bar::before {
           background:linear-gradient(90deg, transparent, #6aaef0 45%, #6aaef0 55%, transparent); box-shadow:0 0 8px rgba(106,174,240,.6); }
         @keyframes load-slide { 0% { left:-40%; } 100% { left:100%; } }
+        /* ---- Phone (base): full-screen modal sheet + reflowed content -------
+           A grabber hints the swipe-down feel; chart packs go one-per-row and
+           settings rows wrap their control under the label. */
+        @media (max-width: 640px) {
+          #drawer::before { content:""; flex:none; width:36px; height:4px; margin:7px auto 1px;
+            border-radius:2px; background:var(--ui-border-strong); }
+          #empty .card { max-width:min(360px, calc(100vw - 48px)); }
+          .pack-grid { grid-template-columns:1fr; }
+          .set-row { flex-wrap:wrap; gap:8px 14px; }
+          .set-row .lbl { flex:1 1 60%; }
+          .seg-multi { flex-wrap:wrap; gap:8px 14px; }
+        }
+        /* On a narrow phone, drop the zoom from the status chip so the readout +
+           chart-count never run past the screen edge (scale is what matters). */
+        @media (max-width: 430px) {
+          .sb-readout .hud-z, .sb-readout .hud-scale + .hud-sep { display:none; }
+        }
+        /* ---- Desktop: floating left dock + 40% left overlay panel -----------
+           The nav becomes a floating vertical dock; opening a section overlays a
+           panel over the LEFT of the map without moving it, so the right of the
+           chart (and live S-52 changes) stays visible. */
+        @media (min-width: 641px) {
+          :host { --botbar-h:0px; }
+          #map { inset:0; }
+          #rail { left:14px; right:auto; top:50%; bottom:auto; transform:translateY(-50%);
+            width:auto; height:auto; grid-template-columns:none;
+            display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px;
+            border:1px solid var(--ui-border); border-radius:20px; box-shadow:0 6px 26px rgba(0,0,0,.20); }
+          #rail .rail-tabs { flex-direction:column; gap:4px; }
+          /* search + day/night group sits at the bottom of the dock, divided off. */
+          #rail .rail-end { flex-direction:column; gap:4px; margin-top:6px; padding-top:10px;
+            border-top:1px solid var(--ui-border-2); }
+          #rail .scheme-toggle, #rail .search-toggle { width:64px; }
+          #drawer { left:100px; right:auto; top:14px; bottom:14px; width:min(40vw, 560px); height:auto;
+            border-radius:16px; box-shadow:0 12px 36px rgba(0,0,0,.30);
+            transform:translateX(calc(-100% - 110px));
+            transition:transform .25s ease, visibility 0s linear .25s; }
+          #drawer.open { transform:translateX(0); }
+          .load-bar { top:0; bottom:auto; }
+          /* Search flyout anchored where the panel opens (top-left, from the dock),
+             matching its width; it just grows down with results instead of filling. */
+          #search { left:100px; right:auto; top:14px; bottom:auto; width:min(40vw, 560px); max-height:calc(100% - 28px); }
+        }
       </style>
       <div id="map"></div>
-      <div id="load-bar" class="load-bar" aria-hidden="true"></div>
-      <div id="rail">
-        <button class="ri" id="rail-home" title="Chart viewer">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></svg>
-          <span class="cap">Home</span>
-        </button>
-        <button class="ri" id="rail-menu" title="Get &amp; manage charts">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 3 5.5v15L9 18l6 3 6-2.5v-15L15 6 9 3Z"/><path d="M9 3v15M15 6v15"/></svg>
-          <span class="cap">Charts</span>
-        </button>
-        <button class="ri" id="rail-settings" title="Settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
-          <span class="cap">Settings</span>
-        </button>
-        <div class="spacer"></div>
-        <button class="ri" id="dev-toggle" title="Developer tools — share, tile/band inspector, feature inspect">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3"/><path d="m16 9 4 3-4 3"/><path d="m13 6-2 12"/></svg>
-          <span class="cap">Dev</span>
-        </button>
-      </div>
-      <button id="search-tab" title="Search a port or area">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      </button>
-      <div id="search" hidden><input id="search-input" type="search" placeholder="Search a port or area…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
-      <button id="world-btn" hidden title="Zoom out to all charts">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z"/></svg>
-        <span>All charts</span>
-      </button>
       <div id="statusbar">
         <button id="bake-status" class="sb-bake" type="button" hidden title="Chart tile generation — click for per-cell status">
           <span class="sb-bake-spin"></span><span class="sb-bake-txt"></span>
@@ -3249,11 +3369,41 @@ export class ChartPlotterApp extends HTMLElement {
         <div id="cov-readout" class="sb-readout"></div>
         <div id="cell-status-pop" hidden></div>
       </div>
-      <div id="noaa-attr">
-        Data from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a>
-        · <button id="attr-terms" class="attr-link" type="button">Terms</button>
-        · not for navigation
+      <div id="load-bar" class="load-bar" aria-hidden="true"></div>
+      <div id="rail">
+        <div class="rail-tabs">
+        <button class="ri" id="rail-home" title="Chart view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 3 5.5v15L9 18l6 3 6-2.5v-15L15 6 9 3Z"/><path d="M9 3v15M15 6v15"/></svg>
+          <span class="cap">Charts</span>
+        </button>
+        <button class="ri" id="rail-menu" title="Get &amp; manage charts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12l9 4.5L21 12"/><path d="M3 16.5 12 21l9-4.5"/></svg>
+          <span class="cap">Library</span>
+        </button>
+        <button class="ri" id="rail-settings" title="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+          <span class="cap">Settings</span>
+        </button>
+        <button class="ri" id="dev-toggle" title="Developer tools — share, tile/band inspector, feature inspect">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3"/><path d="m16 9 4 3-4 3"/><path d="m13 6-2 12"/></svg>
+          <span class="cap">Dev</span>
+        </button>
+        </div>
+        <div class="rail-end">
+          <button class="ri search-toggle" id="search-tab" type="button" title="Search charts & features">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          </button>
+          <button class="ri scheme-toggle" id="scheme-toggle" type="button" title="Colour scheme — tap to cycle Day · Dusk · Night">
+            <svg id="scheme-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg>
+          </button>
+        </div>
       </div>
+      <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
+      <button id="world-btn" hidden title="Zoom out to all charts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z"/></svg>
+        <span>All charts</span>
+      </button>
+      <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
       <div id="agree" class="modal" hidden>
         <div class="modal-card">
           <h2>NOAA ENC® — User Agreement</h2>
@@ -3283,7 +3433,7 @@ export class ChartPlotterApp extends HTMLElement {
         <div class="welcome-sub">or <button id="empty-import" class="linkbtn">import from a file</button></div>
       </div></div>
       <div id="drawer">
-        <div class="dhead"><strong id="dtitle">Charts</strong><button id="close" class="btn">✕</button></div>
+        <div class="dhead"><strong id="dtitle">Chart library</strong><button id="close" class="btn">✕</button></div>
         <div class="body">
           <div class="panel sel" data-panel="charts">
             <!-- shared progress card (download / import), visible in any view -->
@@ -3315,6 +3465,8 @@ export class ChartPlotterApp extends HTMLElement {
     $("rail-settings").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
     $("dev-toggle").onclick = () => this.toggleSection("inspect");
+    $("scheme-toggle").onclick = () => this._cycleScheme();
+    this._syncSchemeUI(); // paint the toggle's initial icon
     this._renderDevPanel(); // fills #dev-tools (share, band toggles, tile inspector)
     $("bake-status").onclick = (e) => { e.stopPropagation(); this._toggleCellStatusPopup(); };
     // Esc dismisses the debug context menu, else exits the feature inspector.
@@ -3332,23 +3484,20 @@ export class ChartPlotterApp extends HTMLElement {
     $("agree-accept").onclick = () => this._resolveAgreement(true);
     $("agree-decline").onclick = () => this._resolveAgreement(false);
 
-    // Geo search (offline, over the catalog titles). Collapsed behind a tab: the
-    // button reveals the input; it tucks away again once blurred while empty.
+    // Search (offline, over catalog titles + loaded chart feature data). The nav
+    // button toggles a tiny flyout with the input + results.
     const si = $("search-input");
-    const collapseSearch = () => { $("search").hidden = true; $("search-tab").hidden = false; };
-    $("search-tab").onclick = () => { $("search").hidden = false; $("search-tab").hidden = true; si.focus(); };
+    const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); si.focus(); };
+    $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
     // "All charts" — re-frame the selection map to the zoomed-out world view.
     $("world-btn").onclick = () => this._frameChartsWorld();
     si.oninput = () => this.doSearch(si.value);
     si.onkeydown = (e) => {
       if (e.key === "Enter") this.gotoSearchHit(0);
-      else if (e.key === "Escape") { $("search-results").hidden = true; si.value = ""; si.blur(); }
+      else if (e.key === "Escape") { si.value = ""; closeSearch(); }
     };
     si.onfocus = () => { if (si.value.trim().length >= 2) this.doSearch(si.value); };
-    si.onblur = () => setTimeout(() => {
-      const sr = $("search-results"); if (sr) sr.hidden = true;
-      if (!si.value.trim()) collapseSearch(); // empty → tuck back into the tab
-    }, 150);
 
     this.renderSettings();
   }
@@ -3362,7 +3511,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._section = name;
     const r = this.shadowRoot;
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Dev" : "Charts";
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Dev" : "Chart library";
     // Charts is the "get & see charts" mode: overlay every catalog cell on the
     // map (selected ones highlighted) so you can see and box-select coverage.
     // Any other section is just chrome over the live viewer — no overlay.
@@ -3384,13 +3533,14 @@ export class ChartPlotterApp extends HTMLElement {
 
   closeDrawer() { this.setDrawerOpen(false); }
 
-  // Fly the drawer in/out. The map shrinks to clear it (CSS transition), so once
-  // that settles, tell MapLibre to resize its canvas to the new container width.
+  // Slide the panel sheet up/down from the tab bar. data-sec drives its per-section
+  // size (Charts wide+short, Settings/Dev tall); set before opening so it animates
+  // in at the right size.
   setDrawerOpen(open) {
     const r = this.shadowRoot;
-    r.getElementById("drawer").classList.toggle("open", open);
-    r.getElementById("map").classList.toggle("with-drawer", open);
-    r.getElementById("statusbar").classList.toggle("with-drawer", open);
+    const drawer = r.getElementById("drawer");
+    if (open && this._section) drawer.dataset.sec = this._section;
+    drawer.classList.toggle("open", open);
     r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
     r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
     r.getElementById("dev-toggle").classList.toggle("on", open && this._section === "inspect");
@@ -3404,8 +3554,7 @@ export class ChartPlotterApp extends HTMLElement {
     setTimeout(() => {
       if (!this._map) return;
       this._map.resize();
-      // Frame the selection map only AFTER the resize — so the fit centres the
-      // coverage in the now-narrower (drawer-open) map area, not the full width.
+      // Frame the world view when entering Charts mode (once the sheet has settled).
       if (this._pendingChartsFrame) { this._pendingChartsFrame = false; this._frameChartsWorld(); }
     }, 230);
   }
