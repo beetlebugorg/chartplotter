@@ -320,8 +320,11 @@ export class ChartPlotterApp extends HTMLElement {
     plotter.setAttribute("zoom", String(view ? view.zoom : (this.getAttribute("zoom") || 11)));
     if (this.hasAttribute("cell-url")) plotter.setAttribute("cell-url", this.getAttribute("cell-url"));
     plotter.setAttribute("assets", this._assets);
+    this._osmVecUrl = this._cfg("osm-pmtiles"); // hosted OSM vector basemap archive (enables the "Vector" option)
+    if (this._osmVecUrl) plotter.setAttribute("osm-pmtiles", this._osmVecUrl);
     this._basemap = localStorage.getItem(LS_BASEMAP) || this.getAttribute("basemap") || "coastline";
-    if (this._basemap !== "coastline" && this._basemap !== "osm") this._basemap = "coastline";
+    if (!["coastline", "osm", "osmvec"].includes(this._basemap)) this._basemap = "coastline";
+    if (this._basemap === "osmvec" && !this._osmVecUrl) this._basemap = "coastline"; // vector not configured
     plotter.setAttribute("basemap", this._basemap);
     // Prod renders prebaked hosted .pmtiles via the per-band pmtiles path; dev
     // bakes in-browser from stored cells (100%-wasm).
@@ -2937,7 +2940,7 @@ export class ChartPlotterApp extends HTMLElement {
   // Basemap under the chart: "coastline" (offline GSHHG land/lakes) or "osm"
   // (online OpenStreetMap raster).
   applyBasemap(mode) {
-    this._basemap = mode === "osm" ? "osm" : "coastline";
+    this._basemap = (mode === "osm" || mode === "osmvec") ? mode : "coastline";
     if (this._plotter) this._plotter.setBasemap(this._basemap);
     localStorage.setItem(LS_BASEMAP, this._basemap);
   }
@@ -3800,10 +3803,11 @@ export class ChartPlotterApp extends HTMLElement {
         <div class="set-row"><div class="lbl"><span class="t">Colour scheme</span></div>
           <div class="ctl"><div class="seg" id="scheme-seg">${SCHEMES.map((s) =>
             `<button data-scheme="${s}" class="${this._scheme === s ? "sel" : ""}">${SCHEME_LABEL[s]}</button>`).join("")}</div></div></div>
-        <div class="set-row"><div class="lbl"><span class="t">Basemap</span><span class="d">Land under the chart — offline coastline or online OpenStreetMap</span></div>
+        <div class="set-row"><div class="lbl"><span class="t">Basemap</span><span class="d">Land under the chart — offline coastline, online OSM raster${this._osmVecUrl ? ", or hosted OSM vector" : ""}</span></div>
           <div class="ctl"><div class="seg" id="basemap-seg">
-            <button data-basemap="coastline" class="${this._basemap !== "osm" ? "sel" : ""}">Offline</button>
-            <button data-basemap="osm" class="${this._basemap === "osm" ? "sel" : ""}">OSM</button></div></div></div>
+            <button data-basemap="coastline" class="${this._basemap === "coastline" ? "sel" : ""}">Offline</button>
+            <button data-basemap="osm" class="${this._basemap === "osm" ? "sel" : ""}">OSM</button>${this._osmVecUrl
+              ? `<button data-basemap="osmvec" class="${this._basemap === "osmvec" ? "sel" : ""}">Vector</button>` : ""}</div></div></div>
       </div>
       <div class="set-section">
         <h3>Depths</h3>

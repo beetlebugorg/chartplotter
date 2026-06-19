@@ -19,6 +19,7 @@ DIST="${DIST:-$here/dist}"
 
 PMTILES_URL="${PMTILES_URL:-}"   # one hosted .pmtiles archive (range-read)
 CATALOG_URL="${CATALOG_URL:-}"   # OR a hosted charts-index.json manifest of archives
+OSM_PMTILES_URL="${OSM_PMTILES_URL:-}"  # hosted OSM vector (Protomaps) .pmtiles → enables the Vector basemap
 CENTER="${CENTER:--98.5,39.5}"   # initial map centre "lon,lat"
 ZOOM="${ZOOM:-4}"
 TITLE="${TITLE:-chartplotter}"
@@ -52,6 +53,7 @@ touch "$DIST/.nojekyll"
 attrs="prod"
 [ -n "$PMTILES_URL" ] && attrs="$attrs pmtiles=\"$PMTILES_URL\""
 [ -n "$CATALOG_URL" ] && attrs="$attrs catalog=\"$CATALOG_URL\""
+[ -n "$OSM_PMTILES_URL" ] && attrs="$attrs osm-pmtiles=\"$OSM_PMTILES_URL\""
 attrs="$attrs center=\"$CENTER\" zoom=\"$ZOOM\""
 
 cat > "$DIST/index.html" <<HTML

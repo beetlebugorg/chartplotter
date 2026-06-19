@@ -168,6 +168,15 @@ export class ChartPlotter extends HTMLElement {
     // the chart tiles, so it never collides with the chart:// source).
     registerPmtilesProtocol(maplibregl, "coastline", () => this._coastlineArchive);
 
+    // Optional OSM vector basemap: a hosted Protomaps .pmtiles, read by range over
+    // its own protocol (works offline if hosted alongside the charts). Loaded
+    // lazily when the basemap is switched to "osmvec".
+    this._osmvecUrl = this.getAttribute("osm-pmtiles") || "";
+    registerPmtilesProtocol(maplibregl, "osmvec", () => this._osmvecArchive);
+    if (basemap === "osmvec" && this._osmvecUrl) {
+      this._osmvecArchive = await new PMTilesArchive(this._osmvecUrl).init().catch(() => null);
+    }
+
     // Cells live in the store (OPFS/IndexedDB); the worker bakes tiles from them
     // on demand. For the `charts` attribute, just make sure each is downloaded
     // into the store — the worker finds + bakes it by viewport (needs the cell
@@ -546,15 +555,25 @@ export class ChartPlotter extends HTMLElement {
     setIf("coast-line", "line-color", this.coastColor());
   }
 
-  // Switch the basemap live: "coastline" (offline GSHHG land/lakes) or "osm"
-  // (online OpenStreetMap raster). Rebuilds the style from buildStyle() so the
-  // basemap sources/layers swap cleanly; chart sources, loaded archives and the
-  // tile protocols persist on the instance, so charts re-request and repaint.
-  setBasemap(mode) {
-    const m = mode === "osm" ? "osm" : "coastline";
+  // Switch the basemap live: "coastline" (offline GSHHG land/lakes), "osm"
+  // (online OpenStreetMap raster), or "osmvec" (hosted OSM vector .pmtiles).
+  // Rebuilds the style from buildStyle() so the basemap sources/layers swap
+  // cleanly; chart sources, loaded archives and the tile protocols persist.
+  async setBasemap(mode) {
+    const m = mode === "osm" || mode === "osmvec" ? mode : "coastline";
     if ((this.getAttribute("basemap") || "coastline") === m) return;
+    if (m === "osmvec" && !this._osmvecArchive && this._osmvecUrl) {
+      this._osmvecArchive = await new PMTilesArchive(this._osmvecUrl).init().catch(() => null);
+    }
     this.setAttribute("basemap", m);
     if (this._map) this._map.setStyle(this.buildStyle());
+  }
+
+  // Is the active basemap any OSM variant (raster or vector)? Used to let the OSM
+  // land show through (drop the chart's land fill + no-data hatch).
+  _osmBasemap() {
+    const b = this.getAttribute("basemap") || "none";
+    return b === "osm" || b === "osmvec";
   }
 
   // -- runtime chart & settings API (driven by the <chart-plotter-app> shell) --
@@ -984,10 +1003,10 @@ export class ChartPlotter extends HTMLElement {
     }));
   }
   buildLayers() {
-    // Over an OSM basemap, let its detailed land show through: drop the chart's
-    // own land-area (LNDARE) fill so OSM land isn't painted over (the no-data
-    // hatch is hidden too — see buildStyle).
-    const osm = (this.getAttribute("basemap") || "none") === "osm";
+    // Over an OSM basemap (raster or vector), let its detailed land show through:
+    // drop the chart's own land-area (LNDARE) fill so OSM land isn't painted over
+    // (the no-data hatch is hidden too — see buildStyle).
+    const osm = this._osmBasemap();
     const base = [
       { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: ["!=", ["get", "class"], "LNDARE"] } : {}), paint: { "fill-color": this.areasFillColor() } },
       { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["coalesce", ["get", "pattern_name"], ""] } },
@@ -1133,6 +1152,20 @@ export class ChartPlotter extends HTMLElement {
     if (basemap === "osm") {
       sources.osm = { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap contributors" };
       layers.push({ id: "osm", type: "raster", source: "osm" });
+    } else if (basemap === "osmvec" && this._osmvecArchive) {
+      // Hosted OSM vector (Protomaps schema). Styled per source-layer (no kind
+      // filters) so it works across Protomaps schema versions, tinted to the
+      // active S-52 scheme so it reads as a muted underlay beneath the chart.
+      sources.osmvec = { type: "vector", tiles: ["osmvec://{z}/{x}/{y}"], minzoom: this._osmvecArchive.minZoom, maxzoom: this._osmvecArchive.maxZoom, attribution: "© OpenStreetMap contributors" };
+      const ink = this.coastColor();
+      layers.push(
+        { id: "ov-earth", type: "fill", source: "osmvec", "source-layer": "earth", paint: { "fill-color": this.landColor() } },
+        { id: "ov-landuse", type: "fill", source: "osmvec", "source-layer": "landuse", minzoom: 6, paint: { "fill-color": this.landColor(), "fill-opacity": 0.5 } },
+        { id: "ov-water", type: "fill", source: "osmvec", "source-layer": "water", paint: { "fill-color": this.seaColor() } },
+        { id: "ov-roads", type: "line", source: "osmvec", "source-layer": "roads", minzoom: 7, paint: { "line-color": ink, "line-opacity": 0.35, "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.3, 14, 1.4] } },
+        { id: "ov-boundaries", type: "line", source: "osmvec", "source-layer": "boundaries", paint: { "line-color": ink, "line-opacity": 0.4, "line-dasharray": [2, 2], "line-width": 0.7 } },
+        { id: "ov-places", type: "symbol", source: "osmvec", "source-layer": "places", layout: { "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]], "text-font": ["Noto Sans Regular"], "text-size": ["interpolate", ["linear"], ["zoom"], 4, 10, 10, 13] }, paint: { "text-color": this.textColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.2 } },
+      );
     } else if ((basemap === "coastline" || basemap === "gshhg") && (this._coastlineArchive || this._coastline)) {
       // Offline GSHHG land/lake polygons (see emit-basemap*). Land fills over
       // the sea-coloured background; lakes (level 2) punch back to sea; a thin
@@ -1160,7 +1193,7 @@ export class ChartPlotter extends HTMLElement {
     // via `styleimagemissing` → registerPattern.)
     sources.nodata = { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[-180, -85.0511], [180, -85.0511], [180, 85.0511], [-180, 85.0511], [-180, -85.0511]]] } } };
     // No-data hatch is hidden over OSM (its land/water fills the gaps instead).
-    const hideNoData = this._mariner.showNoData === false || basemap === "osm";
+    const hideNoData = this._mariner.showNoData === false || basemap === "osm" || basemap === "osmvec";
     layers.push({ id: "nodata", type: "fill", source: "nodata", layout: { visibility: hideNoData ? "none" : "visible" }, paint: { "fill-pattern": "NODATA03" } });
 
     return {

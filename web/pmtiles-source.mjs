@@ -136,7 +136,14 @@ export class PMTilesArchive {
     const rootOff = u64(8), rootLen = u64(16);
     this._leafOff = u64(40);
     this._dataOff = u64(56);
-    if (head.getUint8(97) !== 1 || head.getUint8(98) !== 1) throw new Error("compressed PMTiles not supported (minimal reader)");
+    // Compression: 1=none, 2=gzip (3=brotli/4=zstd unsupported). Our own baked
+    // chart archives are uncompressed; hosted OSM-vector (Protomaps) archives are
+    // gzip — decompress directories + tiles on read.
+    const ic = head.getUint8(97), tc = head.getUint8(98);
+    const okComp = (v) => v === 1 || v === 2;
+    if (!okComp(ic) || !okComp(tc)) throw new Error("unsupported PMTiles compression (only none/gzip)");
+    this._internalGz = ic === 2;
+    this._tileGz = tc === 2;
     this.minZoom = head.getUint8(100);
     this.maxZoom = head.getUint8(101);
     // Data extent straight from the header (the writer stores it), so we never
@@ -144,7 +151,7 @@ export class PMTilesArchive {
     const e7 = (off) => head.getInt32(off, true) / 1e7;
     this.bounds = [e7(102), e7(106), e7(110), e7(114)]; // [W,S,E,N]
     const dir = await this._read(rootOff, rootLen);
-    this._root = decodeDirectory(dir);
+    this._root = decodeDirectory(this._internalGz ? await gunzip(dir) : dir);
     return this;
   }
 
@@ -155,7 +162,8 @@ export class PMTilesArchive {
   async _leaf(offset, length) {
     const hit = this._leafCache.get(offset);
     if (hit) return hit;
-    const entries = decodeDirectory(await this._read(this._leafOff + offset, length));
+    const raw = await this._read(this._leafOff + offset, length);
+    const entries = decodeDirectory(this._internalGz ? await gunzip(raw) : raw);
     if (this._leafCache.size >= 64) this._leafCache.delete(this._leafCache.keys().next().value);
     this._leafCache.set(offset, entries);
     return entries;
@@ -175,8 +183,16 @@ export class PMTilesArchive {
       this._misses.add(key);
       return null;
     }
-    return this._read(this._dataOff + e.offset, e.length);
+    const raw = await this._read(this._dataOff + e.offset, e.length);
+    return this._tileGz ? gunzip(raw) : raw;
   }
+}
+
+// Gunzip a byte range using the platform DecompressionStream (no deps). Used for
+// gzip-compressed PMTiles directories + tiles (e.g. Protomaps OSM basemaps).
+async function gunzip(bytes) {
+  const stream = new Response(new Blob([bytes])).body.pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 // Web-Mercator tile (z,x,y) → its [W,S,E,N] lon/lat bounds. Used to route a tile
