@@ -56,6 +56,9 @@ func BuildFeature(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.Feature
 	if mariner == nil {
 		mariner = s52.DefaultMarinerSettings()
 	}
+	if isUnknownClass(f.ObjectClass()) {
+		return unknownObjectBuild(f), true
+	}
 	set := lib.LookupFeatureRaw(f.ObjectClass(), geometryCode(f.Geometry().Type), f.Attributes(), mariner)
 	if set == nil {
 		return FeatureBuild{}, false
@@ -145,6 +148,12 @@ func BuildFeaturePasses(lib *s52.Library, mariner *s52.MarinerSettings, f *s57.F
 	gtype := f.Geometry().Type
 	geomCode := geometryCode(gtype)
 	attrs := f.Attributes()
+
+	// Unknown object class (no catalogue acronym → no PresLib lookup): mark it
+	// with SY(QUESMRK1) instead of dropping it (S-52 PresLib §2.30 / §10.1.1).
+	if isUnknownClass(objClass) {
+		return []FeatureBuildPass{{Build: unknownObjectBuild(f), Bnd: BndCommon, Pts: PtsCommon}}
+	}
 
 	// Point features: the only style axis is simplified vs paper-chart symbols
 	// (matchesTableName switches the point LUP set on SimplifiedPoints).
@@ -827,4 +836,84 @@ func stringifyScalar(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// isUnknownClass reports that the S-57 parser could not resolve the feature's
+// numeric object code to a catalogue acronym — it names such classes "OBJL_<code>"
+// (see internal/s57/parser/objectclass.go). These are proprietary / non-ENC
+// classes (e.g. Inland ENC extensions) with no Presentation Library lookup entry.
+// S-52 PresLib e4.0.0 §2.30 & §10.1.1: such objects must NOT be hidden — each is
+// shown with the magenta question-mark SY(QUESMRK1) at IMO category Standard so
+// the mariner is told an unknown object exists.
+func isUnknownClass(objClass string) bool {
+	return strings.HasPrefix(objClass, "OBJL_")
+}
+
+// unknownObjectBuild is the §10.1.1 portrayal of an unknown-class feature: a
+// single QUESMRK1 question-mark symbol at the feature's position.
+func unknownObjectBuild(f *s57.Feature) FeatureBuild {
+	anchor, ok := representativePoint(f)
+	if !ok {
+		// No usable coordinate (e.g. a line/area feature whose spatial edges didn't
+		// resolve) — there is nowhere to put the question mark, so emit nothing
+		// rather than stamp it at null island (0,0).
+		return FeatureBuild{DisplayCategory: s52.DisplayStandard}
+	}
+	return FeatureBuild{
+		Primitives: []Primitive{SymbolCall{
+			Anchor:         anchor,
+			SymbolName:     "QUESMRK1",
+			Scale:          DefaultPxPerSymbolUnit,
+			SoundingDepthM: nan32,
+			DangerDepthM:   nan32,
+		}},
+		DisplayPriority: 6, // ordinary point-symbol priority
+		DisplayCategory: s52.DisplayStandard,
+	}
+}
+
+// representativePoint returns a single lat/lon to anchor a point symbol on a
+// feature of any geometry: the point itself, a line's midpoint vertex, or an
+// area's exterior-ring centroid. ok is false when the geometry carries no usable
+// coordinate (so the caller must not place a symbol).
+func representativePoint(f *s57.Feature) (geo.LatLon, bool) {
+	g := f.Geometry()
+	switch g.Type {
+	case s57.GeometryTypeLineString:
+		if n := len(g.Coordinates); n > 0 {
+			if c := g.Coordinates[n/2]; len(c) >= 2 {
+				return geo.LatLon{Lat: c[1], Lon: c[0]}, true
+			}
+		}
+	case s57.GeometryTypePolygon:
+		ring := exteriorRing(g)
+		var sx, sy, n float64
+		for _, c := range ring {
+			if len(c) >= 2 {
+				sx, sy, n = sx+c[0], sy+c[1], n+1
+			}
+		}
+		if n > 0 {
+			return geo.LatLon{Lat: sy / n, Lon: sx / n}, true
+		}
+	}
+	// Point geometry, or a fallback for any geometry whose first coordinate is set.
+	if len(g.Coordinates) > 0 && len(g.Coordinates[0]) >= 2 {
+		return geo.LatLon{Lat: g.Coordinates[0][1], Lon: g.Coordinates[0][0]}, true
+	}
+	return geo.LatLon{}, false
+}
+
+// exteriorRing returns the coordinates of a polygon's first exterior ring
+// (USAG 1 or 3), falling back to the first ring present.
+func exteriorRing(g s57.Geometry) [][]float64 {
+	for _, r := range g.Rings {
+		if r.Usage == 1 || r.Usage == 3 {
+			return r.Coordinates
+		}
+	}
+	if len(g.Rings) > 0 {
+		return g.Rings[0].Coordinates
+	}
+	return nil
 }
