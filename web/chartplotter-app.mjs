@@ -3679,11 +3679,19 @@ export class ChartPlotterApp extends HTMLElement {
     this._renderDevPanel(); // fills #dev-tools (share, band toggles, tile inspector)
     $("bake-status").onclick = (e) => { e.stopPropagation(); this._toggleCellStatusPopup(); };
     // Esc dismisses the debug context menu, else exits the feature inspector.
+    // Escape closes the topmost open dialog/overlay (one per press). The
+    // cursor-pick report closes itself (its own captured handler runs first).
     window.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
-      const menu = this.shadowRoot.getElementById("ctx-menu");
-      if (menu && !menu.hidden) { this._hideContextMenu(); return; }
-      if (this._inspectMode) this.closeDrawer();
+      const root = this.shadowRoot;
+      const ctx = root.getElementById("ctx-menu");
+      if (ctx && !ctx.hidden) { this._hideContextMenu(); return; }
+      const agree = root.getElementById("agree");
+      if (agree && !agree.hidden) { this._resolveAgreement(false); return; } // cancel
+      if (this._cellPopOpen) { this._toggleCellStatusPopup(); return; }
+      const search = root.getElementById("search");
+      if (search && !search.hidden) { search.hidden = true; root.getElementById("search-tab").classList.remove("on"); return; }
+      if (this._drawerOpen()) { this.closeDrawer(); return; }
     });
     $("empty-add").onclick = () => this.openCharts();
     $("empty-import").onclick = () => { this.openCharts(); const det = r.querySelector(".import-more"); if (det) det.open = true; };
