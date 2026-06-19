@@ -320,7 +320,9 @@ export class ChartPlotterApp extends HTMLElement {
     if (this.hasAttribute("cell-url")) plotter.setAttribute("cell-url", this.getAttribute("cell-url"));
     plotter.setAttribute("assets", this._assets);
     plotter.setAttribute("basemap", this.getAttribute("basemap") || "coastline");
-    plotter.setAttribute("tiles", "realtime"); // 100%-wasm: bake tiles in-browser from stored cells
+    // Prod renders prebaked hosted .pmtiles via the per-band pmtiles path; dev
+    // bakes in-browser from stored cells (100%-wasm).
+    plotter.setAttribute("tiles", this._prod ? "pmtiles" : "realtime");
     this._plotter = plotter;
     this.shadowRoot.getElementById("map").appendChild(plotter);
 

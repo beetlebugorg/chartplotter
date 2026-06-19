@@ -24,6 +24,7 @@ type cli struct {
 	Version     versionCmd     `cmd:"" help:"Print version and embedded-asset info."`
 	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-52 client assets (colortables.json, ...) into a directory."`
 	CatalogJSON catalogJSONCmd `cmd:"" name:"catalog-json" help:"Distil NOAA ENCProdCat.xml into a compact catalog.json."`
+	Bake        bakeCmd        `cmd:"" name:"bake" help:"Bake S-57 ENC cells (.zip/.000/dir) into a PMTiles archive for a prebaked deployment."`
 	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static + wasm) + the NOAA cell proxy."`
 }
 
