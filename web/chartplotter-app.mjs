@@ -1443,13 +1443,14 @@ export class ChartPlotterApp extends HTMLElement {
     this._task = { kind: "download", status: "running" };
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
 
+    const prog = (p) => this._setProgress(p);
     let failed = want.length;
     try {
-      failed = await this._bulkExtractZip(this._districtZipUrl(cg), want, label);
+      failed = await this._dl.bulkExtractZip(this._districtZipUrl(cg), want, label, prog);
     } catch (e) {
       console.warn(`[pack] ${label} bundle failed — trying All_ENCs.zip:`, e.message);
-      try { failed = await this._bulkExtract(want); }
-      catch (e2) { console.warn("[pack] All_ENCs.zip failed — per-cell:", e2.message); failed = await this._downloadPerCell(want); }
+      try { failed = await this._dl.bulkExtract(want, prog); }
+      catch (e2) { console.warn("[pack] All_ENCs.zip failed — per-cell:", e2.message); failed = await this._dl.downloadPerCell(want, prog); }
     }
 
     this._setProgress({ label: "Baking tiles…", sub: failed ? `${failed} chart${failed !== 1 ? "s" : ""} failed` : "", frac: 1 });
@@ -1481,79 +1482,6 @@ export class ChartPlotterApp extends HTMLElement {
     this._refreshCellSel();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
-
-  // Per-cell fallback: fetch each cell's own zip through the byte proxy. Returns
-  // the count that failed.
-  async _downloadPerCell(names) {
-    let done = 0, failed = 0;
-    for (const name of names) {
-      this._setProgress({ label: `Downloading ${names.length} chart${names.length !== 1 ? "s" : ""}`, sub: `${name} · ${done + 1} of ${names.length}`, frac: names.length ? done / names.length : null });
-      try {
-        const c = this._byName.get(name);
-        const url = "api/cell/" + encodeURIComponent(name) + (c && c.z ? "?url=" + encodeURIComponent(c.z) : "");
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        await this._store.put(name, new Uint8Array(await resp.arrayBuffer()));
-        this._installed.add(name);
-      } catch (e) { console.warn("[download]", name, e.message); failed++; }
-      done++;
-    }
-    return failed;
-  }
-
-  // The URL of NOAA's All_ENCs.zip, derived from any catalog cell's per-cell zip
-  // URL (same directory) so it tracks the catalog's host.
-  _allEncsUrl() { return this._dl.allEncsUrl(); }
-
-  // Bulk path: download a NOAA zip bundle ONCE (streamed through the dumb byte
-  // proxy into a disk-backed Blob), then slice + inflate the wanted base cells
-  // out of it locally — no network per cell. `label` names the bundle for the
-  // progress UI. Returns the count that failed; throws if the archive can't be
-  // opened (caller falls back).
-  async _bulkExtractZip(url, names, label) {
-    const proxy = "api/proxy?url=" + encodeURIComponent(url);
-    const resp = await fetch(proxy);
-    if (!resp.ok) throw new Error("proxy HTTP " + resp.status);
-
-    // Stream the download into a Blob, reporting progress. Piping through a
-    // counting TransformStream into Response().blob() lets the browser back the
-    // Blob on disk (no multi-hundred-MB JS heap spike) while we track bytes.
-    const total = +resp.headers.get("Content-Length") || 0;
-    let blob;
-    if (resp.body) {
-      let recv = 0;
-      const tap = new TransformStream({
-        transform: (chunk, ctrl) => {
-          recv += chunk.length;
-          this._setProgress({ label: `Downloading ${label}…`, sub: total ? `${this._fmtBytes(recv)} / ${this._fmtBytes(total)} · ${names.length} charts` : this._fmtBytes(recv), frac: total ? recv / total : null });
-          ctrl.enqueue(chunk);
-        },
-      });
-      blob = await new Response(resp.body.pipeThrough(tap)).blob();
-    } else {
-      blob = await resp.blob();
-    }
-
-    this._setProgress({ label: `Reading ${label}…`, sub: `${names.length} charts — extracting`, frac: null });
-    const byName = new Map(cellEntries(await readCentralDirectory(blob)).map((c) => [c.name, c]));
-
-    let done = 0, failed = 0;
-    for (const name of names) {
-      this._setProgress({ label: `Extracting ${names.length} charts`, sub: `${name} · ${done + 1} of ${names.length}`, frac: names.length ? done / names.length : null });
-      const rec = byName.get(name);
-      if (!rec || !rec.base) { console.warn("[bulk]", name, "not in", label); failed++; done++; continue; }
-      try {
-        await this._store.put(name, await extractEntry(blob, rec.base));
-        this._installed.add(name);
-      } catch (e) { console.warn("[bulk]", name, e.message); failed++; }
-      done++;
-    }
-    console.log(`[bulk] ${label}: extracted ${names.length - failed}/${names.length}`);
-    return failed;
-  }
-
-  // All_ENCs.zip fallback for when a per-district bundle isn't available.
-  async _bulkExtract(names) { return this._bulkExtractZip(this._allEncsUrl(), names, "All_ENCs.zip"); }
 
   // Remove ALL regions at once (DELETE /api/charts), then reflect empty by
   // re-applying the now-empty manifest — no reload needed.
