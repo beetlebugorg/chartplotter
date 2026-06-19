@@ -45,8 +45,11 @@ func (o *OBSTRN07) Execute() ([]Instruction, error) {
 	// Add symbol
 	instructions = append(instructions, &SYInstruction{SymbolID: o.selectSymbol()})
 
-	// Add sounding text if dangerous and depth is known
-	if o.isDangerous() && o.valsouExists {
+	// Add sounding text if dangerous and a POSITIVE depth is known. A rock/
+	// obstruction at or above sounding datum (VALSOU <= 0, i.e. awash/drying) is
+	// conveyed by its symbol (OBSTRN11 etc.) — S-52 shows no plain sounding
+	// there, so a "0" label just obscures the symbol.
+	if o.isDangerous() && o.valsouExists && o.valsou > 0 {
 		instructions = append(instructions, o.depthLabelInstruction())
 	}
 
@@ -64,6 +67,23 @@ func (o *OBSTRN07) fetchDepthFromUnderlying() {
 
 // selectSymbol chooses the appropriate obstruction symbol based on category, water level, and depth.
 func (o *OBSTRN07) selectSymbol() string {
+	// UWTROC (rocks) use the rock-specific symbols, NOT the generic obstruction
+	// glyphs (S-52 OBSTRN07 Continuation A): a rock at/above sounding datum
+	// (VALSOU <= 0, i.e. awash) -> UWTROC04 "rock awash"; an underwater rock
+	// (VALSOU > 0) -> UWTROC03. With no VALSOU, fall back to WATLEV.
+	if o.ctx.ObjectClass == "UWTROC" {
+		if o.valsouExists {
+			if o.valsou <= 0 {
+				return "UWTROC04"
+			}
+			return "UWTROC03"
+		}
+		if o.isAwash() {
+			return "UWTROC04"
+		}
+		return "UWTROC03"
+	}
+
 	// Special category handling (overrides depth-based logic)
 	switch o.catobs {
 	case 6, 7: // Foul ground, foul area
