@@ -18,6 +18,7 @@
 package bake
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -218,6 +219,7 @@ type Baker struct {
 	curCell    string // dataset name of the cell currently being added (stamped on each feature)
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
+	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
 	// position, the first is "primary" (one flare + a merged multi-line label);
 	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
@@ -363,6 +365,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		// light characteristic string ("Fl.R.4s") so the inspector can show the
 		// light data, not just the symbol.
 		b.curObjnam = stringAttr(f.Attributes(), "OBJNAM")
+		b.curAttrs = encodeS57Attrs(f.Attributes())
 		b.curLight = ""
 		b.curLightSkip = false
 		b.curLightText = ""
@@ -460,6 +463,9 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 	if pts != ptsAlwaysShown {
 		attrs = append(attrs, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(pts)})
 	}
+	if b.curAttrs != "" {
+		attrs = append(attrs, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
+	}
 	if !isNaN32(sc.SoundingDepthM) {
 		attrs = append(attrs,
 			mvt.KeyValue{Key: "depth", Value: mvt.FloatVal(sc.SoundingDepthM)},
@@ -527,6 +533,11 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		}
 		if b.curLight != "" {
 			base = append(base, mvt.KeyValue{Key: "light", Value: mvt.StringVal(b.curLight)})
+		}
+		// Full S-57 attribute set for the cursor-pick report (S-52 PresLib §10.8).
+		// One compact JSON blob the client decodes against web/s57-catalogue.json.
+		if b.curAttrs != "" {
+			base = append(base, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
 		}
 		return append(base, extra...)
 	}
@@ -1385,6 +1396,49 @@ func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// encodeS57Attrs serialises a feature's full S-57 attribute set into the compact
+// JSON blob carried in the tile for the cursor-pick report (S-52 PresLib §10.8).
+// Keys are S-57 acronyms; values are kept as raw strings (e.g. "3", list "1,3",
+// "Fl.R.4s") so the client decodes names/enums/units against the catalogue — and
+// numbers are formatted minimally, satisfying the no-padding rule (§10.8 rule 3).
+// Returns "" for an attribute-free feature. json.Marshal sorts map keys, so the
+// output is deterministic (bake reproducibility).
+func encodeS57Attrs(attrs map[string]interface{}) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	out := make(map[string]string, len(attrs))
+	for k, v := range attrs {
+		if k == "DEPTHS" { // synthetic (SOUNDG Z values), not an S-57 attribute
+			continue
+		}
+		switch t := v.(type) {
+		case string:
+			if s := strings.TrimSpace(t); s != "" {
+				out[k] = s
+			}
+		case float64:
+			out[k] = strconv.FormatFloat(t, 'g', -1, 64)
+		case float32:
+			out[k] = strconv.FormatFloat(float64(t), 'g', -1, 32)
+		case int:
+			out[k] = strconv.Itoa(t)
+		case int64:
+			out[k] = strconv.FormatInt(t, 10)
+		default:
+			out[k] = fmt.Sprint(t)
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	buf, err := json.Marshal(out)
+	if err != nil {
+		return ""
+	}
+	return string(buf)
 }
 
 // stringAttr returns the trimmed string value of a string attribute, or "".
