@@ -171,6 +171,13 @@ var objectClassNames = map[int]string{
 	157: "WATFAL",
 	158: "WEDKLP",
 	159: "WRECKS",
+	160: "TS_FEB", // Tidal stream - flood/ebb (S-57 App A §1.173; was missing → rendered QUESMRK)
+	// NEWOBJ (code 163) is not in the base Ed 3.1 catalogue but is the ENC
+	// convention for producer "new objects"; it carries SYMINS and the PresLib
+	// NEWOBJ lookup routes SYMINS-bearing features through CS(SYMINS02). Used by
+	// the S-64 test data (V-AIS, temporary/preliminary NtoM). Codes 161/162 are
+	// deliberately-unknown test objects (no catalogue entry) → QUESMRK, correct.
+	163: "NEWOBJ",
 	300: "M_ACCY",
 	301: "M_CSCL",
 	302: "M_COVR",
