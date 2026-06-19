@@ -747,10 +747,14 @@ func formatSubstitute(attrs map[string]interface{}, format string, attrNames []s
 		}
 		// Scan the printf spec: flags, width, .precision, length, conv.
 		j := i + 1
+		flagsStart := j
 		for j < len(format) && strings.IndexByte("-+ #0", format[j]) >= 0 {
 			j++
 		}
+		flags := format[flagsStart:j]
+		width := 0
 		for j < len(format) && format[j] >= '0' && format[j] <= '9' {
+			width = width*10 + int(format[j]-'0')
 			j++
 		}
 		precision := -1
@@ -781,7 +785,7 @@ func formatSubstitute(attrs map[string]interface{}, format string, attrNames []s
 			if !ok {
 				return "", false
 			}
-			appendConverted(&out, val, conv, precision)
+			appendConverted(&out, val, conv, precision, width, flags)
 		default:
 			out.WriteString(format[i : j+1]) // unknown conversion -> literal
 		}
@@ -791,30 +795,47 @@ func formatSubstitute(attrs map[string]interface{}, format string, attrNames []s
 }
 
 // appendConverted appends val formatted per the printf conversion: floats honour
-// precision, integer conversions round, everything else passes through.
-func appendConverted(out *strings.Builder, val string, conv byte, precision int) {
+// precision, integer conversions round, everything else passes through. The
+// zero-pad flag + width are applied (e.g. "%03.0lf" → 90 ⇒ "090", the S-52
+// bearing format); space/width padding is intentionally NOT applied (proportional
+// chart text needs no fixed-pitch alignment).
+func appendConverted(out *strings.Builder, val string, conv byte, precision, width int, flags string) {
+	var s string
 	switch conv {
 	case 'f', 'e', 'g':
 		x, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
 		if err != nil {
-			out.WriteString(val)
-			return
-		}
-		if precision >= 0 {
-			out.WriteString(strconv.FormatFloat(x, 'f', precision, 64))
+			s = val
+		} else if precision >= 0 {
+			s = strconv.FormatFloat(x, 'f', precision, 64)
 		} else {
-			out.WriteString(strconv.FormatFloat(x, 'g', -1, 64))
+			s = strconv.FormatFloat(x, 'g', -1, 64)
 		}
 	case 'd', 'i', 'u', 'x':
 		x, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
 		if err != nil {
-			out.WriteString(val)
-			return
+			s = val
+		} else {
+			s = strconv.FormatInt(int64(math.Round(x)), 10)
 		}
-		out.WriteString(strconv.FormatInt(int64(math.Round(x)), 10))
 	default:
-		out.WriteString(val)
+		s = val
 	}
+	out.WriteString(zeroPad(s, width, flags))
+}
+
+// zeroPad left-pads s with zeros to width when the printf '0' flag is set (and
+// not left-justified '-'), inserting after any leading sign. Other padding is
+// ignored (see appendConverted).
+func zeroPad(s string, width int, flags string) string {
+	if width <= len(s) || !strings.ContainsRune(flags, '0') || strings.ContainsRune(flags, '-') {
+		return s
+	}
+	pad := strings.Repeat("0", width-len(s))
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+' || s[0] == ' ') {
+		return s[:1] + pad + s[1:]
+	}
+	return pad + s
 }
 
 // stringifyScalar renders a scalar attribute value as label text. Integer-valued
