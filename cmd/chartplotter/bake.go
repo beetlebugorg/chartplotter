@@ -12,6 +12,7 @@ import (
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 )
 
 // bakeCmd bakes S-57 ENC base cells into a PMTiles archive (the same MVT tiles the
@@ -117,46 +118,49 @@ func (c bakeCmd) Run() error {
 // (<out-stem>-<slug>.pmtiles) plus a manifest tagging each with its band slug, so
 // the frontend loads each into its own chart-<slug> source.
 func (c bakeCmd) runBands(b *bake.Baker, nCells int) error {
-	lastPct := -1
-	byBand := baker.BakeToPMTilesBands(b, func(done, total int) {
-		if total == 0 {
-			return
-		}
-		if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
-			lastPct = pct
-			fmt.Fprintf(os.Stderr, "\r  tiles %d/%d (%d%%)", done, total, pct)
-		}
-	})
-	fmt.Fprintln(os.Stderr)
-
 	ext := filepath.Ext(c.Out)
 	stem := strings.TrimSuffix(c.Out, ext)
 	bb := b.Bounds()
 	var entries []map[string]any
-	for _, bd := range bake.BakeBands() {
-		pb := byBand[bd.Slug]
-		if pb == nil {
-			continue
-		}
-		out := stem + "-" + bd.Slug + ext
-		f, err := os.Create(out)
-		if err != nil {
-			return err
-		}
-		if err := pb.WriteArchive(f); err != nil {
-			f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return err
-		}
-		st, _ := os.Stat(out)
-		fmt.Printf("  %-9s → %s (%d tiles, %.1f MB)\n", bd.Slug, out, pb.Count(), float64(st.Size())/(1<<20))
-		entries = append(entries, map[string]any{
-			"file":   filepath.Base(out),
-			"band":   bd.Slug,
-			"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
+	lastPct := -1
+
+	// Each band is written + freed as it is baked (streamed via the callback), so
+	// only one band's archive is ever resident in memory.
+	err := baker.BakeToPMTilesBands(b,
+		func(done, total int) {
+			if total == 0 {
+				return
+			}
+			if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
+				lastPct = pct
+				fmt.Fprintf(os.Stderr, "\r  tiles %d/%d (%d%%)", done, total, pct)
+			}
+		},
+		func(slug string, pb *pmtiles.Builder) error {
+			out := stem + "-" + slug + ext
+			f, err := os.Create(out)
+			if err != nil {
+				return err
+			}
+			if err := pb.WriteArchive(f); err != nil {
+				f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+			st, _ := os.Stat(out)
+			fmt.Fprintf(os.Stderr, "\r")
+			fmt.Printf("  %-9s → %s (%d tiles, %.1f MB)\n", slug, out, pb.Count(), float64(st.Size())/(1<<20))
+			entries = append(entries, map[string]any{
+				"file":   filepath.Base(out),
+				"band":   slug,
+				"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
+			})
+			return nil
 		})
+	if err != nil {
+		return err
 	}
 	fmt.Printf("baked %d cell(s) → %d band archive(s)\n", nCells, len(entries))
 

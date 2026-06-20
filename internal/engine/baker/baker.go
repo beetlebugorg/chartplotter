@@ -168,21 +168,35 @@ func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func
 	return b, ok, nil
 }
 
-// BakeToPMTiles bakes every tile from b into a PMTiles builder. Tiles are
-// emitted in parallel across all CPUs (EmitTile only reads the Baker, so it is
-// safe to run concurrently); the encoded bytes are added to the builder in
-// deterministic coord order, so the resulting archive is independent of
-// scheduling. progress, if non-nil, is called as (tilesEmitted, totalTiles).
+// BakeToPMTiles bakes every tile from b into a PMTiles builder. Tiles are emitted
+// in parallel across all CPUs (EmitTileInto only reads the Baker) and each worker
+// adds its tile to the builder directly under a mutex, so only one encoded tile
+// per worker is live at a time instead of holding every tile's bytes in a second
+// full-size slice. (Add order is no longer deterministic, so the blob LAYOUT can
+// vary run-to-run; the tiles served — sorted by TileID at write — are identical.)
+// progress, if non-nil, is called as (tilesEmitted, totalTiles).
 func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Builder {
-	coords := b.TileCoords(MVTExtent)
-	total := len(coords)
-	encoded := make([][]byte, total)
-
 	// Build the inverted tile→prim index once (single-threaded) so each parallel
-	// worker's EmitTileInto iterates only on-tile prims instead of scanning all
-	// of b.prims. Read-only after this point, so concurrent reads are safe.
+	// worker's EmitTileInto iterates only on-tile prims instead of scanning all of
+	// b.prims. Read-only after this point, so concurrent reads are safe.
 	b.BuildEmitIndex(MVTExtent, MVTBuffer)
+	pb := pmtiles.New()
+	emitTiles(b.TileCoords(MVTExtent), pb, progress, func(c tile.TileCoord, ts *bake.TileScratch) []byte {
+		return b.EmitTileInto(c, MVTExtent, MVTBuffer, ts)
+	})
+	// Override the tile-derived bounds (the spec-display z0 world tile would make
+	// them global) with the real cell-union extent so clients frame to the charts.
+	if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
+		pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
+	}
+	return pb
+}
 
+// emitTiles bakes coords in parallel and adds each non-empty tile to pb under a
+// mutex — no intermediate full-archive slice of encoded bytes (only one tile per
+// worker is live at a time). emit returns the encoded tile (or nil to skip).
+func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done, total int), emit func(tile.TileCoord, *bake.TileScratch) []byte) {
+	total := len(coords)
 	workers := runtime.NumCPU()
 	if workers > total {
 		workers = total
@@ -190,9 +204,8 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 	if workers < 1 {
 		workers = 1
 	}
-
-	var next int64 = -1
-	var done int64
+	var mu sync.Mutex
+	var next, done int64 = -1, 0
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -204,7 +217,12 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 				if i >= total {
 					return
 				}
-				encoded[i] = b.EmitTileInto(coords[i], MVTExtent, MVTBuffer, &ts)
+				c := coords[i]
+				if data := emit(c, &ts); data != nil {
+					mu.Lock()
+					pb.AddTile(uint8(c.Z), c.X, c.Y, data)
+					mu.Unlock()
+				}
 				if progress != nil {
 					progress(int(atomic.AddInt64(&done, 1)), total)
 				}
@@ -212,31 +230,16 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 		}()
 	}
 	wg.Wait()
-
-	pb := pmtiles.New()
-	for i, c := range coords {
-		if encoded[i] != nil {
-			pb.AddTile(uint8(c.Z), c.X, c.Y, encoded[i])
-		}
-	}
-	// Override the tile-derived bounds (the spec-display z0 world tile would make
-	// them global) with the real cell-union extent so clients frame to the charts.
-	if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
-		pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
-	}
-	return pb
 }
 
-// BakeToPMTilesBands bakes one PMTiles builder PER navigational-purpose band,
-// keyed by band slug (only bands that produced tiles are returned). Each band's
-// archive carries only that band's own data (EmitTileBandInto filters on natMax),
-// gap-clipped a couple zooms past its native max, so the frontend can load it into
-// a chart-<slug> source whose maxzoom = band.max + margin and client-overzoom it
-// up. A coarser band's source fills a finer band's gaps via its own overzoom; the
-// gap-clipping keeps it from bleeding where the finer band actually has data. This
-// reproduces the realtime/wasm best-available result in a bounded eager bake. The
-// shared margin-extended emit index is built once.
-func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int)) map[string]*pmtiles.Builder {
+// BakeToPMTilesBands bakes one PMTiles archive PER navigational-purpose band and
+// calls emit(slug, builder) for each band that produced tiles, ONE AT A TIME — so
+// the caller can write+free a band before the next is baked, instead of holding
+// all six archives in memory at once. Each band's archive carries only that band's
+// own data (EmitTileBandInto filters on natMax); a coarser band's source fills a
+// finer band's gaps via client overzoom, and lines/patterns are cut where a finer
+// band covers so they don't bleed. The shared emit index is built once.
+func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int), emit func(slug string, pb *pmtiles.Builder) error) error {
 	b.BuildEmitIndexBands(MVTExtent, MVTBuffer) // built once; read-only, shared across bands
 	type job struct {
 		slug    string
@@ -252,51 +255,33 @@ func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int)) map[strin
 		}
 	}
 	bb := b.Bounds()
-	out := map[string]*pmtiles.Builder{}
-	var done int64
-	for _, j := range jobs {
-		encoded := make([][]byte, len(j.coords))
-		workers := runtime.NumCPU()
-		if workers > len(j.coords) {
-			workers = len(j.coords)
-		}
-		if workers < 1 {
-			workers = 1
-		}
-		var next int64 = -1
-		var wg sync.WaitGroup
-		for w := 0; w < workers; w++ {
-			wg.Add(1)
-			go func(bandMax uint32) {
-				var ts bake.TileScratch
-				defer wg.Done()
-				for {
-					i := int(atomic.AddInt64(&next, 1))
-					if i >= len(j.coords) {
-						return
-					}
-					encoded[i] = b.EmitTileBandInto(j.coords[i], MVTExtent, MVTBuffer, &ts, bandMax)
-					if progress != nil {
-						progress(int(atomic.AddInt64(&done, 1)), total)
-					}
-				}
-			}(j.bandMax)
-		}
-		wg.Wait()
-		pb := pmtiles.New()
-		for i, c := range j.coords {
-			if encoded[i] != nil {
-				pb.AddTile(uint8(c.Z), c.X, c.Y, encoded[i])
+	done := 0
+	bumpAfter := func(p func(d, t int)) func(d, t int) {
+		// Each band reports 0..len(coords); fold into the global done counter.
+		base := done
+		return func(d, _ int) {
+			if p != nil {
+				p(base+d, total)
 			}
 		}
+	}
+	for _, j := range jobs {
+		pb := pmtiles.New()
+		emitTiles(j.coords, pb, bumpAfter(progress), func(c tile.TileCoord, ts *bake.TileScratch) []byte {
+			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, j.bandMax)
+		})
+		done += len(j.coords)
 		if bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
 			pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
 		}
-		if pb.Count() > 0 {
-			out[j.slug] = pb
+		if pb.Count() == 0 {
+			continue
+		}
+		if err := emit(j.slug, pb); err != nil { // write + free this band before the next
+			return err
 		}
 	}
-	return out
+	return nil
 }
 
 // IsBaseCell reports whether name is an S-57 base cell (…/<CELL>.000).
