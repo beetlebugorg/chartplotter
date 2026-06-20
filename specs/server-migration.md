@@ -1,6 +1,6 @@
 # Server-side migration: bake + serve in Go, retire the wasm baker
 
-Status: Phase 1 done. Owner: see git. Supersedes the in-browser baking model.
+Status: Phases 1–2 done. Owner: see git. Supersedes the in-browser baking model.
 
 ## Decision
 
@@ -56,9 +56,17 @@ use. Static-CDN pmtiles (client range reads) can remain as a serverless option.
    Accept-Encoding, 204 blank / 404 unknown set), `GET /tiles/{set}.json`
    (TileJSON), `GET /tiles/` (set list). Backends return decompressed MVT; the
    handler gzips on the wire. Breaks nothing — the wasm baker path is untouched.
-2. **Server-side import/bake.** `POST /api/import` (or server fetches NOAA directly,
-   retiring `/api/proxy`) → native bake → register as a set. Filesystem/updates/aux
-   all become trivial here.
+2. ✅ **Server-side import/bake.** Done (`import.go`). `POST /api/import?set=NAME`
+   takes an uploaded exchange-set zip (raw body or multipart `file`) — or, with no
+   body, the cells already in the ENC_ROOT cache (`?cells=` narrows) — and bakes it
+   natively with the CLI's baker (`BuildBakerWithUpdates` → `BakeToPMTiles`,
+   `?updates=0` to skip .001+, `?overzoom=1`). Baking runs as a background job
+   (returns `202 {job,set}`); the client polls `GET /api/import/status?job=ID`
+   (`state`/`done`/`total`/`percent`/`cells`/`error`). On success the archive is
+   written atomically to `<cache>/tiles/NAME.pmtiles` and registered, so
+   `/tiles/NAME/…` serves it immediately; aux files are stashed under
+   `<cache>/aux/NAME/` for Phase 4. `/api/proxy` is kept (still used by the wasm
+   path until Phase 3). Updates/aux are handled inline (the "trivial here" payoff).
 3. **Delete the wasm baker surface.** `cmd/chartplotter-wasm`, `web/wasm-tiles-worker.js`,
    `web/wasm-tiles.mjs`, OPFS bake path (`chart-store.mjs`), in-browser import UI in
    `chartplotter-app.mjs`. ~6 files, ~16 call sites. The big simplification.

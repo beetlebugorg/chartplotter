@@ -33,8 +33,9 @@ type Server struct {
 	share       shareStore // latest "share my view" snapshot (camera + cell list)
 	Version     string     // build version
 
-	sets  *tileSets  // registry of named tile sets served at /tiles/{set}/…
-	dynMu sync.Mutex // serialises the lazy build of the "dynamic" set
+	sets    *tileSets   // registry of named tile sets served at /tiles/{set}/…
+	dynMu   sync.Mutex  // serialises the lazy build of the "dynamic" set
+	imports *importJobs // background server-side bake jobs (POST /api/import)
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -44,7 +45,7 @@ type Server struct {
 // host is not loopback (the operator opted into network exposure), which skips
 // the per-request Host-header DNS-rebind check on /api.
 func New(assetsDir, cacheDir string, allowRemote bool) *Server {
-	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote, sets: newTileSets()}
+	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs()}
 	// Register every prebaked archive under <cacheDir>/tiles as a tile set so
 	// /tiles/{set}/… serves them immediately. The "dynamic" set is built lazily.
 	if n := s.sets.discoverArchives(tilesDir(cacheDir)); n > 0 {
@@ -127,6 +128,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveShare(w, r) // GET/POST the latest "share my view" snapshot
 	case strings.HasPrefix(r.URL.Path, "/api/tile/"):
 		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
+	case strings.HasPrefix(r.URL.Path, "/api/import"):
+		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
 	default:
