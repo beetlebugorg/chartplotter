@@ -1,22 +1,21 @@
 // <chartplotter> — the public web component.
 //
-// A self-contained S-52 ENC chart plotter: a MapLibre map whose vector tiles
-// are generated IN-BROWSER by the wasm engine (chartplotter.wasm) from ENC cell
-// bytes kept in OPFS. No tile server. Drop the tag on a page:
+// A self-contained S-52 ENC chart plotter: a MapLibre map whose vector tiles are
+// baked SERVER-SIDE and served from /tiles/{set} (or read from a hosted .pmtiles).
+// Drop the tag on a page:
 //
 //   <script type="module" src="chartplotter.mjs"></script>
-//   <chart-plotter center="-76.4875,38.975" zoom="13" charts="US5MD1MC"></chart-plotter>
+//   <chart-plotter center="-76.4875,38.975" zoom="13" tiles="server" set="charts"></chart-plotter>
 //
 // Attributes (all optional):
 //   center   "lon,lat"            initial view centre (default Annapolis)
 //   zoom     number               initial zoom (default 13)
-//   charts   "CELL1,CELL2,…"      cells to load on start (downloaded into OPFS
-//                                 from cell-url if not already stored)
+//   tiles    "server"             pull MVT from the Go server's /tiles/{set}
+//   set      name                 the server tile-set name (the {set} in the URL)
+//   pmtiles  URL                  instead: render a hosted prebaked .pmtiles
 //   assets   base URL             where the generated assets live (default "./":
-//                                 chartplotter.wasm, colortables.json, sprite.*,
-//                                 linestyles.json, patterns.*, glyphs/)
-//   cell-url template             URL to fetch a cell's .000, {name} substituted
-//                                 (default "{assets}cells/{name}.000")
+//                                 colortables.json, sprite.*, linestyles.json,
+//                                 patterns.*, glyphs/, and the /tiles base)
 //   basemap  "osm" | "none"       street raster under the chart (default none)
 //
 // The full S-52 style (areas, patterns, lines, complex lines, point symbols,
@@ -30,25 +29,24 @@
 // separate component that talks to it ONLY through the surface below. Nothing
 // reaches into private (`_`) fields or MapLibre internals; see specs/web-architecture.md.
 //
-//   Charts:        setArchive · addArchive · addArchives · loadRegions ·
-//                  replaceBand · loadArchiveUrl · loadStoreCells · listCharts
+//   Charts:        setServerSet (server tiles) · setArchive · addArchive ·
+//                  addArchives · loadRegions · replaceBand · loadArchiveUrl
 //   Display:       setScheme · setMariner · setBasemap
 //   Tiles:         refresh · flushTiles
-//   Introspection: realtimeStats · realtimeCoverage · cellBounds
 //   Overlays:      get map · overlayBeforeId · addOverlayLayer · removeOverlay
 //   Camera:        setCameraMode · updateFollow · clearFollow
-//   Events:        ready{map} · bake-activity{inflight} · cell-status{name,status,info}
+//   Events:        ready{map}
 //
 // A plugin = a small element/module that, on the `ready` event, takes the `map`
 // handle, adds its own namespaced source + layers (via addOverlayLayer), runs its
 // own data loop, and (for tracking) drives the camera via updateFollow.
 
-// NOTE: in-browser baking (the TinyGo WASM EngineClient) is NOT part of the Go
-// build — all tile generation is a server-side task (`chartplotter provision` /
-// POST /api/provision). The browser only renders pre-baked archives. The
-// `bakePmtiles`/`_engineClient` methods below therefore throw; the optional
-// in-browser import-bake path is Phase 9.
-import { ChartStore } from "./chart-store.mjs";
+// Tiles are baked SERVER-SIDE. Two render sources are supported:
+//   • server  (tiles="server" set="<name>") — MVT pulled live from the Go server
+//     at /tiles/{set}/{z}/{x}/{y}.mvt (POST /api/import bakes + registers a set).
+//   • prebaked (pmtiles="<url>" / setArchive / loadRegions) — a hosted .pmtiles
+//     read by HTTP Range, the serverless static-CDN option. No tile server.
+// There is no in-browser baking; the wasm baker has been retired (server migration).
 import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 
 const FALLBACK = "#ff00ff";
@@ -133,6 +131,13 @@ export class ChartPlotter extends HTMLElement {
     this._mariner = {};      // current mariner settings (engine-side)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bands = {};        // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
+    this._server = false;    // server-tiles mode (tiles="server"): chart source is /tiles/{set}
+    this._serverSet = "";    // active server tile-set name (the {set} in /tiles/{set}/…)
+  }
+
+  // Tile URL template for the active server set, or "" when no set is selected.
+  _serverTilesUrl() {
+    return this._serverSet ? `${this._assets}tiles/${this._serverSet}/{z}/{x}/{y}.mvt` : "";
   }
 
   connectedCallback() {
@@ -164,10 +169,9 @@ export class ChartPlotter extends HTMLElement {
     mapEl.id = "map";
     this.shadowRoot.append(style, css, mapEl);
 
-    // The bake engine (wasm in a Web Worker) is created LAZILY — only when a
-    // bake is actually requested (see _engineClient/bakePmtiles). Rendering
-    // reads from a prebaked .pmtiles archive, so the map never waits on the
-    // worker spinning up (wasm load + PresLib/catalog parse).
+    // Tiles are baked server-side (POST /api/import) and served from /tiles/{set};
+    // the browser only renders them. Rendering also supports a hosted prebaked
+    // .pmtiles read by HTTP Range (the serverless static-CDN option).
 
     // -- assets (parallel) --------------------------------------------------
     const [ct, sj, lsj, pj] = await Promise.all([
@@ -219,61 +223,17 @@ export class ChartPlotter extends HTMLElement {
       this._osmvecArchive = await new PMTilesArchive(this._osmvecUrl).init().catch(() => null);
     }
 
-    // Cells live in the store (OPFS/IndexedDB); the worker bakes tiles from them
-    // on demand. For the `charts` attribute, just make sure each is downloaded
-    // into the store — the worker finds + bakes it by viewport (needs the cell
-    // in the catalog for its coverage/scale).
-    this._store = new ChartStore();
-    this._cellTmpl = this.getAttribute("cell-url") || assets + "cells/{name}.000";
-    const cells = (this.getAttribute("charts") || "")
-      .split(",").map((s) => s.trim()).filter(Boolean);
-    for (const name of cells) {
-      try { await this._store.ensure(name, (n) => this._cellTmpl.replace("{name}", n)); }
-      catch (e) { console.warn("[chartplotter] cell", name, e.message); }
-    }
+    // Render-source mode. server (tiles="server"): one "chart" vector source whose
+    // MVT comes live from the Go server's /tiles/{set} endpoint; the set is chosen
+    // by the `set` attribute or setServerSet(). Otherwise the prebaked per-band
+    // pmtiles:// path (setArchive/loadRegions/pmtiles=), a hosted static-CDN archive.
+    this._server = this.getAttribute("tiles") === "server";
+    if (this._server) this._serverSet = this.getAttribute("set") || "";
 
-    // Tile source. Real-time (tiles="realtime"): one "cp://" vector source baked
-    // on demand in-browser by the wasm baker from the store's raw cells (the 100%-
-    // wasm path — no server bake, no pmtiles). Otherwise the legacy per-band
-    // pmtiles protocols, each serving its loaded archive(s) (blank when none).
-    this._realtime = this.getAttribute("tiles") === "realtime";
-    if (this._realtime) {
-      this._rt = await import("./wasm-tiles.mjs");
-      await this._rt.initBaker(assets);
-      // HYBRID: a hosted prebaked archive (prebaked="<url>") fills tiles your
-      // uploaded cells don't cover. The URL is a single .pmtiles, OR a
-      // charts-index.json manifest (its district files are opened into one
-      // MultiArchive). Absent → pure offline (wasm-only) rendering.
-      // Prebaked archives are routed into the per-band sources (chart-<slug>) by
-      // _openPrebaked, which render UNDER the cp:// cells with client overzoom — so
-      // the cp:// source needs no fallback (it carries only the user's cells).
-      const fallback = null;
-      const preUrl = this.getAttribute("prebaked") || "";
-      if (preUrl) {
-        this._prebakedArchive = await this._openPrebaked(preUrl).catch((e) => { console.warn("[chartplotter] prebaked", preUrl, e); return null; });
-      }
-      this._rtCache = this._rt.registerTileProtocol(maplibregl, {
-        // Namespace scopes the persistent tile cache. BUMP THE VERSION SUFFIX when
-        // the baker's tile output changes, so stale cached tiles are abandoned.
-        // rt6: load cells for every tile (not just misses) + don't cache empties.
-        // rt7: overzoom-down for all bands, QUESMRK1 for unknown classes, ISO 8211
-        //   record-length-0 parse fix, and the known-empty tile cache — all change
-        //   tile output, so prior rt6 tiles must not be reused (they cause stale
-        //   holes after a code update without a manual cache clear).
-        // rt8: baker caps each prim at its native band (no in-baker up-overzoom);
-        //   coarse data now overzooms client-side via the per-band sources below.
-        namespace: "rt8",
-        fallback,
-        // Surface live bake activity so the app can show a "generating tiles"
-        // indicator; fires whenever the worker's in-flight tile count changes.
-        onActivity: (n) => this.dispatchEvent(new CustomEvent("bake-activity", { detail: { inflight: n }, bubbles: true })),
-      });
-    }
-    // Per-band prebaked sources (chart-<slug>), registered in BOTH modes. Each
+    // Per-band prebaked sources (chart-<slug>), one PMTiles protocol each. Each
     // carries its own maxzoom so MapLibre client-overzooms a coarse band up into
-    // finer display zooms (coastal z11 → z18 offshore) — replacing the old in-baker
-    // overzoom. In realtime mode they render UNDER the cp:// cells (the shell loads
-    // hosted districts into this._bands via addArchives).
+    // finer display zooms (coastal z11 → z18 offshore). Used by the prebaked path;
+    // harmless (blank) in server mode.
     for (const band of CHART_BANDS) {
       const slug = band.slug;
       registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._bands[slug]);
@@ -329,15 +289,9 @@ export class ChartPlotter extends HTMLElement {
           }
         } catch (e) { console.warn("[chartplotter] pmtiles load", pmUrl, e); }
       }
-      // Bare-component usage (<chart-plotter charts="…">): bake the listed cells
-      // into an archive so they render. The shell drives this itself for uploads.
-      if (!pmUrl && cells.length) {
-        try {
-          const bytes = await this.bakePmtiles(cells);
-          if (bytes.length) await this.setArchive(new Blob([bytes]));
-        } catch (e) { console.warn("[chartplotter] auto-bake", e); }
-      }
-      this.dispatchEvent(new CustomEvent("ready", { detail: { map }, bubbles: true }));
+      // composed so it crosses the shell's shadow boundary → a page-level splash
+      // (index.html) can hear it and fade out once the map's first frame is up.
+      this.dispatchEvent(new CustomEvent("ready", { detail: { map }, bubbles: true, composed: true }));
     });
   }
 
@@ -648,21 +602,33 @@ export class ChartPlotter extends HTMLElement {
     const j = await fetch(url).then((r) => (r.ok ? r.json() : null));
     const districts = (j && j.districts) || [];
     const base = new URL(url, location.href);
-    let any = null;
+
+    // Open every archive CONCURRENTLY. Each open is two range round-trips (header
+    // + root directory); doing ~50 districts serially was the slow initial load.
+    // Each unique file is opened ONCE — a bandless ("all") pack FANS across every
+    // per-band source (each overzooms its own [min,max]) so a coarse-only spot
+    // shows the coarser chart overscale instead of a high-zoom hole, but the
+    // underlying archive handle is shared, not re-fetched six times.
+    const opened = new Map(); // url → Promise<PMTilesArchive>
+    const openOnce = (u) => {
+      let p = opened.get(u);
+      if (!p) { p = new PMTilesArchive(u).init(); opened.set(u, p); }
+      return p;
+    };
+    const tasks = [];
     for (const d of districts) {
       if (!d.file) continue;
-      // A bandless ("all") archive is FANNED across every per-band source (each
-      // overzooms its own [min,max]) so a coarse-only spot shows the coarser chart
-      // overscale instead of a high-zoom hole; explicit band slugs route directly.
-      const slugs = this._fanBands(d.band || "all");
       const u = new URL(d.file, base).href;
-      for (const slug of slugs) {
+      for (const slug of this._fanBands(d.band || "all")) {
         if (!this._bands[slug]) this._bands[slug] = new MultiArchive();
-        try { const a = await this._bands[slug].add(u); any = any || a; }
-        catch (e) { console.warn("[chartplotter] prebaked district", d.file, e); }
+        const band = this._bands[slug];
+        tasks.push(openOnce(u)
+          .then((a) => band.addOpened(a))
+          .catch((e) => { console.warn("[chartplotter] prebaked district", d.file, e); return null; }));
       }
     }
-    return any;
+    const results = await Promise.all(tasks);
+    return results.find(Boolean) || null;
   }
 
   // Is the active basemap any OSM variant (raster or vector)? Used to let the OSM
@@ -682,9 +648,10 @@ export class ChartPlotter extends HTMLElement {
     this._ver++;
     const map = this._map;
     if (!map) return;
-    if (this._realtime) {
+    if (this._server) {
       const src = map.getSource("chart");
-      if (src) src.setTiles([`cp://${this._ver}/{z}/{x}/{y}`]);
+      const url = this._serverTilesUrl();
+      if (src && url) src.setTiles([`${url}?v=${this._ver}`]);
     } else {
       for (const band of CHART_BANDS) {
         const src = map.getSource("chart-" + band.slug);
@@ -694,20 +661,18 @@ export class ChartPlotter extends HTMLElement {
     map.triggerRepaint();
   }
 
-  // Flush every baked-tile cache and force a re-bake of the visible tiles:
-  // clears the in-browser cp TileCache (memory + IndexedDB), drops MapLibre's
-  // already-loaded tiles for the chart source, and bumps the version token so
-  // tiles refetch. Public so the shell needn't reach into renderer internals or
-  // MapLibre's (version-specific) source-cache layout. Returns when done.
+  // Drop MapLibre's already-loaded tiles for the chart source(s) and bump the
+  // version token so tiles refetch (e.g. after the server re-bakes a set). Public
+  // so the shell needn't reach into MapLibre's (version-specific) source-cache
+  // layout. Returns when done.
   async flushTiles() {
-    if (this._rtCache && this._rtCache.clear) await this._rtCache.clear();
     const map = this._map;
     if (map) {
       for (const sc of this._chartSourceCaches()) {
         if (sc.clearTiles) { sc.clearTiles(); if (sc.update) sc.update(map.transform); }
       }
     }
-    this.refresh(); // bump version → re-request + re-bake
+    this.refresh(); // bump version → re-request
   }
 
   // -- overlay & camera API (for plugins: own-ship, AIS, …) ----------------
@@ -809,7 +774,7 @@ export class ChartPlotter extends HTMLElement {
     if (!style) return [];
     const out = [];
     const consider = (c) => { if (c && (c._tiles || typeof c.clearTiles === "function") && !out.includes(c)) out.push(c); };
-    const keys = this._realtime ? ["chart"] : CHART_BANDS.map((b) => "chart-" + b.slug);
+    const keys = this._server ? ["chart"] : CHART_BANDS.map((b) => "chart-" + b.slug);
     const fromDict = (d) => {
       if (!d || typeof d !== "object") return;
       for (const k of keys) {
@@ -822,44 +787,26 @@ export class ChartPlotter extends HTMLElement {
     return out;
   }
 
-  // -- real-time wasm tiles ------------------------------------------------
-  // Register the stored cells for LAZY, on-demand parsing — nothing is parsed
-  // now. Each cell is parsed into the baker only when a requested tile needs it
-  // (its zoom reaches the cell's band and the tile overlaps the cell footprint),
-  // so opening to one harbour parses one cell, not the whole library. `meta` maps
-  // cell name -> { bb:[w,s,e,n]|null, minzoom } (footprint + render-start zoom,
-  // from the catalog). clearCache drops persisted tiles when the installed set
-  // changed (false on a plain reload, so cached tiles render with no parsing).
-  // Returns { ok, names } (the installed set) without parsing anything.
-  async loadStoreCells(meta, clearCache = false) {
-    if (!this._realtime || !this._rt) return null;
-    const names = await this._store.list();
-    console.log(`[realtime] ${names.length} cell(s) in store — lazy load on demand`, names);
-    const list = names.map((name) => {
-      const m = meta && (meta.get ? meta.get(name) : meta[name]);
-      return { name, bb: m && m.bb, minzoom: (m && m.minzoom) || 0, getBytes: () => this._store.getBytes(name) };
-    });
-    this._rt.setCellRegistry(list, (name, status, info) => {
-      this.dispatchEvent(new CustomEvent("cell-status", { detail: { name, status, info }, bubbles: true }));
-    });
-    await this._rt.resetCells(this._assets);
-    if (clearCache && this._rtCache) await this._rtCache.clear();
-    this.refresh();
-    return { ok: true, names };
+  // -- server tiles --------------------------------------------------------
+  // Point the chart source at a server tile set (the {set} in /tiles/{set}/…),
+  // baked + registered by the Go server (POST /api/import). Switches the renderer
+  // into server mode if it wasn't already, (re)builds the style so the "chart"
+  // source + base layers exist, and re-requests tiles. Pass "" to clear. Returns
+  // the active set name.
+  setServerSet(name) {
+    this._serverSet = name || "";
+    if (!this._server) {
+      this._server = true;
+      const map = this._map;
+      if (map) map.setStyle(this.buildStyle());
+    } else {
+      this.refresh();
+    }
+    return this._serverSet;
   }
 
-  // Tile-cache usage (memory + disk bytes/tiles, hit/miss counters) for the
-  // status popup, or null when not on the realtime path.
-  realtimeStats() { return this._rtCache ? this._rtCache.usage() : null; }
-
-  // Parse a cell's footprint [w,s,e,n] without baking (locate an uploaded cell).
-  async cellBounds(name, bytes) { return this._rt ? this._rt.cellBounds(name, bytes) : null; }
-
-  // GeoJSON of loaded cells' real M_COVR data-coverage polygons (debug overlay).
-  async realtimeCoverage() { return this._rt ? this._rt.coverage() : { type: "FeatureCollection", features: [] }; }
-
-  // Toggle per-tile bake diagnostics (logged to the worker console). Debug only.
-  setTileDiag(on) { return this._rt && this._rt.setTileDiag ? this._rt.setTileDiag(on) : null; }
+  // The active server tile-set name, or "" when none/not in server mode.
+  serverSet() { return this._server ? this._serverSet : ""; }
 
   // Resolve an archive source: a Blob/File is passed through; a URL string is
   // made absolute (relative to the page) for the HTTP-Range reader.
@@ -872,10 +819,7 @@ export class ChartPlotter extends HTMLElement {
   // read up front (tiles stream on demand), so a multi-GB archive loads instantly.
   // Returns the opened archive (read `.bounds` to frame). Re-requests tiles.
   async setArchive(src) {
-    // In realtime mode the per-band sources carry the prebaked fan (see
-    // _openPrebaked) and addArchive is a no-op, so a single-archive REPLACE must
-    // NOT wipe them — that would blank the hosted chart.
-    if (this._realtime) return null;
+    if (this._server) return null; // server mode renders from /tiles, not pmtiles archives
     this._bands = {};
     return this.addArchive(src);
   }
@@ -898,7 +842,7 @@ export class ChartPlotter extends HTMLElement {
   // across every band so it overzooms correctly (see `_fanBands`). Tiles still
   // stream by viewport.
   async addArchive(src, band = "all") {
-    if (this._realtime) return null; // realtime renders from cells, not pmtiles archives
+    if (this._server) return null; // server mode renders from /tiles, not pmtiles archives
     const resolved = this._resolveSrc(src);
     let a = null;
     for (const b of this._fanBands(band)) {
@@ -915,7 +859,7 @@ export class ChartPlotter extends HTMLElement {
   // add/remove a region just reloads the manifest's set — no re-bake). An empty
   // list clears the map.
   async loadRegions(urls) {
-    if (this._realtime) return; // realtime renders from cells, not pmtiles archives
+    if (this._server) return; // server mode renders from /tiles, not pmtiles archives
     this._bands = {};
     for (const u of urls) {
       try { await this.addArchive(u, "all"); } catch (e) { console.warn("[chartplotter] region", u, e); }
@@ -945,7 +889,7 @@ export class ChartPlotter extends HTMLElement {
   // string or `{src, band}`; bad sources are skipped (logged). Returns the
   // opened archives.
   async addArchives(entries) {
-    if (this._realtime) return []; // realtime renders from cells, not pmtiles archives
+    if (this._server) return []; // server mode renders from /tiles, not pmtiles archives
     const norm = entries.map((e) => (typeof e === "object" && e && e.src !== undefined ? e : { src: e, band: "all" }));
     const arcs = await Promise.all(norm.map((e) => {
       const band = e.band || "all";
@@ -977,31 +921,6 @@ export class ChartPlotter extends HTMLElement {
   // combine).
   loadArchiveUrl(url) {
     return this.setArchive(url);
-  }
-
-  // The bake engine (worker + wasm), created on first use. Rendering doesn't
-  // need it — only baking (upload-ENCs / charts= attribute) does — so a
-  // prebaked-only viewer never spins up the worker, loads the wasm, or parses
-  // the catalog.
-  _engineClient() {
-    throw new Error(
-      "in-browser baking is not available in this build — tiles are baked " +
-      "server-side (chartplotter provision / POST /api/provision)",
-    );
-  }
-
-  // In-browser baking is not part of the Go build (see the import note at the
-  // top): all tile generation is a server-side task. This throws so the (rare)
-  // bare-component charts="…" / in-browser .zip-import paths fail loudly rather
-  // than silently; the primary flows render a hosted/provisioned archive via
-  // pmtiles="…" or setArchive(). Restoring this is Phase 9 (TinyGo WASM).
-  bakePmtiles(names, onProgress) {
-    return Promise.reject(new Error("in-browser baking unavailable; use server provisioning"));
-  }
-
-  // Names of every locally stored chart.
-  listCharts() {
-    return this._store ? this._store.list() : Promise.resolve([]);
   }
 
   // Update S-52 mariner settings. EVERY setting is applied CLIENT-SIDE from
@@ -1349,24 +1268,11 @@ export class ChartPlotter extends HTMLElement {
     this._layerBase = {};
     this._variants = {};
     const out = [];
-    // Real-time: the per-band prebaked layers (built below) render UNDER the
-    // realtime cp:// "chart" layers, which carry the user's in-browser-baked cells
-    // (kept as the base layer id so scheme/mariner updates by name still hit them).
-    // The cells draw on top of the hosted chart where both exist; offshore, where
-    // the cp:// source has no tile, the overzoomed per-band prebaked shows through.
-    if (this._realtime) {
-      for (const L of tmpl) {
-        for (const band of CHART_BANDS) {
-          const id = L.id + "@" + band.slug;
-          this._layerBase[id] = L.filter ?? null;
-          (this._variants[L.id] ||= []).push(id);
-          const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(L.filter ?? null) };
-          if ((band.slug === "overview" || band.slug === "general") && this._capsAtBand(L)) {
-            v.maxzoom = band.max; // coarser band's non-fill marks never draw at a finer zoom
-          }
-          out.push(v);
-        }
-      }
+    // Server mode: ONE merged "chart" source (all bands baked together by the
+    // server), so the templates map straight onto it — no per-band fan. The server
+    // tiles already carry the best-available band per tile; the client overzooms
+    // above the set's max for free.
+    if (this._server) {
       for (const L of tmpl) {
         const base = L.filter ?? null;
         this._layerBase[L.id] = base;
@@ -1440,10 +1346,11 @@ export class ChartPlotter extends HTMLElement {
         maxzoom: band.bake,
       };
     }
-    if (this._realtime) {
-      // Realtime cells, baked on demand by the wasm; rendered ON TOP of the
-      // per-band prebaked layers (cells override the hosted chart where loaded).
-      sources.chart = { type: "vector", tiles: [`cp://${v}/{z}/{x}/{y}`], minzoom: 0, maxzoom: 18 };
+    if (this._server) {
+      // Server-baked MVT pulled live from /tiles/{set}; one merged source over the
+      // whole zoom range (client overzooms above the set's baked max).
+      const url = this._serverTilesUrl();
+      sources.chart = { type: "vector", tiles: url ? [`${url}?v=${v}`] : [], minzoom: 0, maxzoom: 18 };
     }
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];
 
