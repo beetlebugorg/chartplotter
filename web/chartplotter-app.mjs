@@ -18,6 +18,7 @@
 import "./chartplotter.mjs"; // defines <chart-plotter> (the renderer we wrap)
 import "./pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
 import { ChartDownloader } from "./chart-downloader.mjs"; // chart discovery + acquisition
+import { AuxStore } from "./aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 
@@ -230,6 +231,26 @@ function pickGeomRank(layer) {
   return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[layer] ?? 9;
 }
 
+// Order two picked features per S-52 PresLib §10.8.4: higher drawing priority
+// first, then geometric primitive (point < line < area).
+function pickCmp(a, b) {
+  const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
+  if (pa !== pb) return pb - pa; // higher drawing priority (more significant) first
+  return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
+}
+
+// Richness of a feature's geometry for *highlighting*: an area outlines better
+// than a line, which outlines better than a centred symbol's anchor point. Used
+// to pick which of an object's co-located representations the pick circle/outline
+// should trace, so an area object highlights its extent rather than a dot.
+function hiGeomRank(f) {
+  const t = (f.geometry && f.geometry.type) || "";
+  if (t.includes("Polygon")) return 3;
+  if (t.includes("LineString")) return 2;
+  if (t.includes("Point")) return 1;
+  return 0;
+}
+
 export class ChartPlotterApp extends HTMLElement {
   constructor() {
     super();
@@ -364,20 +385,16 @@ export class ChartPlotterApp extends HTMLElement {
     if (!["coastline", "osm", "osmvec"].includes(this._basemap)) this._basemap = "coastline";
     if (this._basemap === "osmvec" && !this._osmVecUrl) this._basemap = "coastline"; // vector not configured
     plotter.setAttribute("basemap", this._basemap);
-    // Both modes use the wasm baker, so uploaded charts always bake in-browser.
-    // Prod is HYBRID: a hosted prebaked archive (pmtiles="…") fills tiles your
-    // uploads don't cover. Dev/offline is wasm-only (no prebaked).
-    plotter.setAttribute("tiles", "realtime");
-    // Hybrid prebaked fallback: a charts-index.json manifest (multiple archives)
-    // if configured, else a single pmtiles= archive.
-    const prebaked = this._prod ? (this._cfg("catalog") || this._cfg("pmtiles")) : "";
-    if (prebaked) { plotter.setAttribute("prebaked", prebaked); this._hasArchive = true; }
+    // Render source. Prod (hosted): prebaked per-region .pmtiles, loaded by
+    // restoreArchive through the renderer's pmtiles path — no tile server needed.
+    // Local serve: server-baked MVT from /tiles/{set} (server mode); imported /
+    // downloaded cells are baked on the server (POST /api/import) and the renderer
+    // is pointed at the resulting set (see _refreshCharts).
+    if (!this._prod) plotter.setAttribute("tiles", "server");
     this._plotter = plotter;
     this.shadowRoot.getElementById("map").appendChild(plotter);
 
     plotter.addEventListener("ready", (e) => this.onReady(e.detail.map), { once: true });
-    plotter.addEventListener("bake-activity", (e) => this._onBakeActivity(e.detail.inflight));
-    plotter.addEventListener("cell-status", (e) => this._onCellStatus(e.detail));
   }
 
   // Per-cell load status, streamed from the wasm baker as cells are parsed one at
@@ -451,7 +468,7 @@ export class ChartPlotterApp extends HTMLElement {
     else { this._clearDebugHover(); this._hideContextMenu(); }
     // Solo render applies only in debug mode, so toggling it with a render set
     // active flips between "only selected" and normal — re-bake to reflect that.
-    if (this._renderSel.size) this._refreshRealtime(false);
+    if (this._renderSel.size) this._refreshCharts(false);
   }
 
   // Pick the cell under `point` for the debug overlay. Prefers REAL data coverage
@@ -617,7 +634,7 @@ export class ChartPlotterApp extends HTMLElement {
   async _applyRenderSel() {
     console.log(`[debug] render set: ${this._renderSel.size ? [...this._renderSel].join(", ") : "(all)"}`);
     if (this._section === "inspect" && this._drawerOpen()) this._renderDevPanel();
-    await this._refreshRealtime(false); // keep the camera put
+    await this._refreshCharts(false); // keep the camera put
   }
 
   // A tiny shadow-DOM context menu. items: [{ label, onClick }]. Positioned at
@@ -655,7 +672,7 @@ export class ChartPlotterApp extends HTMLElement {
       this._cellError.delete(name);
     }
     console.log("[charts] removed failed cells:", failed);
-    await this._refreshRealtime();
+    await this._refreshCharts();
     this.renderCharts();
     this._renderCellStatusPopup();
   }
@@ -843,7 +860,13 @@ export class ChartPlotterApp extends HTMLElement {
 
   loadCatalog() {
     // NOAA chart catalogue + hosted-archive manifest — owned by the downloader.
-    const dl = this._dl.loadCatalog();
+    // Once the manifest settles it may name a companion aux zip (TXTDSC/PICREP
+    // external files); load it so the pick report can show that content inline.
+    this._aux = new AuxStore();
+    const dl = this._dl.loadCatalog().then(async (r) => {
+      if (this._dl.auxUrl) await this._aux.load(this._dl.auxUrl);
+      return r;
+    });
     // S-57 object/attribute catalogue for the cursor-pick report (decodes class
     // and attribute names, enumerated values and units — S-52 PresLib §10.8).
     // Independent of the chart catalogue; the report degrades to raw acronyms if absent.
@@ -872,14 +895,11 @@ export class ChartPlotterApp extends HTMLElement {
     await this._catalogReady;
     this.addCatalogOverlay(map);
     await this.restoreArchive();
-    // 100%-wasm path: register stored cells for lazy, on-demand parsing (nothing
-    // parses until a viewed tile needs it). Plain reload → keep persisted tiles.
-    this._resetCellStatus();
-    try {
-      const rt = await this._plotter.loadStoreCells(this._realtimeCellMeta(), false);
-      this._refreshInstalledBounds();
-      if (rt && rt.ok && rt.names && rt.names.length) { this._hasArchive = true; this.updateEmptyState(); }
-    } catch (e) { console.warn("[realtime] loadStoreCells", e); }
+    // Local serve: bake the installed cells into a server set and render it. Prod
+    // already loaded its prebaked archives in restoreArchive() above.
+    if (!this._prod && this._installed.size) {
+      try { await this._refreshCharts(false); } catch (e) { console.warn("[charts] initial bake", e); }
+    }
     this.updateEmptyState();
     this.renderCharts();
     this._assessCoverage();
@@ -1432,10 +1452,10 @@ export class ChartPlotterApp extends HTMLElement {
   // gone, but still called on Charts-mode exit / section switch).
   _cancelAreaSelect() { if (this._areaCleanup) this._areaCleanup(); }
 
-  // Download a whole pack: fetch NOAA's per-district bundle once (one zip holding
-  // exactly this district's cells), extract the cells we don't already have into
-  // the browser store, then re-bake in-browser. If the district bundle can't be
-  // opened it falls back to All_ENCs.zip, then to per-cell fetches.
+  // Download a whole pack: the SERVER fetches NOAA's per-district bundle into its
+  // XDG cache (one zip holding exactly this district's cells), then we bake the
+  // installed union from the cache and render it. Falls back to per-cell server
+  // fetches if the district bundle can't be opened. No client-side download / OPFS.
   async _downloadPack(cg) {
     if (this._taskRunning()) return;
     const d = DISTRICTS.find((x) => x.cg === cg);
@@ -1449,23 +1469,23 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
 
     const prog = (p) => this._setProgress(p);
-    let failed = want.length;
+    want.forEach((n) => this._installed.add(n)); // optimistic; rolled back on total failure
+    let ok = true;
     try {
-      failed = await this._dl.bulkExtractZip(this._districtZipUrl(cg), want, label, prog);
+      await this._serverFetch({ zipUrl: this._districtZipUrl(cg), names: want }, prog);
     } catch (e) {
-      console.warn(`[pack] ${label} bundle failed — trying All_ENCs.zip:`, e.message);
-      try { failed = await this._dl.bulkExtract(want, prog); }
-      catch (e2) { console.warn("[pack] All_ENCs.zip failed — per-cell:", e2.message); failed = await this._dl.downloadPerCell(want, prog); }
+      console.warn(`[pack] ${label} server bundle failed — per-cell:`, e.message);
+      const cells = want.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
+      try { await this._serverFetch({ cells }, prog); }
+      catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); ok = false; want.forEach((n) => this._installed.delete(n)); }
     }
 
-    this._setProgress({ label: "Baking tiles…", sub: failed ? `${failed} chart${failed !== 1 ? "s" : ""} failed` : "", frac: 1 });
-    await this._refreshRealtime();
+    if (ok) await this._refreshCharts(); // union bake from the server cache + render
     this._task = null;
     this._setProgress(null);
     this.updateEmptyState();
     this._refreshCellSel();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-    if (failed) console.warn(`[pack] ${label}: ${failed} of ${want.length} chart(s) failed`);
   }
 
   // Uninstall a pack: drop its cells from the browser store and re-bake.
@@ -1480,7 +1500,7 @@ export class ChartPlotterApp extends HTMLElement {
     for (const n of names) {
       try { await this._store.remove(n); this._installed.delete(n); } catch (e) { console.warn("[store] remove", n, e); }
     }
-    await this._refreshRealtime();
+    await this._refreshCharts();
     this._task = null;
     this._setProgress(null);
     this.updateEmptyState();
@@ -2073,7 +2093,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (off) this._bandsOff.add(band); else this._bandsOff.delete(band);
     this._clearDevHoles();
     this._renderDevPanel();
-    await this._refreshRealtime(false); // re-bake in place — don't move the camera
+    await this._refreshCharts(false); // re-bake in place — don't move the camera
   }
 
   // Sample a grid over the viewport: a point where no chart feature renders is a
@@ -2247,23 +2267,31 @@ export class ChartPlotterApp extends HTMLElement {
     const map = this._map;
     if (!map) return;
     const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source));
-    const seen = new Set(), uniq = [];
+    // Collapse the per-source-layer representations of one S-57 object — its area
+    // fill, boundary line and centred symbol arrive as separate features that all
+    // share class/cell/objnam/s57 — into a single pick entry, so stepping the
+    // report walks real-world objects rather than draw primitives. Each object
+    // keeps its highest-priority representation as the displayed row (§10.8.4
+    // ordering is unchanged) plus the richest geometry under the cursor
+    // (area > line > point) on `_hiGeom`, so the highlight traces an area's
+    // extent instead of dropping a dot on a centred symbol's anchor.
+    const groups = new Map();
     for (const f of feats) {
       const p = f.properties || {};
-      const key = (f.sourceLayer || "") + "|" + (p.class || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      uniq.push(f);
+      const key = (p.class || "") + "|" + (p.cell || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
+      const g = groups.get(key);
+      if (!g) { groups.set(key, { feat: f, hi: f }); continue; }
+      if (pickCmp(f, g.feat) < 0) g.feat = f;        // higher drawing priority wins the report row
+      if (hiGeomRank(f) > hiGeomRank(g.hi)) g.hi = f; // richer primitive wins the highlight
     }
+    const uniq = [];
+    for (const g of groups.values()) { g.feat._hiGeom = g.hi.geometry; uniq.push(g.feat); }
     if (!uniq.length) { this._closePick(); return; }
-    uniq.sort((a, b) => {
-      const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
-      if (pa !== pb) return pb - pa; // higher drawing priority (more significant) first
-      return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
-    });
+    uniq.sort(pickCmp);
     const el = this._ensurePickEl();
     if (!el) return; // <pick-report> module not loaded (degrade quietly)
     el.setCatalogue(this._s57cat);
+    el.setAux(this._aux);
     el.show(uniq, ev ? { x: ev.clientX, y: ev.clientY } : null);
   }
 
@@ -2276,8 +2304,9 @@ export class ChartPlotterApp extends HTMLElement {
     this.shadowRoot.appendChild(el);
     el.addEventListener("pick-feature", (e) => {
       const f = e.detail && e.detail.feature;
+      const geom = f ? (f._hiGeom || f.geometry) : null; // trace the object's extent, not the symbol anchor
       const src = this._map && this._map.getSource("pick");
-      if (src) src.setData({ type: "FeatureCollection", features: f ? [{ type: "Feature", properties: {}, geometry: f.geometry }] : [] });
+      if (src) src.setData({ type: "FeatureCollection", features: geom ? [{ type: "Feature", properties: {}, geometry: geom }] : [] });
     });
     el.addEventListener("pick-close", () => this._clearPickHi());
     this._pickEl = el;
@@ -2627,27 +2656,112 @@ export class ChartPlotterApp extends HTMLElement {
     this.updateEmptyState();
     this.renderArchiveList();
     // Re-bake the in-browser wasm tiles from the now-larger stored cell set.
-    await this._refreshRealtime();
+    await this._refreshCharts();
   }
 
-  // Reload every stored cell into the wasm baker (the 100%-wasm render path) and
-  // reflect coverage in the empty state. Called after any import.
-  // frame=false re-bakes in place without moving the camera — used by the dev
-  // band toggles, which only change what renders in the current view.
-  async _refreshRealtime(frame = true) {
+  // Bake the installed cells into a server tile set and render it. Called after any
+  // import / install / removal. Uploads each stored cell to the server cache, then
+  // POST /api/import bakes a set named "user" from exactly that list; the renderer
+  // is pointed at /tiles/user. frame=false rebakes in place without moving the
+  // camera. The wasm baker is gone — all baking is server-side now.
+  async _refreshCharts(frame = true) {
     if (!this._plotter) return;
-    this._resetCellStatus();
+    const names = [...this._installed];
+    this._refreshInstalledBounds();
+    if (!names.length) { this._plotter.setServerSet(""); this.updateEmptyState(); return; }
+    if (this._charting) { this._chartingAgain = true; return; } // coalesce concurrent rebakes
+    this._charting = true;
     try {
-      // The installed set changed → drop persisted tiles so removed cells vanish.
-      const rt = await this._plotter.loadStoreCells(this._realtimeCellMeta(), true);
-      this._refreshInstalledBounds();
-      if (rt && rt.ok && rt.names && rt.names.length) {
-        this._hasArchive = true;
-        this.updateEmptyState();
-        if (frame) { await this._ensureForeignBounds(rt.names); this._frameCells(rt.names); }
+      // Make sure the server cache holds each installed cell (upload from the local
+      // store; idempotent). Then bake exactly these cells into the "user" set.
+      for (const name of names) {
+        try {
+          const bytes = await this._store.getBytes(name);
+          if (bytes && bytes.length) {
+            await fetch(`${this._assets}api/cell/${encodeURIComponent(name)}`, { method: "PUT", body: bytes });
+          }
+        } catch (e) { console.warn("[charts] upload", name, e); }
       }
-    } catch (e) { console.warn("[realtime] refresh", e); }
-    this._refreshCellUsage();
+      const res = await fetch(`${this._assets}api/import?set=user&cells=${encodeURIComponent(names.join(","))}`, { method: "POST" });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
+      await this._pollImport(j.job);
+      this._plotter.setServerSet("user");
+      this._hasArchive = true;
+      this.updateEmptyState();
+      if (frame) this._frameCells(names);
+    } catch (e) {
+      console.warn("[charts] server bake", e);
+    } finally {
+      this._charting = false;
+      this._refreshCellUsage();
+      if (this._chartingAgain) { this._chartingAgain = false; this._refreshCharts(false); }
+    }
+  }
+
+  // Wait for a server job (download/bake) to complete, surfacing progress through
+  // prog({label,sub,frac}). Prefers a single Server-Sent-Events stream (one
+  // connection, server pushes on change) and falls back to polling if EventSource
+  // is unavailable or the stream drops. Resolves with the final status; throws on
+  // error/timeout.
+  async _pollImport(job, prog = () => {}) {
+    if (typeof EventSource !== "undefined") {
+      try { return await this._streamJob(job, prog); }
+      catch (e) { console.warn("[job] event stream failed — polling:", e.message); }
+    }
+    for (let i = 0; i < 2400; i++) { // ~20 min ceiling at 500ms
+      const r = await fetch(`${this._assets}api/import/status?job=${encodeURIComponent(job)}`);
+      const s = await r.json().catch(() => ({}));
+      if (s.state === "done") return s;
+      if (s.state === "error") throw new Error(s.error || "job failed");
+      this._reportJob(s, prog);
+      await new Promise((res) => setTimeout(res, 500));
+    }
+    throw new Error("job timed out");
+  }
+
+  // Stream a job's progress over SSE (GET /api/import/events). One long-lived
+  // connection; the server pushes a status event whenever it changes.
+  _streamJob(job, prog) {
+    return new Promise((resolve, reject) => {
+      const es = new EventSource(`${this._assets}api/import/events?job=${encodeURIComponent(job)}`);
+      let settled = false;
+      const done = (fn, arg) => { if (!settled) { settled = true; es.close(); fn(arg); } };
+      es.onmessage = (ev) => {
+        let s; try { s = JSON.parse(ev.data); } catch { return; }
+        if (s.state === "done") return done(resolve, s);
+        if (s.state === "error") return done(reject, new Error(s.error || "job failed"));
+        this._reportJob(s, prog);
+      };
+      es.onerror = () => done(reject, new Error("event stream closed"));
+    });
+  }
+
+  // Map a job status into the progress UI. The server reports a human note + a
+  // (done/total, unit) counter per phase (download bytes/cells → extract → bake tiles).
+  _reportJob(s, prog) {
+    const label = s.note || (s.phase ? s.phase[0].toUpperCase() + s.phase.slice(1) + "…" : "Working…");
+    let sub = "";
+    if (s.unit === "bytes") sub = s.total ? `${this._fmtBytes(s.done)} / ${this._fmtBytes(s.total)}` : this._fmtBytes(s.done);
+    else if (s.total) sub = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${s.unit || ""}`.trim();
+    if (s.percent) sub += sub ? ` · ${s.percent}%` : `${s.percent}%`;
+    prog({ label, sub, frac: s.total ? s.done / s.total : null });
+  }
+
+  // Server-side download: the SERVER fetches the cells from NOAA into its XDG cache
+  // (no client download / OPFS). spec is {zipUrl,names} (one district bundle) or
+  // {cells:[{name,url}]} (per-cell). downloadOnly → the cells land in the cache and
+  // the caller triggers the union bake via _refreshCharts.
+  async _serverFetch(spec, prog = () => {}) {
+    const body = { set: "user", downloadOnly: true, ...spec };
+    const res = await fetch(`${this._assets}api/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.job) throw new Error(j.error || `download HTTP ${res.status}`);
+    return this._pollImport(j.job, prog);
   }
 
   // Footprint + render-start zoom for each installed cell, from the catalog —
@@ -2952,29 +3066,22 @@ export class ChartPlotterApp extends HTMLElement {
     this.refreshBoxes();
     this.renderArchiveList();
     // New cells stored → the wasm baker renders them on demand (no pre-bake).
-    if (imported.length) await this._refreshRealtime();
+    if (imported.length) await this._refreshCharts();
     setTimeout(() => this._setProgress(null), 1200);
   }
 
-  // Bake every installed cell into ONE static .pmtiles (the bake-once path),
-  // persist it, and point the renderer at it. Shows tile-bake progress.
+  // Re-bake every installed cell into the server "user" set and render it. The
+  // bake now runs server-side (POST /api/import); see _refreshCharts.
   async rebakeArchive() {
     const names = [...this._installed];
     if (!names.length) return;
-    this._setProgress({ label: "Importing charts…", sub: `${names.length} chart${names.length > 1 ? "s" : ""}`, frac: 0 });
+    this._setProgress({ label: "Baking charts…", sub: `${names.length} chart${names.length > 1 ? "s" : ""}`, frac: null });
     try {
-      const bytes = await this._plotter.bakePmtiles(names, (p) => {
-        this._setProgress({ label: "Importing charts…", sub: `${p.done.toLocaleString()} / ${p.total.toLocaleString()} tiles`, frac: p.total ? p.done / p.total : null });
-      });
-      const blob = new Blob([bytes], { type: "application/octet-stream" });
-      await this._plotter.addArchive(blob); // render first (header + dir only)
-      this._importedArchives.push(blob); // keep in memory so a coverage rebuild can re-add it
-      this._markArchive({ type: "blob" });
-      archivePut(blob).catch((e) => console.warn("[archive] persist failed", e)); // background
-      this._setProgress({ label: `Imported ${names.length} chart${names.length > 1 ? "s" : ""}`, sub: "Ready", frac: 1 });
+      await this._refreshCharts();
+      this._setProgress({ label: `Baked ${names.length} chart${names.length > 1 ? "s" : ""}`, sub: "Ready", frac: 1 });
     } catch (e) {
       console.error("[bake]", e);
-      this._setProgress({ label: "Import failed", sub: e.message, frac: null });
+      this._setProgress({ label: "Bake failed", sub: e.message, frac: null });
     }
     setTimeout(() => this._setProgress(null), 1500);
   }

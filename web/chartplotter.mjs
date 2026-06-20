@@ -135,9 +135,13 @@ export class ChartPlotter extends HTMLElement {
     this._serverSet = "";    // active server tile-set name (the {set} in /tiles/{set}/…)
   }
 
-  // Tile URL template for the active server set, or "" when no set is selected.
+  // Absolute tile-URL template for the active server set, or "" when no set is
+  // selected. MUST be absolute: MapLibre fetches tiles in a Web Worker that has no
+  // document base, so a relative "/tiles/…" URL throws "Failed to parse URL".
   _serverTilesUrl() {
-    return this._serverSet ? `${this._assets}tiles/${this._serverSet}/{z}/{x}/{y}.mvt` : "";
+    if (!this._serverSet) return "";
+    const base = new URL(this._assets, location.href).href; // absolute, trailing "/"
+    return `${base}tiles/${this._serverSet}/{z}/{x}/{y}.mvt`;
   }
 
   connectedCallback() {
