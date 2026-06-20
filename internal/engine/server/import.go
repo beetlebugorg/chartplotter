@@ -3,10 +3,13 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,8 +35,11 @@ type importJob struct {
 	ID      string `json:"id"`
 	Set     string `json:"set"`
 	State   string `json:"state"` // "running" | "done" | "error"
-	Done    int    `json:"done"`  // tiles emitted
-	Total   int    `json:"total"` // tiles to emit (0 until known)
+	Phase   string `json:"phase"` // "download" | "extract" | "bake"
+	Note    string `json:"note"`  // human-readable current step (e.g. "downloading US5MD1MC")
+	Done    int    `json:"done"`  // phase units done (bytes/cells downloaded, then tiles emitted)
+	Total   int    `json:"total"` // phase total (0 until known)
+	Unit    string `json:"unit"`  // what done/total count: "bytes" | "cells" | "tiles"
 	Cells   int    `json:"cells"` // cells successfully parsed
 	Err     string `json:"error,omitempty"`
 	Started string `json:"started"`
@@ -90,10 +96,21 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		s.importStatus(w, r)
 		return
 	}
+	if r.URL.Path == "/api/import/events" {
+		s.importEvents(w, r)
+		return
+	}
 	if r.URL.Path != "/api/import" || r.Method != http.MethodPost {
 		apiErr(w, http.StatusMethodNotAllowed, "POST /api/import")
 		return
 	}
+	// JSON body → server-side fetch+bake (the download path: the server pulls the
+	// cells from NOAA itself rather than the client downloading + re-uploading).
+	if strings.HasPrefix(r.Header.Get("Content-Type"), jsonCT) {
+		s.handleImportFetch(w, r)
+		return
+	}
+
 	set := r.URL.Query().Get("set")
 	if !isSetName(set) || set == dynamicSetName {
 		apiErr(w, http.StatusBadRequest, "set must be a valid name (and not 'dynamic')")
@@ -118,6 +135,229 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", jsonCT)
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, `{"ok":true,"job":%q,"set":%q}`, job.ID, set)
+}
+
+// importFetchReq is the JSON body of a server-side download+bake. Either zipURL
+// (one NOAA exchange-set/district zip the server fetches + extracts) or cells (a
+// list of per-cell NOAA zip URLs) supplies the cells; the server downloads them
+// from NOAA itself, then bakes set.
+type importFetchReq struct {
+	Set      string   `json:"set"`
+	Overzoom bool     `json:"overzoom"`
+	Updates  *bool    `json:"updates"` // nil → apply .001+ (default)
+	ZipURL   string   `json:"zipUrl"`  // bulk: one NOAA zip to fetch + extract
+	Names    []string `json:"names"`   // for zipUrl: keep only these base cells (empty → all)
+	Cells    []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	} `json:"cells"` // per-cell: each cell's own NOAA zip URL
+	// Bake, if set, is the FULL set of cell names to bake from the cache (the union
+	// of everything installed) after the download — so adding one district rebakes
+	// the whole "user" set, not just the new cells. Empty → bake only what was
+	// downloaded this call.
+	Bake []string `json:"bake"`
+	// DownloadOnly fetches the cells into the server cache and finishes WITHOUT
+	// baking — the client then triggers a single union bake (POST /api/import
+	// cells=…). This keeps one bake path while moving the NOAA fetch server-side.
+	DownloadOnly bool `json:"downloadOnly"`
+}
+
+// handleImportFetch accepts a JSON fetch spec, validates it, and starts a job that
+// downloads the cells from NOAA server-side and bakes them.
+func (s *Server) handleImportFetch(w http.ResponseWriter, r *http.Request) {
+	var req importFetchReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		apiErr(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if req.Set == "" {
+		req.Set = r.URL.Query().Get("set")
+	}
+	if !isSetName(req.Set) || req.Set == dynamicSetName {
+		apiErr(w, http.StatusBadRequest, "set must be a valid name (and not 'dynamic')")
+		return
+	}
+	if req.ZipURL == "" && len(req.Cells) == 0 {
+		apiErr(w, http.StatusBadRequest, "need zipUrl or cells")
+		return
+	}
+	if req.ZipURL != "" && !isNOAAURL(req.ZipURL) {
+		apiErr(w, http.StatusBadRequest, "zipUrl must be a charts.noaa.gov URL")
+		return
+	}
+	for _, c := range req.Cells {
+		if c.URL != "" && !isNOAAURL(c.URL) {
+			apiErr(w, http.StatusBadRequest, "cell url must be a charts.noaa.gov URL")
+			return
+		}
+	}
+
+	job := s.imports.create(req.Set)
+	go s.runImportFetch(job.ID, req)
+
+	w.Header().Set("Content-Type", jsonCT)
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, `{"ok":true,"job":%q,"set":%q}`, job.ID, req.Set)
+}
+
+// runImportFetch downloads the requested cells from NOAA into the server cache
+// (reporting download progress on the job), then bakes + registers the set.
+func (s *Server) runImportFetch(jobID string, req importFetchReq) {
+	fail := func(err error) {
+		log.Printf("import %s (%s): %v", jobID, req.Set, err)
+		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
+	}
+	applyUpdates := req.Updates == nil || *req.Updates
+
+	var cells map[string]baker.CellData
+	var aux map[string][]byte
+
+	if req.ZipURL != "" {
+		// Bulk: stream the one zip (byte progress), then extract + cache its cells.
+		name := req.ZipURL[strings.LastIndexByte(req.ZipURL, '/')+1:]
+		s.imports.update(jobID, func(j *importJob) {
+			j.Phase, j.Unit, j.Note, j.Done, j.Total = "download", "bytes", "Downloading "+name, 0, 0
+		})
+		data, err := fetchURLProgress(req.ZipURL, func(done, total int) {
+			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
+		})
+		if err != nil {
+			fail(fmt.Errorf("download %s: %w", req.ZipURL, err))
+			return
+		}
+		s.imports.update(jobID, func(j *importJob) {
+			j.Phase, j.Unit, j.Note, j.Done, j.Total = "extract", "cells", "Extracting "+name, 0, 0
+		})
+		cells, aux, err = extractZipCells(data)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if len(req.Names) > 0 {
+			cells = filterCells(cells, req.Names)
+		}
+		// Persist the extracted cells to the ENC_ROOT cache so a later rebake of the
+		// installed union (req.Bake) finds them (per-cell downloads cache themselves).
+		s.cacheCells(cells)
+	} else {
+		// Per-cell: download each into the ENC_ROOT cache, then bake from there.
+		cells = map[string]baker.CellData{}
+		total := len(req.Cells)
+		s.imports.update(jobID, func(j *importJob) { j.Phase, j.Unit, j.Total = "download", "cells", total })
+		for i, c := range req.Cells {
+			if !isCellName(c.Name) {
+				continue
+			}
+			s.imports.update(jobID, func(j *importJob) { j.Note = "Downloading " + c.Name; j.Done = i })
+			base, _, err := loadCellCached(http.DefaultClient, s.cacheDir, c.Name, c.URL)
+			if err != nil {
+				log.Printf("import %s: download %s: %v", jobID, c.Name, err) // skip, keep going
+			} else {
+				cells[c.Name+".000"] = baker.CellData{Base: base}
+			}
+			s.imports.update(jobID, func(j *importJob) { j.Done = i + 1 })
+		}
+	}
+
+	if len(cells) == 0 {
+		fail(fmt.Errorf("no cells downloaded"))
+		return
+	}
+	// Download-only: the cells are now in the XDG cache (ENC_ROOT/); the client
+	// triggers the union bake separately. Done.
+	if req.DownloadOnly {
+		log.Printf("import %s: downloaded %d cell(s) into the cache", jobID, len(cells))
+		s.imports.update(jobID, func(j *importJob) { j.Cells = len(cells); j.State = "done" })
+		return
+	}
+	// Bake the full installed union (req.Bake) from the cache, with the freshly
+	// downloaded cells merged in; or just the downloaded set when Bake is empty.
+	bakeMap := cells
+	if len(req.Bake) > 0 {
+		bakeMap = s.cachedCellData(strings.Join(req.Bake, ","))
+		maps.Copy(bakeMap, cells)
+	}
+	s.bakeAndRegister(jobID, req.Set, bakeMap, aux, req.Overzoom, applyUpdates)
+}
+
+// cacheCells writes each cell's base (+updates) into the ENC_ROOT cache layout so
+// a later cache bake (cachedCellData) finds it. Best-effort; write errors are logged.
+func (s *Server) cacheCells(cells map[string]baker.CellData) {
+	root := filepath.Join(s.cacheDir, "ENC_ROOT")
+	for name, cd := range cells {
+		stem := strings.TrimSuffix(name, ".000")
+		if !isCellName(stem) {
+			continue
+		}
+		dir := filepath.Join(root, stem)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("cache %s: %v", stem, err)
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, stem+".000"), cd.Base, 0o644); err != nil {
+			log.Printf("cache %s: %v", stem, err)
+		}
+		for un, ub := range cd.Updates {
+			_ = os.WriteFile(filepath.Join(dir, filepath.Base(un)), ub, 0o644)
+		}
+	}
+}
+
+// filterCells keeps only the cells whose stem (name sans .000) is in names.
+func filterCells(cells map[string]baker.CellData, names []string) map[string]baker.CellData {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[strings.TrimSuffix(n, ".000")] = true
+	}
+	out := make(map[string]baker.CellData, len(want))
+	for k, v := range cells {
+		if want[strings.TrimSuffix(k, ".000")] {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// isNOAAURL reports whether raw is an http(s) URL on a NOAA chart host.
+func isNOAAURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && isNOAAHost(u.Hostname())
+}
+
+// fetchURLProgress downloads raw (capped at maxImportBytes) and returns the bytes,
+// calling onProgress(bytesSoFar, contentLength) as it streams (contentLength is 0
+// when the server sends no Content-Length).
+func fetchURLProgress(raw string, onProgress func(done, total int)) ([]byte, error) {
+	resp, err := http.DefaultClient.Get(raw)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	total := max(int(resp.ContentLength), 0)
+	var out bytes.Buffer
+	buf := make([]byte, 256<<10)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			out.Write(buf[:n])
+			if out.Len() > maxImportBytes {
+				return nil, fmt.Errorf("download exceeds %d bytes", maxImportBytes)
+			}
+			if onProgress != nil {
+				onProgress(out.Len(), total)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return nil, rerr
+		}
+	}
+	return out.Bytes(), nil
 }
 
 // importInputs gathers the cells to bake: from an uploaded zip (raw zip body or a
@@ -194,8 +434,14 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 }
 
 // runImport bakes cells into <cache>/tiles/<set>.pmtiles and registers the set.
-// Progress and the terminal state are recorded on the job.
 func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, overzoom, applyUpdates bool) {
+	s.bakeAndRegister(jobID, set, cells, aux, overzoom, applyUpdates)
+}
+
+// bakeAndRegister is the shared bake → write → register tail for every import
+// path (upload, cached, server-fetch). Progress and the terminal state are
+// recorded on the job.
+func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, overzoom, applyUpdates bool) {
 	fail := func(err error) {
 		log.Printf("import %s (%s): %v", jobID, set, err)
 		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
@@ -206,7 +452,10 @@ func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, a
 		fail(err)
 		return
 	}
-	s.imports.update(jobID, func(j *importJob) { j.Cells = b.ok })
+	s.imports.update(jobID, func(j *importJob) {
+		j.Cells = b.ok
+		j.Phase, j.Unit, j.Note, j.Done, j.Total = "bake", "tiles", fmt.Sprintf("Baking %d cell(s)", b.ok), 0, 0
+	})
 
 	pb := baker.BakeToPMTiles(b.baker, func(done, total int) {
 		s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
@@ -301,7 +550,19 @@ func (s *Server) writeAux(set string, aux map[string][]byte) error {
 	return nil
 }
 
-// importStatus returns a job's state as JSON.
+// statusJSON renders a job snapshot as the status JSON line (shared by the polling
+// endpoint and the SSE stream).
+func (j importJob) statusJSON() string {
+	pct := 0
+	if j.Total > 0 {
+		pct = j.Done * 100 / j.Total
+	}
+	return fmt.Sprintf(
+		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"note":%q,"done":%d,"total":%d,"unit":%q,"percent":%d,"cells":%d,"error":%q}`,
+		j.ID, j.Set, j.State, j.Phase, j.Note, j.Done, j.Total, j.Unit, pct, j.Cells, j.Err)
+}
+
+// importStatus returns a job's state as JSON (one-shot poll).
 func (s *Server) importStatus(w http.ResponseWriter, r *http.Request) {
 	job, ok := s.imports.snapshot(r.URL.Query().Get("job"))
 	if !ok {
@@ -309,13 +570,52 @@ func (s *Server) importStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", jsonCT)
-	pct := 0
-	if job.Total > 0 {
-		pct = job.Done * 100 / job.Total
+	io.WriteString(w, job.statusJSON())
+}
+
+// importEvents streams a job's progress as Server-Sent Events, so the client opens
+// ONE long-lived connection instead of polling. It emits a "data:" event whenever
+// the status line changes (checked on a short server-side tick — cheap in-memory
+// reads, no per-update fan-out), and a final event when the job ends. Closes on
+// completion or client disconnect.
+func (s *Server) importEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("job")
+	if _, ok := s.imports.snapshot(id); !ok {
+		apiErr(w, http.StatusNotFound, "unknown job")
+		return
 	}
-	fmt.Fprintf(w,
-		`{"ok":true,"id":%q,"set":%q,"state":%q,"done":%d,"total":%d,"percent":%d,"cells":%d,"error":%q}`,
-		job.ID, job.Set, job.State, job.Done, job.Total, pct, job.Cells, job.Err)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		apiErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	last := ""
+	for {
+		job, ok := s.imports.snapshot(id)
+		if !ok {
+			return
+		}
+		if line := job.statusJSON(); line != last {
+			last = line
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+		if job.State != "running" {
+			return // terminal state emitted; close the stream
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // extractZipCells reads an exchange-set zip held in memory, grouping each cell's

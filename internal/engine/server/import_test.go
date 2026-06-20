@@ -168,6 +168,83 @@ func TestImportJobErrorPath(t *testing.T) {
 	}
 }
 
+func TestImportFetchValidation(t *testing.T) {
+	dir := t.TempDir()
+	ts := httptest.NewServer(New(dir, dir, false))
+	defer ts.Close()
+
+	post := func(body string) int {
+		resp, _ := http.Post(ts.URL+"/api/import", "application/json", bytes.NewReader([]byte(body)))
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := post(`{"set":"bad..name","cells":[{"name":"X","url":""}]}`); c != http.StatusBadRequest {
+		t.Errorf("bad set: got %d", c)
+	}
+	if c := post(`{"set":"user"}`); c != http.StatusBadRequest {
+		t.Errorf("no spec: got %d, want 400", c)
+	}
+	if c := post(`{"set":"user","zipUrl":"https://evil.example/x.zip"}`); c != http.StatusBadRequest {
+		t.Errorf("non-NOAA zipUrl: got %d, want 400", c)
+	}
+	if c := post(`{"set":"user","cells":[{"name":"US5MD1MC","url":"https://evil.example/c.zip"}]}`); c != http.StatusBadRequest {
+		t.Errorf("non-NOAA cell url: got %d, want 400", c)
+	}
+}
+
+// TestImportFetchDownloadOnly places a cell in the cache, then a per-cell
+// download-only fetch with an empty URL finds it cached (no NOAA) and finishes
+// "done" without baking — verifying the server-side download path + cache.
+func TestImportFetchDownloadOnly(t *testing.T) {
+	dir := t.TempDir()
+	cp := filepath.Join(dir, "ENC_ROOT", "US5MD1MC", "US5MD1MC.000")
+	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cp, []byte("cell-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(dir, dir, false)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/import", "application/json",
+		bytes.NewReader([]byte(`{"set":"user","downloadOnly":true,"cells":[{"name":"US5MD1MC","url":""}]}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("accept: %d %s", resp.StatusCode, body)
+	}
+	var acc struct{ Job string }
+	json.Unmarshal(body, &acc)
+
+	var st struct {
+		State, Phase string
+		Cells        int
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ := http.Get(ts.URL + "/api/import/status?job=" + acc.Job)
+		b, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		json.Unmarshal(b, &st)
+		if st.State != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st.State != "done" || st.Cells != 1 {
+		t.Fatalf("download-only: state=%q cells=%d, want done/1", st.State, st.Cells)
+	}
+	// Download-only must NOT register a tile set.
+	if _, ok := srv.sets.get("user"); ok {
+		t.Errorf("download-only should not register a set")
+	}
+}
+
 func keys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

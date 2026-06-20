@@ -93,6 +93,14 @@ func (w *logResponseWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Flush forwards to the underlying writer so streaming responses (SSE) work
+// through the log wrapper.
+func (w *logResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 const jsonCT = "application/json"
 
 func apiErr(w http.ResponseWriter, status int, msg string) {
