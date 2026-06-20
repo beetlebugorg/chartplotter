@@ -133,6 +133,8 @@ export class ChartPlotter extends HTMLElement {
     this._bands = {};        // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
     this._server = false;    // server-tiles mode (tiles="server"): chart source is /tiles/{set}
     this._serverSet = "";    // active server tile-set name (the {set} in /tiles/{set}/…)
+    this._serverMin = 0;     // active set's real min zoom (from its TileJSON)
+    this._serverMax = 18;    // active set's real MAX zoom — the source maxzoom MUST equal this
   }
 
   // Absolute tile-URL template for the active server set, or "" when no set is
@@ -142,6 +144,24 @@ export class ChartPlotter extends HTMLElement {
     if (!this._serverSet) return "";
     const base = new URL(this._assets, location.href).href; // absolute, trailing "/"
     return `${base}tiles/${this._serverSet}/{z}/{x}/{y}.mvt`;
+  }
+
+  // Read the active set's real zoom range from its TileJSON. The source maxzoom MUST
+  // be the set's actual deepest baked zoom: if it claims more (e.g. a fixed 18 when a
+  // harbor cell only bakes to z16), MapLibre requests tiles past the bake (empty →
+  // no-data holes) instead of overzooming the deepest real tile. Best-effort.
+  async _fetchServerZoom() {
+    this._serverMin = 0;
+    this._serverMax = 18;
+    if (!this._serverSet) return;
+    try {
+      const base = new URL(this._assets, location.href).href;
+      const tj = await fetch(`${base}tiles/${this._serverSet}.json`).then((r) => (r.ok ? r.json() : null));
+      if (tj) {
+        if (Number.isFinite(tj.minzoom)) this._serverMin = tj.minzoom;
+        if (Number.isFinite(tj.maxzoom)) this._serverMax = tj.maxzoom;
+      }
+    } catch (e) { /* keep defaults */ }
   }
 
   connectedCallback() {
@@ -232,7 +252,12 @@ export class ChartPlotter extends HTMLElement {
     // by the `set` attribute or setServerSet(). Otherwise the prebaked per-band
     // pmtiles:// path (setArchive/loadRegions/pmtiles=), a hosted static-CDN archive.
     this._server = this.getAttribute("tiles") === "server";
-    if (this._server) this._serverSet = this.getAttribute("set") || "";
+    if (this._server) {
+      this._serverSet = this.getAttribute("set") || "";
+      // Learn the set's real zoom range before the first buildStyle so the chart
+      // source's maxzoom is truthful (overzoom, not empty-tile holes).
+      if (this._serverSet) await this._fetchServerZoom();
+    }
 
     // Per-band prebaked sources (chart-<slug>), one PMTiles protocol each. Each
     // carries its own maxzoom so MapLibre client-overzooms a coarse band up into
@@ -797,15 +822,20 @@ export class ChartPlotter extends HTMLElement {
   // into server mode if it wasn't already, (re)builds the style so the "chart"
   // source + base layers exist, and re-requests tiles. Pass "" to clear. Returns
   // the active set name.
-  setServerSet(name) {
+  async setServerSet(name) {
+    const prevSet = this._serverSet;
+    const prevMin = this._serverMin, prevMax = this._serverMax;
+    const wasServer = this._server;
     this._serverSet = name || "";
-    if (!this._server) {
-      this._server = true;
-      const map = this._map;
-      if (map) map.setStyle(this.buildStyle());
-    } else {
-      this.refresh();
-    }
+    this._server = true;
+    await this._fetchServerZoom(); // truthful source min/max so overzoom works
+    const map = this._map;
+    // Rebuild the style when the SET itself appears/changes or its zoom range moves
+    // (the source must be created/recreated). A same-set rebake just bumps tiles.
+    const rebuild = !wasServer || this._serverSet !== prevSet ||
+      this._serverMin !== prevMin || this._serverMax !== prevMax;
+    if (map && rebuild) map.setStyle(this.buildStyle());
+    else if (map) this.refresh();
     return this._serverSet;
   }
 
@@ -1277,6 +1307,7 @@ export class ChartPlotter extends HTMLElement {
     // tiles already carry the best-available band per tile; the client overzooms
     // above the set's max for free.
     if (this._server) {
+      if (!this._serverTilesUrl()) return out; // no set selected → no chart source/layers
       for (const L of tmpl) {
         const base = L.filter ?? null;
         this._layerBase[L.id] = base;
@@ -1351,10 +1382,14 @@ export class ChartPlotter extends HTMLElement {
       };
     }
     if (this._server) {
-      // Server-baked MVT pulled live from /tiles/{set}; one merged source over the
-      // whole zoom range (client overzooms above the set's baked max).
+      // Server-baked MVT pulled live from /tiles/{set}. minzoom/maxzoom are the
+      // set's REAL range (from its TileJSON) so MapLibre overzooms the deepest baked
+      // tile above maxzoom instead of requesting empty tiles past the bake. Only
+      // added when a set is selected — a vector source with an empty `tiles` array
+      // makes MapLibre crash (it indexes tiles[i % tiles.length]); with no set we
+      // emit no chart source/layers and the no-data hatch shows through.
       const url = this._serverTilesUrl();
-      sources.chart = { type: "vector", tiles: url ? [`${url}?v=${v}`] : [], minzoom: 0, maxzoom: 18 };
+      if (url) sources.chart = { type: "vector", tiles: [`${url}?v=${v}`], minzoom: this._serverMin, maxzoom: this._serverMax };
     }
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];
 

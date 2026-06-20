@@ -2686,7 +2686,7 @@ export class ChartPlotterApp extends HTMLElement {
       const j = await res.json().catch(() => ({}));
       if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
       await this._pollImport(j.job);
-      this._plotter.setServerSet("user");
+      await this._plotter.setServerSet("user");
       this._hasArchive = true;
       this.updateEmptyState();
       if (frame) this._frameCells(names);
