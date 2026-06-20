@@ -17,6 +17,29 @@ import (
 // FPoint is a tile-local coordinate before quantization.
 type FPoint struct{ X, Y float64 }
 
+// UPoint is a normalized-world coordinate stored as 32-bit fixed point: the [0,1)
+// Web-Mercator value × 2³². Half the size of an FPoint (8 vs 16 bytes), which
+// matters because the baker holds every cell's pre-projected geometry in memory
+// at once. Precision is 2⁻³² of the world ≈ a few mm at the equator — far finer
+// than a z18 / 4096-extent tile pixel, so there is no visible loss. Project with
+// Projector.ProjectNormU.
+type UPoint struct{ X, Y uint32 }
+
+// uScale is 2³² — the fixed-point scale for UPoint.
+const uScale = 4294967296.0
+
+// NormU converts a [0,1] normalized-world value to 32-bit fixed point (clamped).
+func NormU(n float64) uint32 {
+	v := n * uScale
+	if v <= 0 {
+		return 0
+	}
+	if v >= uScale-1 {
+		return uScale - 1
+	}
+	return uint32(v)
+}
+
 // IPoint is a quantized integer MVT vertex.
 type IPoint struct{ X, Y int32 }
 
@@ -43,17 +66,30 @@ func latToWebMercatorPx(latDeg, worldPx float64) float64 {
 
 // Projector is a per-tile lat/lon -> tile-local transform. Build once per tile.
 type Projector struct {
-	worldSize float64
-	originX   float64
-	originY   float64
+	worldSize  float64
+	worldSizeU float64 // worldSize / 2³², for projecting UPoint fixed-point coords
+	originX    float64
+	originY    float64
 }
 
 // NewProjector builds the transform for a tile of the given extent.
 func NewProjector(coord TileCoord, extent uint32) Projector {
+	ws := WorldSize(coord.Z, extent)
 	return Projector{
-		worldSize: WorldSize(coord.Z, extent),
-		originX:   float64(coord.X) * float64(extent),
-		originY:   float64(coord.Y) * float64(extent),
+		worldSize:  ws,
+		worldSizeU: ws / uScale,
+		originX:    float64(coord.X) * float64(extent),
+		originY:    float64(coord.Y) * float64(extent),
+	}
+}
+
+// ProjectNormU projects a UPoint (32-bit fixed-point normalized world) into this
+// tile's pixel space — the same affine transform as ProjectNorm, on stored
+// geometry that's half the size.
+func (p Projector) ProjectNormU(n UPoint) FPoint {
+	return FPoint{
+		X: float64(n.X)*p.worldSizeU - p.originX,
+		Y: float64(n.Y)*p.worldSizeU - p.originY,
 	}
 }
 

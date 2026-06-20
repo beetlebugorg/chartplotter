@@ -212,9 +212,9 @@ type routed struct {
 	// Web-Mercator) ONCE at add time, so per-tile emit is a cheap affine
 	// transform (Projector.ProjectNorm) instead of recomputing log/sin/tan for
 	// every tile a primitive appears in.
-	nrings [][]tile.FPoint // polygon
-	nline  []tile.FPoint   // linestring
-	npoint tile.FPoint     // point
+	nrings [][]tile.UPoint // polygon
+	nline  []tile.UPoint   // linestring
+	npoint tile.UPoint     // point
 
 	wMinX, wMinY, wMaxX, wMaxY float64 // normalized world bbox [0,1]
 	zMin, zMax                 uint32  // display zoom span
@@ -1229,7 +1229,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				tb.Layer(r.layer).AddLines(paths, r.attrs)
 			}
 		case mvt.GeomPoint:
-			p := proj.ProjectNorm(r.npoint)
+			p := proj.ProjectNormU(r.npoint)
 			if p.X < 0 || p.X >= e || p.Y < 0 || p.Y >= e {
 				continue
 			}
@@ -1327,8 +1327,9 @@ func (b *Baker) DebugTilePolyOverlap(coord tile.TileCoord, buffer float64, exten
 		minx, miny, maxx, maxy := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
 		for _, ring := range r.nrings {
 			for _, p := range ring {
-				minx, maxx = math.Min(minx, p.X), math.Max(maxx, p.X)
-				miny, maxy = math.Min(miny, p.Y), math.Max(maxy, p.Y)
+				px, py := float64(p.X)/4294967296.0, float64(p.Y)/4294967296.0 // UPoint → [0,1]
+				minx, maxx = math.Min(minx, px), math.Max(maxx, px)
+				miny, maxy = math.Min(miny, py), math.Max(maxy, py)
 			}
 		}
 		if overlaps(minx, miny, maxx, maxy) {
@@ -1538,36 +1539,36 @@ func projectRing(ring []geo.LatLon, proj tile.Projector) []tile.FPoint {
 // normPt / normPts / normRings pre-project geometry to normalized-world
 // coordinates ([0,1] Web-Mercator) once, so per-tile emit is a cheap affine
 // transform (see Projector.ProjectNorm).
-func normPt(ll geo.LatLon) tile.FPoint {
-	return tile.FPoint{X: normX(ll.Lon), Y: normY(ll.Lat)}
+func normPt(ll geo.LatLon) tile.UPoint {
+	return tile.UPoint{X: tile.NormU(normX(ll.Lon)), Y: tile.NormU(normY(ll.Lat))}
 }
 
-func normPts(pts []geo.LatLon) []tile.FPoint {
-	out := make([]tile.FPoint, len(pts))
+func normPts(pts []geo.LatLon) []tile.UPoint {
+	out := make([]tile.UPoint, len(pts))
 	for i, p := range pts {
 		out[i] = normPt(p)
 	}
 	return out
 }
 
-func normRings(rings [][]geo.LatLon) [][]tile.FPoint {
-	out := make([][]tile.FPoint, len(rings))
+func normRings(rings [][]geo.LatLon) [][]tile.UPoint {
+	out := make([][]tile.UPoint, len(rings))
 	for i, r := range rings {
 		out[i] = normPts(r)
 	}
 	return out
 }
 
-// projectNormRing affine-projects a normalized-world ring into tile-pixel space,
-// writing into scratch (grown as needed) to avoid per-call allocation. The
-// returned slice aliases scratch and is valid until the next call.
-func projectNormRing(npts []tile.FPoint, proj tile.Projector, scratch []tile.FPoint) []tile.FPoint {
+// projectNormRing affine-projects a normalized-world ring (32-bit fixed point)
+// into tile-pixel space, writing into scratch (grown as needed) to avoid per-call
+// allocation. The returned slice aliases scratch and is valid until the next call.
+func projectNormRing(npts []tile.UPoint, proj tile.Projector, scratch []tile.FPoint) []tile.FPoint {
 	if cap(scratch) < len(npts) {
 		scratch = make([]tile.FPoint, len(npts))
 	}
 	scratch = scratch[:len(npts)]
 	for i, n := range npts {
-		scratch[i] = proj.ProjectNorm(n)
+		scratch[i] = proj.ProjectNormU(n)
 	}
 	return scratch
 }
