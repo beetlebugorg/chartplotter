@@ -94,7 +94,7 @@ func buildLinestyleTable(lib *s52.Library) map[string]*lsInfo {
 }
 
 // emitComplexLine tessellates one complex-line prim into this tile at coord.Z.
-func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, z uint32, extent uint32, tb *mvt.TileBuilder, scratch *[]tile.FPoint) {
+func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, z uint32, extent uint32, tb *mvt.TileBuilder, scratch *[]tile.FPoint, attrScratch *[]mvt.KeyValue) {
 	info := r.ls
 	if info == nil || len(r.nline) < 2 {
 		return
@@ -118,9 +118,10 @@ func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, 
 		return
 	}
 
-	dashAttrs := append(append([]mvt.KeyValue(nil), r.attrs...),
+	full := b.attrsFor(r, attrScratch) // rebuild base+variable (aliases attrScratch; stable here)
+	dashAttrs := append(append([]mvt.KeyValue(nil), full...),
 		mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(info.widthPx + 0.5))})
-	symBase := r.attrs // class/cell/draw_prio/cat/bnd (+inspector extras)
+	symBase := full // class/cell/draw_prio/cat/bnd (+inspector extras)
 	symScale := float64(0.01 / 0.35278)
 
 	var dashPaths [][]mvt.IPoint

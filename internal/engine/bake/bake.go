@@ -225,7 +225,22 @@ type routed struct {
 	// instead of drawn as a plain polyline.
 	ls *lsInfo
 
-	attrs []mvt.KeyValue
+	// attrs is the feature's tag list. For prims routed through route() (the bulk),
+	// bcBase is set and attrs holds ONLY the variable tags (color_token, drval…,
+	// objnam/light/s57); the always-present base (class/cell/draw_prio/cat/bnd/pts)
+	// lives in the compact bc* fields below and is rebuilt at emit (attrsFor) —
+	// replacing a ~5–8 entry []KeyValue per feature (the heap-profile hot spot) with
+	// a few interned ints. Prims from other constructors keep bcBase=false and a
+	// full attrs list.
+	attrs    []mvt.KeyValue
+	bcClass  uint32 // interned class index (classTab)
+	bcCell   uint32 // interned cell index (cellTab)
+	bcDrawP  int16
+	bcCat    int16
+	bcBnd    int8
+	bcPts    int16
+	bcHasPts bool
+	bcBase   bool // attrs is variable-only; rebuild the base from bc* at emit
 }
 
 // sectorPrim is a LIGHTS06 sector light. Its geometry (dashed legs, OUTLW-backed
@@ -280,6 +295,17 @@ type Baker struct {
 	// coarser data). Internal seams between same-band cells are suppressed.
 	covMeta         []covMeta
 	scaleBndEmitted bool
+
+	// Interning for the route() base attributes: `class` (one of ~170 S-57 object
+	// classes) and `cell` (the source dataset name) are the same string repeated
+	// across millions of features. Store one shared copy here and a uint32 index on
+	// each prim (see routed.bcClass/bcCell), rebuilding the KeyValue tags at emit —
+	// far cheaper than a per-feature []KeyValue. Built single-threaded in AddCell,
+	// read-only (concurrent-safe) during the parallel emit.
+	classTab []string
+	classIdx map[string]uint32
+	cellTab  []string
+	cellIdx  map[string]uint32
 
 	// OverzoomAllBands makes EVERY band overzoom DOWN to the world view (like the
 	// general band always does), not just BandGeneral. Set on the realtime/upload
@@ -580,35 +606,88 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.prims = append(b.prims, r)
 }
 
+func (b *Baker) internClass(s string) uint32 {
+	if b.classIdx == nil {
+		b.classIdx = map[string]uint32{}
+	}
+	if i, ok := b.classIdx[s]; ok {
+		return i
+	}
+	i := uint32(len(b.classTab))
+	b.classTab = append(b.classTab, s)
+	b.classIdx[s] = i
+	return i
+}
+
+func (b *Baker) internCell(s string) uint32 {
+	if b.cellIdx == nil {
+		b.cellIdx = map[string]uint32{}
+	}
+	if i, ok := b.cellIdx[s]; ok {
+		return i
+	}
+	i := uint32(len(b.cellTab))
+	b.cellTab = append(b.cellTab, s)
+	b.cellIdx[s] = i
+	return i
+}
+
+// attrsFor returns a prim's full MVT tags. For route() prims (bcBase) it rebuilds
+// the base (class/cell/draw_prio/cat/bnd/pts) from the compact fields + interned
+// strings into the caller's reused scratch slice (no per-emit allocation), then
+// appends the variable tags. Other prims return their full attrs unchanged.
+func (b *Baker) attrsFor(r *routed, scratch *[]mvt.KeyValue) []mvt.KeyValue {
+	if !r.bcBase {
+		return r.attrs
+	}
+	out := append((*scratch)[:0],
+		mvt.KeyValue{Key: "class", Value: mvt.StringVal(b.classTab[r.bcClass])},
+		mvt.KeyValue{Key: "cell", Value: mvt.StringVal(b.cellTab[r.bcCell])},
+		mvt.KeyValue{Key: "draw_prio", Value: mvt.IntVal(int64(r.bcDrawP))},
+		mvt.KeyValue{Key: "cat", Value: mvt.IntVal(int64(r.bcCat))},
+		mvt.KeyValue{Key: "bnd", Value: mvt.IntVal(int64(r.bcBnd))},
+	)
+	if r.bcHasPts {
+		out = append(out, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(int64(r.bcPts))})
+	}
+	out = append(out, r.attrs...)
+	*scratch = out
+	return out
+}
+
 func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2 float32) {
+	// The always-present base (class/cell/draw_prio/cat/bnd/pts) is stored compactly
+	// (interned class/cell + small ints) and rebuilt at emit by attrsFor; `common`
+	// returns only the VARIABLE tags — the per-feature extra plus the sparse
+	// inspector/pick fields (objnam/light/s57). Tag ORDER is irrelevant (MVT
+	// properties are a map), so appending these after extra is fine.
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
-		base := []mvt.KeyValue{
-			{Key: "class", Value: mvt.StringVal(class)},
-			{Key: "cell", Value: mvt.StringVal(b.curCell)},
-			{Key: "draw_prio", Value: mvt.IntVal(int64(drawPrio))},
-			{Key: "cat", Value: mvt.IntVal(catRank(cat))},
-			{Key: "bnd", Value: mvt.IntVal(bnd)},
-		}
-		// pts is omitted for the common case (2): only paper/simplified variant
-		// passes (0/1) carry it, so most features stay lean.
-		if pts != ptsAlwaysShown {
-			base = append(base, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(pts)})
-		}
-		// Inspector extras — only when present, to avoid bloating every feature.
 		if b.curObjnam != "" {
-			base = append(base, mvt.KeyValue{Key: "objnam", Value: mvt.StringVal(b.curObjnam)})
+			extra = append(extra, mvt.KeyValue{Key: "objnam", Value: mvt.StringVal(b.curObjnam)})
 		}
 		if b.curLight != "" {
-			base = append(base, mvt.KeyValue{Key: "light", Value: mvt.StringVal(b.curLight)})
+			extra = append(extra, mvt.KeyValue{Key: "light", Value: mvt.StringVal(b.curLight)})
 		}
 		// Full S-57 attribute set for the cursor-pick report (S-52 PresLib §10.8).
-		// One compact JSON blob the client decodes against web/s57-catalogue.json.
 		if b.curAttrs != "" {
-			base = append(base, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
+			extra = append(extra, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
 		}
-		return append(base, extra...)
+		return extra
 	}
-	r := routed{zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
+	r := routed{
+		zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max,
+		bcBase:  true,
+		bcClass: b.internClass(class),
+		bcCell:  b.internCell(b.curCell),
+		bcDrawP: int16(drawPrio),
+		bcCat:   int16(catRank(cat)),
+		bcBnd:   int8(bnd),
+	}
+	// pts is omitted for the common case (2): only paper/simplified variant passes
+	// (0/1) carry it, so most features stay lean.
+	if pts != ptsAlwaysShown {
+		r.bcHasPts, r.bcPts = true, int16(pts)
+	}
 
 	switch v := p.(type) {
 	case portrayal.FillPolygon:
@@ -1041,6 +1120,7 @@ type TileScratch struct {
 	clip     tile.Clipper
 	proj     []tile.FPoint
 	eligible []int
+	attrs    []mvt.KeyValue // reused per feature by attrsFor (no per-emit alloc)
 }
 
 // EmitTile bakes one tile with a throwaway scratch — convenience for the serial
@@ -1206,7 +1286,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				outRings = append(outRings, q)
 			}
 			if len(outRings) > 0 {
-				tb.Layer(r.layer).AddPolygon(outRings, r.attrs)
+				tb.Layer(r.layer).AddPolygon(outRings, b.attrsFor(r, &ts.attrs))
 				polyEmit++
 			} else {
 				emptyGeom++
@@ -1214,7 +1294,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		case mvt.GeomLineString:
 			if r.ls != nil {
 				// Complex (symbolised) linestyle: tessellate its period per zoom.
-				b.emitComplexLine(r, proj, rect, coord.Z, extent, tb, &scratch)
+				b.emitComplexLine(r, proj, rect, coord.Z, extent, tb, &scratch, &ts.attrs)
 				continue
 			}
 			scratch = projectNormRing(r.nline, proj, scratch)
@@ -1226,14 +1306,14 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				}
 			}
 			if len(paths) > 0 {
-				tb.Layer(r.layer).AddLines(paths, r.attrs)
+				tb.Layer(r.layer).AddLines(paths, b.attrsFor(r, &ts.attrs))
 			}
 		case mvt.GeomPoint:
 			p := proj.ProjectNormU(r.npoint)
 			if p.X < 0 || p.X >= e || p.Y < 0 || p.Y >= e {
 				continue
 			}
-			tb.Layer(r.layer).AddPoints([]mvt.IPoint{tile.Quantize(p)}, r.attrs)
+			tb.Layer(r.layer).AddPoints([]mvt.IPoint{tile.Quantize(p)}, b.attrsFor(r, &ts.attrs))
 		}
 	}
 	ts.proj = scratch // persist the (possibly grown) projection buffer for reuse
