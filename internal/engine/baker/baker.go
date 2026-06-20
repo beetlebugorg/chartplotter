@@ -13,6 +13,7 @@ import (
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 	"github.com/beetlebugorg/chartplotter/pkg/s52"
 	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
@@ -224,6 +225,78 @@ func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Build
 		pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
 	}
 	return pb
+}
+
+// BakeToPMTilesBands bakes one PMTiles builder PER navigational-purpose band,
+// keyed by band slug (only bands that produced tiles are returned). Each band's
+// archive carries only that band's own data (EmitTileBandInto filters on natMax),
+// gap-clipped a couple zooms past its native max, so the frontend can load it into
+// a chart-<slug> source whose maxzoom = band.max + margin and client-overzoom it
+// up. A coarser band's source fills a finer band's gaps via its own overzoom; the
+// gap-clipping keeps it from bleeding where the finer band actually has data. This
+// reproduces the realtime/wasm best-available result in a bounded eager bake. The
+// shared margin-extended emit index is built once.
+func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int)) map[string]*pmtiles.Builder {
+	b.BuildEmitIndexBands(MVTExtent, MVTBuffer) // built once; read-only, shared across bands
+	type job struct {
+		slug    string
+		bandMax uint32
+		coords  []tile.TileCoord
+	}
+	var jobs []job
+	total := 0
+	for _, bd := range bake.BakeBands() {
+		if c := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max); len(c) > 0 {
+			jobs = append(jobs, job{bd.Slug, bd.Max, c})
+			total += len(c)
+		}
+	}
+	bb := b.Bounds()
+	out := map[string]*pmtiles.Builder{}
+	var done int64
+	for _, j := range jobs {
+		encoded := make([][]byte, len(j.coords))
+		workers := runtime.NumCPU()
+		if workers > len(j.coords) {
+			workers = len(j.coords)
+		}
+		if workers < 1 {
+			workers = 1
+		}
+		var next int64 = -1
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(bandMax uint32) {
+				var ts bake.TileScratch
+				defer wg.Done()
+				for {
+					i := int(atomic.AddInt64(&next, 1))
+					if i >= len(j.coords) {
+						return
+					}
+					encoded[i] = b.EmitTileBandInto(j.coords[i], MVTExtent, MVTBuffer, &ts, bandMax)
+					if progress != nil {
+						progress(int(atomic.AddInt64(&done, 1)), total)
+					}
+				}
+			}(j.bandMax)
+		}
+		wg.Wait()
+		pb := pmtiles.New()
+		for i, c := range j.coords {
+			if encoded[i] != nil {
+				pb.AddTile(uint8(c.Z), c.X, c.Y, encoded[i])
+			}
+		}
+		if bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
+			pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
+		}
+		if pb.Count() > 0 {
+			out[j.slug] = pb
+		}
+	}
+	return out
 }
 
 // IsBaseCell reports whether name is an S-57 base cell (…/<CELL>.000).

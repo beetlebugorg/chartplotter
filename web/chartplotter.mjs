@@ -87,6 +87,10 @@ const PAT_PREFIX = "pat:";
 // coarser one; where it doesn't, the coarser shows through (overzoomed). `all`
 // is the merged single archive (an upload / `--emit-pmtiles`) — one full-range
 // source, drawn on top. Order here IS the draw order (bottom→top).
+// Levels each per-band archive bakes past its native max (gap-clipped), so its
+// source can client-overzoom a clean tile above maxzoom. Must match the baker's
+// bandOverzoomMargin (internal/engine/bake/bake.go).
+const BAND_OVERZOOM_MARGIN = 2;
 const CHART_BANDS = [
   { slug: "overview", min: 0, max: 7 },
   { slug: "general", min: 7, max: 9 },
@@ -1327,6 +1331,18 @@ export class ChartPlotter extends HTMLElement {
   // filter in `_layerBase` (so a category/boundary toggle re-applies
   // combineFilters per layer) and a baseId→[variantId…] map in `_variants` (so
   // mariner/colour updates that target a layer by name hit all its band copies).
+  // Only LINES and pattern (hatch) FILLS are capped to their band: those are the
+  // marks that visibly duplicate — a coarse and a finer band draw the same coast/
+  // contour/boundary as two offset strokes. Base area fills (solid depth/land
+  // colour) and POINT symbols / soundings / text keep overzooming: a base fill is
+  // the continuous gap-fill base (a finer fill draws on top), and a coarse + finer
+  // symbol at the same object land on the same spot and collapse to ~one mark. So
+  // symbols stay visible as you zoom past a band boundary instead of popping out
+  // and back (the z13 "soundings disappear then return" gap).
+  _capsAtBand(L) {
+    return L.type === "line" || (L.type === "fill" && L.paint && L.paint["fill-pattern"] !== undefined);
+  }
+
   expandChartLayers() {
     const tmpl = this.buildLayers();
     this._layerBase = {};
@@ -1343,7 +1359,11 @@ export class ChartPlotter extends HTMLElement {
           const id = L.id + "@" + band.slug;
           this._layerBase[id] = L.filter ?? null;
           (this._variants[L.id] ||= []).push(id);
-          out.push({ ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(L.filter ?? null) });
+          const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(L.filter ?? null) };
+          if ((band.slug === "overview" || band.slug === "general") && this._capsAtBand(L)) {
+            v.maxzoom = band.max; // coarser band's non-fill marks never draw at a finer zoom
+          }
+          out.push(v);
         }
       }
       for (const L of tmpl) {
@@ -1369,14 +1389,16 @@ export class ChartPlotter extends HTMLElement {
         this._layerBase[id] = base;
         (this._variants[L.id] ||= []).push(id);
         const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) };
-        // SYMBOL layers used to be capped a few levels past their band (a perf
-        // guard, since the fanned archive re-places the same marks per band), but
-        // that dropped coarse-scale point symbols/soundings the moment you zoomed
-        // past the cap when no finer-scale chart covered them — they'd just vanish.
-        // Now symbols overzoom to the map max like area/line FILLS, so a feature
-        // stays visible as you zoom in. Where a coarse and a finer chart both carry
-        // the same object the two marks share a lat/lon and overlap into ~one icon;
-        // sparse marks make the extra layout cheap in practice.
+        // A coarser band's data must never be drawn at a finer band's zoom. Base
+        // area FILLS (solid depth/land colour) DO overzoom — they're the gap-fill
+        // base and a finer band's opaque fill is drawn on top of them — but every
+        // other layer (lines, point symbols, soundings, area PATTERNS like the
+        // restricted/caution hatch) is capped at its band's max so it simply isn't
+        // present at a finer zoom. That's what kills the duplicate coastlines /
+        // boundaries / soundings: at any zoom only the appropriate band's marks draw.
+        if ((band.slug === "overview" || band.slug === "general") && this._capsAtBand(L)) {
+          v.maxzoom = band.max;
+        }
         out.push(v);
       }
     }
@@ -1404,14 +1426,19 @@ export class ChartPlotter extends HTMLElement {
     // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
     // bands resolve to blank tiles (harmless) until an archive is added.
     const sources = {};
-    // Per-band prebaked sources in BOTH modes (fixed band zoom range, overzoomed
-    // above max client-side).
+    // Per-band prebaked sources in BOTH modes. Each per-band archive bakes
+    // BAND_OVERZOOM_MARGIN levels past its native max, gap-clipped (the band's
+    // fill suppressed where a finer cell's coverage actually exists). Setting the
+    // source maxzoom to band.max + margin makes MapLibre client-overzoom that
+    // GAP-CLIPPED tile (not the full native one), so a coarse band fills a finer
+    // band's gaps without bleeding into areas the finer band owns.
     for (const band of CHART_BANDS) {
+      const merged = band.slug === "all";
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
         minzoom: band.min,
-        maxzoom: band.max,
+        maxzoom: merged ? band.max : Math.min(18, band.max + BAND_OVERZOOM_MARGIN),
       };
     }
     if (this._realtime) {

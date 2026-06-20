@@ -42,6 +42,14 @@ const maxBandZ uint32 = 18
 // a coarse-zoom tile carries only the skeleton (land/coast/major depth).
 const generalOverzoomMin uint32 = 0
 
+// bandOverzoomMargin is how many zoom levels past its native max a per-band
+// archive bakes. Those extra levels are gap-clipped (the band's fill suppressed
+// where a finer cell's M_COVR covers), giving each per-band source a clean tile
+// to client-overzoom above its maxzoom without bleeding a coarse band into an
+// area a finer band already owns. Coarse data has no detail past its scale, so 2
+// levels is plenty for a seamless handoff; MapLibre overzooms the rest for free.
+const bandOverzoomMargin uint32 = 2
+
 // ZoomRange is a baked [min,max] Web-Mercator zoom span.
 type ZoomRange struct{ Min, Max uint32 }
 
@@ -75,6 +83,27 @@ func (b Band) ZoomRange() ZoomRange {
 		return ZoomRange{13, 16}
 	default: // berthing
 		return ZoomRange{16, 18}
+	}
+}
+
+// BakeBand is one navigational-purpose band's identity for per-band archive
+// baking: its frontend slug and native [Min,Max] zoom span.
+type BakeBand struct {
+	Slug     string
+	Min, Max uint32
+}
+
+// BakeBands lists the bands coarse→fine for per-band archive baking — must match
+// the frontend's CHART_BANDS (slug + zoom span) so each archive loads into its
+// chart-<slug> source. Max feeds EmitTileBandInto's band filter (natMax == Max).
+func BakeBands() []BakeBand {
+	return []BakeBand{
+		{"overview", 0, 7},
+		{"general", 7, 9},
+		{"coastal", 9, 11},
+		{"approach", 11, 13},
+		{"harbor", 13, 16},
+		{"berthing", 16, 18},
 	}
 }
 
@@ -824,6 +853,54 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 	return out
 }
 
+// TileCoordsBand enumerates the tiles for ONE per-band archive: only this band's
+// own prims (natMax == bandMax), across [bandMin, bandMax+bandOverzoomMargin]. The
+// extra overzoom levels are gap-clipped at emit; the source overzooms above them.
+func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord {
+	b.emitScaleBoundaries() // idempotent; adds scale-boundary prims before enumeration
+	ceil := b.clampZMax(bandMax + bandOverzoomMargin)
+	seen := map[uint64]struct{}{}
+	var out []tile.TileCoord
+	for i := range b.prims {
+		r := &b.prims[i]
+		if r.natMax != bandMax {
+			continue
+		}
+		lo := r.zMin
+		if lo < bandMin {
+			lo = bandMin // the band's source never serves below bandMin
+		}
+		if lo > ceil {
+			continue
+		}
+		bb := geo.BoundingBox{
+			MinLat: unnormY(r.wMaxY), MinLon: r.wMinX*360 - 180,
+			MaxLat: unnormY(r.wMinY), MaxLon: r.wMaxX*360 - 180,
+		}
+		out = addRange(out, seen, bb, lo, ceil, extent)
+	}
+	for i := range b.sectors {
+		sp := &b.sectors[i]
+		if sp.natMax != bandMax {
+			continue
+		}
+		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		lo := sp.zMin
+		if lo < bandMin {
+			lo = bandMin
+		}
+		for z := lo; z <= b.clampZMax(sp.natMax); z++ {
+			r := math.Max(sectorRadiusNorm(z), sp.legNorm)
+			bb := geo.BoundingBox{
+				MinLat: unnormY(ay + r), MinLon: (ax-r)*360 - 180,
+				MaxLat: unnormY(ay - r), MaxLon: (ax+r)*360 - 180,
+			}
+			out = addRange(out, seen, bb, z, z, extent)
+		}
+	}
+	return out
+}
+
 // BuildEmitIndex builds the inverted tile→prim index (b.emitIndex) for the given
 // extent and clip buffer, so EmitTileInto can iterate only the prims that touch a
 // tile rather than scanning every b.prims entry. Call once after all cells are
@@ -833,12 +910,24 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 // superset of EmitTileInto's in-tile reject — the reject still runs and trims the
 // boundary-tile over-inclusion, so behaviour is identical to the full scan.
 func (b *Baker) BuildEmitIndex(extent uint32, buffer float64) {
+	b.buildEmitIndex(extent, buffer, 0)
+}
+
+// BuildEmitIndexBands builds the index for the per-band archive bake: each prim
+// is keyed up to bandOverzoomMargin levels past its native max so the gap-clipped
+// overzoom tiles (emitted by EmitTileBandInto) are covered too.
+func (b *Baker) BuildEmitIndexBands(extent uint32, buffer float64) {
+	b.buildEmitIndex(extent, buffer, bandOverzoomMargin)
+}
+
+func (b *Baker) buildEmitIndex(extent uint32, buffer float64, upMargin uint32) {
 	b.emitScaleBoundaries() // adds scale-boundary prims; must precede indexing
 	idx := make(map[uint64][]int32, len(b.prims))
 	bufFrac := buffer / float64(extent)
 	for i := range b.prims {
 		r := &b.prims[i]
-		for z := r.zMin; z <= r.zMax; z++ {
+		hi := b.clampZMax(r.zMax + upMargin)
+		for z := r.zMin; z <= hi; z++ {
 			n := math.Pow(2, float64(z))
 			last := int64(n) - 1
 			bufN := bufFrac / n
@@ -933,6 +1022,23 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 // EmitTileInto bakes the merged (all-band) MVT for one tile, or nil if empty,
 // reusing ts's buffers.
 func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64, ts *TileScratch) []byte {
+	return b.emitTileInto(coord, extent, buffer, ts, 0)
+}
+
+// EmitTileBandInto bakes ONLY the single navigational band whose native max zoom
+// == bandMax (one per-band archive tile), still gap-clipped above that band where
+// a finer cell's M_COVR actually covers — so a coarser band's overzoomed fill is
+// dropped wherever finer data exists. bandMax==0 emits the merged all-band tile.
+func (b *Baker) EmitTileBandInto(coord tile.TileCoord, extent uint32, buffer float64, ts *TileScratch, bandMax uint32) []byte {
+	return b.emitTileInto(coord, extent, buffer, ts, bandMax)
+}
+
+// emitTileInto bakes one tile (bandMax==0 ⇒ every band merged), or nil if empty,
+// reusing ts's buffers.
+func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64, ts *TileScratch, bandMax uint32) []byte {
+	// Full-scan / realtime path emits without a prebuilt index, so make sure the
+	// finer-coverage cuts exist (idempotent; the prebaked paths already ran it
+	// single-threaded in BuildEmitIndex before any parallel worker calls this).
 	tb := mvt.NewTileBuilder(extent)
 	proj := tile.NewProjector(coord, extent)
 	rect := tile.RectForTile(extent, buffer)
@@ -953,6 +1059,12 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		// Spatial reject first so the zMin diagnostic below counts only prims that
 		// actually overlap this tile (the full-scan path considers every prim).
 		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
+			return
+		}
+		// Per-band archive: keep only this band's own prims. Coarser bands fill the
+		// gaps from THEIR sources (whose client overzoom reaches into this band's
+		// zooms); they must not be baked into this band's tiles or they'd bleed.
+		if bandMax != 0 && r.natMax != bandMax {
 			return
 		}
 		// Lower gate only. The UPPER end is governed by best-available suppression
@@ -1012,17 +1124,29 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			suppDown++
 			continue
 		}
-		// Up-direction (a coarse prim overzoomed ABOVE its native band, full-scan
-		// path only): AREA/LINE fills are suppressed only where a strictly-finer
-		// cell's DATA COVERAGE actually contains the tile (covBandAt) — gating on
-		// real coverage, not feature bbox, avoids blanking gaps where a finer cell's
-		// bbox merely overlapped. POINTS keep the per-feature overlap test so a
-		// coarse light survives unless a finer prim sits on it (disappearing-light).
-		if bandZ > r.natMax {
+		// Up-direction best-available suppression where a coarse prim overzoomed at/
+		// above its native max yields to a strictly-finer band that actually has data
+		// (covBandAt — real M_COVR coverage, not bbox).
+		//   • MERGED tile (bandMax==0, realtime cp://): every band shares one tile, so
+		//     ALL kinds are suppressed (points use the per-feature overlap test so a
+		//     coarse light survives unless a finer prim sits on it).
+		//   • PER-BAND archive (bandMax!=0): suppress only the marks that visibly
+		//     DUPLICATE as offset strokes / hatch — LINES and pattern fills. Base
+		//     fills are layered finer-over-coarser on the client (no holes) and point
+		//     symbols overlap into ~one mark, so those overzoom freely. The fine bands
+		//     bake at fine enough resolution that this cut is clean, so the frontend
+		//     lets them overzoom (filling where finest, e.g. harbor at berth level)
+		//     and only caps the COARSE bands (overview/general), whose resolution is
+		//     too low to cut cleanly.
+		if bandZ >= r.natMax {
 			var suppressed bool
-			if r.kind == mvt.GeomPoint {
-				suppressed = b.anyFinerOverlaps(eligible, r)
-			} else {
+			if bandMax == 0 {
+				if r.kind == mvt.GeomPoint {
+					suppressed = b.anyFinerOverlaps(eligible, r)
+				} else {
+					suppressed = r.natMax < covBandAt()
+				}
+			} else if r.kind == mvt.GeomLineString || r.layer == "area_patterns" {
 				suppressed = r.natMax < covBandAt()
 			}
 			if suppressed {
@@ -1094,6 +1218,9 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	for i := range b.sectors {
 		sp := &b.sectors[i]
 		if coord.Z < sp.zMin || coord.Z > sp.natMax {
+			continue
+		}
+		if bandMax != 0 && sp.natMax != bandMax {
 			continue
 		}
 		margin := math.Max(sectorRadiusNorm(coord.Z), sp.legNorm) + spill

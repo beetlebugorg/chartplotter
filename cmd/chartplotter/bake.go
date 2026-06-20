@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
@@ -23,6 +24,7 @@ type bakeCmd struct {
 	BaseURL  string   `name:"base-url" help:"URL/prefix for the archive in the manifest (default: the archive's basename)."`
 	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
 	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
+	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
 }
 
 func (c bakeCmd) Run() error {
@@ -50,6 +52,10 @@ func (c bakeCmd) Run() error {
 	}
 	if c.MaxZoom > 0 {
 		b.MaxBakeZoom = uint32(c.MaxZoom)
+	}
+
+	if c.Bands {
+		return c.runBands(b, len(ok))
 	}
 
 	lastPct := -1
@@ -103,6 +109,70 @@ func (c bakeCmd) Run() error {
 		}
 		mf.Close()
 		fmt.Printf("wrote manifest %s (file=%s)\n", c.Manifest, file)
+	}
+	return nil
+}
+
+// runBands writes one gap-clipped PMTiles archive per navigational band
+// (<out-stem>-<slug>.pmtiles) plus a manifest tagging each with its band slug, so
+// the frontend loads each into its own chart-<slug> source.
+func (c bakeCmd) runBands(b *bake.Baker, nCells int) error {
+	lastPct := -1
+	byBand := baker.BakeToPMTilesBands(b, func(done, total int) {
+		if total == 0 {
+			return
+		}
+		if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
+			lastPct = pct
+			fmt.Fprintf(os.Stderr, "\r  tiles %d/%d (%d%%)", done, total, pct)
+		}
+	})
+	fmt.Fprintln(os.Stderr)
+
+	ext := filepath.Ext(c.Out)
+	stem := strings.TrimSuffix(c.Out, ext)
+	bb := b.Bounds()
+	var entries []map[string]any
+	for _, bd := range bake.BakeBands() {
+		pb := byBand[bd.Slug]
+		if pb == nil {
+			continue
+		}
+		out := stem + "-" + bd.Slug + ext
+		f, err := os.Create(out)
+		if err != nil {
+			return err
+		}
+		if err := pb.WriteArchive(f); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		st, _ := os.Stat(out)
+		fmt.Printf("  %-9s → %s (%d tiles, %.1f MB)\n", bd.Slug, out, pb.Count(), float64(st.Size())/(1<<20))
+		entries = append(entries, map[string]any{
+			"file":   filepath.Base(out),
+			"band":   bd.Slug,
+			"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
+		})
+	}
+	fmt.Printf("baked %d cell(s) → %d band archive(s)\n", nCells, len(entries))
+
+	if c.Manifest != "" {
+		mf, err := os.Create(c.Manifest)
+		if err != nil {
+			return err
+		}
+		enc := json.NewEncoder(mf)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(map[string]any{"districts": entries}); err != nil {
+			mf.Close()
+			return err
+		}
+		mf.Close()
+		fmt.Printf("wrote manifest %s\n", c.Manifest)
 	}
 	return nil
 }
