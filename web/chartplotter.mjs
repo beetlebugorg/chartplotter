@@ -96,7 +96,7 @@ const CHART_BANDS = [
   { slug: "overview", min: 0, max: 7, bake: 7 },
   { slug: "general", min: 7, max: 9, bake: 9 },
   { slug: "coastal", min: 9, max: 11, bake: 13 },
-  { slug: "approach", min: 11, max: 13, bake: 15 },
+  { slug: "approach", min: 11, max: 13, bake: 13 },
   { slug: "harbor", min: 13, max: 16, bake: 16 },
   { slug: "berthing", min: 16, max: 18, bake: 18 },
   { slug: "all", min: 0, max: 18, bake: 18 },

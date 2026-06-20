@@ -56,11 +56,13 @@ const generalOverzoomMin uint32 = 0
 //   berthing 18 — finest band, nothing finer to cut against; native detail.
 func bandBakeCeil(bandMax uint32) uint32 {
 	switch bandMax {
-	case 11: // coastal
+	case 11: // coastal: native max (z11) cuts at ~13 km — too coarse; +2 → z13 (~3 km)
 		return 13
-	case 13: // approach
-		return 15
-	default: // overview(7) general(9) harbor(16) berthing(18): bake to native max
+	default: // everyone else bakes to native max:
+		//   overview(7)/general(9) are capped client-side (no overzoom cut to sharpen);
+		//   approach(13) cuts vs harbor at ~3 km — fine, and z14/z15 over a whole
+		//     district is the dominant size/index cost (Alaska approach: ~1.2 GB → ~80 MB);
+		//   harbor(16) cuts vs berthing at ~0.4 km; berthing(18) is the finest band.
 		return bandMax
 	}
 }
