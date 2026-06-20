@@ -42,13 +42,28 @@ const maxBandZ uint32 = 18
 // a coarse-zoom tile carries only the skeleton (land/coast/major depth).
 const generalOverzoomMin uint32 = 0
 
-// bandOverzoomMargin is how many zoom levels past its native max a per-band
-// archive bakes. Those extra levels are gap-clipped (the band's fill suppressed
-// where a finer cell's M_COVR covers), giving each per-band source a clean tile
-// to client-overzoom above its maxzoom without bleeding a coarse band into an
-// area a finer band already owns. Coarse data has no detail past its scale, so 2
-// levels is plenty for a seamless handoff; MapLibre overzooms the rest for free.
-const bandOverzoomMargin uint32 = 2
+// bandBakeCeil is the TOP zoom a per-band archive bakes to (its source's maxzoom;
+// the client overzooms above it for free). A band only bakes past its native max
+// to sharpen the suppression CUT against the next finer band — so the cut isn't
+// stair-stepped at coarse-tile granularity when overzoomed. Beyond that the extra
+// levels are pure overzoom buffer the client recreates, and at high zoom they cost
+// 4×/16× the tiles, so we don't bake them:
+//   overview 7, general 9 — capped client-side (lines/patterns don't overzoom), so
+//     no cut to sharpen; base fills overzoom from the native max.
+//   coastal 11→13, approach 13→15 — +2 sharpens the cut vs the next finer band.
+//   harbor 16 — native max already cuts vs berthing at ~0.4 km; z17/18 would be
+//     pure buffer (this is the big win: drops ~16× of the harbor archive).
+//   berthing 18 — finest band, nothing finer to cut against; native detail.
+func bandBakeCeil(bandMax uint32) uint32 {
+	switch bandMax {
+	case 11: // coastal
+		return 13
+	case 13: // approach
+		return 15
+	default: // overview(7) general(9) harbor(16) berthing(18): bake to native max
+		return bandMax
+	}
+}
 
 // ZoomRange is a baked [min,max] Web-Mercator zoom span.
 type ZoomRange struct{ Min, Max uint32 }
@@ -854,11 +869,11 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 }
 
 // TileCoordsBand enumerates the tiles for ONE per-band archive: only this band's
-// own prims (natMax == bandMax), across [bandMin, bandMax+bandOverzoomMargin]. The
-// extra overzoom levels are gap-clipped at emit; the source overzooms above them.
+// own prims (natMax == bandMax), across [bandMin, bandBakeCeil(bandMax)]. The
+// client overzooms above the ceiling.
 func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord {
 	b.emitScaleBoundaries() // idempotent; adds scale-boundary prims before enumeration
-	ceil := b.clampZMax(bandMax + bandOverzoomMargin)
+	ceil := b.clampZMax(bandBakeCeil(bandMax))
 	seen := map[uint64]struct{}{}
 	var out []tile.TileCoord
 	for i := range b.prims {
@@ -910,23 +925,26 @@ func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord
 // superset of EmitTileInto's in-tile reject — the reject still runs and trims the
 // boundary-tile over-inclusion, so behaviour is identical to the full scan.
 func (b *Baker) BuildEmitIndex(extent uint32, buffer float64) {
-	b.buildEmitIndex(extent, buffer, 0)
+	b.buildEmitIndex(extent, buffer, false)
 }
 
-// BuildEmitIndexBands builds the index for the per-band archive bake: each prim
-// is keyed up to bandOverzoomMargin levels past its native max so the gap-clipped
-// overzoom tiles (emitted by EmitTileBandInto) are covered too.
+// BuildEmitIndexBands builds the index for the per-band archive bake: each prim is
+// keyed up to its band's bake ceiling (bandBakeCeil) so the overzoom tiles emitted
+// by EmitTileBandInto are covered too.
 func (b *Baker) BuildEmitIndexBands(extent uint32, buffer float64) {
-	b.buildEmitIndex(extent, buffer, bandOverzoomMargin)
+	b.buildEmitIndex(extent, buffer, true)
 }
 
-func (b *Baker) buildEmitIndex(extent uint32, buffer float64, upMargin uint32) {
+func (b *Baker) buildEmitIndex(extent uint32, buffer float64, perBand bool) {
 	b.emitScaleBoundaries() // adds scale-boundary prims; must precede indexing
 	idx := make(map[uint64][]int32, len(b.prims))
 	bufFrac := buffer / float64(extent)
 	for i := range b.prims {
 		r := &b.prims[i]
-		hi := b.clampZMax(r.zMax + upMargin)
+		hi := b.clampZMax(r.zMax)
+		if perBand {
+			hi = b.clampZMax(bandBakeCeil(r.natMax)) // bake the band's overzoom ceiling
+		}
 		for z := r.zMin; z <= hi; z++ {
 			n := math.Pow(2, float64(z))
 			last := int64(n) - 1

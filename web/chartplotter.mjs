@@ -87,18 +87,19 @@ const PAT_PREFIX = "pat:";
 // coarser one; where it doesn't, the coarser shows through (overzoomed). `all`
 // is the merged single archive (an upload / `--emit-pmtiles`) — one full-range
 // source, drawn on top. Order here IS the draw order (bottom→top).
-// Levels each per-band archive bakes past its native max (gap-clipped), so its
-// source can client-overzoom a clean tile above maxzoom. Must match the baker's
-// bandOverzoomMargin (internal/engine/bake/bake.go).
-const BAND_OVERZOOM_MARGIN = 2;
+// `bake` is the top zoom the archive actually contains (the source maxzoom; the
+// client overzooms above it). Coastal/approach bake +2 past native to sharpen the
+// suppression cut vs the next finer band; harbor stops at its native max (z17/18
+// would be pure buffer) and the client overzooms it to fill berth level. MUST
+// match the baker's bandBakeCeil (internal/engine/bake/bake.go).
 const CHART_BANDS = [
-  { slug: "overview", min: 0, max: 7 },
-  { slug: "general", min: 7, max: 9 },
-  { slug: "coastal", min: 9, max: 11 },
-  { slug: "approach", min: 11, max: 13 },
-  { slug: "harbor", min: 13, max: 16 },
-  { slug: "berthing", min: 16, max: 18 },
-  { slug: "all", min: 0, max: 18 },
+  { slug: "overview", min: 0, max: 7, bake: 7 },
+  { slug: "general", min: 7, max: 9, bake: 9 },
+  { slug: "coastal", min: 9, max: 11, bake: 13 },
+  { slug: "approach", min: 11, max: 13, bake: 15 },
+  { slug: "harbor", min: 13, max: 16, bake: 16 },
+  { slug: "berthing", min: 16, max: 18, bake: 18 },
+  { slug: "all", min: 0, max: 18, bake: 18 },
 ];
 
 // Ensure the vendored MapLibre UMD global is loaded (the component injects it if
@@ -1426,19 +1427,17 @@ export class ChartPlotter extends HTMLElement {
     // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
     // bands resolve to blank tiles (harmless) until an archive is added.
     const sources = {};
-    // Per-band prebaked sources in BOTH modes. Each per-band archive bakes
-    // BAND_OVERZOOM_MARGIN levels past its native max, gap-clipped (the band's
-    // fill suppressed where a finer cell's coverage actually exists). Setting the
-    // source maxzoom to band.max + margin makes MapLibre client-overzoom that
-    // GAP-CLIPPED tile (not the full native one), so a coarse band fills a finer
-    // band's gaps without bleeding into areas the finer band owns.
+    // Per-band prebaked sources in BOTH modes. The source maxzoom is band.bake —
+    // the top zoom the archive actually contains — so MapLibre serves real tiles up
+    // to there and client-overzooms above it (base fills + the finest band fill the
+    // finer zooms for free; coarser bands' lines/patterns are cut in the bake or
+    // capped on the layer, so they don't bleed into a finer band's area).
     for (const band of CHART_BANDS) {
-      const merged = band.slug === "all";
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
         minzoom: band.min,
-        maxzoom: merged ? band.max : Math.min(18, band.max + BAND_OVERZOOM_MARGIN),
+        maxzoom: band.bake,
       };
     }
     if (this._realtime) {
