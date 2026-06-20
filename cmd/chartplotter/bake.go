@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 )
@@ -42,6 +41,12 @@ func (c bakeCmd) Run() error {
 	}
 	fmt.Fprintf(os.Stderr, "baking %d cell(s) (%d update file(s) applied)…\n", len(cells), nUpd)
 
+	// Per-band streaming holds only one band's geometry at a time, so it skips the
+	// all-cells BuildBakerWithUpdates entirely.
+	if c.Bands {
+		return c.runBands(cells)
+	}
+
 	b, ok, err := baker.BuildBakerWithUpdates(cells, c.Overzoom, func(name string, err error) {
 		fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
 	})
@@ -53,10 +58,6 @@ func (c bakeCmd) Run() error {
 	}
 	if c.MaxZoom > 0 {
 		b.MaxBakeZoom = uint32(c.MaxZoom)
-	}
-
-	if c.Bands {
-		return c.runBands(b, len(ok))
 	}
 
 	lastPct := -1
@@ -117,16 +118,18 @@ func (c bakeCmd) Run() error {
 // runBands writes one gap-clipped PMTiles archive per navigational band
 // (<out-stem>-<slug>.pmtiles) plus a manifest tagging each with its band slug, so
 // the frontend loads each into its own chart-<slug> source.
-func (c bakeCmd) runBands(b *bake.Baker, nCells int) error {
+func (c bakeCmd) runBands(cells map[string]baker.CellData) error {
 	ext := filepath.Ext(c.Out)
 	stem := strings.TrimSuffix(c.Out, ext)
-	bb := b.Bounds()
 	var entries []map[string]any
 	lastPct := -1
 
-	// Each band is written + freed as it is baked (streamed via the callback), so
-	// only one band's archive is ever resident in memory.
-	err := baker.BakeToPMTilesBands(b,
+	// Streaming: pass 1 derives coverage per cell; pass 2 re-parses + bakes one band
+	// at a time, so only a single band's geometry + archive is ever resident.
+	bb, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, uint32(c.MaxZoom),
+		func(name string, err error) {
+			fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
+		},
 		func(done, total int) {
 			if total == 0 {
 				return
@@ -153,14 +156,18 @@ func (c bakeCmd) runBands(b *bake.Baker, nCells int) error {
 			fmt.Fprintf(os.Stderr, "\r")
 			fmt.Printf("  %-9s → %s (%d tiles, %.1f MB)\n", slug, out, pb.Count(), float64(st.Size())/(1<<20))
 			entries = append(entries, map[string]any{
-				"file":   filepath.Base(out),
-				"band":   slug,
-				"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
+				"file": filepath.Base(out),
+				"band": slug,
 			})
 			return nil
 		})
 	if err != nil {
 		return err
+	}
+	// District bounds (cell-union) are known only after both passes; stamp them
+	// onto every band entry now.
+	for _, e := range entries {
+		e["bounds"] = []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat}
 	}
 	fmt.Printf("baked %d cell(s) → %d band archive(s)\n", nCells, len(entries))
 

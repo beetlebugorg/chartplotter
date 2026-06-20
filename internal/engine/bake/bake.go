@@ -295,6 +295,7 @@ type Baker struct {
 	// coarser data). Internal seams between same-band cells are suppressed.
 	covMeta         []covMeta
 	scaleBndEmitted bool
+	skipCoverage    bool // AddCell skips M_COVR extraction (covMeta pre-built; streaming bake)
 
 	// Interning for the route() base attributes: `class` (one of ~170 S-57 object
 	// classes) and `cell` (the source dataset name) are the same string repeated
@@ -413,6 +414,68 @@ func groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, s
 	return primaryText, skip
 }
 
+// extractCoverage records a cell's M_COVR (CATCOV=1) data-coverage polygons into
+// covMeta (keyed to the cell's native band [zr]) — the input to best-available
+// suppression and DATCVR scale boundaries.
+func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell string) {
+	for i := range features {
+		f := &features[i]
+		if f.ObjectClass() != "M_COVR" || intAttr(f.Attributes(), "CATCOV") != 1 {
+			continue
+		}
+		rings := f.Geometry().Rings
+		if len(rings) == 0 {
+			continue
+		}
+		cov := CellCoverage{Cell: cell}
+		cm := covMeta{bandMin: zr.Min, bandMax: zr.Max, bb: geo.EmptyBox()}
+		for _, r := range rings {
+			cov.Rings = append(cov.Rings, r.Coordinates)
+			cm.rings = append(cm.rings, r.Coordinates)
+			for _, pt := range r.Coordinates {
+				cm.bb.ExtendPoint(geo.LatLon{Lon: pt[0], Lat: pt[1]})
+			}
+		}
+		b.coverage = append(b.coverage, cov)
+		b.covMeta = append(b.covMeta, cm)
+		b.bbox.ExtendBox(cm.bb) // so the streaming bake has full bounds after pass 1
+	}
+}
+
+// cellStem is a cell's dataset name without the .000/.NNN extension.
+func cellStem(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// AddCellCoverage extracts ONLY a cell's coverage + native band (no feature
+// routing) — the streaming bake's first pass, building the global covMeta once so
+// each later per-band routing pass can suppress against finer bands without
+// re-deriving coverage. Returns the cell's native band.
+func (b *Baker) AddCellCoverage(chart *s57.Chart) Band {
+	band := BandForScale(uint32(chart.CompilationScale()))
+	b.extractCoverage(chart.Features(), band.ZoomRange(), cellStem(chart.DatasetName()))
+	return band
+}
+
+// SetSkipCoverage makes AddCell skip M_COVR extraction (covMeta already built by
+// AddCellCoverage in the streaming bake's first pass).
+func (b *Baker) SetSkipCoverage(v bool) { b.skipCoverage = v }
+
+// ResetPrims drops the routed primitives, sectors, and emit index so the next
+// band's cells can be routed into the same Baker, while KEEPING the accumulated
+// coverage, bounds, interning tables, and loaded library — so the streaming bake
+// holds only one band's geometry at a time.
+func (b *Baker) ResetPrims() {
+	b.prims = nil
+	b.sectors = nil
+	b.emitIndex = nil
+	b.scaleBndEmitted = false
+	b.seenSector = nil
+}
+
 // AddCell expands every feature of a parsed cell into routed primitives at the
 // cell's scale band, with per-feature SCAMIN display z-min.
 func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.MarinerSettings) {
@@ -443,6 +506,12 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	// co-located point aids (TOPMAR01 floating/rigid). Built once per cell.
 	cellIdx := buildCellIndex(chart)
 	features := chart.Features()
+	// Cell data-coverage (M_COVR CATCOV=1) → covMeta for best-available suppression
+	// and scale boundaries. Skipped when the coverage was already built in a prior
+	// pass (the streaming bake builds it once up front, then re-routes per band).
+	if !b.skipCoverage {
+		b.extractCoverage(features, zr, b.curCell)
+	}
 	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.
 	lightPrimary, lightSkip := groupCoLocatedLights(features)
 	b.seenSector = make(map[sectorKey]struct{})
@@ -456,23 +525,6 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		b.curLight = ""
 		b.curLightSkip = false
 		b.curLightText = ""
-		// Capture the cell's data-coverage polygon (M_COVR, CATCOV=1) for the debug
-		// overlay — the real area the cell carries data for, not its bounding box.
-		if f.ObjectClass() == "M_COVR" && intAttr(f.Attributes(), "CATCOV") == 1 {
-			if rings := f.Geometry().Rings; len(rings) > 0 {
-				cov := CellCoverage{Cell: b.curCell}
-				cm := covMeta{bandMin: zr.Min, bandMax: zr.Max, bb: geo.EmptyBox()}
-				for _, r := range rings {
-					cov.Rings = append(cov.Rings, r.Coordinates)
-					cm.rings = append(cm.rings, r.Coordinates)
-					for _, pt := range r.Coordinates {
-						cm.bb.ExtendPoint(geo.LatLon{Lon: pt[0], Lat: pt[1]})
-					}
-				}
-				b.coverage = append(b.coverage, cov)
-				b.covMeta = append(b.covMeta, cm)
-			}
-		}
 		if f.ObjectClass() == "LIGHTS" {
 			b.curLight = s52.BuildLightCharacteristic(f.Attributes())
 			b.curLightSkip = lightSkip[i]

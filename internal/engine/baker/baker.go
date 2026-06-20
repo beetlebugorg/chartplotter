@@ -16,6 +16,7 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 	"github.com/beetlebugorg/chartplotter/pkg/s52"
 	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
@@ -297,6 +298,96 @@ func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int), emit func
 		}
 	}
 	return nil
+}
+
+// BakeToPMTilesBandsStreaming bakes per-band archives while holding only ONE
+// band's parsed geometry in memory at a time — the key to baking a large district
+// without keeping every cell's prims resident. It works in two passes:
+//
+//	Pass 1 — parse each cell and extract only its coverage + native band (no
+//	  feature routing), building the global covMeta once so best-available
+//	  suppression and scale boundaries have full cross-band coverage.
+//	Pass 2 — for each band, re-parse just that band's cells, route them, bake the
+//	  band's archive (emit), then drop the prims before the next band.
+//
+// Cells are therefore parsed twice, but pass 1 skips the expensive portrayal +
+// routing, so the overhead is small relative to the memory saved. emit(slug,
+// builder) is called per band that produced tiles; returns the cell-union bounds
+// and the number of cells parsed.
+func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSkip func(name string, err error), progress func(done, total int), emit func(slug string, pb *pmtiles.Builder) error) (geo.BoundingBox, int, error) {
+	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
+	if err != nil {
+		return geo.BoundingBox{}, 0, err
+	}
+	mariner := s52.DefaultMarinerSettings()
+	b := bake.New()
+	if maxZoom > 0 {
+		b.MaxBakeZoom = maxZoom
+	}
+
+	names := make([]string, 0, len(cells))
+	for n := range cells {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	// Pass 1: coverage + band per cell (no routing).
+	byBand := map[uint32][]string{}
+	parsed := 0
+	for _, name := range names {
+		cd := cells[name]
+		chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
+		if err != nil {
+			if onSkip != nil {
+				onSkip(name, err)
+			}
+			continue
+		}
+		band := b.AddCellCoverage(chart)
+		byBand[band.ZoomRange().Max] = append(byBand[band.ZoomRange().Max], name)
+		parsed++
+	}
+	b.SetSkipCoverage(true) // covMeta is now global; don't re-derive it per band
+
+	// Pass 2: per band, re-parse + route + bake + free.
+	for _, bd := range bake.BakeBands() {
+		bandCells := byBand[bd.Max]
+		if len(bandCells) == 0 {
+			continue
+		}
+		b.ResetPrims()
+		for _, name := range bandCells {
+			cd := cells[name]
+			chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
+			if err != nil {
+				if onSkip != nil {
+					onSkip(name, err)
+				}
+				continue
+			}
+			b.AddCell(chart, lib, mariner)
+		}
+		coords := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max)
+		if len(coords) == 0 {
+			continue
+		}
+		b.BuildEmitIndexBand(MVTExtent, MVTBuffer, bd.Max)
+		pb := pmtiles.New()
+		emitTiles(coords, pb, progress, func(c tile.TileCoord, ts *bake.TileScratch) []byte {
+			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, bd.Max)
+		})
+		b.ClearEmitIndex()
+		if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
+			pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
+		}
+		if pb.Count() == 0 {
+			continue
+		}
+		if err := emit(bd.Slug, pb); err != nil { // write + free this band before the next
+			return b.Bounds(), parsed, err
+		}
+	}
+	return b.Bounds(), parsed, nil
 }
 
 // IsBaseCell reports whether name is an S-57 base cell (…/<CELL>.000).
