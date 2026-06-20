@@ -192,7 +192,6 @@ type sectorPrim struct {
 	cell     string
 	drawPrio int
 	cat      int
-	band     Band
 	zMin     uint32
 	natMax   uint32
 	// legNorm is the full-length leg reach (VALNMR nominal range) as a fraction
@@ -228,6 +227,13 @@ type Baker struct {
 	curLightText string                // merged multi-line characteristic for the primary
 	seenSector   map[sectorKey]struct{} // sector dedup for the current cell
 	coverage     []CellCoverage         // M_COVR data-coverage polygons of added cells (debug)
+
+	// DATCVR §10.1.9.1 chart scale boundaries: per-cell M_COVR(CATCOV=1) coverage
+	// + native band, used by emitScaleBoundaries to draw a line where the
+	// navigational purpose changes (a finer cell's coverage edge sitting inside
+	// coarser data). Internal seams between same-band cells are suppressed.
+	covMeta         []covMeta
+	scaleBndEmitted bool
 
 	// OverzoomAllBands makes EVERY band overzoom DOWN to the world view (like the
 	// general band always does), not just BandGeneral. Set on the realtime/upload
@@ -265,6 +271,15 @@ type CellCoverage struct {
 
 // Coverage returns the M_COVR data-coverage polygons of every cell added so far.
 func (b *Baker) Coverage() []CellCoverage { return b.coverage }
+
+// covMeta is one cell's data-coverage (M_COVR CATCOV=1) outline plus its native
+// scale band, the input to emitScaleBoundaries. rings are GeoJSON
+// [ring][point][lon,lat]; bb is their lon/lat bounding box.
+type covMeta struct {
+	bandMin, bandMax uint32
+	bb               geo.BoundingBox
+	rings            [][][]float64
+}
 
 // sectorKey identifies a sector light's geometry (anchor + params) for dedup.
 type sectorKey struct {
@@ -374,10 +389,16 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		if f.ObjectClass() == "M_COVR" && intAttr(f.Attributes(), "CATCOV") == 1 {
 			if rings := f.Geometry().Rings; len(rings) > 0 {
 				cov := CellCoverage{Cell: b.curCell}
+				cm := covMeta{bandMin: zr.Min, bandMax: zr.Max, bb: geo.EmptyBox()}
 				for _, r := range rings {
 					cov.Rings = append(cov.Rings, r.Coordinates)
+					cm.rings = append(cm.rings, r.Coordinates)
+					for _, pt := range r.Coordinates {
+						cm.bb.ExtendPoint(geo.LatLon{Lon: pt[0], Lat: pt[1]})
+					}
 				}
 				b.coverage = append(b.coverage, cov)
+				b.covMeta = append(b.covMeta, cm)
 			}
 		}
 		if f.ObjectClass() == "LIGHTS" {
@@ -416,7 +437,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 						names = append(names, nsc.SymbolName)
 						pi++
 					}
-					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd, pts)
+					b.routeSoundingGroup(names, sc, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts)
 					continue
 				}
 				// Co-located lights (S-52 LIGHTS06): a non-primary light drops its
@@ -439,7 +460,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 						}
 					}
 				}
-				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, band, zr, zMin, dr.Max, bnd, pts, drval1, drval2)
+				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts, drval1, drval2)
 			}
 		}
 	}
@@ -448,7 +469,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 // routeSoundingGroup emits one soundings feature for a whole sounding number
 // (the comma-joined digit-glyph list), carrying depth + both palette variants so
 // the client runs SNDFRM04's safety-depth split live.
-func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd, pts int64) {
+func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, class string, drawPrio, cat int, zr ZoomRange, zMin, zMax uint32, bnd, pts int64) {
 	joined := strings.Join(names, ",")
 	r := routed{layer: "soundings", kind: mvt.GeomPoint, npoint: normPt(sc.Anchor), zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
 	attrs := []mvt.KeyValue{
@@ -513,7 +534,7 @@ func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.prims = append(b.prims, r)
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, band Band, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2 float32) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2 float32) {
 	common := func(extra ...mvt.KeyValue) []mvt.KeyValue {
 		base := []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal(class)},
@@ -616,7 +637,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, ba
 		b.bbox.ExtendPoint(v.Anchor)
 		b.sectors = append(b.sectors, sectorPrim{
 			anchor: v.Anchor, params: v.Sector, class: class, cell: b.curCell,
-			drawPrio: drawPrio, cat: cat, band: band, zMin: zMin, natMax: zr.Max,
+			drawPrio: drawPrio, cat: cat, zMin: zMin, natMax: zr.Max,
 			legNorm: sectorLegFullNorm(v.Anchor.Lat, v.Sector.RadiusNM),
 		})
 	}
@@ -646,9 +667,131 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 	b.add(r, ptBbox(v.Anchor))
 }
 
+// emitScaleBoundaries draws S-52 DATCVR §10.1.9.1 "chart scale boundaries": a
+// line where the navigational purpose changes — i.e. along a cell's data-coverage
+// (M_COVR CATCOV=1) edge wherever STRICTLY-COARSER data lies just outside it. The
+// boundary is emitted once, by the finer cell, and extended DOWN to the coarser
+// side's band so it is visible when zoomed out (marking "larger-scale data here").
+// Edges shared with a SAME-band cell are internal seams and are suppressed (the
+// spec draws only navigational-purpose changes, not minor in-band joins); edges
+// facing no data are the end of coverage, shown by the NODATA hatch, not a line.
+// Idempotent; runs once before tile enumeration. Adds prims to b.prims.
+//
+// Outside-side membership is sampled by probing a short perpendicular off each
+// segment's midpoint (the side not inside this cell's own coverage), then a
+// point-in-coverage test against the other cells — robust to mismatched ring
+// tessellation between adjoining cells (no shared-vertex assumption).
+func (b *Baker) emitScaleBoundaries() {
+	if b.scaleBndEmitted {
+		return
+	}
+	b.scaleBndEmitted = true
+	if len(b.covMeta) < 2 {
+		return
+	}
+	const eps = 0.0006 // ~60 m perpendicular probe (degrees, mid-latitude)
+	for ci := range b.covMeta {
+		cm := &b.covMeta[ci]
+		for _, ring := range cm.rings {
+			n := len(ring)
+			if n < 2 {
+				continue
+			}
+			var run []geo.LatLon
+			minOut := cm.bandMin
+			flush := func() {
+				if len(run) >= 2 {
+					b.addScaleBoundary(run, minOut, cm.bandMax)
+				}
+				run = run[:0]
+				minOut = cm.bandMin
+			}
+			for i := 0; i < n; i++ {
+				lon1, lat1 := ring[i][0], ring[i][1]
+				lon2, lat2 := ring[(i+1)%n][0], ring[(i+1)%n][1]
+				dx, dy := lon2-lon1, lat2-lat1
+				plen := math.Hypot(dx, dy)
+				if plen == 0 {
+					continue
+				}
+				mx, my := (lon1+lon2)/2, (lat1+lat2)/2
+				nx, ny := -dy/plen*eps, dx/plen*eps
+				ax, ay := mx+nx, my+ny
+				cx, cy := mx-nx, my-ny
+				aIn := pointInRings(ax, ay, cm.rings)
+				cIn := pointInRings(cx, cy, cm.rings)
+				if aIn == cIn { // corner/degenerate — can't tell outside; break the run
+					flush()
+					continue
+				}
+				ox, oy := cx, cy
+				if cIn {
+					ox, oy = ax, ay
+				}
+				// Classify the outside: a same-band neighbour ⇒ internal seam (drop);
+				// the coarsest strictly-coarser neighbour sets how far down to show it.
+				seam, coarser := false, false
+				coarsestMin := cm.bandMin
+				for oj := range b.covMeta {
+					if oj == ci {
+						continue
+					}
+					o := &b.covMeta[oj]
+					if !o.bb.Contains(geo.LatLon{Lat: oy, Lon: ox}) || !pointInRings(ox, oy, o.rings) {
+						continue
+					}
+					if o.bandMin == cm.bandMin {
+						seam = true
+						break
+					}
+					if o.bandMin < cm.bandMin { // smaller band min = coarser
+						coarser = true
+						if o.bandMin < coarsestMin {
+							coarsestMin = o.bandMin
+						}
+					}
+				}
+				if seam || !coarser {
+					flush()
+					continue
+				}
+				if len(run) == 0 {
+					run = append(run, geo.LatLon{Lat: lat1, Lon: lon1})
+				}
+				run = append(run, geo.LatLon{Lat: lat2, Lon: lon2})
+				if coarsestMin < minOut {
+					minOut = coarsestMin
+				}
+			}
+			flush()
+		}
+	}
+}
+
+// addScaleBoundary appends one scale-boundary polyline prim (DATCVR §10.1.9.1).
+// natMin==zMin and natMax==zMax so best-available suppression never touches it —
+// the boundary is a structural line, shown across its whole [zMin,zMax] span.
+func (b *Baker) addScaleBoundary(pts []geo.LatLon, zMin, zMax uint32) {
+	bb := geo.EmptyBox()
+	for _, p := range pts {
+		bb.ExtendPoint(p)
+	}
+	r := routed{
+		layer: "scale_boundaries", kind: mvt.GeomLineString, nline: normPts(pts),
+		zMin: zMin, zMax: zMax, natMin: zMin, natMax: zMax,
+		attrs: []mvt.KeyValue{
+			{Key: "class", Value: mvt.StringVal("SCLBDY")},
+			{Key: "color_token", Value: mvt.StringVal("CHGRD")},
+			{Key: "width_px", Value: mvt.IntVal(2)},
+		},
+	}
+	b.add(r, bb)
+}
+
 // TileCoords enumerates every tile (across each primitive's display zooms) that
 // the resident primitives touch.
 func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
+	b.emitScaleBoundaries() // adds scale-boundary prims; must precede enumeration
 	seen := map[uint64]struct{}{}
 	var out []tile.TileCoord
 	for i := range b.prims {
@@ -690,6 +833,7 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 // superset of EmitTileInto's in-tile reject — the reject still runs and trims the
 // boundary-tile over-inclusion, so behaviour is identical to the full scan.
 func (b *Baker) BuildEmitIndex(extent uint32, buffer float64) {
+	b.emitScaleBoundaries() // adds scale-boundary prims; must precede indexing
 	idx := make(map[uint64][]int32, len(b.prims))
 	bufFrac := buffer / float64(extent)
 	for i := range b.prims {
@@ -786,8 +930,8 @@ func (b *Baker) EmitTile(coord tile.TileCoord, extent uint32, buffer float64) []
 	return b.EmitTileInto(coord, extent, buffer, &TileScratch{})
 }
 
-// EmitTileInto bakes the merged MVT for one tile, or nil if it has no features,
-// reusing ts's buffers. band_z is coord.Z (the per-primitive in-band test zoom).
+// EmitTileInto bakes the merged (all-band) MVT for one tile, or nil if empty,
+// reusing ts's buffers.
 func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64, ts *TileScratch) []byte {
 	tb := mvt.NewTileBuilder(extent)
 	proj := tile.NewProjector(coord, extent)
@@ -802,7 +946,6 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	tny0, tny1 := float64(coord.Y)/n-bufN, float64(coord.Y+1)/n+bufN
 
 	eligible := ts.eligible[:0]
-	var finestNat uint32
 	var gatedZMin int // polys that overlap this tile but are hidden below their display zMin (SCAMIN) — diagnostic
 	minNatMin := uint32(math.MaxUint32)
 	consider := func(i int) {
@@ -812,14 +955,12 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		if r.wMaxX < tnx0 || r.wMinX > tnx1 || r.wMaxY < tny0 || r.wMinY > tny1 {
 			return
 		}
-		// Lower gate only: below zMin the feature isn't shown at all. The UPPER end
-		// is governed by best-available suppression below (a coarse prim stays
-		// visible when zoomed in past its native band — overzoomed — except where a
-		// strictly-finer cell actually overlaps it). So once data is on screen,
-		// zooming in never drops it unless something better takes its place. (The
-		// indexed bake path only lists prims at their native zooms, so it's
-		// unaffected; overzoom relies on the full-scan path used by the realtime
-		// baker.) r.zMax is retained for the index build's range only.
+		// Lower gate only. The UPPER end is governed by best-available suppression
+		// below: the full-scan (wasm) path overzooms a coarse prim UP past its native
+		// band to fill where no finer cell exists, suppressed only where a finer cell
+		// actually covers. The indexed (prebaked) path lists each prim only across
+		// [zMin, zMax], so it never overzooms up — there the per-band sources +
+		// MapLibre client overzoom do the same job. r.zMax bounds the index only.
 		if coord.Z < r.zMin {
 			if r.kind == mvt.GeomPolygon {
 				gatedZMin++
@@ -827,9 +968,6 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			return
 		}
 		eligible = append(eligible, i)
-		if r.natMax != math.MaxUint32 && r.natMax > finestNat {
-			finestNat = r.natMax
-		}
 		if r.natMin < minNatMin {
 			minNatMin = r.natMin
 		}
@@ -850,29 +988,47 @@ func (b *Baker) EmitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	ts.eligible = eligible // persist the (possibly grown) backing array for reuse
 	scratch := ts.proj     // reused per-ring projection buffer (across tiles)
 	clip := &ts.clip       // reused clipper (across tiles)
+	// tileCovBand: finest band whose M_COVR data-coverage contains this tile's
+	// centre — the up-suppression's "is a finer cell actually here" test. Computed
+	// lazily (tiles with no up-overzoom candidate pay nothing); only the full-scan
+	// path reaches it (the indexed path caps prims at their band).
+	tileCovBand, tileCovDone := uint32(0), false
+	covBandAt := func() uint32 {
+		if !tileCovDone {
+			ctrLon := (float64(coord.X)+0.5)/n*360 - 180
+			ctrLat := unnormY((float64(coord.Y) + 0.5) / n)
+			tileCovBand, tileCovDone = b.coverageBandAt(ctrLat, ctrLon), true
+		}
+		return tileCovBand
+	}
 	var suppDown, suppUp, emptyGeom int    // tile-generation diagnostics (see TileDiag)
 	var polyElig, polyEmit int             // polygon prims eligible vs actually emitted (diagnostic)
 	for _, i := range eligible {
 		r := &b.prims[i]
-		// Best-available suppression: below its native band, yield only where no
-		// coarser cell covers; above its native band, only the finest shows. A
-		// prim already at the coarsest native band on this tile can't be
-		// suppressed (nothing is coarser), so skip the O(eligible) overlap scan —
-		// for a single-band/single-cell bake this elides it entirely.
+		// Down-fill: a prim displayed BELOW its native band (general/overzoom cells)
+		// yields only where no coarser cell covers, so coarse bands stay best-
+		// available when zoomed out.
 		if bandZ < r.natMin && r.natMin > minNatMin && b.anyCoarserOverlaps(eligible, r) {
 			suppDown++
 			continue
 		}
-		// Symmetric up-direction gate: a coarse prim shown above its native band is
-		// suppressed only where a strictly-finer eligible prim actually *overlaps*
-		// it — not merely because some finer cell touches the tile. Without the
-		// overlap test a coarse feature (e.g. a light the finer cell doesn't carry)
-		// vanishes wherever a finer cell shares its tile. The r.natMax < finestNat
-		// short-circuit means a prim already at the finest band on the tile pays no
-		// scan, mirroring the down path's minNatMin guard.
-		if bandZ > r.natMax && r.natMax < finestNat && b.anyFinerOverlaps(eligible, r) {
-			suppUp++
-			continue
+		// Up-direction (a coarse prim overzoomed ABOVE its native band, full-scan
+		// path only): AREA/LINE fills are suppressed only where a strictly-finer
+		// cell's DATA COVERAGE actually contains the tile (covBandAt) — gating on
+		// real coverage, not feature bbox, avoids blanking gaps where a finer cell's
+		// bbox merely overlapped. POINTS keep the per-feature overlap test so a
+		// coarse light survives unless a finer prim sits on it (disappearing-light).
+		if bandZ > r.natMax {
+			var suppressed bool
+			if r.kind == mvt.GeomPoint {
+				suppressed = b.anyFinerOverlaps(eligible, r)
+			} else {
+				suppressed = r.natMax < covBandAt()
+			}
+			if suppressed {
+				suppUp++
+				continue
+			}
 		}
 		switch r.kind {
 		case mvt.GeomPolygon:
@@ -1165,8 +1321,9 @@ func (b *Baker) anyCoarserOverlaps(eligible []int, r *routed) bool {
 }
 
 // anyFinerOverlaps reports whether a strictly-finer-band eligible primitive's
-// world bbox overlaps r (AABB only). Gates up-direction suppression — the mirror
-// of anyCoarserOverlaps. A finer band has the larger native-max zoom.
+// world bbox overlaps r (AABB only). Gates up-direction suppression of POINT
+// features only: a coarse symbol survives unless a finer prim sits on it. Area/
+// line fills use coverageBandAt (actual M_COVR coverage) instead.
 func (b *Baker) anyFinerOverlaps(eligible []int, r *routed) bool {
 	for _, qi := range eligible {
 		q := &b.prims[qi]
@@ -1178,6 +1335,25 @@ func (b *Baker) anyFinerOverlaps(eligible []int, r *routed) bool {
 		}
 	}
 	return false
+}
+
+// coverageBandAt returns the finest native band whose M_COVR (CATCOV=1) data
+// coverage contains (lat,lon), or 0 if none — the best-available band at a point.
+// Gates up-direction suppression of area/line fills: a coarse fill overzoomed
+// above its band is hidden only where a strictly-finer cell genuinely carries data.
+func (b *Baker) coverageBandAt(lat, lon float64) uint32 {
+	var best uint32
+	p := geo.LatLon{Lat: lat, Lon: lon}
+	for i := range b.covMeta {
+		cm := &b.covMeta[i]
+		if cm.bandMax <= best || !cm.bb.Contains(p) {
+			continue
+		}
+		if pointInRings(lon, lat, cm.rings) {
+			best = cm.bandMax
+		}
+	}
+	return best
 }
 
 // -- helpers -----------------------------------------------------------------

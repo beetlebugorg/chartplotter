@@ -239,11 +239,13 @@ export class ChartPlotter extends HTMLElement {
       // uploaded cells don't cover. The URL is a single .pmtiles, OR a
       // charts-index.json manifest (its district files are opened into one
       // MultiArchive). Absent → pure offline (wasm-only) rendering.
-      let fallback = null;
+      // Prebaked archives are routed into the per-band sources (chart-<slug>) by
+      // _openPrebaked, which render UNDER the cp:// cells with client overzoom — so
+      // the cp:// source needs no fallback (it carries only the user's cells).
+      const fallback = null;
       const preUrl = this.getAttribute("prebaked") || "";
       if (preUrl) {
         this._prebakedArchive = await this._openPrebaked(preUrl).catch((e) => { console.warn("[chartplotter] prebaked", preUrl, e); return null; });
-        fallback = this._prebakedArchive;
       }
       this._rtCache = this._rt.registerTileProtocol(maplibregl, {
         // Namespace scopes the persistent tile cache. BUMP THE VERSION SUFFIX when
@@ -253,17 +255,23 @@ export class ChartPlotter extends HTMLElement {
         //   record-length-0 parse fix, and the known-empty tile cache — all change
         //   tile output, so prior rt6 tiles must not be reused (they cause stale
         //   holes after a code update without a manual cache clear).
-        namespace: "rt7",
+        // rt8: baker caps each prim at its native band (no in-baker up-overzoom);
+        //   coarse data now overzooms client-side via the per-band sources below.
+        namespace: "rt8",
         fallback,
         // Surface live bake activity so the app can show a "generating tiles"
         // indicator; fires whenever the worker's in-flight tile count changes.
         onActivity: (n) => this.dispatchEvent(new CustomEvent("bake-activity", { detail: { inflight: n }, bubbles: true })),
       });
-    } else {
-      for (const band of CHART_BANDS) {
-        const slug = band.slug;
-        registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._bands[slug]);
-      }
+    }
+    // Per-band prebaked sources (chart-<slug>), registered in BOTH modes. Each
+    // carries its own maxzoom so MapLibre client-overzooms a coarse band up into
+    // finer display zooms (coastal z11 → z18 offshore) — replacing the old in-baker
+    // overzoom. In realtime mode they render UNDER the cp:// cells (the shell loads
+    // hosted districts into this._bands via addArchives).
+    for (const band of CHART_BANDS) {
+      const slug = band.slug;
+      registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._bands[slug]);
     }
 
     // -- map ----------------------------------------------------------------
@@ -627,16 +635,29 @@ export class ChartPlotter extends HTMLElement {
   // charts-index.json manifest whose district files are opened into one
   // MultiArchive (each file URL resolved relative to the manifest).
   async _openPrebaked(url) {
-    if (!url.endsWith(".json")) return new PMTilesArchive(url).init();
+    if (!url.endsWith(".json")) {
+      // A single .pmtiles → the merged "all" band source (no per-band overzoom).
+      if (!this._bands.all) this._bands.all = new MultiArchive();
+      return this._bands.all.add(url);
+    }
     const j = await fetch(url).then((r) => (r.ok ? r.json() : null));
     const districts = (j && j.districts) || [];
     const base = new URL(url, location.href);
-    const ma = new MultiArchive();
+    let any = null;
     for (const d of districts) {
       if (!d.file) continue;
-      try { await ma.add(new URL(d.file, base).href); } catch (e) { console.warn("[chartplotter] prebaked district", d.file, e); }
+      // A bandless ("all") archive is FANNED across every per-band source (each
+      // overzooms its own [min,max]) so a coarse-only spot shows the coarser chart
+      // overscale instead of a high-zoom hole; explicit band slugs route directly.
+      const slugs = this._fanBands(d.band || "all");
+      const u = new URL(d.file, base).href;
+      for (const slug of slugs) {
+        if (!this._bands[slug]) this._bands[slug] = new MultiArchive();
+        try { const a = await this._bands[slug].add(u); any = any || a; }
+        catch (e) { console.warn("[chartplotter] prebaked district", d.file, e); }
+      }
     }
-    return ma.archives.length ? ma : null;
+    return any;
   }
 
   // Is the active basemap any OSM variant (raster or vector)? Used to let the OSM
@@ -846,6 +867,10 @@ export class ChartPlotter extends HTMLElement {
   // read up front (tiles stream on demand), so a multi-GB archive loads instantly.
   // Returns the opened archive (read `.bounds` to frame). Re-requests tiles.
   async setArchive(src) {
+    // In realtime mode the per-band sources carry the prebaked fan (see
+    // _openPrebaked) and addArchive is a no-op, so a single-archive REPLACE must
+    // NOT wipe them — that would blank the hosted chart.
+    if (this._realtime) return null;
     this._bands = {};
     return this.addArchive(src);
   }
@@ -1027,6 +1052,9 @@ export class ChartPlotter extends HTMLElement {
       // visibility toggle. Off → the basemap shows through where data ends.
       if (keys.includes("showNoData")) {
         this._eachLayer("nodata", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showNoData === false ? "none" : "visible"));
+      }
+      if (keys.includes("showScaleBoundaries")) {
+        this._eachLayer("scale-boundaries", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showScaleBoundaries === false ? "none" : "visible"));
       }
       // S-52 individually-selectable "Other" items, each a plain visibility
       // toggle on its own layer (all default on): spot soundings, light
@@ -1256,6 +1284,10 @@ export class ChartPlotter extends HTMLElement {
       // depth areas straddling the live safety contour, drawn over the plain
       // DEPCN contour lines. Filter updates on safetyContour — no re-bake.
       { id: "safety-contour", type: "line", source: "chart", "source-layer": "areas", filter: this.safetyContourFilter(), paint: { "line-color": this.token("DEPSC", "#3a6a8a"), "line-width": 2 } },
+      // Chart scale boundaries (DATCVR §10.1.9.1): a CHGRD line where the
+      // navigational purpose changes, baked into the scale_boundaries layer.
+      // Standard display, on by default; toggled via mariner.showScaleBoundaries.
+      { id: "scale-boundaries", type: "line", source: "chart", "source-layer": "scale_boundaries", layout: { visibility: this._mariner.showScaleBoundaries === false ? "none" : "visible" }, paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1.5] } },
     ];
     const top = [
       { id: "point_symbols", type: "symbol", source: "chart", "source-layer": "point_symbols", layout: { "icon-image": this.pointSymbolImage(), "icon-size": this.iconSizeForScale(), "icon-rotate": ["coalesce", ["get", "rotation_deg"], 0], "icon-rotation-alignment": "map", "icon-allow-overlap": true, "icon-ignore-placement": true, "symbol-z-order": "source" } },
@@ -1300,15 +1332,24 @@ export class ChartPlotter extends HTMLElement {
     this._layerBase = {};
     this._variants = {};
     const out = [];
-    // Real-time: one layer per template on the single "chart" source (the wasm
-    // baker already composes bands per tile, so no per-band fan is needed). The
-    // id IS the base id, so scheme/mariner updates that target a layer by name
-    // hit it directly.
+    // Real-time: the per-band prebaked layers (built below) render UNDER the
+    // realtime cp:// "chart" layers, which carry the user's in-browser-baked cells
+    // (kept as the base layer id so scheme/mariner updates by name still hit them).
+    // The cells draw on top of the hosted chart where both exist; offshore, where
+    // the cp:// source has no tile, the overzoomed per-band prebaked shows through.
     if (this._realtime) {
+      for (const L of tmpl) {
+        for (const band of CHART_BANDS) {
+          const id = L.id + "@" + band.slug;
+          this._layerBase[id] = L.filter ?? null;
+          (this._variants[L.id] ||= []).push(id);
+          out.push({ ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(L.filter ?? null) });
+        }
+      }
       for (const L of tmpl) {
         const base = L.filter ?? null;
         this._layerBase[L.id] = base;
-        this._variants[L.id] = [L.id];
+        (this._variants[L.id] ||= []).push(L.id);
         out.push({ ...L, source: "chart", filter: this.combineFilters(base) });
       }
       return out;
@@ -1363,18 +1404,20 @@ export class ChartPlotter extends HTMLElement {
     // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
     // bands resolve to blank tiles (harmless) until an archive is added.
     const sources = {};
+    // Per-band prebaked sources in BOTH modes (fixed band zoom range, overzoomed
+    // above max client-side).
+    for (const band of CHART_BANDS) {
+      sources["chart-" + band.slug] = {
+        type: "vector",
+        tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
+        minzoom: band.min,
+        maxzoom: band.max,
+      };
+    }
     if (this._realtime) {
-      // One source; the wasm baker handles band-gating / best-available per tile.
+      // Realtime cells, baked on demand by the wasm; rendered ON TOP of the
+      // per-band prebaked layers (cells override the hosted chart where loaded).
       sources.chart = { type: "vector", tiles: [`cp://${v}/{z}/{x}/{y}`], minzoom: 0, maxzoom: 18 };
-    } else {
-      for (const band of CHART_BANDS) {
-        sources["chart-" + band.slug] = {
-          type: "vector",
-          tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
-          minzoom: band.min,
-          maxzoom: band.max,
-        };
-      }
     }
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];
 

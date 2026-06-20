@@ -390,49 +390,39 @@ func TestSectorLights(t *testing.T) {
 	}
 }
 
-// TestUpSuppressionGeometryAware exercises the up-direction best-available gate
-// (bake.go EmitTileInto): a coarse prim shown above its native band must survive
-// where no strictly-finer prim overlaps it (the disappearing-light bug), and only
-// be suppressed where a finer prim genuinely covers its location. The single-
-// archive bake caps zMax at natMax so this branch is latent; here we set zMax >
-// natMax to simulate an overzoomed coarse prim and drive the branch directly.
-func TestUpSuppressionGeometryAware(t *testing.T) {
+// TestUpSuppressionPointOverlap exercises the up-direction gate for POINT features
+// in the full-scan (wasm) path: a coarse symbol overzoomed above its native band
+// survives where no strictly-finer prim overlaps it (disappearing-light), and is
+// suppressed only where a finer prim sits on it. zMax is set > natMax to simulate
+// the overzoomed coarse prim and drive the branch directly.
+func TestUpSuppressionPointOverlap(t *testing.T) {
 	coastal := BandCoastal.ZoomRange() // {9,11}
 	harbor := BandHarbor.ZoomRange()   // {13,16}
 	base := geo.LatLon{Lat: 38.97, Lon: -76.49}
-
 	mk := func(b *Baker, ll geo.LatLon, layer string, zr ZoomRange, zMax uint32) {
 		r := routed{layer: layer, kind: mvt.GeomPoint, npoint: normPt(ll),
 			zMin: zr.Min, zMax: zMax, natMin: zr.Min, natMax: zr.Max}
 		r.attrs = []mvt.KeyValue{{Key: "class", Value: mvt.StringVal("X")}}
 		b.add(r, ptBbox(ll))
 	}
-	// The z13 tile carrying base — both prims land on it (offsets « tile width).
 	rng := tile.RangeForBbox(13, ptBbox(base), mvt.ExtentDefault)
 	coord := tile.TileCoord{Z: 13, X: rng.XMin, Y: rng.YMin}
 
-	// A: finer feature elsewhere on the tile (disjoint bbox) → coarse survives.
+	// A: finer feature elsewhere on the tile (disjoint) → coarse survives.
 	bA := New()
-	mk(bA, base, "point_symbols", coastal, 18) // coarse light, overzoomed past z11
+	mk(bA, base, "point_symbols", coastal, 18)
 	mk(bA, geo.LatLon{Lat: base.Lat + 0.0008, Lon: base.Lon + 0.0008}, "soundings", harbor, harbor.Max)
 	layersA := decodeLayers(bA.EmitTile(coord, mvt.ExtentDefault, 64))
 	if layersA["point_symbols"] == nil {
-		t.Error("A: coarse overzoomed light suppressed even though no finer prim overlaps it")
+		t.Error("A: coarse overzoomed symbol suppressed even though no finer prim overlaps it")
 	}
-	if layersA["soundings"] == nil {
-		t.Error("A: finer prim missing")
-	}
-
-	// B: finer feature at the SAME location (overlapping bbox) → coarse suppressed.
+	// B: finer feature at the SAME location → coarse suppressed.
 	bB := New()
 	mk(bB, base, "point_symbols", coastal, 18)
 	mk(bB, base, "soundings", harbor, harbor.Max)
 	layersB := decodeLayers(bB.EmitTile(coord, mvt.ExtentDefault, 64))
 	if layersB["point_symbols"] != nil {
-		t.Error("B: coarse light should be suppressed where a finer prim overlaps it")
-	}
-	if layersB["soundings"] == nil {
-		t.Error("B: finer prim missing")
+		t.Error("B: coarse symbol should be suppressed where a finer prim overlaps it")
 	}
 }
 

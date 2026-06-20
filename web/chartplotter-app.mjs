@@ -48,6 +48,7 @@ const DEFAULT_MARINER = {
   simplifiedPoints: false,     // paper-chart point symbols (engine SimplifiedPoints=false)
   fourShadeWater: true,        // four depth shades (engine TwoShades=false)
   showNoData: true,
+  showScaleBoundaries: true, // DATCVR §10.1.9.1 chart scale boundaries (standard display)
   // Individually-selectable "Other" items (S-52/IMO), all default on.
   showSoundings: true,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
@@ -3957,6 +3958,7 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
         ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
         ${toggle("showMetaBounds", "Metadata boundaries", "Coverage/region indicator lines (nautical-publication, nav-system, coverage)", !!m.showMetaBounds)}
+        ${toggle("showScaleBoundaries", "Scale boundaries", "Lines where the chart's navigational purpose changes — larger-scale (more detailed) data is available inside (S-52 DATCVR §10.1.9.1)", m.showScaleBoundaries !== false)}
       </div>`;
 
     el.querySelectorAll("#scheme-seg button").forEach((b) =>

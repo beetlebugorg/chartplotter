@@ -15,13 +15,34 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-.PHONY: build wasm test vet fmt tidy clean clear-cache serve docs dist bake-ienc serve-prod
+.PHONY: build wasm test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
-IENC_SRC     ?= testdata/full/ienc          # dir of per-cell IENC .zip bundles
-IENC_PMTILES ?= ienc.pmtiles                # baked IENC archive (project root)
-IENC_MAXZOOM ?= 15                          # cap (IENC is 1:5000 over a vast area; client overzooms)
-NOAA_PMTILES ?= $(firstword $(wildcard noaa-enc-*.pmtiles) noaa.pmtiles)
+# NB: keep these as bare values with NO inline `#` comments — Make folds any
+# whitespace before an inline comment into the value, silently appending
+# trailing spaces to the path (which then fails to stat).
+IENC_SRC     ?= testdata/full/ienc
+# ^ dir of per-cell IENC .zip bundles
+IENC_PMTILES ?= ienc.pmtiles
+# ^ baked IENC archive (project root)
+IENC_MAXZOOM ?= 15
+# ^ zoom cap (IENC is 1:5000 over a vast area; client overzooms)
+
+# NOAA is baked per US Coast Guard district (https://www.charts.noaa.gov/ENCs/),
+# one geographically-disjoint .pmtiles per district — the frontend's MultiArchive
+# routes each tile to the one covering archive (web/pmtiles-source.mjs). Each
+# district's NNCGD_ENCs.zip is downloaded once into $(NOAA_CACHE) and baked once
+# into noaa-d<NN>.pmtiles at the repo root (cached; only re-baked if missing).
+NOAA_URL_BASE ?= https://www.charts.noaa.gov/ENCs
+# ^ NOAA ENC download host; per-district bundles are <NN>CGD_ENCs.zip
+DISTRICTS     ?= 01 05 07 08 09 11 13 14 17
+# ^ USCG districts to bake, zero-padded (override e.g. DISTRICTS="05 07" for a fast loop)
+NOAA_CACHE    ?= $(CACHE)/noaa
+# ^ download cache for the per-district zips (outside the repo; cleared by clear-cache)
+NOAA_JOBS     ?= 5
+# ^ districts baked CONCURRENTLY (NOAA_JOBS=9 for all at once). Each bake is itself
+#   multi-threaded, so peak load ≈ NOAA_JOBS × cores and RAM scales with it too.
+NOAA_PMTILES_ALL := $(foreach d,$(DISTRICTS),noaa-d$(d).pmtiles)
 
 build: $(ASSETS)/chartplotter.wasm ## Build the self-contained shim (embeds web/ + wasm) into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
@@ -48,15 +69,41 @@ bake-ienc: build $(IENC_PMTILES) ## Bake every IENC cell in $(IENC_SRC) into $(I
 $(IENC_PMTILES): $(BIN)
 	$(BIN) bake "$(IENC_SRC)" -o "$(IENC_PMTILES)" --overzoom --max-zoom $(IENC_MAXZOOM)
 
-# Serve the NOAA world archive + the baked IENC archive TOGETHER, prebaked, in
-# production mode on 0.0.0.0:8080. Both .pmtiles live at the project root; they're
-# symlinked into web/ (the served asset dir) and listed in a combined
+# Build the binary first (single-threaded), then bake the districts $(NOAA_JOBS)
+# at a time via a recursive parallel sub-make (the district .pmtiles targets are
+# independent, so -j fans them out; download + bake of each runs concurrently).
+bake-noaa: build ## Bake each USCG district ($(DISTRICTS)) into noaa-d<NN>.pmtiles, $(NOAA_JOBS) in parallel
+	$(MAKE) -j$(NOAA_JOBS) $(NOAA_PMTILES_ALL)
+
+# Keep the downloaded district zips — without this Make treats them as
+# intermediate (made by one pattern rule, consumed by another) and deletes them
+# after baking, forcing a re-download on the next run.
+.PRECIOUS: $(NOAA_CACHE)/%CGD_ENCs.zip
+
+# Download a district's NOAA bundle once (cached by its file target).
+$(NOAA_CACHE)/%CGD_ENCs.zip:
+	@mkdir -p $(NOAA_CACHE)
+	@echo "downloading $*CGD_ENCs.zip from NOAA…"
+	curl -fSL --retry 3 -o "$@" "$(NOAA_URL_BASE)/$*CGD_ENCs.zip"
+
+# Bake a district bundle. NO --overzoom: a district bundle carries its own
+# overview/general cells, so the zoomed-out skeleton is already present. $(BIN) is
+# an order-only prereq so rebuilding the binary doesn't force a (very slow) re-bake.
+noaa-d%.pmtiles: $(NOAA_CACHE)/%CGD_ENCs.zip | $(BIN)
+	$(BIN) bake "$<" -o "$@"
+
+# Serve the per-district NOAA archives + the baked IENC archive TOGETHER,
+# prebaked, in production mode on 0.0.0.0:8080. Every .pmtiles lives at the project
+# root; they're symlinked into web/ (the served asset dir) and listed in a combined
 # charts-index.json manifest the prod app loads via ?catalog=. Open the printed URL.
-serve-prod: build bake-ienc ## Serve NOAA + IENC prebaked pmtiles together, prod mode, on 0.0.0.0:8080
-	@test -n "$(NOAA_PMTILES)" && test -f "$(NOAA_PMTILES)" || { echo "NOAA pmtiles not found (set NOAA_PMTILES=…)"; exit 1; }
-	@ln -sf "$(abspath $(NOAA_PMTILES))" web/noaa.pmtiles
+serve-prod: build bake-noaa ## Serve per-district NOAA + IENC prebaked pmtiles together, prod mode, on 0.0.0.0:8080
 	@ln -sf "$(abspath $(IENC_PMTILES))" web/ienc.pmtiles
-	@printf '{\n  "districts": [\n    { "file": "noaa.pmtiles", "band": "all" },\n    { "file": "ienc.pmtiles", "band": "all" }\n  ]\n}\n' > web/charts-index.json
+	@for d in $(DISTRICTS); do ln -sf "$(abspath noaa-d$$d.pmtiles)" "web/noaa-d$$d.pmtiles"; done
+	@{ \
+	  printf '{\n  "districts": [\n'; \
+	  for d in $(DISTRICTS); do printf '    { "file": "noaa-d%s.pmtiles", "band": "all" },\n' "$$d"; done; \
+	  printf '    { "file": "ienc.pmtiles", "band": "all" }\n  ]\n}\n'; \
+	} > web/charts-index.json
 	@echo
 	@echo "  Prebaked prod test server — open:"
 	@echo "    http://localhost:8080/?prod&catalog=/charts-index.json"

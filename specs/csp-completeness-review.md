@@ -101,7 +101,7 @@ QUAPNT02, RESCSP02.
 
 | Missing | Priority | Note |
 |---|---|---|
-| **DATCVR02** | High | Data-coverage / no-data overfill + M_COVR. Core ENC-display correctness; relates to the tracked z7 tile-hole work. |
+| **DATCVR02** | Partial | No-data overfill (§10.1.8) done client-side (flat `AP(NODATA03)` world fill under the chart). **Chart scale boundaries (§10.1.9.1) now implemented** — `Baker.emitScaleBoundaries` draws a `CHGRD` line along a cell's M_COVR(CATCOV=1) edge wherever strictly-coarser data lies outside it (same-band seams suppressed, end-of-data left to the NODATA hatch); baked into the `scale_boundaries` MVT layer, rendered by the `scale-boundaries` client layer (mariner `showScaleBoundaries`, default on). **Still TODO:** overscale pattern `AP(OVERSC01)` (§10.1.10.2), overscale indication "×N" (§10.1.10.1), "larger-scale data available" (§10.1.10.3). Baked path only — the realtime wasm baker doesn't emit boundaries (it overzooms every band instead). |
 | **QUALIN01** | High | Per-edge quality-of-line — the procedure QUAPOS01 is *supposed to delegate to* for low-accuracy lines (`LC(LOWACC21)`). Not implemented. |
 
 **Out of scope (need own-ship/route/AIS/radar/cursor inputs this app lacks):**
