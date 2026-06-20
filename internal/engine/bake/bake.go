@@ -925,25 +925,35 @@ func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord
 // superset of EmitTileInto's in-tile reject — the reject still runs and trims the
 // boundary-tile over-inclusion, so behaviour is identical to the full scan.
 func (b *Baker) BuildEmitIndex(extent uint32, buffer float64) {
-	b.buildEmitIndex(extent, buffer, false)
+	b.buildEmitIndex(extent, buffer, 0)
 }
 
-// BuildEmitIndexBands builds the index for the per-band archive bake: each prim is
-// keyed up to its band's bake ceiling (bandBakeCeil) so the overzoom tiles emitted
-// by EmitTileBandInto are covered too.
-func (b *Baker) BuildEmitIndexBands(extent uint32, buffer float64) {
-	b.buildEmitIndex(extent, buffer, true)
+// BuildEmitIndexBand builds the index for ONE band's archive: only that band's own
+// prims (natMax == bandMax), keyed up to the band's bake ceiling. Built+freed per
+// band (see BakeToPMTilesBands) so the indexes for all six bands are never resident
+// at once — the index for a full district is the dominant peak-RAM cost otherwise.
+func (b *Baker) BuildEmitIndexBand(extent uint32, buffer float64, bandMax uint32) {
+	b.buildEmitIndex(extent, buffer, bandMax)
 }
 
-func (b *Baker) buildEmitIndex(extent uint32, buffer float64, perBand bool) {
+// ClearEmitIndex drops the emit index so its memory is reclaimed between bands.
+func (b *Baker) ClearEmitIndex() { b.emitIndex = nil }
+
+// buildEmitIndex builds the tile→prim index. bandMax==0 indexes every prim across
+// its full display zoom span (the merged tile); bandMax!=0 indexes only that band's
+// own prims (natMax == bandMax) up to the band's bake ceiling.
+func (b *Baker) buildEmitIndex(extent uint32, buffer float64, bandMax uint32) {
 	b.emitScaleBoundaries() // adds scale-boundary prims; must precede indexing
-	idx := make(map[uint64][]int32, len(b.prims))
+	idx := map[uint64][]int32{}
 	bufFrac := buffer / float64(extent)
 	for i := range b.prims {
 		r := &b.prims[i]
 		hi := b.clampZMax(r.zMax)
-		if perBand {
-			hi = b.clampZMax(bandBakeCeil(r.natMax)) // bake the band's overzoom ceiling
+		if bandMax != 0 {
+			if r.natMax != bandMax {
+				continue // per-band index: skip other bands' prims
+			}
+			hi = b.clampZMax(bandBakeCeil(bandMax)) // bake the band's overzoom ceiling
 		}
 		for z := r.zMin; z <= hi; z++ {
 			n := math.Pow(2, float64(z))

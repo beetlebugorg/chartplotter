@@ -250,9 +250,10 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 // all six archives in memory at once. Each band's archive carries only that band's
 // own data (EmitTileBandInto filters on natMax); a coarser band's source fills a
 // finer band's gaps via client overzoom, and lines/patterns are cut where a finer
-// band covers so they don't bleed. The shared emit index is built once.
+// band covers so they don't bleed. The emit INDEX is also built per band and freed
+// between bands, so the dominant per-district memory cost (the index over millions
+// of tiles) is one band's worth at a time, not all six.
 func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int), emit func(slug string, pb *pmtiles.Builder) error) error {
-	b.BuildEmitIndexBands(MVTExtent, MVTBuffer) // built once; read-only, shared across bands
 	type job struct {
 		slug    string
 		bandMax uint32
@@ -277,7 +278,9 @@ func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int), emit func
 			}
 		}
 	}
+	defer b.ClearEmitIndex()
 	for _, j := range jobs {
+		b.BuildEmitIndexBand(MVTExtent, MVTBuffer, j.bandMax) // only this band's prims; the next build replaces it
 		pb := pmtiles.New()
 		emitTiles(j.coords, pb, bumpAfter(progress), func(c tile.TileCoord, ts *bake.TileScratch) []byte {
 			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, j.bandMax)
