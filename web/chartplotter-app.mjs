@@ -351,7 +351,16 @@ export class ChartPlotterApp extends HTMLElement {
     // attribute so the map/basemap paints immediately, then we ingest cells
     // lazily by viewport (see ingestViewport).
     this._store = new ChartStore();
-    this._installed = new Set(await this._store.list());
+    // Installed set = local OPFS imports ∪ the server's cached cells. Server-side
+    // downloads live in the XDG cache (not OPFS), so without the server list they'd
+    // be forgotten on reload. (Prod renders prebaked archives — no server cache.)
+    this._installed = new Set(await this._store.list().catch(() => []));
+    if (!this._prod) {
+      try {
+        const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
+        if (j && Array.isArray(j.cells)) for (const n of j.cells) this._installed.add(n);
+      } catch (e) { /* offline / no server cache — keep the local set */ }
+    }
     // Chart discovery/acquisition domain (NOAA catalogue, packs, download, import).
     // Reads the installed set live via a getter (boot reassigns _installed above).
     this._dl = new ChartDownloader({
@@ -898,7 +907,14 @@ export class ChartPlotterApp extends HTMLElement {
     // Local serve: bake the installed cells into a server set and render it. Prod
     // already loaded its prebaked archives in restoreArchive() above.
     if (!this._prod && this._installed.size) {
-      try { await this._refreshCharts(false); } catch (e) { console.warn("[charts] initial bake", e); }
+      try {
+        // The "user" set is baked + persisted in the XDG cache and auto-registered
+        // by the server, so on reload just render it — no rebake. Only bake if it's
+        // missing (e.g. local imports staged before a bake).
+        const haveUser = await fetch(`${this._assets}tiles/user.json`).then((r) => r.ok).catch(() => false);
+        if (haveUser) { await this._plotter.setServerSet("user"); this._hasArchive = true; }
+        else await this._refreshCharts(false);
+      } catch (e) { console.warn("[charts] initial render", e); }
     }
     this.updateEmptyState();
     this.renderCharts();
@@ -2672,10 +2688,12 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._charting) { this._chartingAgain = true; return; } // coalesce concurrent rebakes
     this._charting = true;
     try {
-      // Make sure the server cache holds each installed cell (upload from the local
-      // store; idempotent). Then bake exactly these cells into the "user" set.
+      // Upload the LOCALLY-imported cells (the ones in the OPFS store) to the server
+      // cache so it can bake them. Server-DOWNLOADED cells aren't in the local store
+      // — they're already in the server's XDG cache — so skip them (no warning).
       for (const name of names) {
         try {
+          if (!(await this._store.has(name))) continue; // already server-side (downloaded)
           const bytes = await this._store.getBytes(name);
           if (bytes && bytes.length) {
             await fetch(`${this._assets}api/cell/${encodeURIComponent(name)}`, { method: "PUT", body: bytes });

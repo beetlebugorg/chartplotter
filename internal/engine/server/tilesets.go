@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -136,6 +138,30 @@ func (s *Server) ensureDynamicSet() (tilesource.TileSource, bool) {
 
 // dynamicSetName is the reserved set name for the bake-on-demand cache backend.
 const dynamicSetName = "dynamic"
+
+// serveCells returns the names of cells currently in the server's ENC_ROOT cache
+// (downloaded server-side or uploaded). The client uses this so its installed-set
+// (and the persisted "user" tile set) survive a page reload — the cells live in the
+// XDG cache, not the browser.
+func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
+	entries, _ := os.ReadDir(filepath.Join(s.cacheDir, "ENC_ROOT"))
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() && isCellName(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	w.Header().Set("Content-Type", jsonCT)
+	fmt.Fprint(w, `{"cells":[`)
+	for i, n := range names {
+		if i > 0 {
+			fmt.Fprint(w, ",")
+		}
+		fmt.Fprintf(w, "%q", n)
+	}
+	fmt.Fprint(w, "]}")
+}
 
 // loadCachedCells reads every base cell (.000) under the ENC_ROOT cache into a
 // name→bytes map for the dynamic backend.

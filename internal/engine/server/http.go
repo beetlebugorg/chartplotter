@@ -126,6 +126,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/health":
 		w.Header().Set("Content-Type", jsonCT)
 		io.WriteString(w, `{"ok":true}`)
+	case r.URL.Path == "/api/cells":
+		s.serveCells(w, r) // GET: names of cells currently in the server's ENC_ROOT cache
 	case strings.HasPrefix(r.URL.Path, "/api/cell/"):
 		if r.Method == http.MethodPut {
 			s.uploadCell(w, r) // PUT raw .000 into the cache (share: hand-imported cells)

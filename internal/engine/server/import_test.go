@@ -245,6 +245,31 @@ func TestImportFetchDownloadOnly(t *testing.T) {
 	}
 }
 
+// TestServeCells lists the cells in the ENC_ROOT cache (so the client's installed
+// set + persisted "user" tile set survive a reload — cells live server-side now).
+func TestServeCells(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"US5MD1MC", "U37AG001"} {
+		p := filepath.Join(dir, "ENC_ROOT", n, n+".000")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(p, []byte("x"), 0o644)
+	}
+	ts := httptest.NewServer(New(dir, dir, false))
+	defer ts.Close()
+	resp, _ := http.Get(ts.URL + "/api/cells")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var got struct{ Cells []string }
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("parse: %v (%s)", err, body)
+	}
+	if len(got.Cells) != 2 || got.Cells[0] != "U37AG001" || got.Cells[1] != "US5MD1MC" {
+		t.Errorf("cells = %v, want sorted [U37AG001 US5MD1MC]", got.Cells)
+	}
+}
+
 func keys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
