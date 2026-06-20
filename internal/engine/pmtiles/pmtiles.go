@@ -22,6 +22,7 @@ import (
 const (
 	tileTypeMVT     uint8 = 1
 	compressionNone uint8 = 1
+	compressionGzip uint8 = 2
 	leafSize              = 4096
 )
 
@@ -85,7 +86,13 @@ type Builder struct {
 	minZ       uint8
 	maxZ       uint8
 	w, s, e, n float64
+	tilesGz    bool // tile contents are gzipped (caller gzips before AddTile)
 }
+
+// SetTilesGzipped marks the tile contents as gzip-compressed, so WriteArchive
+// records gzip in the header's tile-compression field. The caller is responsible
+// for gzipping each tile's bytes before AddTile (done in the worker, in parallel).
+func (b *Builder) SetTilesGzipped() { b.tilesGz = true }
 
 // New returns an empty Builder.
 func New() *Builder {
@@ -220,8 +227,11 @@ func (b *Builder) WriteArchive(out io.Writer) error {
 	binary.LittleEndian.PutUint64(h[80:88], nEntries) // tile entries
 	binary.LittleEndian.PutUint64(h[88:96], unique)   // tile contents (deduped)
 	h[96] = 0                                         // not clustered (dedup back-references)
-	h[97] = compressionNone
+	h[97] = compressionNone // directories are uncompressed
 	h[98] = compressionNone
+	if b.tilesGz {
+		h[98] = compressionGzip // tile contents are gzipped (set by SetTilesGzipped)
+	}
 	h[99] = tileTypeMVT
 	h[100] = minZ
 	h[101] = b.maxZ

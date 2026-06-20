@@ -4,6 +4,8 @@
 package baker
 
 import (
+	"bytes"
+	"compress/gzip"
 	"path"
 	"runtime"
 	"sort"
@@ -204,6 +206,7 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 	if workers < 1 {
 		workers = 1
 	}
+	pb.SetTilesGzipped() // each tile is gzipped in the worker below
 	var mu sync.Mutex
 	var next, done int64 = -1, 0
 	var wg sync.WaitGroup
@@ -211,6 +214,8 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 		wg.Add(1)
 		go func() {
 			var ts bake.TileScratch // reused across every tile this worker bakes
+			gz := gzip.NewWriter(nil)
+			var buf bytes.Buffer
 			defer wg.Done()
 			for {
 				i := int(atomic.AddInt64(&next, 1))
@@ -219,8 +224,15 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 				}
 				c := coords[i]
 				if data := emit(c, &ts); data != nil {
+					// gzip in the worker (parallel); the archive stores compressed
+					// tiles (~3–5× smaller blob + file). Deterministic (no mtime), so
+					// identical tiles still dedup.
+					buf.Reset()
+					gz.Reset(&buf)
+					gz.Write(data)
+					gz.Close()
 					mu.Lock()
-					pb.AddTile(uint8(c.Z), c.X, c.Y, data)
+					pb.AddTile(uint8(c.Z), c.X, c.Y, buf.Bytes())
 					mu.Unlock()
 				}
 				if progress != nil {
