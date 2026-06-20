@@ -1,6 +1,6 @@
 # Server-side migration: bake + serve in Go, retire the wasm baker
 
-Status: Phases 1–2 done. Owner: see git. Supersedes the in-browser baking model.
+Status: Phases 1–3 done. Owner: see git. Supersedes the in-browser baking model.
 
 ## Decision
 
@@ -67,9 +67,22 @@ use. Static-CDN pmtiles (client range reads) can remain as a serverless option.
    `/tiles/NAME/…` serves it immediately; aux files are stashed under
    `<cache>/aux/NAME/` for Phase 4. `/api/proxy` is kept (still used by the wasm
    path until Phase 3). Updates/aux are handled inline (the "trivial here" payoff).
-3. **Delete the wasm baker surface.** `cmd/chartplotter-wasm`, `web/wasm-tiles-worker.js`,
-   `web/wasm-tiles.mjs`, OPFS bake path (`chart-store.mjs`), in-browser import UI in
-   `chartplotter-app.mjs`. ~6 files, ~16 call sites. The big simplification.
+3. ✅ **Delete the wasm baker surface.** Done. Renderer (`chartplotter.mjs`) gained
+   a server-tiles mode (`tiles="server" set="…"` → `/tiles/{set}/{z}/{x}/{y}.mvt`,
+   absolute URL — MapLibre fetches tiles in a worker with no document base); the
+   `cp://` realtime path, ChartStore cell-feeding, and loadStoreCells/cellBounds/
+   realtimeCoverage/bakePmtiles were removed (prebaked `pmtiles://` path kept for
+   static-CDN). The shell (`chartplotter-app.mjs`) now bakes imports server-side
+   (upload → POST /api/import → setServerSet) and downloads server-side (POST
+   /api/import fetch spec → server pulls from NOAA into the XDG cache → bake the
+   installed union); `_refreshCharts` is the single bake path; progress streams via
+   SSE (`GET /api/import/events`) with a polling fallback. Deleted
+   `cmd/chartplotter-wasm`, `web/wasm-tiles.mjs`, `web/wasm-tiles-worker.js`,
+   `web/tile-cache.mjs`, `web/wasm-demo.html`, `chartplotter.wasm`/`wasm_exec.js`;
+   updated `embed.go`, `Makefile`, `index.html`, `customHttp.yml` (dropped
+   `wasm-unsafe-eval`), and `tile-debugger.mjs`. `ChartStore`/`zip-import.mjs` stay
+   (local-import staging). Verified end-to-end: a real ENC imports + renders full
+   S-52 from server tiles.
 4. **TXTDSC/PICREP via API.** `GET /api/feature-file/{name}` off disk, TIFF→PNG on
    the fly. Supersedes the `aux.zip` bundle for server deploys (aux.zip stays correct
    for pure-static-CDN deploys — see [[txtdsc-aux-files]]).
