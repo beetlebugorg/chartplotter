@@ -15,7 +15,7 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-.PHONY: build wasm test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
+.PHONY: build test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -49,17 +49,8 @@ NOAA_JOBS     ?= 5
 NOAA_BANDS  := overview general coastal approach harbor berthing
 NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
-build: $(ASSETS)/chartplotter.wasm ## Build the self-contained shim (embeds web/ + wasm) into bin/
+build: ## Build the self-contained shim (embeds web/) into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
-
-# go:embed needs the wasm present; build it if it's missing.
-$(ASSETS)/chartplotter.wasm:
-	$(MAKE) wasm
-
-wasm: ## Build the real-time tile-baker wasm (stock go). (tinygo was dropped — it mis-parsed some foreign S-57 cells.)
-	GOOS=js GOARCH=wasm go build -o $(ASSETS)/chartplotter.wasm ./cmd/chartplotter-wasm
-	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" $(ASSETS)/vendor/wasm_exec.js
-	@echo "built $(ASSETS)/chartplotter.wasm ($$(du -h $(ASSETS)/chartplotter.wasm | cut -f1)) via go"
 
 serve: build ## Serve the web frontend + provisioning API (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)

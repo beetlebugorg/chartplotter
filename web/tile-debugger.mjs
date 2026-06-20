@@ -21,10 +21,9 @@
 // dict that holds those caches moved between majors (`style.sourceCaches` in v4 →
 // `style.tileManagers` in v5), so we DUCK-TYPE it (see `_sourceCaches`) rather
 // than hardcode the property — robust across v4/v5, still tied to the vendored
-// web/vendor/maplibre-gl.js. Delivery bytes come from the cp:// protocol's
-// read-only onTileDelivery hook.
-
-import { onTileDelivery } from "./wasm-tiles.mjs";
+// web/vendor/maplibre-gl.js. (The per-tile delivered-bytes correlation was a
+// hook on the retired in-browser cp:// baker; server tiles are inspected via the
+// "inspect this tile" button → /api/tile instead.)
 
 // Tile box colour + badge by classification. The red EMPTY box is the bug
 // signature: state=loaded but no buckets / no raw bytes.
@@ -86,12 +85,6 @@ export class TileDebugger {
 
   onAdd(map) {
     this._map = map;
-
-    // Delivery bytes — the key correlation. Read-only hook on the cp:// protocol.
-    this._unsub = onTileDelivery((e) => {
-      const id = `${e.z}/${e.x}/${e.y}`;
-      this._delivered.set(id, { bytes: e.bytes, ver: e.ver, error: e.error, t: e.t });
-    });
 
     // Lifecycle log: dataloading / data / error, filtered to our source.
     this._onData = (e) => this._record(e, false);
