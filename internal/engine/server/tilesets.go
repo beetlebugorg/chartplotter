@@ -1,0 +1,160 @@
+package server
+
+import (
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
+)
+
+// tileSets is the server's registry of named tile sets (set name → backend). It is
+// safe for concurrent use: the HTTP handler reads under an RLock while discovery /
+// future imports register under a write lock.
+type tileSets struct {
+	mu sync.RWMutex
+	m  map[string]tilesource.TileSource
+}
+
+func newTileSets() *tileSets { return &tileSets{m: map[string]tilesource.TileSource{}} }
+
+// register adds (or replaces) a set. A replaced backend is closed.
+func (ts *tileSets) register(name string, src tilesource.TileSource) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if old, ok := ts.m[name]; ok {
+		_ = tilesource.Close(old)
+	}
+	ts.m[name] = src
+}
+
+// get returns the set named name, or (nil, false).
+func (ts *tileSets) get(name string) (tilesource.TileSource, bool) {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	src, ok := ts.m[name]
+	return src, ok
+}
+
+// names returns the registered set names, sorted.
+func (ts *tileSets) names() []string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	out := make([]string, 0, len(ts.m))
+	for n := range ts.m {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// closeAll closes every registered backend (file handles / DBs).
+func (ts *tileSets) closeAll() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	for _, src := range ts.m {
+		_ = tilesource.Close(src)
+	}
+	ts.m = map[string]tilesource.TileSource{}
+}
+
+// discoverArchives registers every prebaked .pmtiles / .mbtiles archive found
+// directly under dir as a tile set named by its basename (sans extension). It is
+// best-effort: a file that fails to open is logged and skipped. Returns the count
+// registered.
+func (ts *tileSets) discoverArchives(dir string) int {
+	n := 0
+	for _, ext := range []string{"*.pmtiles", "*.mbtiles"} {
+		matches, _ := filepath.Glob(filepath.Join(dir, ext))
+		for _, path := range matches {
+			name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+			if !isSetName(name) {
+				log.Printf("tilesets: skip %q (invalid set name)", path)
+				continue
+			}
+			src, err := tilesource.Open(path)
+			if err != nil {
+				log.Printf("tilesets: skip %q: %v", path, err)
+				continue
+			}
+			ts.register(name, src)
+			m := src.Meta()
+			log.Printf("tilesets: registered %q from %s (z%d-%d)", name, filepath.Base(path), m.MinZoom, m.MaxZoom)
+			n++
+		}
+	}
+	return n
+}
+
+// tilesDir is the directory scanned for prebaked archives: <cacheDir>/tiles.
+func tilesDir(cacheDir string) string { return filepath.Join(cacheDir, "tiles") }
+
+// isSetName accepts a safe single path component for a set name: letters, digits,
+// '-', '_', '.' (but no separators or traversal).
+func isSetName(s string) bool {
+	if s == "" || len(s) > 64 || s == "." || s == ".." {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return !strings.Contains(s, "..")
+}
+
+// ensureDynamicSet lazily builds and registers the "dynamic" set from the cells
+// currently in the ENC_ROOT cache, on first request. Building parses every cached
+// cell (seconds for a large set), so it is done once under a lock and reused.
+func (s *Server) ensureDynamicSet() (tilesource.TileSource, bool) {
+	if src, ok := s.sets.get(dynamicSetName); ok {
+		return src, true
+	}
+	s.dynMu.Lock()
+	defer s.dynMu.Unlock()
+	if src, ok := s.sets.get(dynamicSetName); ok { // built while we waited
+		return src, true
+	}
+	cells := s.loadCachedCells()
+	if len(cells) == 0 {
+		return nil, false
+	}
+	src, err := tilesource.NewDynamic(cells, 0, func(name string, err error) {
+		log.Printf("tilesets: dynamic skip %s: %v", name, err)
+	})
+	if err != nil {
+		log.Printf("tilesets: build dynamic set: %v", err)
+		return nil, false
+	}
+	s.sets.register(dynamicSetName, src)
+	log.Printf("tilesets: built %q from %d cached cell(s)", dynamicSetName, len(cells))
+	return src, true
+}
+
+// dynamicSetName is the reserved set name for the bake-on-demand cache backend.
+const dynamicSetName = "dynamic"
+
+// loadCachedCells reads every base cell (.000) under the ENC_ROOT cache into a
+// name→bytes map for the dynamic backend.
+func (s *Server) loadCachedCells() map[string][]byte {
+	entries, err := os.ReadDir(filepath.Join(s.cacheDir, "ENC_ROOT"))
+	if err != nil {
+		return nil
+	}
+	cells := map[string][]byte{}
+	for _, e := range entries {
+		if !e.IsDir() || !isCellName(e.Name()) {
+			continue
+		}
+		name := e.Name()
+		data, err := os.ReadFile(filepath.Join(s.cacheDir, "ENC_ROOT", name, name+".000"))
+		if err != nil {
+			continue
+		}
+		cells[name] = data
+	}
+	return cells
+}

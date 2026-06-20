@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/web"
@@ -31,6 +32,9 @@ type Server struct {
 	allowRemote bool
 	share       shareStore // latest "share my view" snapshot (camera + cell list)
 	Version     string     // build version
+
+	sets  *tileSets  // registry of named tile sets served at /tiles/{set}/…
+	dynMu sync.Mutex // serialises the lazy build of the "dynamic" set
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -40,15 +44,31 @@ type Server struct {
 // host is not loopback (the operator opted into network exposure), which skips
 // the per-request Host-header DNS-rebind check on /api.
 func New(assetsDir, cacheDir string, allowRemote bool) *Server {
-	return &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote}
+	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote, sets: newTileSets()}
+	// Register every prebaked archive under <cacheDir>/tiles as a tile set so
+	// /tiles/{set}/… serves them immediately. The "dynamic" set is built lazily.
+	if n := s.sets.discoverArchives(tilesDir(cacheDir)); n > 0 {
+		log.Printf("tilesets: %d prebaked set(s) from %s", n, tilesDir(cacheDir))
+	}
+	return s
+}
+
+// Close releases server-held resources (open tile-set archives). Safe to call once
+// at shutdown.
+func (s *Server) Close() error {
+	s.sets.closeAll()
+	return nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	lw := &logResponseWriter{ResponseWriter: w, status: http.StatusOK}
-	if strings.HasPrefix(r.URL.Path, "/api/") {
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/api/"):
 		s.handleAPI(lw, r)
-	} else {
+	case strings.HasPrefix(r.URL.Path, "/tiles/"):
+		s.serveTileSet(lw, r)
+	default:
 		s.serveAsset(lw, r)
 	}
 	// One access-log line per request to stderr (method, status, path, range,
