@@ -19,7 +19,7 @@ func TestServeStaticAndRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "data.pmtiles"), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(New(dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts.Close()
 
 	// Root serves index.html.
@@ -62,7 +62,7 @@ func TestServeCell(t *testing.T) {
 	if err := os.WriteFile(cp, cell, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(New(dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/api/cell/US5MD1MC")
@@ -87,7 +87,7 @@ func TestServeCell(t *testing.T) {
 
 func TestAPIHealthAndHostCheck(t *testing.T) {
 	dir := t.TempDir()
-	ts := httptest.NewServer(New(dir, dir, false)) // loopback-only
+	ts := httptest.NewServer(New(dir, dir, dir, false)) // loopback-only
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/api/health")
@@ -113,7 +113,7 @@ func TestAPIHealthAndHostCheck(t *testing.T) {
 // disk (share.json persistence).
 func TestShareAndUpload(t *testing.T) {
 	dir := t.TempDir()
-	ts := httptest.NewServer(New(dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts.Close()
 
 	// No snapshot yet → 404.
@@ -164,7 +164,7 @@ func TestShareAndUpload(t *testing.T) {
 	}
 
 	// A fresh Server over the same cache dir reloads the snapshot from share.json.
-	ts2 := httptest.NewServer(New(dir, dir, false))
+	ts2 := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts2.Close()
 	resp, _ = http.Get(ts2.URL + "/api/share")
 	got, _ = io.ReadAll(resp.Body)

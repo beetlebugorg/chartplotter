@@ -16,19 +16,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/auxfiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
 
-// Phase 2: server-side import/bake. POST /api/import takes ENC input (an uploaded
-// exchange-set zip, or — with no body — the cells already in the ENC_ROOT cache),
-// bakes it natively into <cache>/tiles/<set>.pmtiles with the same baker the CLI
-// uses, and registers it as a tile set served at /tiles/<set>/…. Baking a district
-// takes seconds-to-minutes, so it runs as a background job the client polls via
-// GET /api/import/status?job=<id>. Aux (TXTDSC/PICREP) files are stashed under
-// <cache>/aux/<set>/ for the Phase 4 feature-file API.
+// Server-side import/bake. POST /api/import takes ENC input — an uploaded
+// exchange-set zip, a JSON server-fetch spec (the SERVER pulls the cells from
+// NOAA), or the cells already in the data store — and bakes a named tile SET with
+// the same baker the CLI uses. Source cells live in the DATA dir (ENC_ROOT/, safe);
+// the baked set + its companion aux.zip go to the regenerable CACHE under a
+// provider/pack tree keyed by the set name ("<provider>-<pack>" → <PROVIDER>/<PACK>/;
+// e.g. noaa-d17 → NOAA/D17/noaa-d17.{pmtiles,aux.zip}). Baking takes
+// seconds-to-minutes, so it runs as a background job the client follows via
+// GET /api/import/status (poll) or /api/import/events (SSE).
 
 // importJob is a single background bake's state.
 type importJob struct {
@@ -112,8 +115,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	set := r.URL.Query().Get("set")
-	if !isSetName(set) || set == dynamicSetName {
-		apiErr(w, http.StatusBadRequest, "set must be a valid name (and not 'dynamic')")
+	if !isSetName(set) {
+		apiErr(w, http.StatusBadRequest, "set must be a valid name")
 		return
 	}
 	overzoom := r.URL.Query().Get("overzoom") == "1"
@@ -173,8 +176,8 @@ func (s *Server) handleImportFetch(w http.ResponseWriter, r *http.Request) {
 	if req.Set == "" {
 		req.Set = r.URL.Query().Get("set")
 	}
-	if !isSetName(req.Set) || req.Set == dynamicSetName {
-		apiErr(w, http.StatusBadRequest, "set must be a valid name (and not 'dynamic')")
+	if !isSetName(req.Set) {
+		apiErr(w, http.StatusBadRequest, "set must be a valid name")
 		return
 	}
 	if req.ZipURL == "" && len(req.Cells) == 0 {
@@ -249,7 +252,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 				continue
 			}
 			s.imports.update(jobID, func(j *importJob) { j.Note = "Downloading " + c.Name; j.Done = i })
-			base, _, err := loadCellCached(http.DefaultClient, s.cacheDir, c.Name, c.URL)
+			base, _, err := loadCellCached(http.DefaultClient, s.dataDir, c.Name, c.URL)
 			if err != nil {
 				log.Printf("import %s: download %s: %v", jobID, c.Name, err) // skip, keep going
 			} else {
@@ -283,7 +286,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 // cacheCells writes each cell's base (+updates) into the ENC_ROOT cache layout so
 // a later cache bake (cachedCellData) finds it. Best-effort; write errors are logged.
 func (s *Server) cacheCells(cells map[string]baker.CellData) {
-	root := filepath.Join(s.cacheDir, "ENC_ROOT")
+	root := filepath.Join(s.dataDir, "ENC_ROOT")
 	for name, cd := range cells {
 		stem := strings.TrimSuffix(name, ".000")
 		if !isCellName(stem) {
@@ -402,7 +405,7 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 			want[n] = true
 		}
 	}
-	root := filepath.Join(s.cacheDir, "ENC_ROOT")
+	root := filepath.Join(s.dataDir, "ENC_ROOT")
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -461,14 +464,9 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
 	})
 
-	if err := s.writeAndRegister(set, pb); err != nil {
+	if err := s.writeAndRegister(set, pb, aux); err != nil {
 		fail(err)
 		return
-	}
-	if len(aux) > 0 {
-		if err := s.writeAux(set, aux); err != nil {
-			log.Printf("import %s: aux: %v", jobID, err) // non-fatal
-		}
 	}
 	log.Printf("import %s: baked %q (%d cells, %d tiles)", jobID, set, b.ok, pb.Count())
 	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
@@ -501,10 +499,25 @@ func bakeCells(cells map[string]baker.CellData, overzoom, applyUpdates bool) (*b
 	return &bakerResult{baker: b, ok: len(ok)}, nil
 }
 
-// writeAndRegister writes the baked archive to <cache>/tiles/<set>.pmtiles
-// atomically (temp + rename) and registers it (replacing any prior set).
-func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder) error {
-	dir := tilesDir(s.cacheDir)
+// setDir is the per-set output directory under the (regenerable) cache. A set name
+// is "<provider>-<pack>" (e.g. "noaa-d17", "ienc-overview"), which maps to
+// <CACHE>/<PROVIDER>/<PACK>/ so packs from different providers (NOAA districts, IENC
+// waterways, …) live in their own trees. A name with no provider prefix (a local
+// import, e.g. "import") goes to <CACHE>/import/. The set's pmtiles + aux.zip live
+// together there: <dir>/<set>.{pmtiles,aux.zip}.
+func (s *Server) setDir(set string) string {
+	if i := strings.IndexByte(set, '-'); i > 0 && i < len(set)-1 {
+		provider, pack := strings.ToUpper(set[:i]), strings.ToUpper(set[i+1:])
+		return filepath.Join(s.cacheDir, provider, pack)
+	}
+	return filepath.Join(s.cacheDir, "import")
+}
+
+// writeAndRegister writes the baked archive to <setDir>/<set>.pmtiles atomically
+// (temp + rename), writes the companion <set>.aux.zip beside it (TXTDSC/PICREP, via
+// the auxfiles package), and registers the set (replacing any prior one).
+func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder, aux map[string][]byte) error {
+	dir := s.setDir(set)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -527,26 +540,21 @@ func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder) error {
 		os.Remove(tmpName)
 		return err
 	}
+	// Companion aux.zip (best-effort — a missing aux archive only disables pictures
+	// in the pick report, it doesn't break tiles).
+	if len(aux) > 0 {
+		if f, e := os.Create(filepath.Join(dir, set+".aux.zip")); e == nil {
+			if _, e := auxfiles.WriteZip(f, aux); e != nil {
+				log.Printf("aux %s: %v", set, e)
+			}
+			f.Close()
+		}
+	}
 	src, err := tilesource.Open(final)
 	if err != nil {
 		return err
 	}
 	s.sets.register(set, src)
-	return nil
-}
-
-// writeAux stashes the referenced aux files raw under <cache>/aux/<set>/<KEY> for
-// the Phase 4 feature-file API (transcoding/serving lands there).
-func (s *Server) writeAux(set string, aux map[string][]byte) error {
-	dir := filepath.Join(s.cacheDir, "aux", set)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	for key, data := range aux {
-		if err := os.WriteFile(filepath.Join(dir, filepath.Base(key)), data, 0o644); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

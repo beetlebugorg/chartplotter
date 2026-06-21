@@ -83,12 +83,8 @@ func (s *Server) serveTileSet(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-// lookupSet resolves a set name to a backend, building the lazy "dynamic" set on
-// first use.
+// lookupSet resolves a set name to a registered backend.
 func (s *Server) lookupSet(name string) (tilesource.TileSource, bool) {
-	if name == dynamicSetName {
-		return s.ensureDynamicSet()
-	}
 	return s.sets.get(name)
 }
 

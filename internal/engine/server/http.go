@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/web"
@@ -28,28 +27,35 @@ import (
 // zero value is not usable; use New.
 type Server struct {
 	assetsDir   string // optional on-disk asset override (dev); "" → embedded only
-	cacheDir    string // XDG cache root: downloaded raw cells cached under ENC_ROOT/
+	cacheDir    string // XDG cache root: REGENERABLE baked tile sets (NOAA/<d>/*.pmtiles)
+	dataDir     string // XDG data root: SOURCE ENC (district zips, raw cells) — safe, not auto-deleted
 	allowRemote bool
 	share       shareStore // latest "share my view" snapshot (camera + cell list)
 	Version     string     // build version
 
 	sets    *tileSets   // registry of named tile sets served at /tiles/{set}/…
-	dynMu   sync.Mutex  // serialises the lazy build of the "dynamic" set
 	imports *importJobs // background server-side bake jobs (POST /api/import)
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
 // bundle (the single-file default); pass a directory to override it from disk
-// during development. cacheDir is the XDG cache root for baked archives and the
-// destination for every user-initiated write. allowRemote is true when the bind
-// host is not loopback (the operator opted into network exposure), which skips
-// the per-request Host-header DNS-rebind check on /api.
-func New(assetsDir, cacheDir string, allowRemote bool) *Server {
-	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs()}
-	// Register every prebaked archive under <cacheDir>/tiles as a tile set so
-	// /tiles/{set}/… serves them immediately. The "dynamic" set is built lazily.
-	if n := s.sets.discoverArchives(tilesDir(cacheDir)); n > 0 {
-		log.Printf("tilesets: %d prebaked set(s) from %s", n, tilesDir(cacheDir))
+// during development. cacheDir is the XDG cache root for REGENERABLE baked tile
+// sets; dataDir is the XDG data root for the SOURCE ENC (district zips, raw cells)
+// that must survive a cache wipe — pass "" to default it to cacheDir (single-dir
+// mode). allowRemote is true when the bind host is not loopback (the operator
+// opted into network exposure), which skips the per-request Host-header check.
+func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
+	if dataDir == "" {
+		dataDir = cacheDir
+	}
+	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs()}
+	// Register every baked archive under the cache as a tile set so /tiles/{set}/…
+	// serves them immediately: the provider trees (<cache>/NOAA/<d>/, IENC/, import/,
+	// …) via a recursive walk, plus legacy <cache>/tiles/*.mbtiles.
+	n := s.sets.discoverTree(cacheDir)
+	n += s.sets.discoverArchives(tilesDir(cacheDir))
+	if n > 0 {
+		log.Printf("tilesets: %d baked set(s) registered from %s", n, cacheDir)
 	}
 	return s
 }
@@ -161,7 +167,7 @@ func (s *Server) serveCell(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "bad cell name")
 		return
 	}
-	data, _, err := loadCellCached(http.DefaultClient, s.cacheDir, name, r.URL.Query().Get("url"))
+	data, _, err := loadCellCached(http.DefaultClient, s.dataDir, name, r.URL.Query().Get("url"))
 	if err != nil {
 		apiErr(w, http.StatusBadGateway, err.Error())
 		return

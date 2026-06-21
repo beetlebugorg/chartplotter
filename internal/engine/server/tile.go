@@ -51,7 +51,7 @@ func (s *Server) serveTile(w http.ResponseWriter, r *http.Request) {
 	}
 	added := 0
 	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(s.cacheDir, "ENC_ROOT", name, name+".000"))
+		data, err := os.ReadFile(filepath.Join(s.dataDir, "ENC_ROOT", name, name+".000"))
 		if err != nil {
 			continue // skip cells that aren't in the cache
 		}
@@ -118,7 +118,7 @@ func (s *Server) tileCells(csv string) []string {
 		}
 		return out
 	}
-	entries, err := os.ReadDir(filepath.Join(s.cacheDir, "ENC_ROOT"))
+	entries, err := os.ReadDir(filepath.Join(s.dataDir, "ENC_ROOT"))
 	if err != nil {
 		return nil
 	}

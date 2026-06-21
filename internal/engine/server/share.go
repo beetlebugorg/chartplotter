@@ -116,7 +116,7 @@ func (s *Server) uploadCell(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusRequestEntityTooLarge, "cell too large")
 		return
 	}
-	cpath := filepath.Join(s.cacheDir, "ENC_ROOT", name, name+".000")
+	cpath := filepath.Join(s.dataDir, "ENC_ROOT", name, name+".000")
 	if err := os.MkdirAll(filepath.Dir(cpath), 0o755); err != nil {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return

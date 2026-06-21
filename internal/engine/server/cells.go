@@ -15,17 +15,18 @@ import (
 // isBaseCell reports whether a zip entry is an S-57 base cell (…/<CELL>.000).
 func isBaseCell(name string) bool { return strings.HasSuffix(name, ".000") }
 
-// ClearCache removes the downloaded raw-cell cache under cacheDir (ENC_ROOT/ and
-// the legacy flat .cellcache-*.000 files). Returns how many entries were removed.
+// ClearCache removes only the REGENERABLE baked tile sets under cacheDir (the
+// per-district NOAA/, import/, and legacy tiles/ trees). It deliberately leaves the
+// SOURCE ENC (ENC_ROOT/, in the data dir) untouched — clearing the cache must not
+// delete downloaded charts; they rebake from source. Returns how many trees removed.
 func ClearCache(cacheDir string) (int, error) {
 	n := 0
-	if err := os.RemoveAll(filepath.Join(cacheDir, "ENC_ROOT")); err == nil {
-		n++
-	}
-	matches, _ := filepath.Glob(filepath.Join(cacheDir, ".cellcache-*.000"))
-	for _, m := range matches {
-		if os.Remove(m) == nil {
-			n++
+	for _, sub := range []string{"NOAA", "import", "tiles"} {
+		p := filepath.Join(cacheDir, sub)
+		if _, err := os.Stat(p); err == nil {
+			if os.RemoveAll(p) == nil {
+				n++
+			}
 		}
 	}
 	return n, nil

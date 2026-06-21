@@ -35,7 +35,7 @@ func TestServeTileSet(t *testing.T) {
 	dir := t.TempDir()
 	body := writeTestPMTiles(t, dir, "charts", 8, 10, 20)
 
-	ts := httptest.NewServer(New(dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts.Close()
 
 	// A present tile → 200 with the MVT body and the vector-tile content type.
@@ -93,7 +93,7 @@ func TestServeTileSet(t *testing.T) {
 func TestServeTileGzip(t *testing.T) {
 	dir := t.TempDir()
 	body := writeTestPMTiles(t, dir, "charts", 8, 10, 20)
-	ts := httptest.NewServer(New(dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts.Close()
 
 	// Go's transport transparently decodes gzip unless we set Accept-Encoding
@@ -121,7 +121,7 @@ func TestServeTileGzip(t *testing.T) {
 func TestServeTileJSONAndList(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPMTiles(t, dir, "charts", 8, 10, 20)
-	ts := httptest.NewServer(New(dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false))
 	defer ts.Close()
 
 	// TileJSON descriptor.

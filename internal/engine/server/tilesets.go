@@ -94,6 +94,33 @@ func (ts *tileSets) discoverArchives(dir string) int {
 // tilesDir is the directory scanned for prebaked archives: <cacheDir>/tiles.
 func tilesDir(cacheDir string) string { return filepath.Join(cacheDir, "tiles") }
 
+// discoverTree walks dir recursively and registers every *.pmtiles as a tile set
+// named by its basename (e.g. <cache>/NOAA/D17/noaa-d17.pmtiles → set "noaa-d17").
+// Best-effort; returns the count registered.
+func (ts *tileSets) discoverTree(dir string) int {
+	n := 0
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".pmtiles") {
+			return nil
+		}
+		name := strings.TrimSuffix(filepath.Base(path), ".pmtiles")
+		if !isSetName(name) {
+			return nil
+		}
+		src, e := tilesource.Open(path)
+		if e != nil {
+			log.Printf("tilesets: skip %q: %v", path, e)
+			return nil
+		}
+		ts.register(name, src)
+		m := src.Meta()
+		log.Printf("tilesets: registered %q from %s (z%d-%d)", name, path, m.MinZoom, m.MaxZoom)
+		n++
+		return nil
+	})
+	return n
+}
+
 // isSetName accepts a safe single path component for a set name: letters, digits,
 // '-', '_', '.' (but no separators or traversal).
 func isSetName(s string) bool {
@@ -108,43 +135,11 @@ func isSetName(s string) bool {
 	return !strings.Contains(s, "..")
 }
 
-// ensureDynamicSet lazily builds and registers the "dynamic" set from the cells
-// currently in the ENC_ROOT cache, on first request. Building parses every cached
-// cell (seconds for a large set), so it is done once under a lock and reused.
-func (s *Server) ensureDynamicSet() (tilesource.TileSource, bool) {
-	if src, ok := s.sets.get(dynamicSetName); ok {
-		return src, true
-	}
-	s.dynMu.Lock()
-	defer s.dynMu.Unlock()
-	if src, ok := s.sets.get(dynamicSetName); ok { // built while we waited
-		return src, true
-	}
-	cells := s.loadCachedCells()
-	if len(cells) == 0 {
-		return nil, false
-	}
-	src, err := tilesource.NewDynamic(cells, 0, func(name string, err error) {
-		log.Printf("tilesets: dynamic skip %s: %v", name, err)
-	})
-	if err != nil {
-		log.Printf("tilesets: build dynamic set: %v", err)
-		return nil, false
-	}
-	s.sets.register(dynamicSetName, src)
-	log.Printf("tilesets: built %q from %d cached cell(s)", dynamicSetName, len(cells))
-	return src, true
-}
-
-// dynamicSetName is the reserved set name for the bake-on-demand cache backend.
-const dynamicSetName = "dynamic"
-
-// serveCells returns the names of cells currently in the server's ENC_ROOT cache
-// (downloaded server-side or uploaded). The client uses this so its installed-set
-// (and the persisted "user" tile set) survive a page reload — the cells live in the
-// XDG cache, not the browser.
+// serveCells returns the names of cells currently in the server's ENC_ROOT source
+// store. The client uses this so its installed-set (and the persisted baked sets)
+// survive a page reload — the cells live server-side in the XDG data dir.
 func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
-	entries, _ := os.ReadDir(filepath.Join(s.cacheDir, "ENC_ROOT"))
+	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "ENC_ROOT"))
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() && isCellName(e.Name()) {
@@ -161,26 +156,4 @@ func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "%q", n)
 	}
 	fmt.Fprint(w, "]}")
-}
-
-// loadCachedCells reads every base cell (.000) under the ENC_ROOT cache into a
-// name→bytes map for the dynamic backend.
-func (s *Server) loadCachedCells() map[string][]byte {
-	entries, err := os.ReadDir(filepath.Join(s.cacheDir, "ENC_ROOT"))
-	if err != nil {
-		return nil
-	}
-	cells := map[string][]byte{}
-	for _, e := range entries {
-		if !e.IsDir() || !isCellName(e.Name()) {
-			continue
-		}
-		name := e.Name()
-		data, err := os.ReadFile(filepath.Join(s.cacheDir, "ENC_ROOT", name, name+".000"))
-		if err != nil {
-			continue
-		}
-		cells[name] = data
-	}
-	return cells
 }
