@@ -146,13 +146,14 @@ func BandForScale(cscl uint32) Band {
 	}
 }
 
-// scaminZoom maps an S-52 SCAMIN (1:N denominator) to the Web-Mercator zoom
-// where the object first becomes visible: the zoom whose DISPLAY-scale
-// denominator (at the cell's latitude) is nearest SCAMIN. S-52 §8.4 gates on the
-// display scale, so we use the cell's latitude (not the equator) and round to
-// the nearest integer zoom — otherwise (equator + round-up) features pop in
-// ~1 zoom late at mid/high latitudes (e.g. a 1:22k harbour
-// sounding wouldn't show until 1:13k instead of ~1:26k). Clamped to the zoom span.
+// scaminZoom maps an S-52 SCAMIN (1:N denominator) to the lowest Web-Mercator
+// zoom that keeps the object visible: it shows when the DISPLAY-scale denominator
+// (at the cell latitude) is ≤ SCAMIN, i.e. at display zoom ≥ z* = log2(denomZ0/
+// SCAMIN). Vector tiles are integer-zoom and the tile serving a fractional display
+// zoom d is floor(d), so to keep the object available right down to its SCAMIN
+// scale it must live in the floor(z*) tile — hence FLOOR. The client's per-SCAMIN
+// bucket layer then applies the EXACT fractional z* as a native layer minzoom, so
+// the visible cutoff is exact in both directions. S-52 §8.4: cell latitude, not equator.
 func scaminZoom(scamin uint32, lat float64) uint32 {
 	if scamin == 0 {
 		return 0
@@ -162,7 +163,7 @@ func scaminZoom(scamin uint32, lat float64) uint32 {
 	if denomZ0 <= s {
 		return 0
 	}
-	z := math.Round(math.Log2(denomZ0 / s))
+	z := math.Floor(math.Log2(denomZ0 / s))
 	if z >= float64(maxBandZ) {
 		return maxBandZ
 	}
@@ -187,17 +188,20 @@ func scaminZoom(scamin uint32, lat float64) uint32 {
 // Per S-52 the visible result is unchanged wherever coverage is complete: a coarse
 // zoom shows the scale-appropriate (coarser) cell anyway.
 //
-//   - DISPLAYBASE: the band min (always shown in-band; SCAMIN never removes base).
-//   - SCAMIN present: max(bandMin, scaminZoom) — SCAMIN can only RAISE the min.
-//   - no SCAMIN: the band min (S-52 §10.3.4 default).
+//   - DISPLAYBASE: the band min (always shown in-band; SCAMIN never removes base,
+//     and base features stay band-gated — the coarse cell shows them at coarse scale).
+//   - SCAMIN present: scaminZoom is AUTHORITATIVE and may fall BELOW the band min —
+//     a SCAMIN is the producer explicitly saying "keep this visible down to 1:N", so
+//     the object stays AVAILABLE down to its SCAMIN scale (crossing into coarser
+//     bands). The client's per-SCAMIN bucket layer gates the exact display cutoff;
+//     best-available point suppression keeps it from doubling up with a coarse cell.
+//   - no SCAMIN: the band min — no over-scale flag ⇒ no display beyond the cell's band.
 func bandZMin(displayCategory int, scamin, bandMin uint32, lat float64) uint32 {
 	if displayCategory == s52.DisplayBase {
 		return bandMin
 	}
 	if scamin != 0 {
-		if z := scaminZoom(scamin, lat); z > bandMin {
-			return z
-		}
+		return scaminZoom(scamin, lat)
 	}
 	return bandMin
 }
@@ -240,6 +244,7 @@ type routed struct {
 	bcCat    int16
 	bcBnd    int8
 	bcPts    int16
+	bcScamin uint32 // SCAMIN denominator (0 = none); emitted as `scamin` for the client's per-SCAMIN bucket layers
 	bcHasPts bool
 	bcBase   bool // attrs is variable-only; rebuild the base from bc* at emit
 }
@@ -279,6 +284,7 @@ type Baker struct {
 	bbox       geo.BoundingBox
 	curCell    string // dataset name of the cell currently being added (stamped on each feature)
 	curCscl   uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
+	curScamin uint32 // SCAMIN (1:N min display scale) of the feature currently being expanded; 0 = none
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
@@ -559,6 +565,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			bnd := int64(pass.Bnd)
 			pts := int64(pass.Pts)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
+			b.curScamin = scamin // baked as the `scamin` tag → client per-SCAMIN bucket layers
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
@@ -628,6 +635,9 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 	}
 	if b.curAttrs != "" {
 		attrs = append(attrs, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
+	}
+	if b.curScamin != 0 {
+		attrs = append(attrs, mvt.KeyValue{Key: "scamin", Value: mvt.IntVal(int64(b.curScamin))})
 	}
 	if !isNaN32(sc.SoundingDepthM) {
 		attrs = append(attrs,
@@ -723,6 +733,9 @@ func (b *Baker) attrsFor(r *routed, scratch *[]mvt.KeyValue) []mvt.KeyValue {
 	if r.bcHasPts {
 		out = append(out, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(int64(r.bcPts))})
 	}
+	if r.bcScamin != 0 {
+		out = append(out, mvt.KeyValue{Key: "scamin", Value: mvt.IntVal(int64(r.bcScamin))})
+	}
 	out = append(out, r.attrs...)
 	*scratch = out
 	return out
@@ -752,9 +765,10 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		bcBase:  true,
 		bcClass: b.internClass(class),
 		bcCell:  b.internCell(b.curCell),
-		bcDrawP: int16(drawPrio),
-		bcCat:   int16(catRank(cat)),
-		bcBnd:   int8(bnd),
+		bcDrawP:  int16(drawPrio),
+		bcCat:    int16(catRank(cat)),
+		bcBnd:    int8(bnd),
+		bcScamin: b.curScamin,
 	}
 	// pts is omitted for the common case (2): only paper/simplified variant passes
 	// (0/1) carry it, so most features stay lean.
@@ -1035,10 +1049,12 @@ func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord
 		if r.natMax != bandMax {
 			continue
 		}
+		// lo is the prim's display zMin — normally ≥ bandMin, but a SCAMIN-bearing
+		// feature may sit BELOW bandMin (it crosses into coarser bands down to its
+		// SCAMIN scale). Emit it into the band archive at that lower zoom so the
+		// source can serve it; the client's per-SCAMIN bucket layer gates the exact
+		// cutoff. Non-SCAMIN features still have zMin == bandMin (bandZMin floors them).
 		lo := r.zMin
-		if lo < bandMin {
-			lo = bandMin // the band's source never serves below bandMin
-		}
 		if lo > ceil {
 			continue
 		}

@@ -109,6 +109,23 @@ const CHART_BANDS = [
 // LAYER minzoom (the baked source may serve lower) so it works without a re-bake.
 const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16, all: 0 };
 
+// Chart layers whose features carry SCAMIN and are split into per-SCAMIN bucket
+// layers (each with a native fractional minzoom) so SCAMIN is honored EXACTLY with
+// zero per-zoom work. Point symbols + soundings are the marks that "disappear too
+// soon / too late" at scale boundaries; their visibility must track display scale.
+const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings"]);
+
+// The display zoom at which a 1:N (scamin) feature first becomes visible at the
+// given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
+// — used directly as a MapLibre layer minzoom, which gives the exact S-52 §8.4
+// cutoff (display scale ≤ SCAMIN ⇒ shown) with no client-side per-zoom computation.
+function scaminDisplayZoom(scamin, lat) {
+  if (!scamin) return 0;
+  const denomZ0 = 559082264.029 * Math.cos((lat * Math.PI) / 180);
+  if (denomZ0 <= scamin) return 0;
+  return Math.max(0, Math.min(24, Math.log2(denomZ0 / scamin)));
+}
+
 // Server sets are baked PER BAND, named "<district>-<band>" (e.g. noaa-d5-general).
 // bandOfSet recovers the band slug from a set name ("all" for a bandless/merged set
 // — a user upload or a legacy pack). BAND_RANK orders sets coarse→fine so a finer
@@ -155,6 +172,8 @@ export class ChartPlotter extends HTMLElement {
     this._mariner = {};      // current mariner settings (engine-side)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bands = {};        // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
+    this._scaminValues = []; // distinct SCAMIN denominators seen in tiles → per-SCAMIN bucket layers
+    this._scaminLat = null;  // latitude the bucket minzooms were computed at (rebuild on big change)
     this._server = false;    // server-tiles mode (tiles="server"): chart sources are /tiles/{set}
     this._serverSets = [];   // active server packs: [{name, min, max}] — one vector source each
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
@@ -338,6 +357,11 @@ export class ChartPlotter extends HTMLElement {
       if (e.id.startsWith(PAT_PREFIX)) this.registerPattern(e.id.slice(PAT_PREFIX.length));
       else this.registerImage(e.id);
     });
+    // Learn the distinct SCAMIN values from tiles as they load → per-SCAMIN bucket
+    // layers. Only on idle (tiles settled), and it rebuilds the style ONLY when the
+    // value set grows or the centre latitude shifts enough to move a bucket minzoom
+    // — never per zoom. Once converged, MapLibre gates the buckets natively for free.
+    map.on("idle", () => this._refreshScaminBuckets());
     map.on("load", async () => {
       try {
         this.registerAllSymbols();
@@ -582,6 +606,39 @@ export class ChartPlotter extends HTMLElement {
   sectorLegFilter() {
     const rank = this._mariner.showFullSectorLines ? 1 : 0;
     return ["in", ["coalesce", ["get", "sleg"], 2], ["literal", [2, rank]]];
+  }
+
+  // Collect the distinct SCAMIN denominators present in the loaded chart tiles and,
+  // when that set grows (or the centre latitude shifts enough to move the bucket
+  // minzooms), rebuild the style so buildLayers regenerates the per-SCAMIN bucket
+  // layers (each gated by a native fractional minzoom). Runs on idle only; the
+  // rebuild converges (no new values ⇒ no rebuild), and steady-state SCAMIN gating
+  // is then 100% native — zero per-zoom JS.
+  _refreshScaminBuckets() {
+    const m = this._map;
+    if (!m) return;
+    const seen = new Set(this._scaminValues);
+    const before = seen.size;
+    const srcs = this._server ? (this._serverSets || []).map((s) => "chart-" + s.name) : CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
+    for (const src of srcs) {
+      if (!m.getSource(src)) continue;
+      for (const sl of SCAMIN_BUCKET_LAYERS) {
+        let fs;
+        try { fs = m.querySourceFeatures(src, { sourceLayer: sl }); } catch (e) { continue; }
+        for (const f of fs) { const s = f.properties && f.properties.scamin; if (s) seen.add(+s); }
+      }
+    }
+    const grew = seen.size !== before;
+    const lat = m.getCenter().lat;
+    const latShift = this._scaminLat == null || Math.abs(lat - this._scaminLat) > 5;
+    if (!grew && !latShift) return;
+    this._scaminValues = [...seen].sort((a, b) => a - b);
+    this._scaminLat = lat;
+    // Debounce the (heavy) style rebuild so a burst of values loaded across several
+    // tiles coalesces into ONE rebuild. Converges: once every value in view is known,
+    // no further growth ⇒ no rebuild, and SCAMIN gating is then fully native.
+    clearTimeout(this._scaminRebuildT);
+    this._scaminRebuildT = setTimeout(() => { if (this._map) this._map.setStyle(this.buildStyle()); }, 450);
   }
 
   // Combine a layer's intrinsic (base) filter with the live category +
@@ -1397,6 +1454,7 @@ export class ChartPlotter extends HTMLElement {
           if (L.id === "areas") this._pushOverscale(out, "chart-" + set.name, set.band);
         }
       }
+      this._pushScaminProbes(out);
       return out;
     }
     // Iterate TEMPLATE-outer, band-inner so the global draw order is by S-52
@@ -1407,30 +1465,61 @@ export class ChartPlotter extends HTMLElement {
     // fill the moment you zoomed in — it "disappeared". Keeping bands coarse→fine
     // WITHIN each class preserves best-available (finer fill covers coarser fill),
     // while symbols/text now always sit above every band's fills.
+    const lat = this._scaminLat != null ? this._scaminLat : this._map ? this._map.getCenter().lat : 0;
     for (const L of tmpl) {
       for (const band of CHART_BANDS) {
-        const id = L.id + "@" + band.slug;
         const base = L.filter ?? null;
-        this._layerBase[id] = base;
-        (this._variants[L.id] ||= []).push(id);
-        const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base), layout: this._variantLayout(L, band.slug, id) };
         const dmin = BAND_DISPLAY_MIN[band.slug];
-        if (dmin) v.minzoom = dmin; // band appears at its scale, not the baked floor
-        // A coarser band's data must never be drawn at a finer band's zoom. Base
-        // area FILLS (solid depth/land colour) DO overzoom — they're the gap-fill
-        // base and a finer band's opaque fill is drawn on top of them — but every
-        // other layer (lines, point symbols, soundings, area PATTERNS like the
-        // restricted/caution hatch) is capped at its band's max so it simply isn't
-        // present at a finer zoom. That's what kills the duplicate coastlines /
-        // boundaries / soundings: at any zoom only the appropriate band's marks draw.
-        if ((band.slug === "overview" || band.slug === "general") && this._capsAtBand(L)) {
-          v.maxzoom = band.max;
+        const capped = (band.slug === "overview" || band.slug === "general") && this._capsAtBand(L);
+        // mk pushes one variant: id, the per-layer base filter it should re-combine
+        // from (stored in _layerBase so category/boundary toggles re-apply), and a
+        // native minzoom. The maxzoom cap (coarse band can't bleed into fine zoom)
+        // is mirrored from the unbucketed path.
+        const mk = (suffix, baseFilter, minzoom) => {
+          const id = L.id + "@" + band.slug + suffix;
+          this._layerBase[id] = baseFilter;
+          (this._variants[L.id] ||= []).push(id);
+          const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, band.slug, id) };
+          if (minzoom != null) v.minzoom = minzoom;
+          if (capped) v.maxzoom = band.max;
+          out.push(v);
+        };
+        const and = (extra) => (base ? ["all", base, extra] : extra);
+        // SCAMIN buckets (point symbols / soundings): MapLibre's native fractional
+        // layer minzoom does the exact-scale gating with ZERO per-zoom work — a
+        // feature with SCAMIN 1:N shows precisely from display scale 1:N, in BOTH
+        // directions, crossing bands down to that scale. One bucket per distinct
+        // SCAMIN value (collected from the tiles). Out-of-zoom buckets are skipped by
+        // MapLibre for free, so the extra layers cost nothing at runtime. Features
+        // WITHOUT SCAMIN take the band-gated `#no` variant. Other layers: one variant.
+        if (SCAMIN_BUCKET_LAYERS.has(L.id) && this._scaminValues && this._scaminValues.length) {
+          mk("#no", and(["!", ["has", "scamin"]]), dmin || undefined);
+          for (const sc of this._scaminValues) {
+            mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
+          }
+        } else {
+          mk("", base, dmin || undefined);
         }
-        out.push(v);
         if (L.id === "areas") this._pushOverscale(out, "chart-" + band.slug, band.slug);
       }
     }
+    this._pushScaminProbes(out);
     return out;
+  }
+
+  // Invisible "probe" layers that force the SPARSE sub-band tiles (where SCAMIN
+  // features float below their band min) to load at all zooms, so the per-SCAMIN
+  // value set can be collected (querySourceFeatures only sees LOADED tiles, and a
+  // tile loads only if some visible layer needs it). They render nothing. Without
+  // them, the bucket layers can't exist until their tiles load, but those tiles
+  // won't load until the buckets exist — a deadlock at sub-band zooms.
+  _pushScaminProbes(out) {
+    const srcs = this._server ? (this._serverSets || []).map((s) => "chart-" + s.name) : CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
+    for (const src of srcs) {
+      for (const sl of SCAMIN_BUCKET_LAYERS) {
+        out.push({ id: "scaminprobe-" + src + "-" + sl, source: src, "source-layer": sl, type: "circle", minzoom: 0, filter: ["has", "scamin"], paint: { "circle-radius": 0, "circle-opacity": 0, "circle-stroke-width": 0 } });
+      }
+    }
   }
 
   // Append the S-52 overscale pattern AP(OVERSC01) for a band's source, shown only
@@ -1538,7 +1627,12 @@ export class ChartPlotter extends HTMLElement {
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
-        minzoom: band.min,
+        // minzoom 0, not band.min: SCAMIN-bearing features are baked into sub-band
+        // tiles (they cross bands down to their SCAMIN scale), so the source must be
+        // allowed to fetch those. They're sparse (only SCAMIN objects live below the
+        // band min), and minzoom only adds requests when the VIEW is coarse (few
+        // tiles), so it's cheap. Per-SCAMIN bucket layers gate the exact display scale.
+        minzoom: 0,
         maxzoom: band.bake,
       };
     }

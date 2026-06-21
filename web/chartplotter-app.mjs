@@ -543,7 +543,7 @@ export class ChartPlotterApp extends HTMLElement {
     const map = this._map;
 
     // What's actually painted here, grouped by source cell → { layer: {cls:count} }.
-    const chartLayers = map.getStyle().layers.filter((l) => l.source && isChartSource(l.source)).map((l) => l.id);
+    const chartLayers = map.getStyle().layers.filter((l) => l.source && isChartSource(l.source) && !l.id.startsWith("scaminprobe")).map((l) => l.id);
     const drawn = new Map(); // cell -> Map(sourceLayer -> Map(class -> count))
     if (chartLayers.length) {
       for (const f of map.queryRenderedFeatures(e.point, { layers: chartLayers })) {
@@ -2179,7 +2179,7 @@ export class ChartPlotterApp extends HTMLElement {
   // chart doesn't clear a useful hover), a no-hit hover shows the hint.
   _inspectAt(point, lock) {
     const map = this._map;
-    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source));
+    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
     if (!feats.length) {
       if (lock) return;
       this._inspectLastKey = "";
@@ -2745,7 +2745,7 @@ export class ChartPlotterApp extends HTMLElement {
   _pickReportAt(point, ev) {
     const map = this._map;
     if (!map) return;
-    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source));
+    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
     // Collapse the per-source-layer representations of one S-57 object — its area
     // fill, boundary line and centred symbol arrive as separate features that all
     // share class/cell/objnam/s57 — into a single pick entry, so stepping the
