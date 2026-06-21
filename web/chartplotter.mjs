@@ -1353,6 +1353,13 @@ export class ChartPlotter extends HTMLElement {
             v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
           }
           out.push(v);
+          // Right after this band's base depth/land fill, drop the S-52 overscale
+          // pattern AP(OVERSC01) for the zooms where the band is GROSSLY overscale
+          // (display scale ≥ ~×2 its compilation scale → above its native max). It's
+          // interleaved per band, so a finer band's opaque fill covers it where finer
+          // data exists — the hatch is left only on the coarse-only (overscale) patches
+          // such as open water shown enlarged. S-52 §10.1.10.2.
+          if (L.id === "areas") this._pushOverscale(out, "chart-" + set.name, set.band);
         }
       }
       return out;
@@ -1383,9 +1390,30 @@ export class ChartPlotter extends HTMLElement {
           v.maxzoom = band.max;
         }
         out.push(v);
+        if (L.id === "areas") this._pushOverscale(out, "chart-" + band.slug, band.slug);
       }
     }
     return out;
+  }
+
+  // Append the S-52 overscale pattern AP(OVERSC01) for a band's source, shown only
+  // above the band's native max (where the chart is grossly enlarged, ≥ ~×2 its
+  // compilation scale). Inserted right after the band's base fill so a finer band's
+  // opaque fill covers it — the hatch survives only on coarse-only overscale patches.
+  // No-op for the finest band / merged "all" set (nothing coarser to enlarge). S-52
+  // §10.1.10.2; display priority 3, viewing group 21030.
+  _pushOverscale(out, source, band) {
+    const nm = CHART_BANDS.find((b) => b.slug === band);
+    if (!nm || band === "all" || nm.max >= 18) return;
+    out.push({
+      id: "overscale@" + source,
+      type: "fill",
+      source,
+      "source-layer": "areas",
+      minzoom: nm.max + 1,
+      layout: { visibility: this._showOverscale === false ? "none" : "visible" },
+      paint: { "fill-pattern": PAT_PREFIX + "OVERSC01" },
+    });
   }
 
   // Live layer ids for a template base id (one per band), for per-layer setting
