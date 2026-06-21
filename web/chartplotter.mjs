@@ -1588,7 +1588,10 @@ export class ChartPlotter extends HTMLElement {
       layers.push(
         { id: "coast-land", type: "fill", source: "coastline", ...srcLayer, filter: ["==", ["get", "level"], 1], paint: { "fill-color": this.landColor() } },
         { id: "coast-lake", type: "fill", source: "coastline", ...srcLayer, filter: ["==", ["get", "level"], 2], paint: { "fill-color": this.seaColor() } },
-        { id: "coast-line", type: "line", source: "coastline", ...srcLayer, filter: ["<=", ["get", "level"], 2], paint: { "line-color": this.coastColor(), "line-width": 0.6 } },
+        // Coastline stroke matched to the NOAA ENC coastline (CSTLN): heavier at
+        // the general/overview scale where the chart's coastline reads thick, then
+        // tapered as you zoom in so detailed shores don't get clobbered.
+        { id: "coast-line", type: "line", source: "coastline", ...srcLayer, filter: ["<=", ["get", "level"], 2], paint: { "line-color": this.coastColor(), "line-width": ["interpolate", ["linear"], ["zoom"], 3, 2.2, 8, 1.8, 12, 1.4, 16, 1.2] } },
       );
     }
 
