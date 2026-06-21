@@ -112,21 +112,21 @@ const DISTRICTS = [
   { cg: 17, name: "17th District", region: "Alaska", blurb: "All of Alaska" },
 ];
 
-// Rough locator boxes for each district on a stylized US map (normalized 0..1,
-// x→right, y→down; CONUS on the right, Alaska top-left, Hawaii bottom-left). Used
-// for the per-row mini-map so a pack is pickable at a glance without zooming the
-// real chart. Approximate by design — a position cue, not a precise footprint.
-const DISTRICT_LOCN = {
-  17: [0.02, 0.06, 0.22, 0.24], // Alaska
-  14: [0.05, 0.74, 0.12, 0.13], // Hawaii / Pacific Is.
-  13: [0.36, 0.10, 0.10, 0.15], // Pacific NW
-  11: [0.34, 0.30, 0.09, 0.20], // California
-  9:  [0.64, 0.10, 0.18, 0.14], // Great Lakes
-  8:  [0.54, 0.54, 0.24, 0.20], // Gulf Coast / rivers
-  1:  [0.86, 0.10, 0.10, 0.14], // Northeast
-  5:  [0.82, 0.30, 0.11, 0.14], // Mid-Atlantic
-  7:  [0.80, 0.54, 0.13, 0.24], // Southeast / PR
-};
+// Locator-map projection: a fixed equirectangular window over the US (Alaska west
+// through Puerto Rico east, Hawaii south through northern Alaska), into a viewBox.
+// Longitudes east of the antimeridian (Alaska's ~172°E) are shifted to continuous
+// negative so AK doesn't wrap. Used by the per-row mini coastline map.
+const LOC_W = -185, LOC_S = 15, LOC_E = -64, LOC_N = 72;
+const LOC_VW = 1000, LOC_VH = Math.round((LOC_VW * (LOC_N - LOC_S)) / (LOC_E - LOC_W));
+function locProject(pt) {
+  if (!pt || pt.length < 2) return null;
+  let lon = pt[0]; const lat = pt[1];
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  if (lon > 0) lon -= 360;
+  const x = ((lon - LOC_W) / (LOC_E - LOC_W)) * LOC_VW;
+  const y = ((LOC_N - lat) / (LOC_N - LOC_S)) * LOC_VH;
+  return { x: Math.round(x), y: Math.round(y), in: lon >= LOC_W && lon <= LOC_E && lat >= LOC_S && lat <= LOC_N };
+}
 
 // Escape text for safe innerHTML insertion (inspector panel renders feature
 // properties straight from the tiles).
@@ -1334,19 +1334,32 @@ export class ChartPlotterApp extends HTMLElement {
       return;
     }
     el.innerHTML = `
-      ${this._renderPackSearch()}
-      ${this._renderPacks()}
-      <details class="import-more">
-        <summary>Import from a file</summary>
-        <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
-        <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-        <div id="import-log" class="muted"></div>
-        <div id="archive-list"></div>
-      </details>
-      ${this._renderDataFreshness()}`;
+      <div class="charts-2col">
+        <div class="cl-list">
+          ${this._renderPackSearch()}
+          ${this._renderProviderList()}
+          <details class="import-more">
+            <summary>Import from a file</summary>
+            <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
+            <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
+            <div id="import-log" class="muted"></div>
+            <div id="archive-list"></div>
+          </details>
+          ${this._renderDataFreshness()}
+        </div>
+        <div class="cl-map">
+          ${this._renderMapPane()}
+          ${this._renderMapSelection()}
+        </div>
+      </div>`;
     this._wirePackSearch();
     this._wirePacks();
     this._wireImport();
+    // Build the coastline locator once, then re-render so the rows upgrade from the
+    // abstract box maps to the real US silhouette.
+    if (this._locator === undefined && !this._locatorPromise) {
+      this._buildLocator().then(() => { if (this._section === "charts" && this._drawerOpen()) this.renderCharts(); });
+    }
   }
 
   // -- chart packs (Coast Guard districts) ---------------------------------
@@ -1361,59 +1374,140 @@ export class ChartPlotterApp extends HTMLElement {
   // "Installed" group lists any non-NOAA packs you have (IENC, imports) so every
   // installed set is manageable in one place. Built provider-by-provider so more
   // providers (IENC waterways) slot in as their catalogues arrive.
-  _renderPacks() {
-    return `<div class="pack-intro">Charts come in packs. Tap a NOAA district to preview it on the map, then download. Search above to find a specific port's pack.</div>
-      ${this._renderOtherInstalled()}
-      <div class="pack-group">
-        <div class="pack-group-h">NOAA · U.S. Coast Guard districts</div>
-        ${DISTRICTS.map((d) => this._packRow(d)).join("")}
-      </div>`;
+  // The left list: providers, each with its available packs. Tap a pack to select
+  // it — the map on the right highlights its area and the callout offers download.
+  _renderProviderList() {
+    const noaa = DISTRICTS.map((d) => this._packListRow(d)).join("");
+    let html = `<div class="pl-group"><div class="pl-group-h">NOAA · U.S. Coast Guard districts</div>${noaa}</div>`;
+    const ienc = [...(this._installedSets || [])].filter((n) => /^ienc-/.test(n)).sort();
+    html += `<div class="pl-group"><div class="pl-group-h">USACE · Inland ENC</div>` +
+      (ienc.length ? ienc.map((n) => this._installedRow(n)).join("") : `<div class="pl-empty">No inland ENC packs available yet.</div>`) +
+      `</div>`;
+    const imp = [...(this._installedSets || [])].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort();
+    if (imp.length) html += `<div class="pl-group"><div class="pl-group-h">Imported</div>${imp.map((n) => this._installedRow(n)).join("")}</div>`;
+    return html;
   }
 
-  // A tiny inline locator map for a district: every district drawn faintly, this
-  // one highlighted — so the pack is pickable at a glance (no real-map zoom needed).
-  _miniMap(cg) {
-    const rects = DISTRICTS.map((d) => {
-      const p = DISTRICT_LOCN[d.cg];
-      if (!p) return "";
-      const on = d.cg === cg;
-      return `<rect x="${(p[0] * 100).toFixed(1)}" y="${(p[1] * 100).toFixed(1)}" width="${(p[2] * 100).toFixed(1)}" height="${(p[3] * 100).toFixed(1)}" rx="2.5" fill="${on ? "var(--ui-accent)" : "var(--ui-text-faint)"}" opacity="${on ? "1" : "0.3"}"/>`;
-    }).join("");
-    return `<svg class="pk-map" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" aria-hidden="true">${rects}</svg>`;
-  }
-
-  // One slim NOAA district row.
-  _packRow(d) {
-    const { total, have, bytes } = this._districtStat(d.cg);
+  // A NOAA district pack row (left list). Tapping selects it (highlights the map).
+  _packListRow(d) {
+    const { total, bytes } = this._districtStat(d.cg);
     if (!total) return "";
-    const busy = this._taskRunning();
-    const mb = `${Math.round(bytes / 1e6)} MB`;
-    const set = "noaa-d" + d.cg;
-    const full = (this._installedSets && this._installedSets.has(set)) || have >= total;
-    const partial = !full && have > 0;
-    const active = this._activeDistrict === d.cg ? " active" : "";
-    let act;
-    if (full) act = `<button class="pk-btn ghost" data-uninstall="${d.cg}"${busy ? " disabled" : ""}>Remove</button>`;
-    else if (partial) act = `<button class="pk-btn" data-download="${d.cg}"${busy ? " disabled" : ""}>Get rest</button>`;
-    else act = `<button class="pk-btn" data-download="${d.cg}"${busy ? " disabled" : ""}>⬇ ~${mb}</button>`;
-    const tick = full ? `<span class="pk-tick" title="Installed">✓</span>` : "";
-    return `<div class="pack-row${active}${full ? " installed" : ""}" data-pack="${d.cg}" role="button" tabindex="0" title="Preview ${esc(d.region)} on the map">
-      ${this._miniMap(d.cg)}
-      <div class="pk-info"><span class="pk-name">${esc(d.region)}${tick}</span><span class="pk-sub">${esc(d.name)} · ${total.toLocaleString()} charts · ~${mb}</span></div>
-      <div class="pk-act">${act}</div>
-    </div>`;
+    const installed = this._installedSets && this._installedSets.has("noaa-d" + d.cg);
+    const sel = this._activeDistrict === d.cg;
+    const mb = Math.round(bytes / 1e6);
+    return `<div class="pl-row${sel ? " sel" : ""}${installed ? " on" : ""}" data-cg="${d.cg}" role="button" tabindex="0" aria-label="${esc(d.region)}">
+      <span class="pl-info"><span class="pl-name">${esc(d.region)}</span><span class="pl-sub">${total.toLocaleString()} charts · ~${mb} MB</span></span>
+      ${installed ? '<span class="pl-tick" title="Installed">✓</span>' : ""}</div>`;
   }
 
-  // Installed packs that AREN'T browsable NOAA districts (imports, IENC, …) — so
-  // every installed set can be removed from one place.
-  _renderOtherInstalled() {
-    const sets = [...(this._installedSets || [])].filter((n) => !/^noaa-d\d+$/.test(n)).sort();
-    if (!sets.length) return "";
+  // A row for an installed non-NOAA pack (IENC / import): no map area to preview,
+  // just a Remove control.
+  _installedRow(name) {
     const busy = this._taskRunning();
-    const rows = sets.map((name) =>
-      `<div class="pack-row installed"><div class="pk-info"><span class="pk-name">${esc(this._setLabel(name))}</span><span class="pk-sub">${esc(name)}</span></div>
-        <div class="pk-act"><button class="pk-btn ghost" data-uninstall-set="${esc(name)}"${busy ? " disabled" : ""}>Remove</button></div></div>`).join("");
-    return `<div class="pack-group"><div class="pack-group-h">Installed</div>${rows}</div>`;
+    return `<div class="pl-row on"><span class="pl-info"><span class="pl-name">${esc(this._setLabel(name))}</span><span class="pl-sub">${esc(name)}</span></span>
+      <button class="pk-btn ghost mini" data-uninstall-set="${esc(name)}"${busy ? " disabled" : ""}>Remove</button></div>`;
+  }
+
+  // Locator-map geometry (built once): a simplified US land silhouette from the
+  // shipped GSHHG coastline, projected equirectangular into LOC_VW×LOC_VH, plus a
+  // helper to project lon/lat. Returns {land} where land is an SVG path string, or
+  // null on failure (the row falls back to the abstract box locator).
+  async _buildLocator() {
+    if (this._locator !== undefined) return this._locator;
+    if (!this._locatorPromise) {
+      this._locatorPromise = (async () => {
+        try {
+          const gj = await fetch(`${this._assets}basemap/coastline.geojson`).then((r) => (r.ok ? r.json() : null));
+          if (!gj || !Array.isArray(gj.features)) return null;
+          let land = "";
+          for (const f of gj.features) {
+            const g = f.geometry; if (!g) continue;
+            const polys = g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
+            for (const poly of polys) {
+              const ring = poly[0]; if (!ring || ring.length < 12) continue;
+              let inWin = false;
+              for (let i = 0; i < ring.length; i += 5) { const p = locProject(ring[i]); if (p && p.in) { inWin = true; break; } }
+              if (!inWin) continue;
+              let d = "";
+              for (let i = 0; i < ring.length; i += 3) { const p = locProject(ring[i]); if (p) d += (d ? "L" : "M") + p.x + " " + p.y; }
+              if (d) land += d + "Z";
+            }
+          }
+          return land ? { land } : null;
+        } catch (e) { return null; }
+      })();
+    }
+    this._locator = await this._locatorPromise;
+    return this._locator;
+  }
+
+  // Each district's REAL bounding box (lon/lat), unioned from its catalog cells
+  // (skipping antimeridian-wrapping cells so Alaska stays sane). Cached.
+  _districtBBoxes() {
+    if (this._dBBox) return this._dBBox;
+    const m = new Map();
+    for (const c of this._catalog) {
+      if (!Array.isArray(c.bb) || c.bb.length !== 4 || typeof c.cg !== "number") continue;
+      let [w, s, e, n] = c.bb;
+      if (w > 0) w -= 360; if (e > 0) e -= 360; // continuous negative lon (Alaska)
+      if (e <= w || e - w > 90) continue; // skip world-spanning / wrapped cells
+      const cur = m.get(c.cg);
+      if (!cur) m.set(c.cg, [w, s, e, n]);
+      else { cur[0] = Math.min(cur[0], w); cur[1] = Math.min(cur[1], s); cur[2] = Math.max(cur[2], e); cur[3] = Math.max(cur[3], n); }
+    }
+    this._dBBox = m;
+    return m;
+  }
+
+  // The embedded map (right pane): a simple US coastline. Installed packs are boxed
+  // faintly in green; the selected pack's area is boxed in the accent colour. Driven
+  // by the left list — tapping a pack sets _activeDistrict and the box appears here.
+  _renderMapPane() {
+    const loc = this._locator;
+    const land = loc && loc.land ? `<path d="${loc.land}" class="mp-land"/>` : "";
+    const bb = this._districtBBoxes();
+    const rectFor = (cg, cls) => {
+      const box = bb.get(cg);
+      if (!box) return "";
+      const a = locProject([box[0], box[3]]), b = locProject([box[2], box[1]]); // NW, SE
+      if (!a || !b) return "";
+      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+      const w = Math.max(8, Math.abs(b.x - a.x)), h = Math.max(8, Math.abs(b.y - a.y));
+      return `<rect class="${cls}" x="${x}" y="${y}" width="${w}" height="${h}" rx="4"/>`;
+    };
+    let rects = "";
+    for (const d of DISTRICTS) {
+      if (d.cg !== this._activeDistrict && this._installedSets && this._installedSets.has("noaa-d" + d.cg)) rects += rectFor(d.cg, "mp-inst");
+    }
+    if (this._activeDistrict) rects += rectFor(this._activeDistrict, "mp-sel");
+    return `<div class="map-pane"><svg viewBox="0 0 ${LOC_VW} ${LOC_VH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Chart coverage map">
+      <rect class="mp-sea" x="0" y="0" width="${LOC_VW}" height="${LOC_VH}"/>${land}${rects}</svg></div>`;
+  }
+
+  // The selection callout under the map: details + action for the picked district.
+  _renderMapSelection() {
+    const cg = this._activeDistrict;
+    if (!cg) return `<div class="map-hint">Select a pack from the list to preview it here and download.</div>`;
+    const d = DISTRICTS.find((x) => x.cg === cg);
+    if (!d) return "";
+    const { total, bytes } = this._districtStat(cg);
+    const mb = Math.round(bytes / 1e6);
+    const busy = this._taskRunning();
+    const installed = this._installedSets && this._installedSets.has("noaa-d" + cg);
+    const act = installed
+      ? `<button class="pk-btn ghost" data-uninstall="${cg}"${busy ? " disabled" : ""}>Remove</button>`
+      : `<button class="pk-btn" data-download="${cg}"${busy ? " disabled" : ""}>⬇ Download · ~${mb} MB</button>`;
+    const tick = installed ? ` <span class="pk-tick" title="Installed">✓</span>` : "";
+    return `<div class="map-sel"><div class="pk-info"><span class="pk-name">${esc(d.region)}${tick}</span>
+      <span class="pk-sub">${esc(d.name)} · ${esc(d.blurb)} · ${total.toLocaleString()} charts · ~${mb} MB</span></div>
+      <div class="pk-act">${act}</div></div>`;
+  }
+
+  // Select a district from the map (highlights its pin + shows its callout). Does
+  // NOT move the real chart — the pane is the picker.
+  _selectDistrict(cg) {
+    this._activeDistrict = cg;
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
   // Human label for a set name (provider · pack).
@@ -1428,11 +1522,11 @@ export class ChartPlotterApp extends HTMLElement {
 
   _wirePacks() {
     const r = this.shadowRoot;
-    r.querySelectorAll(".pack-row[data-pack]").forEach((row) => {
-      const cg = +row.dataset.pack;
-      row.addEventListener("click", () => this._showDistrictOnMap(cg));
+    r.querySelectorAll(".pl-row[data-cg]").forEach((row) => {
+      const cg = +row.dataset.cg;
+      row.addEventListener("click", () => this._selectDistrict(cg));
       row.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this._showDistrictOnMap(cg); }
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this._selectDistrict(cg); }
       });
     });
     r.querySelectorAll(".pk-btn[data-download]").forEach((b) =>
@@ -3374,26 +3468,44 @@ export class ChartPlotterApp extends HTMLElement {
         /* settings */
         .set-section { margin:0 0 22px; }
         .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 4px; font-weight:700; }
-        /* chart packs — provider-grouped, one slim row each */
-        .pack-intro { color:var(--ui-text-dim); font-size:12px; line-height:1.5; margin:2px 0 14px; }
-        .pack-group { margin:0 0 16px; }
-        .pack-group-h { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); font-weight:700; margin:0 0 4px; }
-        .pack-row { display:flex; align-items:center; gap:10px; padding:8px 6px; border-bottom:1px solid var(--ui-border-2); cursor:pointer; transition:background .1s; }
-        .pack-row:last-child { border-bottom:none; }
-        .pack-row:hover { background:var(--ui-hover); }
-        .pack-row:focus-visible { outline:none; background:var(--ui-hover); box-shadow:inset 2px 0 0 var(--ui-accent); }
-        .pack-row.active { box-shadow:inset 2px 0 0 var(--ui-accent); }
-        .pk-map { flex:none; width:46px; height:30px; border:1px solid var(--ui-border-2); border-radius:5px; background:var(--ui-surface-2); padding:2px; }
-        .pk-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
-        .pk-name { font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        /* chart download: two-pane (provider/pack list + embedded map) */
+        .charts-2col { display:flex; gap:16px; align-items:flex-start; }
+        .cl-list { flex:1 1 0; min-width:0; }
+        .cl-map { flex:0 0 46%; position:sticky; top:0; }
+        @media (max-width:780px) { .charts-2col { flex-direction:column-reverse; } .cl-map { flex:none; width:100%; position:static; } }
+        .pack-intro { color:var(--ui-text-dim); font-size:12px; line-height:1.5; margin:2px 0 12px; }
+        /* provider/pack list */
+        .pl-group { margin:0 0 14px; }
+        .pl-group-h { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); font-weight:700; margin:0 0 3px; }
+        .pl-empty { color:var(--ui-text-faint); font-size:12px; padding:6px 6px 8px; }
+        .pl-row { display:flex; align-items:center; gap:9px; padding:8px 8px; border-radius:8px; cursor:pointer; transition:background .1s; }
+        .pl-row:hover { background:var(--ui-hover); }
+        .pl-row:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--ui-accent); }
+        .pl-row.sel { background:var(--ui-hover); box-shadow:inset 3px 0 0 var(--ui-accent); }
+        .pl-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+        .pl-name { font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .pl-sub { color:var(--ui-text-faint); font-size:11.5px; font-variant-numeric:tabular-nums; }
+        .pl-tick { flex:none; color:#1f7a36; font-weight:700; }
+        /* embedded map */
+        .map-pane { width:100%; border:1px solid var(--ui-border-2); border-radius:10px; background:var(--ui-surface-2); overflow:hidden; }
+        .map-pane svg { display:block; width:100%; height:auto; }
+        .mp-sea { fill:var(--ui-surface-2); }
+        .mp-land { fill:var(--ui-border-strong); opacity:0.5; }
+        .mp-inst { fill:#1f7a36; fill-opacity:0.2; stroke:#1f7a36; stroke-width:5; }
+        .mp-sel { fill:var(--ui-accent); fill-opacity:0.25; stroke:var(--ui-accent); stroke-width:7; }
+        .map-hint { color:var(--ui-text-faint); font-size:12.5px; text-align:center; padding:12px 4px; }
+        .map-sel { display:flex; align-items:center; gap:10px; padding:10px 12px; margin:10px 0 0; border:1px solid var(--ui-accent); border-radius:9px; background:var(--ui-surface); }
+        .pk-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+        .pk-name { font-weight:600; font-size:14px; }
         .pk-tick { color:#1f7a36; font-weight:700; margin-left:5px; }
-        .pk-sub { color:var(--ui-text-faint); font-size:11.5px; font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .pk-sub { color:var(--ui-text-dim); font-size:11.5px; line-height:1.4; }
         .pk-act { flex:none; }
         .pk-btn { border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:7px 12px; font:inherit; font-size:12.5px; font-weight:600; cursor:pointer; white-space:nowrap; }
         .pk-btn:hover { background:var(--ui-accent-hover); }
         .pk-btn:disabled { background:#9fb6cf; cursor:default; }
         .pk-btn.ghost { background:var(--ui-surface); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
         .pk-btn.ghost:hover { background:#fdeceb; color:#c0392b; border-color:#e2b6b1; }
+        .pk-btn.mini { padding:5px 9px; font-size:11.5px; }
         /* find-a-chart search results */
         .pkr-row { display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid var(--ui-border-2); cursor:pointer; }
         .pkr-row:last-child { border-bottom:none; }
@@ -3765,6 +3877,7 @@ export class ChartPlotterApp extends HTMLElement {
           #drawer, #search { right:auto; transform-origin:left center; transform:translateX(-6px) scale(.985); }
           #drawer.open, #search:not([hidden]) { transform:none; }
           #drawer { left:116px; top:14px; bottom:14px; width:min(40vw, 520px); max-height:none; }
+          #drawer.wide { width:min(80vw, 960px); } /* charts: two-pane list + map */
           #search { left:116px; top:auto; bottom:14px; width:340px; max-height:calc(100vh - 28px); }
           /* caret points LEFT toward the dock tab */
           #drawer::after, #search::after { left:calc(-1 * var(--caret)); right:auto; bottom:auto; top:var(--caret-top,50%);
@@ -3932,6 +4045,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._section = name;
     const r = this.shadowRoot;
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
+    r.getElementById("drawer").classList.toggle("wide", name === "charts"); // two-pane list+map
     r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Dev" : "Chart library";
     // Charts is the "get & see charts" mode: overlay every catalog cell on the
     // map (selected ones highlighted) so you can see and box-select coverage.
