@@ -973,14 +973,25 @@ export class ChartPlotterApp extends HTMLElement {
     const box = this.shadowRoot.getElementById("databox"); if (box) box.hidden = false;
     const z = this._map.getZoom(), c = this._map.getCenter();
     const band = bandForZoom(z);
+    const dispDenom = scaleDenom(z, c.lat);
+    // Overscale indication (S-52 §10.1.10.1): when the display scale is larger than
+    // the compilation scale of the chart shown here, the data is "grossly enlarged"
+    // beyond its survey scale. Show the ×n factor (= comp-denom / display-denom) so
+    // the mariner knows the detail is magnified and not to be relied on. _coverScale
+    // is the finest covering chart's compilation scale (set in _updateZoomCap).
+    let over = "";
+    if (this._coverScale && dispDenom < this._coverScale) {
+      const f = this._coverScale / dispDenom;
+      if (f >= 1.15) over = `<span class="hud-sep">·</span><span class="hud-over" title="Chart data magnified beyond its compilation scale — detail is enlarged and not to be relied on">overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)}</span>`;
+    }
     // Fixed-width fields (+ tabular-nums in CSS) so scale/zoom don't reflow the
     // bar as their digit counts change.
     el.innerHTML =
       `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
       `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-scale">1:${fmtScale(scaleDenom(z, c.lat))}</span><span class="hud-sep">·</span>` +
+      `<span class="hud-scale">1:${fmtScale(dispDenom)}</span><span class="hud-sep">·</span>` +
       `<span class="hud-z">z${z.toFixed(1)}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span></span>`;
+      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span>${over}</span>`;
   }
 
   // Overscale cap: limit zoom-IN to the finest installed chart band that actually
@@ -993,7 +1004,8 @@ export class ChartPlotterApp extends HTMLElement {
     const map = this._map;
     if (!map) return;
     const c = map.getCenter();
-    let finest = -1; // index into BANDS (coarse→fine)
+    let finest = -1;        // index into BANDS (coarse→fine)
+    let finestScale = 0;    // compilation scale of the largest-scale (smallest-denom) chart covering the centre
     for (const n of this._installed) {
       const cell = this._byName.get(n);
       if (!cell || typeof cell.s !== "number" || !Array.isArray(cell.bb) || cell.bb.length !== 4) continue;
@@ -1001,13 +1013,18 @@ export class ChartPlotterApp extends HTMLElement {
       if (c.lng < w || c.lng > e || c.lat < s || c.lat > nN) continue;
       const idx = BANDS.indexOf(bandForScale(cell.s));
       if (idx > finest) finest = idx;
+      if (!finestScale || cell.s < finestScale) finestScale = cell.s;
     }
+    // Compilation scale of the chart actually shown at the centre — the reference for
+    // the overscale "×n" indication (see _updateHud). 0 = no chart covers the centre.
+    this._coverScale = finestScale;
     // No installed cell covers the centre → allow general-level zoom so you can still
     // navigate toward coverage. Otherwise cap at the finest covering band + margin.
     const band = finest >= 0 ? BANDS[finest] : "general";
     const target = Math.min(18, (BAND_MAXZOOM[band] || 9) + OVERSCALE_MARGIN);
     const cap = Math.max(target, map.getZoom()); // never below current zoom → no yank
     if (Math.abs(map.getMaxZoom() - cap) > 0.01) map.setMaxZoom(cap);
+    this._updateHud(); // repaint the readout with the fresh cover-scale (overscale ×n)
   }
 
   // Load the chart archive(s) on boot. An explicit `?pmtiles=` query pins ONE
@@ -2328,32 +2345,26 @@ export class ChartPlotterApp extends HTMLElement {
   _renderDevPanel() {
     const el = this.shadowRoot.getElementById("dev-tools");
     if (!el) return;
-    const z = this._map ? this._map.getZoom() : null;
-    const stats = this._devInViewBands();
-    const bandRows = DEV_BANDS.map((b) => {
-      const st = stats[b] || { overlap: 0, loaded: 0 };
-      const off = this._bandsOff.has(b);
-      const mz = BAND_MINZOOM[b] || 0;
-      const gated = z != null && z < mz && st.overlap > 0;
-      const tag = st.overlap
-        ? `${st.loaded}/${st.overlap} loaded${gated ? ` · gated &lt;z${mz}` : ""}`
-        : "none in view";
-      return `<label class="dev-band${off ? " off" : ""}${gated ? " gated" : ""}">
-        <input type="checkbox" data-band="${b}"${off ? "" : " checked"}>
-        <span class="bn">${b}</span><span class="bs">${tag}</span></label>`;
-    }).join("");
     const cov = this._devCoverage;
     let covLine = "not measured for this view";
     if (cov) {
       if (cov.holePct === 0) covLine = "✓ full coverage — no holes";
-      else if (cov.gated.length) covLine = `${cov.holePct}% holes · filled by ${cov.gated.slice(0, 6).join(", ")}${cov.gated.length > 6 ? `, +${cov.gated.length - 6}` : ""} (zoom in to load)`;
+      else if (cov.gated.length) covLine = `${cov.holePct}% holes · filled by ${cov.gated.slice(0, 6).join(", ")}${cov.gated.length > 6 ? `, +${cov.gated.length - 6}` : ""} (zoom in)`;
       else covLine = `${cov.holePct}% holes · no installed cell covers them`;
     }
     const inspecting = this._inspectMode;
     const dbgOn = this._debugCells;
+    const busy = this._taskRunning() || !!this._activeDownloadKey || this._dlQueue.length > 0;
     el.innerHTML = `
       <button id="dev-back" class="dev-back" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>Settings</button>
+
+      <section class="dev-sec">
+        <div class="dev-h">Charts</div>
+        <button id="dev-rebuild" class="btn wide"${busy ? " disabled" : ""}>↻ Rebuild all charts</button>
+        <p class="dev-note">Re-bake every installed NOAA / IENC district into per-band tile sets from the cells already on the server — <b>no re-download</b>. Use after a baking change. Progress shows in the notification pill.</p>
+      </section>
+
       <section class="dev-sec">
         <div class="dev-h">Share view</div>
         <button id="dev-share" class="btn wide">Copy share link</button>
@@ -2368,45 +2379,74 @@ export class ChartPlotterApp extends HTMLElement {
       </section>
 
       <section class="dev-sec">
-        <div class="dev-h">Cell overlay</div>
-        <label class="dev-row"><span>Show debug cell overlay</span><input id="dev-debug-cells" type="checkbox"${dbgOn ? " checked" : ""}></label>
-        <p class="dev-note">Coloured cell outlines (green=loaded, amber=loading, red=failed, grey=idle). Hover a box to name it; right-click to pick which cells render.</p>
-        ${this._renderSel.size ? `<div class="dev-row"><span class="dev-cov">Render set (${this._renderSel.size}): ${[...this._renderSel].slice(0, 4).join(", ")}${this._renderSel.size > 4 ? `, +${this._renderSel.size - 4}` : ""}</span><button id="dev-unforce" class="btn sm">Clear</button></div>` : ""}
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Tiles</div>
-        <label class="dev-row"><span>Tile debugger</span><input id="dev-tiledbg" type="checkbox"${this._tileDbgOn ? " checked" : ""}></label>
-        <p class="dev-note">Per-tile overlay + bake logging. Each chart tile's box shows its lifecycle (with z/x/y): green=rendering, <b style="color:#e53935">red=delivered-but-empty</b>, amber=loading; click a box for detail, and the panel lists any delivered-but-parsed-to-zero tiles. Also logs each bake to the console (<code>eligible=… empty=…</code>).</p>
-        <div class="dev-row"><span>Flush baked tile cache</span><button id="dev-flush" class="btn sm">Flush + re-bake</button></div>
-        <p class="dev-note">Clear the in-browser baked-tile cache (memory + IndexedDB) and drop MapLibre's loaded tiles, forcing every visible tile to re-bake.</p>
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Bands <span class="bz">${z != null ? `z ${z.toFixed(2)} · tiles z${Math.floor(z)}` : ""}</span></div>
-        <p class="dev-note">Uncheck a band to drop its cells from the baker and re-bake — isolate which band paints what. Counts are cells overlapping this view.</p>
-        <div class="dev-bands">${bandRows}</div>
-      </section>
-
-      <section class="dev-sec">
         <div class="dev-h">Coverage</div>
         <div class="dev-row"><span class="dev-cov">${covLine}</span><button id="dev-measure" class="btn sm">Measure</button></div>
         <p class="dev-note">Grid-samples the view for holes (no chart data) and paints them red.</p>
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Diagnostics</div>
+        <label class="dev-row"><span>Cell footprints</span><input id="dev-debug-cells" type="checkbox"${dbgOn ? " checked" : ""}></label>
+        <p class="dev-note">Outline every installed cell (hover a box to name it).</p>
+        <label class="dev-row"><span>Tile debugger</span><input id="dev-tiledbg" type="checkbox"${this._tileDbgOn ? " checked" : ""}></label>
+        <p class="dev-note">Per-tile overlay: green=rendering, <b style="color:#e53935">red=delivered-but-empty</b>, amber=loading. Click a box for detail.</p>
+        <div class="dev-row"><span>Refresh tiles</span><button id="dev-flush" class="btn sm">Re-fetch</button></div>
+        <p class="dev-note">Drop MapLibre's loaded tiles and re-request them from the server (e.g. after a rebuild).</p>
       </section>`;
     const q = (id) => el.querySelector("#" + id);
     q("dev-back").onclick = () => this.toggleSection("settings");
+    const rebuild = q("dev-rebuild"); if (rebuild && !rebuild.disabled) rebuild.onclick = (e) => this._rebuildAllPerBand(e.currentTarget);
     q("dev-share").onclick = (e) => this._shareView(e.currentTarget);
     q("dev-inspect").onclick = () => this._setInspectMode(!this._inspectMode);
     const feat = q("dev-feat"); if (!feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
     const dbg = q("dev-debug-cells"); dbg.onchange = () => this._setDebugCells(dbg.checked);
     q("dev-measure").onclick = (e) => this._measureCoverage(e.currentTarget);
-    const unforce = q("dev-unforce");
-    if (unforce) unforce.onclick = () => this._setRenderSel([]);
-    const tiledbg = q("dev-tiledbg");
-    if (tiledbg) tiledbg.onchange = () => this._setTileDebugger(tiledbg.checked);
-    const flush = q("dev-flush");
-    if (flush) flush.onclick = (e) => this._flushTiles(e.currentTarget);
-    el.querySelectorAll("[data-band]").forEach((cb) => (cb.onchange = () => this._setBandOff(cb.dataset.band, !cb.checked)));
+    const tiledbg = q("dev-tiledbg"); if (tiledbg) tiledbg.onchange = () => this._setTileDebugger(tiledbg.checked);
+    const flush = q("dev-flush"); if (flush) flush.onclick = (e) => this._flushTiles(e.currentTarget);
+  }
+
+  // Re-bake every installed NOAA/IENC district into per-band tile sets from the cells
+  // ALREADY on the server (no NOAA re-download). The CLIENT supplies each district's
+  // cell list (from its catalogue) since the server doesn't track membership. Runs
+  // the districts one at a time, surfacing progress through the notification pill.
+  // user/import/legacy packs are skipped (no client-known cell list).
+  async _rebuildAllPerBand(btn) {
+    if (this._taskRunning() || this._activeDownloadKey || this._dlQueue.length) { if (btn) flashBtn(btn, "busy"); return; }
+    let packs = [];
+    try { packs = ((await fetch(`${this._assets}api/packs`).then((r) => (r.ok ? r.json() : null))) || {}).packs || []; } catch (e) { /* offline */ }
+    // Load the IENC catalogue so we know each installed river pack's cells.
+    if (packs.some((p) => p.name.startsWith("ienc-"))) { try { await this._iencCatalog(); } catch (e) { /* skip ienc */ } }
+    const iencPacks = this._providerPacks("ienc");
+    const todo = [];
+    for (const p of packs) {
+      const m = /^noaa-d(\d+)$/.exec(p.name);
+      if (m) { const names = this._districtCellNames(+m[1]); if (names.length) todo.push({ set: p.name, label: this._setLabel(p.name), names }); continue; }
+      if (p.name.startsWith("ienc-")) {
+        const pk = iencPacks.find((x) => x.key === p.name);
+        const names = pk && pk.cells ? pk.cells.map((c) => c.name) : [];
+        if (names.length) todo.push({ set: p.name, label: this._setLabel(p.name), names });
+      }
+    }
+    if (!todo.length) { if (btn) flashBtn(btn, "nothing to rebuild"); return; }
+    this._task = { kind: "download", status: "running" };
+    this._renderDevPanel(); // disable the button while running
+    let done = 0;
+    for (const j of todo) {
+      this._setProgress({ label: "Rebuilding charts", pill: `Rebuilding ${j.label}`, sub: `${done + 1} of ${todo.length} · ${j.names.length} charts`, frac: done / todo.length });
+      try {
+        const res = await fetch(`${this._assets}api/import?set=${encodeURIComponent(j.set)}&cells=${encodeURIComponent(j.names.join(","))}`, { method: "POST" });
+        const job = await res.json().catch(() => ({}));
+        if (job.job) await this._pollImport(job.job, (p) => this._setProgress(p), j.label);
+      } catch (e) { console.warn("[rebuild]", j.set, e); }
+      done++;
+    }
+    this._task = null;
+    this._setProgress(null);
+    await this._renderInstalledSets();
+    if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } } // re-fetch the freshly-baked tiles
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    this._renderDevPanel();
+    if (btn) flashBtn(btn, `✓ rebuilt ${todo.length}`);
   }
 
   // Toggle the tile-debugger plugin (per-tile lifecycle + delivery-integrity
@@ -3901,6 +3941,8 @@ export class ChartPlotterApp extends HTMLElement {
         .db-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
         .db-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
         .db-readout .hud-sep { color:var(--ui-text-faint); }
+        /* Overscale indication (S-52 §10.1.10.1) — amber, like the SCLBR colour. */
+        .db-readout .hud-over { color:#e8820c; font-weight:700; white-space:nowrap; }
         /* Cell-list popup above a band pill (hover on desktop; tap to pin on touch). */
         .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
           background:var(--ui-surface); border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
