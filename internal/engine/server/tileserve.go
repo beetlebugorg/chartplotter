@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -101,7 +102,19 @@ func (s *Server) serveTileJSON(w http.ResponseWriter, r *http.Request, name stri
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	tilesURL := fmt.Sprintf("%s://%s/tiles/%s/{z}/{x}/{y}.mvt", scheme, r.Host, name)
+	// Bake GENERATION token stamped into the tile URL — the source archive's mtime,
+	// which changes every time the set is re-baked (writeAndRegister renames a fresh
+	// file into place). The client re-fetches this TileJSON (it's no-cache) after a
+	// re-bake, gets a new ?g, and its tile URLs change — so the browser/MapLibre tile
+	// caches are bypassed by content, not a fragile client-side counter. serveTile
+	// ignores the query, so ?g is purely a cache key.
+	gen := int64(0)
+	if p, ok := s.packPath(name); ok {
+		if fi, err := os.Stat(p); err == nil {
+			gen = fi.ModTime().UnixNano()
+		}
+	}
+	tilesURL := fmt.Sprintf("%s://%s/tiles/%s/{z}/{x}/{y}.mvt?g=%d", scheme, r.Host, name, gen)
 	w.Header().Set("Content-Type", jsonCT)
 	w.Header().Set("Cache-Control", "no-cache")
 	fmt.Fprintf(w,

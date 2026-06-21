@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -218,11 +219,16 @@ func applyFeatureUpdate(chart *chartData, record *iso8211.DataRecord, fridData [
 		// Per S-57 §8.4.2.2 (b): FSPT modification controlled by FSPC field
 		// If FSPT field is present, parseFeatureRecord will set SpatialRefs (even if empty)
 		// If FSPT field is absent, parseFeatureRecord leaves SpatialRefs as nil
-		_, hasFSPT := record.Fields["FSPT"]
-		if hasFSPT {
-			existing.SpatialRefs = featureRec.SpatialRefs
+		// Gate on the CONTROL field (FSPC), not the data field (FSPT): a DELETE
+		// instruction carries FSPC with NO FSPT (nothing to insert), so gating on FSPT
+		// silently dropped every delete — leaving stale edges that scrambled area
+		// boundaries. FSPC = insert/delete/modify N pointers at index FSIX (§8.4.2.4).
+		if fspc, ok := record.Fields["FSPC"]; ok && len(fspc) >= 5 {
+			existing.SpatialRefs = applyControl(existing.SpatialRefs, featureRec.SpatialRefs, fspc)
+		} else if _, hasFSPT := record.Fields["FSPT"]; hasFSPT {
+			existing.SpatialRefs = featureRec.SpatialRefs // no control field ⇒ full replacement
 		}
-		// If FSPT not present in update, preserve existing SpatialRefs
+		// If neither present, preserve existing SpatialRefs
 
 		// Keep reference in index
 		chart.featuresByID[key] = existing
@@ -280,14 +286,26 @@ func applySpatialUpdate(chart *chartData, record *iso8211.DataRecord, vridData [
 		existing.RecordVersion = spatialRec.RecordVersion
 		existing.UpdateInstr = spatialRec.UpdateInstr
 
-		// Update coordinates ONLY if SG2D or SG3D field present in update record
-		_, hasSG2D := record.Fields["SG2D"]
-		_, hasSG3D := record.Fields["SG3D"]
-		if hasSG2D || hasSG3D {
-			// Update present - replace coordinates
+		// Update coordinates ONLY if SG2D or SG3D field present in update record.
+		// S-57 §8.4.3.2: a coordinate update is NOT a wholesale replacement — the SGCC
+		// (Coordinate Control) field says insert/delete/modify CCNC coordinates at
+		// index CCIX, with SG2D/SG3D supplying the new ones. Replacing the whole list
+		// (the old behavior) collapsed e.g. a 123-point M_COVR coverage ring to the 3
+		// points in the update, which then covered nothing — breaking everything that
+		// keys off cell coverage (best-available band suppression, no-data, …).
+		// Gate on the CONTROL field (SGCC), not the data field (SG2D/SG3D): a coordinate
+		// DELETE carries SGCC with NO SG2D, so gating on SG2D dropped deletes. SGCC =
+		// insert/delete/modify N coords at index CCIX (§8.4.3.2/3.3). With no SGCC, a
+		// SG2D/SG3D update is a full replacement (and for a straight-line edge whose
+		// existing coords are empty, replacement == the §8.4.3.3 "append" rule).
+		if sgcc, ok := record.Fields["SGCC"]; ok && len(sgcc) >= 5 {
+			existing.Coordinates = applyControl(existing.Coordinates, spatialRec.Coordinates, sgcc)
+		} else if _, hasSG2D := record.Fields["SG2D"]; hasSG2D {
+			existing.Coordinates = spatialRec.Coordinates
+		} else if _, hasSG3D := record.Fields["SG3D"]; hasSG3D {
 			existing.Coordinates = spatialRec.Coordinates
 		}
-		// If neither SG2D nor SG3D present, preserve existing coordinates
+		// If neither SG2D nor SG3D nor SGCC present, preserve existing coordinates
 
 		// Update VRPT ONLY if VRPT field present in update record
 		_, hasVRPT := record.Fields["VRPT"]
@@ -305,4 +323,60 @@ func applySpatialUpdate(chart *chartData, record *iso8211.DataRecord, vridData [
 	}
 
 	return nil
+}
+
+// applyControl applies an S-57 update-control field (SGCC for coordinates §8.4.3.2,
+// FSPC for feature-spatial pointers §8.4.2.2 — identical structure) to an existing
+// list. The control is a repeating group of 5-byte entries: UI (b11: 1=insert,
+// 2=delete, 3=modify), IX (b12, 1-based index), NC (b12, count). Insert/modify
+// consume items from `upd` (the update's new SG2D/SG3D or FSPT, in order); delete
+// consumes none. Instructions are applied in sequence to the evolving list — so a
+// small edit no longer wipes out the whole base list (the bug that collapsed a
+// 123-point coverage ring to 3).
+func applyControl[T any](existing, upd []T, ctrl []byte) []T {
+	out := append([]T(nil), existing...) // don't mutate the base record's slice
+	ui := 0                              // cursor into the update's new items
+	take := func(n int) []T {
+		end := ui + n
+		if end > len(upd) {
+			end = len(upd)
+		}
+		o := upd[ui:end]
+		ui = end
+		return o
+	}
+	for off := 0; off+5 <= len(ctrl); off += 5 {
+		instr := ctrl[off]
+		idx := int(binary.LittleEndian.Uint16(ctrl[off+1:off+3])) - 1 // 1-based → 0-based
+		nc := int(binary.LittleEndian.Uint16(ctrl[off+3 : off+5]))
+		if idx < 0 {
+			idx = 0
+		}
+		switch instr {
+		case 1: // insert nc items before idx
+			ins := take(nc)
+			if idx > len(out) {
+				idx = len(out)
+			}
+			merged := make([]T, 0, len(out)+len(ins))
+			merged = append(merged, out[:idx]...)
+			merged = append(merged, ins...)
+			merged = append(merged, out[idx:]...)
+			out = merged
+		case 2: // delete nc items starting at idx
+			end := idx + nc
+			if end > len(out) {
+				end = len(out)
+			}
+			if idx < len(out) && idx < end {
+				out = append(out[:idx], out[end:]...)
+			}
+		case 3: // modify nc items starting at idx (replace with new ones)
+			repl := take(nc)
+			for k := 0; k < len(repl) && idx+k < len(out); k++ {
+				out[idx+k] = repl[k]
+			}
+		}
+	}
+	return out
 }

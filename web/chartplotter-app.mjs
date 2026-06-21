@@ -49,7 +49,7 @@ const DEFAULT_MARINER = {
   simplifiedPoints: false,     // paper-chart point symbols (engine SimplifiedPoints=false)
   fourShadeWater: true,        // four depth shades (engine TwoShades=false)
   showNoData: true,
-  showScaleBoundaries: true, // DATCVR §10.1.9.1 chart scale boundaries (standard display)
+  showScaleBoundaries: false, // DATCVR §10.1.9.1 chart scale boundaries — off by default (opt-in)
   // Individually-selectable "Other" items (S-52/IMO), all default on.
   showSoundings: true,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
@@ -68,6 +68,7 @@ const DEFAULT_MARINER = {
 };
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
+const LS_BANDS_OFF = "chartplotter:bands-off"; // usage bands the user turned off (array of slugs)
 const LS_AGREE = "chartplotter:enc-agreement"; // NOAA ENC User Agreement acceptance
 // NOAA's ENC distribution pages + the User Agreement that must be displayed and
 // accepted before downloading ENCs (charts.noaa.gov/ENCs/ENCs.shtml §3).
@@ -90,12 +91,12 @@ const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a"
 // Below it a cell's chart detail isn't baked, so we draw its coverage outline.
 // General is overzoomed out to z0 (it renders where no overview covers — see
 // generalOverzoomMin in the baker), so it loads from z0 rather than its native z7.
-const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
+const BAND_MINZOOM = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16 };
 // Native MAX (display) zoom per band (matches CHART_BANDS .max in chartplotter.mjs).
 // Drives the overscale cap: zooming past a band's native max + a small margin over
 // open water just enlarges blank water, so _updateZoomCap clamps to the finest band
 // that actually covers the view.
-const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
+const BAND_MAXZOOM = { overview: 8, general: 10, coastal: 12, approach: 14, harbor: 16, berthing: 18 };
 const OVERSCALE_MARGIN = 2; // levels of zoom-in allowed past the finest covering band
 // Usage bands in coarse→fine order, for the dev band-filter rows.
 const DEV_BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing"];
@@ -276,9 +277,9 @@ export class ChartPlotterApp extends HTMLElement {
     this._regionArchives = [];          // [{num,file,bounds}] — one pmtiles per installed region
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
-    this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage outlines on/off (default on)
+    this._showCellBounds = localStorage.getItem("cp-cell-bounds") === "1"; // coverage outlines on/off (default OFF, opt-in)
     this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
-    this._bandsOff = new Set();          // dev: usage bands excluded from the realtime baker (in-memory; default all on)
+    this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
     this._renderSel = new Set();         // dev (debug mode): hand-picked cells — when non-empty, ONLY these render, at any zoom
     this._tileDbgOn = false;             // dev: tile-debugger plugin overlay (lifecycle + delivery integrity + bake logging)
     this._tileDbg = null;                // dev: the TileDebugger IControl instance (lazily imported)
@@ -383,11 +384,16 @@ export class ChartPlotterApp extends HTMLElement {
     // off in parallel; ingestViewport awaits it.
     this._catalogReady = this.loadCatalog();
 
-    // Share-restore: opening <origin>/#share reconstructs someone else's exact
-    // view — pull the snapshot, install its cells (downloaded via the server if
-    // not already stored), and adopt its camera in place of the local last view.
-    let shareView = null;
-    if (isShareUrl()) {
+    // Share-restore: a view-only link (#v=lon,lat,zoom[,bearing,pitch]) just
+    // adopts the publisher's camera — no cells to install, nothing to download;
+    // the spot renders from whatever the server/local store already holds. Strip
+    // the hash afterward so a later reload resumes the user's own last view.
+    // Legacy #share snapshot links still reconstruct cells via _loadSharedView.
+    let shareView = parseViewHash();
+    if (shareView) {
+      this._sharePending = shareView; // onReady applies bearing/pitch
+      try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+    } else if (isShareUrl()) {
       shareView = await this._loadSharedView().catch((e) => { console.warn("[share] restore failed:", e); return null; });
     }
 
@@ -895,6 +901,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (!this._prod) {
       try { await this._renderInstalledSets(); } catch (e) { console.warn("[charts] initial render", e); }
     }
+    this._applyBandsOff(); // re-apply any persisted band on/off now that chart layers exist
     this.updateEmptyState();
     this.renderCharts();
     this._assessCoverage();
@@ -1578,17 +1585,24 @@ export class ChartPlotterApp extends HTMLElement {
       title = d ? d.region : pk.title;
       sub = d ? `${esc(d.name)} · ${esc(d.blurb)}` : "";
       meta = `${pk.sub} · outlined area below is the coverage`;
+    } else if (pk.kind === "user") {
+      // Imported / legacy local set — no catalogue coverage, just a Remove control.
+      title = pk.title || this._setLabel(key);
+      sub = "Imported charts — baked on the server, kept under User Charts.";
+      meta = "";
     } else { // ienc
       title = `${pk.title} River`;
       sub = `USACE Inland ENC · ${pk.cells.length} chart${pk.cells.length > 1 ? "s" : ""}`;
       meta = "outlined area below is the coverage";
     }
+    // User packs have no coverage map; everything else shows the preview.
+    const previewMap = pk.kind === "user" ? "" : `<div id="preview-map" class="prev-map"></div>`;
     return `<div class="mcol mcol-detail">
-      <div id="preview-map" class="prev-map"></div>
+      ${previewMap}
       <div class="m-detail-body">
         <div class="m-detail-title">${esc(title)}${tick}</div>
         <div class="m-detail-sub">${sub}</div>
-        <div class="m-detail-meta">${esc(meta)}</div>
+        ${meta ? `<div class="m-detail-meta">${esc(meta)}</div>` : ""}
         <div class="m-detail-act">${act}</div>
       </div></div>`;
   }
@@ -2281,45 +2295,25 @@ export class ChartPlotterApp extends HTMLElement {
 
   // --- Share my view -------------------------------------------------------
   // Publish the current scene (camera + installed cells) to the server so anyone
-  // — including a headless browser used for debugging — can open <origin>/#share
-  // and see exactly what's on screen here. Catalog (NOAA) cells travel as a name
-  // + download url the reconstructing browser pulls through the server; cells the
-  // server can't fetch itself (hand-imported, non-NOAA) are uploaded byte-for-byte
-  // into its cache first. The share URL is copied to the clipboard.
-  async _shareView(btn) {
+  // — including a headless browser used for debugging — reopens the same camera.
+  // The link carries ONLY the view (#v=lon,lat,zoom[,bearing,pitch]); the cells
+  // and tiles already live on the server (the hub), so there is nothing to
+  // upload or re-download — the opener just renders the same spot from what is
+  // already loaded. The link is copied to the clipboard. (Legacy #share snapshot
+  // links still restore via _loadSharedView for backward compatibility.)
+  _shareView(btn) {
     const m = this._map;
     if (!m) return;
-    if (btn) flashBtn(btn, "…");
     try {
       const c = m.getCenter();
-      const view = {
-        center: [+c.lng.toFixed(6), +c.lat.toFixed(6)],
-        zoom: +m.getZoom().toFixed(3),
-        bearing: +m.getBearing().toFixed(1),
-        pitch: +m.getPitch().toFixed(1),
-      };
-      const cells = [];
-      for (const n of this._installed) {
-        const cat = this._byName.get(n);
-        const z = cat && cat.z ? cat.z : "";
-        cells.push(z ? { n, z } : { n });
-        if (z) continue; // server can fetch catalog cells itself via api/cell?url=
-        // No NOAA url → the server can't get this cell; push its bytes into the cache.
-        try {
-          const bytes = await this._store.getBytes(n);
-          const r = await fetch("api/cell/" + encodeURIComponent(n), { method: "PUT", headers: { "content-type": "application/octet-stream" }, body: bytes });
-          if (!r.ok) throw new Error("HTTP " + r.status);
-        } catch (e) { console.warn("[share] upload", n, e); }
-      }
-      const snap = { v: 1, when: new Date().toISOString(), view, cells };
-      const resp = await fetch("api/share", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(snap) });
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      const url = location.origin + location.pathname + "#share";
-      const ok = await copyText(url);
-      console.log("[share] view published:", url, `(${cells.length} cell${cells.length !== 1 ? "s" : ""})`);
-      if (btn) flashBtn(btn, ok ? "✓ copied" : "✓");
+      const parts = [+c.lng.toFixed(6), +c.lat.toFixed(6), +m.getZoom().toFixed(3)];
+      const b = +m.getBearing().toFixed(1), p = +m.getPitch().toFixed(1);
+      if (b || p) { parts.push(b); if (p) parts.push(p); } // omit trailing zeros
+      const url = location.origin + location.pathname + "#v=" + parts.join(",");
+      console.log("[share] view link:", url);
+      copyText(url).then((ok) => { if (btn) flashBtn(btn, ok ? "✓ copied" : "✓"); });
     } catch (e) {
-      console.warn("[share] publish failed:", e);
+      console.warn("[share] link failed:", e);
       if (btn) flashBtn(btn, "✗");
     }
   }
@@ -2385,7 +2379,7 @@ export class ChartPlotterApp extends HTMLElement {
       <section class="dev-sec">
         <div class="dev-h">Share view</div>
         <button id="dev-share" class="btn wide">Copy share link</button>
-        <p class="dev-note">Publishes the current camera + installed charts and copies a link that reproduces exactly this.</p>
+        <p class="dev-note">Copies a link to <b>this exact camera</b> (center / zoom / bearing). Opens the same spot using the charts already on the server — <b>no upload, no re-download</b>.</p>
       </section>
 
       <section class="dev-sec">
@@ -2399,6 +2393,12 @@ export class ChartPlotterApp extends HTMLElement {
         <div class="dev-h">Coverage</div>
         <div class="dev-row"><span class="dev-cov">${covLine}</span><button id="dev-measure" class="btn sm">Measure</button></div>
         <p class="dev-note">Grid-samples the view for holes (no chart data) and paints them red.</p>
+      </section>
+
+      <section class="dev-sec">
+        <div class="dev-h">Chart bands</div>
+        ${DEV_BANDS.map((b) => `<label class="dev-row"><span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${BAND_COLOR[b]};margin-right:7px;vertical-align:-1px"></span>${BAND_LABEL[b]}</span><input class="dev-band" type="checkbox" data-band="${b}"${this._bandsOff.has(b) ? "" : " checked"}></label>`).join("")}
+        <p class="dev-note">Turn a usage band's charts off to declutter or compare what each band contributes. Hides that band's layers everywhere; persists across reloads.</p>
       </section>
 
       <section class="dev-sec">
@@ -2416,6 +2416,7 @@ export class ChartPlotterApp extends HTMLElement {
     q("dev-share").onclick = (e) => this._shareView(e.currentTarget);
     q("dev-inspect").onclick = () => this._setInspectMode(!this._inspectMode);
     const feat = q("dev-feat"); if (!feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
+    el.querySelectorAll(".dev-band").forEach((cb) => { cb.onchange = () => this._setBandOff(cb.dataset.band, !cb.checked); });
     const dbg = q("dev-debug-cells"); dbg.onchange = () => this._setDebugCells(dbg.checked);
     q("dev-measure").onclick = (e) => this._measureCoverage(e.currentTarget);
     const tiledbg = q("dev-tiledbg"); if (tiledbg) tiledbg.onchange = () => this._setTileDebugger(tiledbg.checked);
@@ -2552,13 +2553,23 @@ export class ChartPlotterApp extends HTMLElement {
     return out;
   }
 
-  // Exclude/include a usage band from the realtime baker, then re-bake the view
-  // (loadStoreCells with clearCache re-registers + drops stale tiles).
-  async _setBandOff(band, off) {
+  // Turn a usage band off/on. Hides that band's layers instantly (server +
+  // per-band pmtiles render one source per band) and persists the choice; the set
+  // also gates the realtime baker (minzoom 999) so a later in-browser re-bake skips
+  // those cells too. No re-bake needed just to hide.
+  _setBandOff(band, off) {
     if (off) this._bandsOff.add(band); else this._bandsOff.delete(band);
-    this._clearDevHoles();
+    try { localStorage.setItem(LS_BANDS_OFF, JSON.stringify([...this._bandsOff])); } catch {}
+    if (this._plotter) this._plotter.setBandVisible(band, !off);
     this._renderDevPanel();
-    await this._refreshCharts(false); // re-bake in place — don't move the camera
+  }
+
+  // Re-apply persisted band on/off to the plotter once its layers exist (on boot
+  // and after any archive (re)load). Idempotent; also seeds the plotter's hidden
+  // set so a later style rebuild keeps the bands off.
+  _applyBandsOff() {
+    if (!this._plotter) return;
+    for (const band of DEV_BANDS) this._plotter.setBandVisible(band, !this._bandsOff.has(band));
   }
 
   // Sample a grid over the viewport: a point where no chart feature renders is a
@@ -4597,10 +4608,10 @@ function bandForScale(s) {
 // overview 0, general 7, coastal 9, approach 11, harbor 13, berthing 16).
 function bandForZoom(z) {
   if (z >= 16) return "berthing";
-  if (z >= 13) return "harbor";
-  if (z >= 11) return "approach";
-  if (z >= 9) return "coastal";
-  if (z >= 7) return "general";
+  if (z >= 14) return "harbor";
+  if (z >= 12) return "approach";
+  if (z >= 10) return "coastal";
+  if (z >= 8) return "general";
   return "overview";
 }
 
@@ -4668,11 +4679,24 @@ function fmtLatLon(lat, lng) {
   return dm(lat, 2) + (lat >= 0 ? "N" : "S") + " " + dm(x, 3) + (x >= 0 ? "E" : "W");
 }
 
-// True when the page was opened as a shared-view link (<origin>/#share or
+// True when the page was opened as a legacy snapshot link (<origin>/#share or
 // ?share) — boot() then reconstructs the publisher's scene from /api/share.
 function isShareUrl() {
   const h = (location.hash || "").replace(/^#/, "");
   return h === "share" || new URLSearchParams(location.search).has("share");
+}
+
+// A lightweight share link carries only the camera in the URL hash
+// (#v=lon,lat,zoom[,bearing,pitch]) — no cells, no server snapshot, no
+// re-download. Returns the camera ({center:[lon,lat],zoom,bearing,pitch}) or
+// null if the hash isn't a view link or is malformed.
+function parseViewHash() {
+  const h = (location.hash || "").replace(/^#/, "");
+  if (!h.startsWith("v=")) return null;
+  const p = h.slice(2).split(",").map(Number);
+  if (p.length < 3 || p.some((n) => !isFinite(n))) return null;
+  const [lon, lat, zoom, bearing = 0, pitch = 0] = p;
+  return { center: [lon, lat], zoom, bearing, pitch };
 }
 
 // Copy `text` to the clipboard, returning whether it worked. Prefers the async

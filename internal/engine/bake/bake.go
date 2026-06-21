@@ -56,13 +56,13 @@ const generalOverzoomMin uint32 = 0
 //   berthing 18 — finest band, nothing finer to cut against; native detail.
 func bandBakeCeil(bandMax uint32) uint32 {
 	switch bandMax {
-	case 11: // coastal: native max (z11) cuts at ~13 km — too coarse; +2 → z13 (~3 km)
-		return 13
+	case 12: // coastal: native max (z12) cuts too coarse; +2 → z14 to sharpen vs approach
+		return 14
 	default: // everyone else bakes to native max:
-		//   overview(7)/general(9) are capped client-side (no overzoom cut to sharpen);
-		//   approach(13) cuts vs harbor at ~3 km — fine, and z14/z15 over a whole
-		//     district is the dominant size/index cost (Alaska approach: ~1.2 GB → ~80 MB);
-		//   harbor(16) cuts vs berthing at ~0.4 km; berthing(18) is the finest band.
+		//   overview(8)/general(10) are capped client-side (no overzoom cut to sharpen);
+		//   approach(14) cuts vs harbor — fine, and deeper zooms over a whole district
+		//     are the dominant size/index cost (Alaska approach: ~1.2 GB → ~80 MB);
+		//   harbor(16) cuts vs berthing; berthing(18) is the finest band.
 		return bandMax
 	}
 }
@@ -89,15 +89,15 @@ const (
 func (b Band) ZoomRange() ZoomRange {
 	switch b {
 	case BandOverview:
-		return ZoomRange{0, 7}
+		return ZoomRange{0, 8}
 	case BandGeneral:
-		return ZoomRange{7, 9}
+		return ZoomRange{8, 10}
 	case BandCoastal:
-		return ZoomRange{9, 11}
+		return ZoomRange{10, 12}
 	case BandApproach:
-		return ZoomRange{11, 13}
+		return ZoomRange{12, 14}
 	case BandHarbor:
-		return ZoomRange{13, 16}
+		return ZoomRange{14, 16}
 	default: // berthing
 		return ZoomRange{16, 18}
 	}
@@ -115,11 +115,11 @@ type BakeBand struct {
 // chart-<slug> source. Max feeds EmitTileBandInto's band filter (natMax == Max).
 func BakeBands() []BakeBand {
 	return []BakeBand{
-		{"overview", 0, 7},
-		{"general", 7, 9},
-		{"coastal", 9, 11},
-		{"approach", 11, 13},
-		{"harbor", 13, 16},
+		{"overview", 0, 8},
+		{"general", 8, 10},
+		{"coastal", 10, 12},
+		{"approach", 12, 14},
+		{"harbor", 14, 16},
 		{"berthing", 16, 18},
 	}
 }
@@ -219,6 +219,7 @@ type routed struct {
 	wMinX, wMinY, wMaxX, wMaxY float64 // normalized world bbox [0,1]
 	zMin, zMax                 uint32  // display zoom span
 	natMin, natMax             uint32  // native band zoom span (for suppression)
+	cscl                       uint32  // owning cell's compilation-scale denominator (per-cell best-available)
 
 	// ls (non-nil only for a complex_lines prim) is the linestyle's period
 	// geometry; when set the prim is tessellated per zoom at emit (emitComplexLine)
@@ -277,6 +278,7 @@ type Baker struct {
 	linestyles map[string]*lsInfo // complex-linestyle period geometry, built once (lazily) from the PresLib
 	bbox       geo.BoundingBox
 	curCell    string // dataset name of the cell currently being added (stamped on each feature)
+	curCscl   uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
@@ -350,6 +352,8 @@ func (b *Baker) Coverage() []CellCoverage { return b.coverage }
 // [ring][point][lon,lat]; bb is their lon/lat bounding box.
 type covMeta struct {
 	bandMin, bandMax uint32
+	cscl             uint32 // compilation-scale denominator (per-cell best-available: finer = smaller wins)
+	displayMin       uint32 // lowest zoom this cell's data is shown at (0 for overview/general which overzoom down)
 	bb               geo.BoundingBox
 	rings            [][][]float64
 }
@@ -417,7 +421,7 @@ func groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, s
 // extractCoverage records a cell's M_COVR (CATCOV=1) data-coverage polygons into
 // covMeta (keyed to the cell's native band [zr]) — the input to best-available
 // suppression and DATCVR scale boundaries.
-func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell string) {
+func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell string, cscl, displayMin uint32) {
 	for i := range features {
 		f := &features[i]
 		if f.ObjectClass() != "M_COVR" || intAttr(f.Attributes(), "CATCOV") != 1 {
@@ -428,7 +432,7 @@ func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell strin
 			continue
 		}
 		cov := CellCoverage{Cell: cell}
-		cm := covMeta{bandMin: zr.Min, bandMax: zr.Max, bb: geo.EmptyBox()}
+		cm := covMeta{bandMin: zr.Min, bandMax: zr.Max, cscl: cscl, displayMin: displayMin, bb: geo.EmptyBox()}
 		for _, r := range rings {
 			cov.Rings = append(cov.Rings, r.Coordinates)
 			cm.rings = append(cm.rings, r.Coordinates)
@@ -456,8 +460,21 @@ func cellStem(name string) string {
 // re-deriving coverage. Returns the cell's native band.
 func (b *Baker) AddCellCoverage(chart *s57.Chart) Band {
 	band := BandForScale(uint32(chart.CompilationScale()))
-	b.extractCoverage(chart.Features(), band.ZoomRange(), cellStem(chart.DatasetName()))
+	cscl := uint32(chart.CompilationScale())
+	b.extractCoverage(chart.Features(), band.ZoomRange(), cellStem(chart.DatasetName()), cscl, cellDisplayMin(band, band.ZoomRange()))
 	return band
+}
+
+// cellDisplayMin is the lowest zoom a band's cells are actually drawn at (matches
+// the client BAND_DISPLAY_MIN): overview/general overzoom down to z0 to gap-fill, so
+// they're "shown" everywhere; the finer bands start at their native min. Used so the
+// per-cell suppression only yields to a finer cell that is ACTUALLY displayed at the
+// current zoom (a harbor cell doesn't punch holes in approach until harbor zooms in).
+func cellDisplayMin(band Band, zr ZoomRange) uint32 {
+	if band <= BandGeneral {
+		return 0
+	}
+	return zr.Min
 }
 
 // SetSkipCoverage makes AddCell skip M_COVR extraction (covMeta already built by
@@ -489,6 +506,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		b.linestyles = buildLinestyleTable(lib)
 	}
 	band := BandForScale(uint32(chart.CompilationScale()))
+	b.curCscl = uint32(chart.CompilationScale()) // per-cell best-available: finer (smaller) wins
 	zr := band.ZoomRange()
 	// Display range vs native band. General cells overzoom OUT (down to z2) so
 	// their data doesn't vanish when you zoom out past z7 with no overview
@@ -510,7 +528,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	// and scale boundaries. Skipped when the coverage was already built in a prior
 	// pass (the streaming bake builds it once up front, then re-routes per band).
 	if !b.skipCoverage {
-		b.extractCoverage(features, zr, b.curCell)
+		b.extractCoverage(features, zr, b.curCell, b.curCscl, cellDisplayMin(band, zr))
 	}
 	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.
 	lightPrimary, lightSkip := groupCoLocatedLights(features)
@@ -651,6 +669,9 @@ const ptsAlwaysShown int64 = 2
 
 func (b *Baker) add(r routed, bb geo.BoundingBox) {
 	b.bbox.ExtendBox(bb)
+	if r.cscl == 0 {
+		r.cscl = b.curCscl // owning cell's compilation scale (structural prims may preset it)
+	}
 	r.wMinX = normX(bb.MinLon)
 	r.wMaxX = normX(bb.MaxLon)
 	r.wMinY = normY(bb.MaxLat) // north -> smaller y
@@ -1262,15 +1283,15 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 	ts.eligible = eligible // persist the (possibly grown) backing array for reuse
 	scratch := ts.proj     // reused per-ring projection buffer (across tiles)
 	clip := &ts.clip       // reused clipper (across tiles)
-	// tileCovBand: finest band whose M_COVR data-coverage contains this tile's
-	// centre — the up-suppression's "is a finer cell actually here" test. Computed
-	// lazily (tiles with no up-overzoom candidate pay nothing); only the full-scan
-	// path reaches it (the indexed path caps prims at their band).
+	// Tile centre (used by both the merged-path band test and the per-band cell-scale
+	// test) — a coarse line/fill is the same band/scale across the whole small tile.
+	ctrLon := (float64(coord.X)+0.5)/n*360 - 180
+	ctrLat := unnormY((float64(coord.Y) + 0.5) / n)
+	// tileCovBand: finest band whose M_COVR data-coverage contains this tile's centre
+	// — the merged-path up-suppression's "is a finer cell actually here" test.
 	tileCovBand, tileCovDone := uint32(0), false
 	covBandAt := func() uint32 {
 		if !tileCovDone {
-			ctrLon := (float64(coord.X)+0.5)/n*360 - 180
-			ctrLat := unnormY((float64(coord.Y) + 0.5) / n)
 			tileCovBand, tileCovDone = b.coverageBandAt(ctrLat, ctrLon), true
 		}
 		return tileCovBand
@@ -1286,35 +1307,39 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			suppDown++
 			continue
 		}
-		// Up-direction best-available suppression where a coarse prim overzoomed at/
-		// above its native max yields to a strictly-finer band that actually has data
-		// (covBandAt — real M_COVR coverage, not bbox).
-		//   • MERGED tile (bandMax==0, realtime cp://): every band shares one tile, so
-		//     ALL kinds are suppressed (points use the per-feature overlap test so a
-		//     coarse light survives unless a finer prim sits on it).
-		//   • PER-BAND archive (bandMax!=0): suppress only the marks that visibly
-		//     DUPLICATE as offset strokes / hatch — LINES and pattern fills. Base
-		//     fills are layered finer-over-coarser on the client (no holes) and point
-		//     symbols overlap into ~one mark, so those overzoom freely. The fine bands
-		//     bake at fine enough resolution that this cut is clean, so the frontend
-		//     lets them overzoom (filling where finest, e.g. harbor at berth level)
-		//     and only caps the COARSE bands (overview/general), whose resolution is
-		//     too low to cut cleanly.
-		if bandZ >= r.natMax {
-			var suppressed bool
-			if bandMax == 0 {
+		// Best-available suppression: a prim yields where a strictly-FINER cell that
+		// is actually shown at this zoom covers it.
+		//   • MERGED tile (bandMax==0, realtime cp://): band-gated, by band (every band
+		//     shares one tile). Points use the per-feature overlap test.
+		//   • PER-BAND archive (bandMax!=0): by per-CELL compilation SCALE, so the finer
+		//     cell wins both ACROSS bands and BETWEEN same-band cells of different scale
+		//     (US1GC09M 1:2.16M vs US2EC02M 1:1.2M, both "general"). coverageScaleAt is
+		//     zoom-gated, so a finer cell that isn't drawn yet at this zoom doesn't punch
+		//     a hole in the coarser one — which replaces the old `bandZ >= natMax` gate.
+		var suppressed bool
+		if bandMax == 0 {
+			if bandZ >= r.natMax {
 				if r.kind == mvt.GeomPoint {
 					suppressed = b.anyFinerOverlaps(eligible, r)
 				} else {
 					suppressed = r.natMax < covBandAt()
 				}
-			} else if r.kind == mvt.GeomLineString || r.layer == "area_patterns" {
-				suppressed = r.natMax < covBandAt()
 			}
-			if suppressed {
-				suppUp++
-				continue
+		} else if r.cscl != 0 && r.layer != "scale_boundaries" &&
+			(r.kind == mvt.GeomPoint || r.kind == mvt.GeomLineString || r.layer == "area_patterns" || r.layer == "areas") {
+			// Points test their own position (a boundary tile keeps coarse points that
+			// fall outside the finer coverage); lines/fills test the tile centre.
+			slat, slon := ctrLat, ctrLon
+			if r.kind == mvt.GeomPoint {
+				slat, slon = unnormY(r.wMinY), r.wMinX*360-180
 			}
+			if s := b.coverageScaleAt(slat, slon, bandZ); s != 0 && s < r.cscl {
+				suppressed = true
+			}
+		}
+		if suppressed {
+			suppUp++
+			continue
 		}
 		switch r.kind {
 		case mvt.GeomPolygon:
@@ -1642,6 +1667,32 @@ func (b *Baker) coverageBandAt(lat, lon float64) uint32 {
 		if pointInRings(lon, lat, cm.rings) {
 			best = cm.bandMax
 		}
+	}
+	return best
+}
+
+// coverageScaleAt returns the FINEST (smallest) compilation-scale denominator among
+// cells whose M_COVR coverage contains (lat,lon) AND that are displayed at zoom
+// bandZ, or 0 if none. This drives per-CELL best-available suppression: a prim is
+// hidden where a strictly-finer cell (smaller cscl) covers it — which works both
+// across bands AND between cells of different scale that fall in the SAME band (the
+// per-band coverageBandAt above can't distinguish those). bandZ-gated so a finer
+// cell that isn't shown yet at this zoom doesn't punch a hole in the coarser one.
+func (b *Baker) coverageScaleAt(lat, lon float64, bandZ uint32) uint32 {
+	var best uint32 // 0 = none found yet; otherwise the finest (smallest) cscl
+	p := geo.LatLon{Lat: lat, Lon: lon}
+	for i := range b.covMeta {
+		cm := &b.covMeta[i]
+		if cm.cscl == 0 || cm.displayMin > bandZ {
+			continue // unscaled, or this cell isn't drawn at this zoom
+		}
+		if best != 0 && cm.cscl >= best {
+			continue // not finer than the best so far — skip the costly point test
+		}
+		if !cm.bb.Contains(p) || !pointInRings(lon, lat, cm.rings) {
+			continue
+		}
+		best = cm.cscl
 	}
 	return best
 }

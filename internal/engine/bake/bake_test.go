@@ -17,8 +17,8 @@ import (
 const goldenCell = "../../../testdata/US4MD81M.000"
 
 func TestBandForScale(t *testing.T) {
-	if BandForScale(12_000).ZoomRange() != (ZoomRange{13, 16}) {
-		t.Error("12k should be harbor [13,16]")
+	if BandForScale(12_000).ZoomRange() != (ZoomRange{14, 16}) {
+		t.Error("12k should be harbor [14,16]")
 	}
 	if BandForScale(3_000_000) != BandOverview {
 		t.Error("3M should be overview")
@@ -396,8 +396,8 @@ func TestSectorLights(t *testing.T) {
 // suppressed only where a finer prim sits on it. zMax is set > natMax to simulate
 // the overzoomed coarse prim and drive the branch directly.
 func TestUpSuppressionPointOverlap(t *testing.T) {
-	coastal := BandCoastal.ZoomRange() // {9,11}
-	harbor := BandHarbor.ZoomRange()   // {13,16}
+	coastal := BandCoastal.ZoomRange() // {10,12}
+	harbor := BandHarbor.ZoomRange()   // {14,16}
 	base := geo.LatLon{Lat: 38.97, Lon: -76.49}
 	mk := func(b *Baker, ll geo.LatLon, layer string, zr ZoomRange, zMax uint32) {
 		r := routed{layer: layer, kind: mvt.GeomPoint, npoint: normPt(ll),
@@ -405,8 +405,8 @@ func TestUpSuppressionPointOverlap(t *testing.T) {
 		r.attrs = []mvt.KeyValue{{Key: "class", Value: mvt.StringVal("X")}}
 		b.add(r, ptBbox(ll))
 	}
-	rng := tile.RangeForBbox(13, ptBbox(base), mvt.ExtentDefault)
-	coord := tile.TileCoord{Z: 13, X: rng.XMin, Y: rng.YMin}
+	rng := tile.RangeForBbox(14, ptBbox(base), mvt.ExtentDefault)
+	coord := tile.TileCoord{Z: 14, X: rng.XMin, Y: rng.YMin}
 
 	// A: finer feature elsewhere on the tile (disjoint) → coarse survives.
 	bA := New()

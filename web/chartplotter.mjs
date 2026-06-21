@@ -91,14 +91,23 @@ const PAT_PREFIX = "pat:";
 // would be pure buffer) and the client overzooms it to fill berth level. MUST
 // match the baker's bandBakeCeil (internal/engine/bake/bake.go).
 const CHART_BANDS = [
-  { slug: "overview", min: 0, max: 7, bake: 7 },
-  { slug: "general", min: 7, max: 9, bake: 9 },
-  { slug: "coastal", min: 9, max: 11, bake: 13 },
-  { slug: "approach", min: 11, max: 13, bake: 13 },
-  { slug: "harbor", min: 13, max: 16, bake: 16 },
+  { slug: "overview", min: 0, max: 8, bake: 8 },
+  { slug: "general", min: 8, max: 10, bake: 10 },
+  { slug: "coastal", min: 10, max: 12, bake: 14 },
+  { slug: "approach", min: 12, max: 14, bake: 14 },
+  { slug: "harbor", min: 14, max: 16, bake: 16 },
   { slug: "berthing", min: 16, max: 18, bake: 18 },
   { slug: "all", min: 0, max: 18, bake: 18 },
 ];
+
+// Lowest display zoom each band's chart layers actually DRAW at — the scale where
+// that band becomes the best-available chart, per the NOAA ENC scheme (ENC Design
+// Handbook Table 1: two standard scales per usage band ≈ two web-Mercator zooms;
+// e.g. Approach 1:90k/1:45k ⇒ shows ~z12–14 ≈ 1:130k–1:32k at mid-US latitudes).
+// Overview/general draw from z0 so they gap-fill on zoom-out; the finer bands start
+// at their band so they don't appear a full zoom (≈½ band) too coarse. Applied as a
+// LAYER minzoom (the baked source may serve lower) so it works without a re-bake.
+const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16, all: 0 };
 
 // Server sets are baked PER BAND, named "<district>-<band>" (e.g. noaa-d5-general).
 // bandOfSet recovers the band slug from a set name ("all" for a bandless/merged set
@@ -148,6 +157,8 @@ export class ChartPlotter extends HTMLElement {
     this._bands = {};        // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
     this._server = false;    // server-tiles mode (tiles="server"): chart sources are /tiles/{set}
     this._serverSets = [];   // active server packs: [{name, min, max}] — one vector source each
+    this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
+    this._layerVis = {};     // chart layer id → intended (mariner) visibility, so band on/off restores it
   }
 
   // Absolute tile-URL template for a server set. MUST be absolute: MapLibre fetches
@@ -163,13 +174,18 @@ export class ChartPlotter extends HTMLElement {
   // fixed 18 when a harbor cell only bakes to z16), MapLibre requests tiles past the
   // bake (empty → no-data holes) instead of overzooming the deepest real tile.
   async _fetchSetMeta(name) {
-    const meta = { name, band: bandOfSet(name), min: 0, max: 18 };
+    // `tiles` is the server's TileJSON tile-URL template, which carries the bake
+    // GENERATION (?g=<mtime>) — re-fetching this JSON (it's no-cache) after a re-bake
+    // yields a new URL, so pointing the source at it bypasses every tile cache by
+    // content. Falls back to the plain URL if the server omits it.
+    const meta = { name, band: bandOfSet(name), min: 0, max: 18, tiles: this._serverTilesUrl(name) };
     try {
       const base = new URL(this._assets, location.href).href;
       const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
       if (tj) {
         if (Number.isFinite(tj.minzoom)) meta.min = tj.minzoom;
         if (Number.isFinite(tj.maxzoom)) meta.max = tj.maxzoom;
+        if (Array.isArray(tj.tiles) && tj.tiles[0]) meta.tiles = tj.tiles[0];
       }
     } catch (e) { /* keep defaults */ }
     return meta;
@@ -702,9 +718,12 @@ export class ChartPlotter extends HTMLElement {
     const map = this._map;
     if (!map) return;
     if (this._server) {
+      // Server URLs carry the bake generation (?g) from the TileJSON; re-apply the
+      // current one. A genuine data change comes through flushTiles (re-fetches the
+      // generation); this is just a repaint/re-request for the same data.
       for (const set of this._serverSets) {
         const src = map.getSource("chart-" + set.name);
-        if (src) src.setTiles([`${this._serverTilesUrl(set.name)}?v=${this._ver}`]);
+        if (src && set.tiles) src.setTiles([set.tiles]);
       }
     } else {
       for (const band of CHART_BANDS) {
@@ -715,18 +734,29 @@ export class ChartPlotter extends HTMLElement {
     map.triggerRepaint();
   }
 
-  // Drop MapLibre's already-loaded tiles for the chart source(s) and bump the
-  // version token so tiles refetch (e.g. after the server re-bakes a set). Public
-  // so the shell needn't reach into MapLibre's (version-specific) source-cache
-  // layout. Returns when done.
+  // Re-request tiles after the SERVER re-bakes a set. Re-fetches each set's TileJSON
+  // (no-cache) to pick up the server's fresh bake-generation token, then points the
+  // source at the new tile URL — so MapLibre drops the stale tiles and the browser
+  // cache misses by content. No client-side counter, no reaching into MapLibre's
+  // internal tile caches. Public; the shell calls it when a re-bake completes.
   async flushTiles() {
     const map = this._map;
-    if (map) {
-      for (const sc of this._chartSourceCaches()) {
-        if (sc.clearTiles) { sc.clearTiles(); if (sc.update) sc.update(map.transform); }
+    if (!map) return;
+    if (this._server) {
+      const names = this._serverSets.map((s) => s.name);
+      this._serverSets = await this._loadSetMetas(names); // new ?g generation per set
+      for (const set of this._serverSets) {
+        const src = map.getSource("chart-" + set.name);
+        if (src) src.setTiles([set.tiles]); // new URL → reload + cache bypass
+      }
+    } else {
+      this._ver++;
+      for (const band of CHART_BANDS) {
+        const src = map.getSource("chart-" + band.slug);
+        if (src) src.setTiles([`chart-${band.slug}://${this._ver}/{z}/{x}/{y}`]);
       }
     }
-    this.refresh(); // bump version → re-request
+    map.triggerRepaint();
   }
 
   // -- overlay & camera API (for plugins: own-ship, AIS, …) ----------------
@@ -836,6 +866,9 @@ export class ChartPlotter extends HTMLElement {
         else if (Object.prototype.hasOwnProperty.call(d, k)) consider(d[k]);
       }
     };
+    // MapLibre 5.x renamed style.sourceCaches → style.tileManagers; try both (plus a
+    // last-ditch scan of every style dict) so a tile flush works across versions.
+    fromDict(style.tileManagers);
     fromDict(style.sourceCaches);
     for (const k of Object.keys(style)) { const v = style[k]; if (v && typeof v === "object") fromDict(v); }
     return out;
@@ -1015,7 +1048,7 @@ export class ChartPlotter extends HTMLElement {
       }
       // Shallow pattern: visibility on its toggle (a fill layer).
       if (keys.includes("shallowPattern")) {
-        this._eachLayer("shallow-pattern", (id) => map.setLayoutProperty(id, "visibility", this._mariner.shallowPattern ? "visible" : "none"));
+        this._eachLayer("shallow-pattern", (id) => this._setVis(id, this._mariner.shallowPattern ? "visible" : "none"));
       }
       // Safety contour: the shallow pattern, safety-contour line, and danger
       // foul boundary all key off it. Re-derive their base filters (setBaseFilter
@@ -1031,24 +1064,24 @@ export class ChartPlotter extends HTMLElement {
       }
       // Contour labels: just a visibility toggle on the DEPCNT label layer.
       if (keys.includes("showContourLabels")) {
-        this._eachLayer("contour-labels", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showContourLabels ? "visible" : "none"));
+        this._eachLayer("contour-labels", (id) => this._setVis(id, this._mariner.showContourLabels ? "visible" : "none"));
       }
       // No-data hatch (NODATA03 fill where there's no chart coverage): a plain
       // visibility toggle. Off → the basemap shows through where data ends.
       if (keys.includes("showNoData")) {
-        this._eachLayer("nodata", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showNoData === false ? "none" : "visible"));
+        this._eachLayer("nodata", (id) => this._setVis(id, this._mariner.showNoData === false ? "none" : "visible"));
       }
       if (keys.includes("showScaleBoundaries")) {
-        this._eachLayer("scale-boundaries", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showScaleBoundaries === false ? "none" : "visible"));
+        this._eachLayer("scale-boundaries", (id) => this._setVis(id, this._mariner.showScaleBoundaries === false ? "none" : "visible"));
       }
       // S-52 individually-selectable "Other" items, each a plain visibility
       // toggle on its own layer (all default on): spot soundings, light
       // descriptions (LIGHTS06 text), and geographic names / object labels.
       if (keys.includes("showSoundings")) {
-        this._eachLayer("soundings", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showSoundings === false ? "none" : "visible"));
+        this._eachLayer("soundings", (id) => this._setVis(id, this._mariner.showSoundings === false ? "none" : "visible"));
       }
       if (keys.includes("showLightDescriptions")) {
-        this._eachLayer("light-text", (id) => map.setLayoutProperty(id, "visibility", this._mariner.showLightDescriptions === false ? "none" : "visible"));
+        this._eachLayer("light-text", (id) => this._setVis(id, this._mariner.showLightDescriptions === false ? "none" : "visible"));
       }
       // S-52 §14.5 text groups: re-derive each text variant's BASE filter (so it
       // survives a later applyFeatureFilters category re-apply) when any group
@@ -1348,7 +1381,9 @@ export class ChartPlotter extends HTMLElement {
           const id = L.id + "@" + set.name;
           this._layerBase[id] = base;
           (this._variants[L.id] ||= []).push(id);
-          const v = { ...L, id, source: "chart-" + set.name, filter: this.combineFilters(base) };
+          const v = { ...L, id, source: "chart-" + set.name, filter: this.combineFilters(base), layout: this._variantLayout(L, set.band, id) };
+          const dmin = BAND_DISPLAY_MIN[set.band];
+          if (dmin) v.minzoom = dmin; // band appears at its scale, not the baked floor
           if ((set.band === "overview" || set.band === "general") && this._capsAtBand(L)) {
             v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
           }
@@ -1378,7 +1413,9 @@ export class ChartPlotter extends HTMLElement {
         const base = L.filter ?? null;
         this._layerBase[id] = base;
         (this._variants[L.id] ||= []).push(id);
-        const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base) };
+        const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(base), layout: this._variantLayout(L, band.slug, id) };
+        const dmin = BAND_DISPLAY_MIN[band.slug];
+        if (dmin) v.minzoom = dmin; // band appears at its scale, not the baked floor
         // A coarser band's data must never be drawn at a finer band's zoom. Base
         // area FILLS (solid depth/land colour) DO overzoom — they're the gap-fill
         // base and a finer band's opaque fill is drawn on top of them — but every
@@ -1403,15 +1440,26 @@ export class ChartPlotter extends HTMLElement {
   // No-op for the finest band / merged "all" set (nothing coarser to enlarge). S-52
   // §10.1.10.2; display priority 3, viewing group 21030.
   _pushOverscale(out, source, band) {
+    // DISABLED: the old "hatch wherever a band overzooms past its native max"
+    // heuristic over-triggers — it paints AP(OVERSC01) on plain zoom-in of the
+    // best-available chart, which S-52 §10.1.10.1 says must show ONLY the "×N"
+    // indication, never the pattern. Real ECDIS show the area pattern only at a
+    // genuine scale boundary (a coarser cell enlarged ≥×2 in a finer cell's hole,
+    // §10.1.10.2) — that wants a baked overscale_areas layer (task #3). Until then,
+    // no auto-hatch (the HUD still shows the ×N overscale indication).
+    return; // eslint-disable-line no-unreachable
     const nm = CHART_BANDS.find((b) => b.slug === band);
     if (!nm || band === "all" || nm.max >= 18) return;
+    const id = "overscale@" + source;
+    const vis = this._showOverscale === false ? "none" : "visible";
+    this._layerVis[id] = vis;
     out.push({
-      id: "overscale@" + source,
+      id,
       type: "fill",
       source,
       "source-layer": "areas",
       minzoom: nm.max + 1,
-      layout: { visibility: this._showOverscale === false ? "none" : "visible" },
+      layout: { visibility: this._bandsHidden.has(band) ? "none" : vis },
       paint: { "fill-pattern": PAT_PREFIX + "OVERSC01" },
     });
   }
@@ -1427,6 +1475,50 @@ export class ChartPlotter extends HTMLElement {
     const map = this._map;
     if (!map) return;
     for (const id of this._variantIds(baseId)) if (map.getLayer(id)) fn(id);
+  }
+
+  // -- band on/off -----------------------------------------------------------
+  // The usage band a chart layer belongs to, from its "<base>@<set-or-band>" id:
+  // the per-band-pmtiles path suffixes the band slug directly; server mode
+  // suffixes the set name ("noaa-d5-harbor"), decoded via bandOfSet.
+  _bandOfLayerId(id) {
+    const s = id.slice(id.lastIndexOf("@") + 1);
+    return BAND_SLUGS.includes(s) ? s : bandOfSet(s);
+  }
+
+  // Set a chart layer's visibility, recording the intended (mariner) value and
+  // forcing "none" while its band is turned off — so a mariner toggle can't
+  // re-show a layer that sits inside a hidden band. Used by the mariner setters.
+  _setVis(id, vis) {
+    this._layerVis[id] = vis;
+    if (this._bandsHidden.has(this._bandOfLayerId(id))) vis = "none";
+    if (this._map) this._map.setLayoutProperty(id, "visibility", vis);
+  }
+
+  // Turn a whole usage band's chart layers on/off. Works in server and per-band
+  // pmtiles modes (both render one source per band); the hidden set is also folded
+  // into buildStyle so a basemap/set rebuild keeps the band off. Host-persisted.
+  setBandVisible(band, visible) {
+    if (visible) this._bandsHidden.delete(band); else this._bandsHidden.add(band);
+    const map = this._map;
+    if (!map || !map.getStyle) return;
+    for (const l of map.getStyle().layers) {
+      if (!l.source || !String(l.source).startsWith("chart-")) continue;
+      if (this._bandOfLayerId(l.id) !== band) continue;
+      map.setLayoutProperty(l.id, "visibility", visible ? (this._layerVis[l.id] || "visible") : "none");
+    }
+  }
+
+  // The usage bands currently turned off (for the host to persist / reflect in UI).
+  bandsHidden() { return [...this._bandsHidden]; }
+
+  // Build a chart variant's layout, folding band on/off into the template's
+  // intended visibility and recording that intent for later restore — so a style
+  // rebuild (basemap/server-set swap) keeps a turned-off band off.
+  _variantLayout(L, band, id) {
+    const vis = (L.layout && L.layout.visibility) || "visible";
+    this._layerVis[id] = vis;
+    return { ...(L.layout || {}), visibility: this._bandsHidden.has(band) ? "none" : vis };
   }
   buildStyle() {
     // `{v}` is a cache-busting version token (see registerPmtilesProtocol /
@@ -1457,7 +1549,7 @@ export class ChartPlotter extends HTMLElement {
       // no packs we add no chart sources (a vector source with an empty `tiles` array
       // makes MapLibre crash); the no-data hatch shows through.
       for (const set of this._serverSets) {
-        sources["chart-" + set.name] = { type: "vector", tiles: [`${this._serverTilesUrl(set.name)}?v=${v}`], minzoom: set.min, maxzoom: set.max };
+        sources["chart-" + set.name] = { type: "vector", tiles: [set.tiles || this._serverTilesUrl(set.name)], minzoom: set.min, maxzoom: set.max };
       }
     }
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];

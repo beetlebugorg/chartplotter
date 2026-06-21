@@ -140,19 +140,33 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 	resolver := newPolygonBuilder(spatialRecords)
 
 	for _, spatialRef := range featureRec.SpatialRefs {
-		// Find the spatial record - try all possible RCNMs since FSPT only gives RCID
-		// S-57 spatial records can be: 110=isolated node, 120=connected node, 130=edge, 140=face
+		// Resolve the EXACT record the FSPT pointer names (RCNM + RCID). RCID is
+		// unique only WITHIN an RCNM, so probing by RCID across record types can
+		// grab an unrelated record that reused the id. This bites hardest after an
+		// update deletes an edge: e.g. a COALNE references edge 130/78, an update
+		// (.011) deletes edge 130/78, but isolated node 110/78 still exists — the
+		// old RCID-only search then resolved the dangling edge-ref to that node and
+		// spliced its far-off coordinate into the coastline (visible as a long line
+		// slashing across the chart). Trust the pointer's RCNM; if that exact record
+		// is gone, drop the ref (the line is simply shorter) rather than guess.
 		var spatial *spatialRecord
-		for _, rcnm := range []int{int(spatialTypeEdge), int(spatialTypeConnectedNode), int(spatialTypeIsolatedNode), int(spatialTypeFace)} {
-			key := spatialKey{RCNM: rcnm, RCID: spatialRef.RCID}
-			if sp, ok := spatialRecords[key]; ok {
+		if spatialRef.RCNM != 0 {
+			if sp, ok := spatialRecords[spatialKey{RCNM: spatialRef.RCNM, RCID: spatialRef.RCID}]; ok {
 				spatial = sp
-				break
+			}
+		} else {
+			// Legacy/unknown RCNM in the pointer: fall back to searching by RCID.
+			for _, rcnm := range []int{int(spatialTypeEdge), int(spatialTypeConnectedNode), int(spatialTypeIsolatedNode), int(spatialTypeFace)} {
+				key := spatialKey{RCNM: rcnm, RCID: spatialRef.RCID}
+				if sp, ok := spatialRecords[key]; ok {
+					spatial = sp
+					break
+				}
 			}
 		}
 
 		if spatial == nil {
-			// Missing spatial record - skip gracefully
+			// Missing spatial record (or deleted by an update) - skip gracefully
 			continue
 		}
 
@@ -261,6 +275,36 @@ func constructPointGeometry(featureRec *featureRecord, spatialRecords map[spatia
 	}, nil
 }
 
+// collectRefCoords appends, to out, the coordinates of the spatial records named
+// by the feature's FSPT pointers. It honours each pointer's RCNM — RCID is unique
+// only WITHIN an RCNM — so a dangling reference (e.g. to an edge an update has
+// deleted) does NOT scavenge an unrelated node/edge that reused the same RCID.
+// That collision turned a bridge whose edges were all deleted by update .007 into
+// a scattered stray ring (5 points pulled from connected/isolated nodes 120/110
+// that happened to share the deleted edges' RCIDs). With no valid records the
+// caller sees too few coords and drops the feature, which is correct.
+func collectRefCoords(refs []spatialRef, spatialRecords map[spatialKey]*spatialRecord, out [][]float64) [][]float64 {
+	for _, ref := range refs {
+		if ref.RCNM != 0 {
+			if sp, ok := spatialRecords[spatialKey{RCNM: ref.RCNM, RCID: ref.RCID}]; ok {
+				for _, coord := range sp.Coordinates {
+					out = append(out, []float64{coord[0], coord[1]})
+				}
+			}
+			continue
+		}
+		// Unknown RCNM in the pointer: fall back to an RCID search across types.
+		for key, spatial := range spatialRecords {
+			if key.RCID == ref.RCID && len(spatial.Coordinates) > 0 {
+				for _, coord := range spatial.Coordinates {
+					out = append(out, []float64{coord[0], coord[1]})
+				}
+			}
+		}
+	}
+	return out
+}
+
 // constructPolygonGeometry builds polygon geometry using VRPT topology resolution
 // S-57 §7.3 (31Main.pdf p64): Area features use VRPT to reference edge topology
 func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spatialKey]*spatialRecord) (Geometry, error) {
@@ -276,13 +320,23 @@ func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spat
 		spatialRefSlicePool.Put(edgeRefsPtr)
 	}()
 	for _, fsptRef := range featureRec.SpatialRefs {
-		// FSPT references can be to any spatial type - try all RCNMs to find by RCID
+		// Resolve the EXACT record the FSPT pointer names (RCNM + RCID) — RCID is
+		// unique only within an RCNM. Probing by RCID across types can resolve a
+		// dangling/deleted reference to an unrelated record that reused the id (see
+		// constructLineStringGeometry). Trust the pointer's RCNM; fall back to the
+		// RCID search only when the pointer carries no/unknown RCNM.
 		var spatial *spatialRecord
-		for _, rcnm := range []int{int(spatialTypeFace), int(spatialTypeEdge), int(spatialTypeConnectedNode), int(spatialTypeIsolatedNode)} {
-			key := spatialKey{RCNM: rcnm, RCID: fsptRef.RCID}
-			if sp, ok := spatialRecords[key]; ok {
+		if fsptRef.RCNM != 0 {
+			if sp, ok := spatialRecords[spatialKey{RCNM: fsptRef.RCNM, RCID: fsptRef.RCID}]; ok {
 				spatial = sp
-				break
+			}
+		} else {
+			for _, rcnm := range []int{int(spatialTypeFace), int(spatialTypeEdge), int(spatialTypeConnectedNode), int(spatialTypeIsolatedNode)} {
+				key := spatialKey{RCNM: rcnm, RCID: fsptRef.RCID}
+				if sp, ok := spatialRecords[key]; ok {
+					spatial = sp
+					break
+				}
 			}
 		}
 
@@ -343,17 +397,9 @@ func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spat
 				}, nil
 			}
 
-			// If we still can't get coordinates from edges, try collecting from ANY spatial record
-			// This handles cases where the feature references spatial records that aren't properly linked
-			for _, spatialRef := range featureRec.SpatialRefs {
-				for key, spatial := range spatialRecords {
-					if key.RCID == spatialRef.RCID && len(spatial.Coordinates) > 0 {
-						for _, coord := range spatial.Coordinates {
-							allCoords = append(allCoords, []float64{coord[0], coord[1]})
-						}
-					}
-				}
-			}
+			// If we still can't get coordinates from edges, collect directly from the
+			// records the pointers name (respecting RCNM — see collectRefCoords).
+			allCoords = collectRefCoords(featureRec.SpatialRefs, spatialRecords, allCoords)
 
 			if len(allCoords) > 0 {
 				allCoords = ensurePolygonClosure(allCoords)
@@ -409,20 +455,13 @@ func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spat
 		}, nil
 	}
 
-	// Fallback: No VRPT topology, collect direct coordinates
+	// Fallback: No VRPT topology, collect direct coordinates (respecting RCNM so a
+	// reference to a deleted edge doesn't scavenge an unrelated record — see
+	// collectRefCoords).
 	allCoordsPtr2 := coordSlicePool.Get().(*[][]float64)
 	allCoords := (*allCoordsPtr2)[:0]
 	defer coordSlicePool.Put(allCoordsPtr2)
-	for _, spatialRef := range featureRec.SpatialRefs {
-		// Search by RCID
-		for key, spatial := range spatialRecords {
-			if key.RCID == spatialRef.RCID && len(spatial.Coordinates) > 0 {
-				for _, coord := range spatial.Coordinates {
-					allCoords = append(allCoords, []float64{coord[0], coord[1]})
-				}
-			}
-		}
-	}
+	allCoords = collectRefCoords(featureRec.SpatialRefs, spatialRecords, allCoords)
 
 	// Check if we have enough coordinates for a valid polygon
 	if len(allCoords) < 3 {

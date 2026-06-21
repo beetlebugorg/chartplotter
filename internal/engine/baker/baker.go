@@ -245,61 +245,6 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 	wg.Wait()
 }
 
-// BakeToPMTilesBands bakes one PMTiles archive PER navigational-purpose band and
-// calls emit(slug, builder) for each band that produced tiles, ONE AT A TIME — so
-// the caller can write+free a band before the next is baked, instead of holding
-// all six archives in memory at once. Each band's archive carries only that band's
-// own data (EmitTileBandInto filters on natMax); a coarser band's source fills a
-// finer band's gaps via client overzoom, and lines/patterns are cut where a finer
-// band covers so they don't bleed. The emit INDEX is also built per band and freed
-// between bands, so the dominant per-district memory cost (the index over millions
-// of tiles) is one band's worth at a time, not all six.
-func BakeToPMTilesBands(b *bake.Baker, progress func(done, total int), emit func(slug string, pb *pmtiles.Builder) error) error {
-	type job struct {
-		slug    string
-		bandMax uint32
-		coords  []tile.TileCoord
-	}
-	var jobs []job
-	total := 0
-	for _, bd := range bake.BakeBands() {
-		if c := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max); len(c) > 0 {
-			jobs = append(jobs, job{bd.Slug, bd.Max, c})
-			total += len(c)
-		}
-	}
-	bb := b.Bounds()
-	done := 0
-	bumpAfter := func(p func(d, t int)) func(d, t int) {
-		// Each band reports 0..len(coords); fold into the global done counter.
-		base := done
-		return func(d, _ int) {
-			if p != nil {
-				p(base+d, total)
-			}
-		}
-	}
-	defer b.ClearEmitIndex()
-	for _, j := range jobs {
-		b.BuildEmitIndexBand(MVTExtent, MVTBuffer, j.bandMax) // only this band's prims; the next build replaces it
-		pb := pmtiles.New()
-		emitTiles(j.coords, pb, bumpAfter(progress), func(c tile.TileCoord, ts *bake.TileScratch) []byte {
-			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, j.bandMax)
-		})
-		done += len(j.coords)
-		if bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
-			pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
-		}
-		if pb.Count() == 0 {
-			continue
-		}
-		if err := emit(j.slug, pb); err != nil { // write + free this band before the next
-			return err
-		}
-	}
-	return nil
-}
-
 // BakeToPMTilesBandsStreaming bakes per-band archives while holding only ONE
 // band's parsed geometry in memory at a time — the key to baking a large district
 // without keeping every cell's prims resident. It works in two passes:

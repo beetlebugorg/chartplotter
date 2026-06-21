@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/auxfiles"
-	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
@@ -141,7 +140,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	overzoom := r.URL.Query().Get("overzoom") == "1"
-	applyUpdates := r.URL.Query().Get("updates") != "0" // default: apply .001+
+	applyUpdates := r.URL.Query().Get("updates") != "0" // default: apply .001+ (NtM corrections)
 
 	cells, aux, err := s.importInputs(r)
 	if err != nil {
@@ -231,7 +230,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 		log.Printf("import %s (%s): %v", jobID, req.Set, err)
 		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
 	}
-	applyUpdates := req.Updates == nil || *req.Updates
+	applyUpdates := req.Updates == nil || *req.Updates // default: apply .001+
 
 	var cells map[string]baker.CellData
 	var aux map[string][]byte
@@ -475,24 +474,28 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
 	}
 
-	b, err := bakeCells(cells, overzoom, applyUpdates)
-	if err != nil {
-		fail(err)
-		return
+	if !applyUpdates { // bake at the base .000 edition — strip updates first
+		base := make(map[string]baker.CellData, len(cells))
+		for n, cd := range cells {
+			base[n] = baker.CellData{Base: cd.Base}
+		}
+		cells = base
 	}
+	_ = overzoom // the per-band streaming bake has no all-bands-to-z0 overzoom mode
 	s.imports.update(jobID, func(j *importJob) {
-		j.Cells = b.ok
-		j.Phase, j.Unit, j.Note, j.Done, j.Total = "bake", "tiles", fmt.Sprintf("Baking %d cell(s)", b.ok), 0, 0
+		j.Phase, j.Unit, j.Note, j.Done, j.Total = "bake", "tiles", fmt.Sprintf("Baking %d cell(s)", len(cells)), 0, 0
 	})
 
 	// Drop any STALE merged archive named exactly `set` from a prior (pre-per-band)
 	// bake, so the old single-maxzoom set isn't left serving alongside the new bands.
 	s.removeMergedSet(set)
 
-	bands := 0
-	tiles := 0
-	first := true
-	bandErr := baker.BakeToPMTilesBands(b.baker,
+	// ONE bake path: the exact streaming per-band bake the CLI (`chartplotter bake
+	// --bands`) uses — same cross-band suppression, same zoom ranges. No server-only
+	// baker variant to drift out of sync.
+	bands, tiles, first := 0, 0, true
+	_, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, 0,
+		func(name string, e error) { log.Printf("import %s: skip %s: %v", jobID, name, e) },
 		func(done, total int) {
 			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
 		},
@@ -511,15 +514,16 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 			log.Printf("import %s: baked %q (%d tiles)", jobID, bandSet, pb.Count())
 			return nil
 		})
-	if bandErr != nil {
-		fail(bandErr)
+	if err != nil {
+		fail(err)
 		return
 	}
 	if bands == 0 {
 		fail(fmt.Errorf("no bands produced tiles"))
 		return
 	}
-	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, b.ok, bands, tiles)
+	s.imports.update(jobID, func(j *importJob) { j.Cells = nCells })
+	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, nCells, bands, tiles)
 	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
 }
 
@@ -538,33 +542,6 @@ func (s *Server) removeMergedSet(set string) {
 	dir := s.setDir(set)
 	_ = os.Remove(filepath.Join(dir, set+".pmtiles"))
 	_ = os.Remove(filepath.Join(dir, set+".aux.zip"))
-}
-
-// bakerResult bundles a built Baker with the count of cells that parsed.
-type bakerResult struct {
-	baker *bake.Baker
-	ok    int
-}
-
-// bakeCells builds a Baker from cells, applying updates unless disabled.
-func bakeCells(cells map[string]baker.CellData, overzoom, applyUpdates bool) (*bakerResult, error) {
-	if !applyUpdates { // strip updates so cells bake at their base .000 edition
-		base := make(map[string]baker.CellData, len(cells))
-		for n, cd := range cells {
-			base[n] = baker.CellData{Base: cd.Base}
-		}
-		cells = base
-	}
-	b, ok, err := baker.BuildBakerWithUpdates(cells, overzoom, func(name string, err error) {
-		log.Printf("import: skip %s: %v", name, err)
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(ok) == 0 {
-		return nil, fmt.Errorf("no cells parsed successfully")
-	}
-	return &bakerResult{baker: b, ok: len(ok)}, nil
 }
 
 // setDir is the per-set output directory under the (regenerable) cache. A set name
