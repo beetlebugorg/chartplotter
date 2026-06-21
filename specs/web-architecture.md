@@ -7,7 +7,7 @@ added without touching the renderer.
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ <chart-plotter-app>            the shell — composes everything │
-│   • chrome: rail, drawer, status bar, scheme toggle            │
+│   • chrome: corner buttons, drawer, bottom data card, scheme   │
 │   • wires events between the base widget and the components     │
 │                                                                 │
 │   ┌───────────────────┐   ┌───────────────┐   ┌──────────────┐ │
@@ -86,7 +86,7 @@ A shared `MapOverlay` base class (`map-overlay.mjs`, planned) will standardize
 
 ## Layer 3 — `<chart-plotter-app>` (shell)
 
-Owns the chrome (rail, drawer, status bar, search, modals) and composes the
+Owns the chrome (corner round buttons, drawer, bottom data card, search, modals) and composes the
 base + components, forwarding events between them. Target: shrink it to
 orchestration once the downloader and plugins are extracted.
 
