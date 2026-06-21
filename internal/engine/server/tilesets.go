@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -31,6 +32,18 @@ func (ts *tileSets) register(name string, src tilesource.TileSource) {
 		_ = tilesource.Close(old)
 	}
 	ts.m[name] = src
+}
+
+// remove unregisters and closes the set named name. Reports whether it existed.
+func (ts *tileSets) remove(name string) bool {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if old, ok := ts.m[name]; ok {
+		_ = tilesource.Close(old)
+		delete(ts.m, name)
+		return true
+	}
+	return false
 }
 
 // get returns the set named name, or (nil, false).
@@ -133,6 +146,29 @@ func isSetName(s string) bool {
 		}
 	}
 	return !strings.Contains(s, "..")
+}
+
+// handleDeleteSet unregisters a tile set and deletes its baked files from the cache
+// (the regenerable pmtiles + aux.zip). The SOURCE cells in the data store are left
+// intact — uninstalling a pack frees the baked cache, not the safe source. The set
+// stops appearing in /tiles/ and rendering immediately.
+func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		apiErr(w, http.StatusMethodNotAllowed, "DELETE only")
+		return
+	}
+	set := r.URL.Query().Get("set")
+	if !isSetName(set) {
+		apiErr(w, http.StatusBadRequest, "bad set name")
+		return
+	}
+	s.sets.remove(set)
+	dir := s.setDir(set)
+	_ = os.Remove(filepath.Join(dir, set+".pmtiles"))
+	_ = os.Remove(filepath.Join(dir, set+".aux.zip"))
+	_ = os.Remove(dir) // best-effort: drop the pack dir if now empty
+	w.Header().Set("Content-Type", jsonCT)
+	io.WriteString(w, `{"ok":true}`)
 }
 
 // serveCells returns the names of cells currently in the server's ENC_ROOT source

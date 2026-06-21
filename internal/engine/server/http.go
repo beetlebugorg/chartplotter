@@ -146,6 +146,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
 	case strings.HasPrefix(r.URL.Path, "/api/import"):
 		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
+	case r.URL.Path == "/api/set":
+		s.handleDeleteSet(w, r) // DELETE: unregister a tile set + remove its baked files
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
 	default:

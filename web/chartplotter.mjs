@@ -29,7 +29,7 @@
 // separate component that talks to it ONLY through the surface below. Nothing
 // reaches into private (`_`) fields or MapLibre internals; see specs/web-architecture.md.
 //
-//   Charts:        setServerSet (server tiles) · setArchive · addArchive ·
+//   Charts:        setServerSets (server tiles) · setArchive · addArchive ·
 //                  addArchives · loadRegions · replaceBand · loadArchiveUrl
 //   Display:       setScheme · setMariner · setBasemap
 //   Tiles:         refresh · flushTiles
@@ -131,37 +131,33 @@ export class ChartPlotter extends HTMLElement {
     this._mariner = {};      // current mariner settings (engine-side)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bands = {};        // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
-    this._server = false;    // server-tiles mode (tiles="server"): chart source is /tiles/{set}
-    this._serverSet = "";    // active server tile-set name (the {set} in /tiles/{set}/…)
-    this._serverMin = 0;     // active set's real min zoom (from its TileJSON)
-    this._serverMax = 18;    // active set's real MAX zoom — the source maxzoom MUST equal this
+    this._server = false;    // server-tiles mode (tiles="server"): chart sources are /tiles/{set}
+    this._serverSets = [];   // active server packs: [{name, min, max}] — one vector source each
   }
 
-  // Absolute tile-URL template for the active server set, or "" when no set is
-  // selected. MUST be absolute: MapLibre fetches tiles in a Web Worker that has no
-  // document base, so a relative "/tiles/…" URL throws "Failed to parse URL".
-  _serverTilesUrl() {
-    if (!this._serverSet) return "";
+  // Absolute tile-URL template for a server set. MUST be absolute: MapLibre fetches
+  // tiles in a Web Worker that has no document base, so a relative "/tiles/…" URL
+  // throws "Failed to parse URL".
+  _serverTilesUrl(name) {
     const base = new URL(this._assets, location.href).href; // absolute, trailing "/"
-    return `${base}tiles/${this._serverSet}/{z}/{x}/{y}.mvt`;
+    return `${base}tiles/${name}/{z}/{x}/{y}.mvt`;
   }
 
-  // Read the active set's real zoom range from its TileJSON. The source maxzoom MUST
-  // be the set's actual deepest baked zoom: if it claims more (e.g. a fixed 18 when a
-  // harbor cell only bakes to z16), MapLibre requests tiles past the bake (empty →
-  // no-data holes) instead of overzooming the deepest real tile. Best-effort.
-  async _fetchServerZoom() {
-    this._serverMin = 0;
-    this._serverMax = 18;
-    if (!this._serverSet) return;
+  // Fetch a set's real zoom range from its TileJSON → {name, min, max}. The source
+  // maxzoom MUST be the set's actual deepest baked zoom: if it claims more (e.g. a
+  // fixed 18 when a harbor cell only bakes to z16), MapLibre requests tiles past the
+  // bake (empty → no-data holes) instead of overzooming the deepest real tile.
+  async _fetchSetMeta(name) {
+    const meta = { name, min: 0, max: 18 };
     try {
       const base = new URL(this._assets, location.href).href;
-      const tj = await fetch(`${base}tiles/${this._serverSet}.json`).then((r) => (r.ok ? r.json() : null));
+      const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
       if (tj) {
-        if (Number.isFinite(tj.minzoom)) this._serverMin = tj.minzoom;
-        if (Number.isFinite(tj.maxzoom)) this._serverMax = tj.maxzoom;
+        if (Number.isFinite(tj.minzoom)) meta.min = tj.minzoom;
+        if (Number.isFinite(tj.maxzoom)) meta.max = tj.maxzoom;
       }
     } catch (e) { /* keep defaults */ }
+    return meta;
   }
 
   connectedCallback() {
@@ -247,16 +243,17 @@ export class ChartPlotter extends HTMLElement {
       this._osmvecArchive = await new PMTilesArchive(this._osmvecUrl).init().catch(() => null);
     }
 
-    // Render-source mode. server (tiles="server"): one "chart" vector source whose
-    // MVT comes live from the Go server's /tiles/{set} endpoint; the set is chosen
-    // by the `set` attribute or setServerSet(). Otherwise the prebaked per-band
-    // pmtiles:// path (setArchive/loadRegions/pmtiles=), a hosted static-CDN archive.
+    // Render-source mode. server (tiles="server"): one vector source per server pack
+    // (/tiles/{set}), each a baked provider/pack (noaa-d17, ienc-…). The packs are
+    // chosen by the `sets`/`set` attribute or setServerSets(). Otherwise the prebaked
+    // per-band pmtiles:// path (setArchive/loadRegions/pmtiles=), a static-CDN archive.
     this._server = this.getAttribute("tiles") === "server";
     if (this._server) {
-      this._serverSet = this.getAttribute("set") || "";
-      // Learn the set's real zoom range before the first buildStyle so the chart
-      // source's maxzoom is truthful (overzoom, not empty-tile holes).
-      if (this._serverSet) await this._fetchServerZoom();
+      const names = (this.getAttribute("sets") || this.getAttribute("set") || "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      // Learn each set's real zoom range before the first buildStyle so the source
+      // maxzoom is truthful (overzoom, not empty-tile holes).
+      this._serverSets = await Promise.all(names.map((n) => this._fetchSetMeta(n)));
     }
 
     // Per-band prebaked sources (chart-<slug>), one PMTiles protocol each. Each
@@ -678,9 +675,10 @@ export class ChartPlotter extends HTMLElement {
     const map = this._map;
     if (!map) return;
     if (this._server) {
-      const src = map.getSource("chart");
-      const url = this._serverTilesUrl();
-      if (src && url) src.setTiles([`${url}?v=${this._ver}`]);
+      for (const set of this._serverSets) {
+        const src = map.getSource("chart-" + set.name);
+        if (src) src.setTiles([`${this._serverTilesUrl(set.name)}?v=${this._ver}`]);
+      }
     } else {
       for (const band of CHART_BANDS) {
         const src = map.getSource("chart-" + band.slug);
@@ -803,7 +801,7 @@ export class ChartPlotter extends HTMLElement {
     if (!style) return [];
     const out = [];
     const consider = (c) => { if (c && (c._tiles || typeof c.clearTiles === "function") && !out.includes(c)) out.push(c); };
-    const keys = this._server ? ["chart"] : CHART_BANDS.map((b) => "chart-" + b.slug);
+    const keys = this._server ? this._serverSets.map((s) => "chart-" + s.name) : CHART_BANDS.map((b) => "chart-" + b.slug);
     const fromDict = (d) => {
       if (!d || typeof d !== "object") return;
       for (const k of keys) {
@@ -817,30 +815,32 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // -- server tiles --------------------------------------------------------
-  // Point the chart source at a server tile set (the {set} in /tiles/{set}/…),
-  // baked + registered by the Go server (POST /api/import). Switches the renderer
-  // into server mode if it wasn't already, (re)builds the style so the "chart"
-  // source + base layers exist, and re-requests tiles. Pass "" to clear. Returns
-  // the active set name.
-  async setServerSet(name) {
-    const prevSet = this._serverSet;
-    const prevMin = this._serverMin, prevMax = this._serverMax;
+  // Render exactly these server tile sets (provider/pack names, the {set} in
+  // /tiles/{set}/…), baked + registered by the Go server (POST /api/import). Each
+  // becomes its own vector source + S-52 layer set; geographically-disjoint packs
+  // (NOAA districts, IENC waterways) sit side-by-side. Switches the renderer into
+  // server mode, (re)builds the style so the sources + layers exist, and re-requests
+  // tiles. Pass [] to clear. Returns the active set names.
+  async setServerSets(names) {
+    const want = (names || []).filter(Boolean);
+    const prevKey = this._serverSets.map((s) => s.name).sort().join(",");
     const wasServer = this._server;
-    this._serverSet = name || "";
     this._server = true;
-    await this._fetchServerZoom(); // truthful source min/max so overzoom works
+    this._serverSets = await Promise.all(want.map((n) => this._fetchSetMeta(n)));
     const map = this._map;
-    // Rebuild the style when the SET itself appears/changes or its zoom range moves
-    // (the source must be created/recreated). A same-set rebake just bumps tiles.
-    const rebuild = !wasServer || this._serverSet !== prevSet ||
-      this._serverMin !== prevMin || this._serverMax !== prevMax;
-    if (map && rebuild) map.setStyle(this.buildStyle());
+    // Rebuild the style when the set OF sets changes (sources must be created/
+    // recreated). A same-set rebake (same names) just bumps the tile version.
+    const changed = !wasServer || this._serverSets.map((s) => s.name).sort().join(",") !== prevKey;
+    if (map && changed) map.setStyle(this.buildStyle());
     else if (map) this.refresh();
-    return this._serverSet;
+    return this._serverSets.map((s) => s.name);
   }
 
-  // The active server tile-set name, or "" when none/not in server mode.
-  serverSet() { return this._server ? this._serverSet : ""; }
+  // Convenience: render a single server set (or none). See setServerSets.
+  setServerSet(name) { return this.setServerSets(name ? [name] : []); }
+
+  // The active server tile-set names ([] when not in server mode).
+  serverSets() { return this._server ? this._serverSets.map((s) => s.name) : []; }
 
   // Resolve an archive source: a Blob/File is passed through; a URL string is
   // made absolute (relative to the page) for the HTTP-Range reader.
@@ -1302,17 +1302,20 @@ export class ChartPlotter extends HTMLElement {
     this._layerBase = {};
     this._variants = {};
     const out = [];
-    // Server mode: ONE merged "chart" source (all bands baked together by the
-    // server), so the templates map straight onto it — no per-band fan. The server
-    // tiles already carry the best-available band per tile; the client overzooms
-    // above the set's max for free.
+    // Server mode: one source per active pack (chart-<set>), each a merged all-band
+    // bake. Iterate template-outer, pack-inner so the global draw order is by S-52
+    // class across all packs (fills, then lines, then symbols, then text); packs are
+    // geographically disjoint so they don't fight. Each variant is "<id>@<set>" so
+    // scheme/mariner updates by base id hit every pack's copy via _variants.
     if (this._server) {
-      if (!this._serverTilesUrl()) return out; // no set selected → no chart source/layers
       for (const L of tmpl) {
         const base = L.filter ?? null;
-        this._layerBase[L.id] = base;
-        (this._variants[L.id] ||= []).push(L.id);
-        out.push({ ...L, source: "chart", filter: this.combineFilters(base) });
+        for (const set of this._serverSets) {
+          const id = L.id + "@" + set.name;
+          this._layerBase[id] = base;
+          (this._variants[L.id] ||= []).push(id);
+          out.push({ ...L, id, source: "chart-" + set.name, filter: this.combineFilters(base) });
+        }
       }
       return out;
     }
@@ -1382,14 +1385,14 @@ export class ChartPlotter extends HTMLElement {
       };
     }
     if (this._server) {
-      // Server-baked MVT pulled live from /tiles/{set}. minzoom/maxzoom are the
-      // set's REAL range (from its TileJSON) so MapLibre overzooms the deepest baked
-      // tile above maxzoom instead of requesting empty tiles past the bake. Only
-      // added when a set is selected — a vector source with an empty `tiles` array
-      // makes MapLibre crash (it indexes tiles[i % tiles.length]); with no set we
-      // emit no chart source/layers and the no-data hatch shows through.
-      const url = this._serverTilesUrl();
-      if (url) sources.chart = { type: "vector", tiles: [`${url}?v=${v}`], minzoom: this._serverMin, maxzoom: this._serverMax };
+      // One source per active pack, MVT pulled live from /tiles/{set}. minzoom/
+      // maxzoom are the set's REAL range (from its TileJSON) so MapLibre overzooms
+      // the deepest baked tile instead of requesting empty tiles past the bake. With
+      // no packs we add no chart sources (a vector source with an empty `tiles` array
+      // makes MapLibre crash); the no-data hatch shows through.
+      for (const set of this._serverSets) {
+        sources["chart-" + set.name] = { type: "vector", tiles: [`${this._serverTilesUrl(set.name)}?v=${v}`], minzoom: set.min, maxzoom: set.max };
+      }
     }
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];
 

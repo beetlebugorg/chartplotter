@@ -351,16 +351,11 @@ export class ChartPlotterApp extends HTMLElement {
     // attribute so the map/basemap paints immediately, then we ingest cells
     // lazily by viewport (see ingestViewport).
     this._store = new ChartStore();
-    // Installed set = local OPFS imports ∪ the server's cached cells. Server-side
-    // downloads live in the XDG cache (not OPFS), so without the server list they'd
-    // be forgotten on reload. (Prod renders prebaked archives — no server cache.)
+    // Installed cells/sets are SERVER-side now (the XDG data/cache); onReady() calls
+    // _renderInstalledSets() to load them (GET /tiles/ + /api/cells), so the map
+    // survives a reload. Seed from the local OPFS store for the first paint.
     this._installed = new Set(await this._store.list().catch(() => []));
-    if (!this._prod) {
-      try {
-        const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
-        if (j && Array.isArray(j.cells)) for (const n of j.cells) this._installed.add(n);
-      } catch (e) { /* offline / no server cache — keep the local set */ }
-    }
+    this._installedSets = new Set();
     // Chart discovery/acquisition domain (NOAA catalogue, packs, download, import).
     // Reads the installed set live via a getter (boot reassigns _installed above).
     this._dl = new ChartDownloader({
@@ -904,17 +899,10 @@ export class ChartPlotterApp extends HTMLElement {
     await this._catalogReady;
     this.addCatalogOverlay(map);
     await this.restoreArchive();
-    // Local serve: bake the installed cells into a server set and render it. Prod
+    // Local serve: render every baked pack the server holds (survives reload). Prod
     // already loaded its prebaked archives in restoreArchive() above.
-    if (!this._prod && this._installed.size) {
-      try {
-        // The "user" set is baked + persisted in the XDG cache and auto-registered
-        // by the server, so on reload just render it — no rebake. Only bake if it's
-        // missing (e.g. local imports staged before a bake).
-        const haveUser = await fetch(`${this._assets}tiles/user.json`).then((r) => r.ok).catch(() => false);
-        if (haveUser) { await this._plotter.setServerSet("user"); this._hasArchive = true; }
-        else await this._refreshCharts(false);
-      } catch (e) { console.warn("[charts] initial render", e); }
+    if (!this._prod) {
+      try { await this._renderInstalledSets(); } catch (e) { console.warn("[charts] initial render", e); }
     }
     this.updateEmptyState();
     this.renderCharts();
@@ -1468,58 +1456,60 @@ export class ChartPlotterApp extends HTMLElement {
   // gone, but still called on Charts-mode exit / section switch).
   _cancelAreaSelect() { if (this._areaCleanup) this._areaCleanup(); }
 
-  // Download a whole pack: the SERVER fetches NOAA's per-district bundle into its
-  // XDG cache (one zip holding exactly this district's cells), then we bake the
-  // installed union from the cache and render it. Falls back to per-cell server
+  // Download a whole district pack: the SERVER fetches NOAA's per-district bundle
+  // into its XDG data store and bakes it into its OWN tile set (noaa-d<cg> →
+  // NOAA/D<cg>/), then we render every installed set. Falls back to per-cell server
   // fetches if the district bundle can't be opened. No client-side download / OPFS.
   async _downloadPack(cg) {
     if (this._taskRunning()) return;
     const d = DISTRICTS.find((x) => x.cg === cg);
     const label = d ? `${d.region} pack` : `District ${cg}`;
-    const want = this._districtCellNames(cg).filter((n) => !this._installed.has(n));
-    if (!want.length) return;
+    const all = this._districtCellNames(cg);
+    if (!all.length) return;
+    if (all.every((n) => this._installed.has(n)) && this._installedSets.has("noaa-d" + cg)) return; // already installed
     if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
 
     this._activeDistrict = cg;
     this._task = { kind: "download", status: "running" };
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
 
+    const set = "noaa-d" + cg;
     const prog = (p) => this._setProgress(p);
-    want.forEach((n) => this._installed.add(n)); // optimistic; rolled back on total failure
-    let ok = true;
     try {
-      await this._serverFetch({ zipUrl: this._districtZipUrl(cg), names: want }, prog);
+      // The district bundle holds the whole district; bake the FULL district into the
+      // pack so it's a complete set (names=all, not just the not-yet-installed ones).
+      await this._serverFetch({ set, zipUrl: this._districtZipUrl(cg), names: all }, prog);
     } catch (e) {
       console.warn(`[pack] ${label} server bundle failed — per-cell:`, e.message);
-      const cells = want.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
-      try { await this._serverFetch({ cells }, prog); }
-      catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); ok = false; want.forEach((n) => this._installed.delete(n)); }
+      const cells = all.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
+      try { await this._serverFetch({ set, cells }, prog); }
+      catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); }
     }
 
-    if (ok) await this._refreshCharts(); // union bake from the server cache + render
+    await this._renderInstalledSets(); // pick up the new pack + refresh installed state
+    if (this._installedSets && this._installedSets.has(set)) this._frameCells(this._districtCellNames(cg));
     this._task = null;
     this._setProgress(null);
-    this.updateEmptyState();
     this._refreshCellSel();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
-  // Uninstall a pack: drop its cells from the browser store and re-bake.
+  // Uninstall a district pack: delete its server set (DELETE /api/set?set=noaa-d<cg>
+  // removes the baked pmtiles/aux + the district's source cells), then re-render.
   async _uninstallPack(cg) {
     if (this._taskRunning()) return;
-    const names = this._districtCellNames(cg).filter((n) => this._installed.has(n));
-    if (!names.length) return;
+    const set = "noaa-d" + cg;
+    if (!(this._installedSets && this._installedSets.has(set))) return;
     this._activeDistrict = cg;
     this._task = { kind: "download", status: "running" };
-    this._setProgress({ label: "Removing charts…", sub: `${names.length} chart${names.length !== 1 ? "s" : ""}`, frac: null });
+    this._setProgress({ label: "Removing charts…", sub: set, frac: null });
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-    for (const n of names) {
-      try { await this._store.remove(n); this._installed.delete(n); } catch (e) { console.warn("[store] remove", n, e); }
-    }
-    await this._refreshCharts();
+    try {
+      await fetch(`${this._assets}api/set?set=${encodeURIComponent(set)}`, { method: "DELETE" });
+    } catch (e) { console.warn("[pack] remove", set, e); }
+    await this._renderInstalledSets();
     this._task = null;
     this._setProgress(null);
-    this.updateEmptyState();
     this._refreshCellSel();
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
@@ -2675,45 +2665,54 @@ export class ChartPlotterApp extends HTMLElement {
     await this._refreshCharts();
   }
 
-  // Bake the installed cells into a server tile set and render it. Called after any
-  // import / install / removal. Uploads each stored cell to the server cache, then
-  // POST /api/import bakes a set named "user" from exactly that list; the renderer
-  // is pointed at /tiles/user. frame=false rebakes in place without moving the
-  // camera. The wasm baker is gone — all baking is server-side now.
-  async _refreshCharts(frame = true) {
-    if (!this._plotter) return;
-    const names = [...this._installed];
+  // Render every baked tile set the server has (GET /tiles/) — each a provider/pack
+  // (noaa-d17, ienc-…, import). This is the single source of truth for what's
+  // installed, so it makes the map survive a reload and reflects exactly what the
+  // server holds. Also rebuilds the installed-cell set (GET /api/cells) for the
+  // pack-card counts. Returns the set names.
+  async _renderInstalledSets() {
+    let sets = [];
+    try { const j = await fetch(`${this._assets}tiles/`).then((r) => (r.ok ? r.json() : null)); sets = (j && j.sets) || []; } catch (e) { /* offline */ }
+    try {
+      const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
+      this._installed = new Set((j && j.cells) || []);
+    } catch (e) { /* keep current */ }
+    this._installedSets = new Set(sets);
+    if (this._plotter) await this._plotter.setServerSets(sets);
+    this._hasArchive = sets.length > 0;
+    this.updateEmptyState();
     this._refreshInstalledBounds();
-    if (!names.length) { this._plotter.setServerSet(""); this.updateEmptyState(); return; }
+    this._refreshCellUsage();
+    return sets;
+  }
+
+  // Bake the LOCALLY-imported cells (the OPFS store) into the "import" set and
+  // re-render. Downloads use their own per-district packs (see _downloadPack); this
+  // is only the drag-a-zip/.000 path. The wasm baker is gone — baking is server-side.
+  async _refreshCharts() {
+    if (!this._plotter) return;
     if (this._charting) { this._chartingAgain = true; return; } // coalesce concurrent rebakes
     this._charting = true;
     try {
-      // Upload the LOCALLY-imported cells (the ones in the OPFS store) to the server
-      // cache so it can bake them. Server-DOWNLOADED cells aren't in the local store
-      // — they're already in the server's XDG cache — so skip them (no warning).
-      for (const name of names) {
-        try {
-          if (!(await this._store.has(name))) continue; // already server-side (downloaded)
-          const bytes = await this._store.getBytes(name);
-          if (bytes && bytes.length) {
-            await fetch(`${this._assets}api/cell/${encodeURIComponent(name)}`, { method: "PUT", body: bytes });
-          }
-        } catch (e) { console.warn("[charts] upload", name, e); }
+      const local = await this._store.list().catch(() => []);
+      if (local.length) {
+        for (const name of local) {
+          try {
+            const bytes = await this._store.getBytes(name);
+            if (bytes && bytes.length) await fetch(`${this._assets}api/cell/${encodeURIComponent(name)}`, { method: "PUT", body: bytes });
+          } catch (e) { console.warn("[charts] upload", name, e); }
+        }
+        const res = await fetch(`${this._assets}api/import?set=import&cells=${encodeURIComponent(local.join(","))}`, { method: "POST" });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
+        await this._pollImport(j.job, (p) => this._setProgress(p));
       }
-      const res = await fetch(`${this._assets}api/import?set=user&cells=${encodeURIComponent(names.join(","))}`, { method: "POST" });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
-      await this._pollImport(j.job);
-      await this._plotter.setServerSet("user");
-      this._hasArchive = true;
-      this.updateEmptyState();
-      if (frame) this._frameCells(names);
+      await this._renderInstalledSets();
     } catch (e) {
-      console.warn("[charts] server bake", e);
+      console.warn("[charts] import bake", e);
     } finally {
       this._charting = false;
-      this._refreshCellUsage();
-      if (this._chartingAgain) { this._chartingAgain = false; this._refreshCharts(false); }
+      if (this._chartingAgain) { this._chartingAgain = false; this._refreshCharts(); }
     }
   }
 
@@ -2766,16 +2765,15 @@ export class ChartPlotterApp extends HTMLElement {
     prog({ label, sub, frac: s.total ? s.done / s.total : null });
   }
 
-  // Server-side download: the SERVER fetches the cells from NOAA into its XDG cache
-  // (no client download / OPFS). spec is {zipUrl,names} (one district bundle) or
-  // {cells:[{name,url}]} (per-cell). downloadOnly → the cells land in the cache and
-  // the caller triggers the union bake via _refreshCharts.
+  // Server-side download + bake of one pack: the SERVER fetches the cells from NOAA
+  // into its XDG data store and bakes them into the named set (no client download /
+  // OPFS). spec is {set, zipUrl, names} (one district bundle) or {set, cells:
+  // [{name,url}]} (per-cell). Resolves when the pack is baked + registered.
   async _serverFetch(spec, prog = () => {}) {
-    const body = { set: "user", downloadOnly: true, ...spec };
     const res = await fetch(`${this._assets}api/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(spec),
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok || !j.job) throw new Error(j.error || `download HTTP ${res.status}`);
