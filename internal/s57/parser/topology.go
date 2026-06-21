@@ -241,96 +241,124 @@ type ringWithUsage struct {
 	usage  int
 }
 
-// buildRingsWithUsage constructs polygon rings separated by Usage indicator
-// S-57 §2.2.8: USAG subfield indicates ring type (1=Exterior, 2=Interior, 3=Truncated)
-// Per S-57 §4.7.3 (31Main.pdf): "vector records making up an area boundary must be referenced sequentially"
+// buildRingsWithUsage constructs polygon rings from an area's edges.
+// S-57 §2.2.8: USAG indicates ring type (1=Exterior, 2=Interior, 3=Truncated).
 //
-// Note: Edges are ordered sequentially in FSPT, but may form multiple closed rings.
-// We detect ring boundaries by checking when coordinates close (return to start).
+// Edges are assembled into rings by TOPOLOGY — matching shared endpoints — NOT by
+// raw FSPT order. Although §4.7.3 says boundary edges "must be referenced
+// sequentially", real ENCs routinely list them out of order, and an area commonly
+// comprises several disjoint loops (an exterior plus island holes). The old code
+// concatenated edges in FSPT order and only ended a ring on an exact match back to
+// the start coord; when a loop's closure went undetected it appended the next,
+// unrelated edge anyway, drawing a straight connector segment between them — the
+// long diagonal lines that slashed across large coastal DEPAREs. Here each edge's
+// endpoints (the connected-node coordinates, bit-identical across the two edges
+// that meet at a node) are indexed, and rings are grown by following those shared
+// endpoints, reversing an edge when it connects at its far end, and starting a new
+// ring whenever the current one closes or dead-ends.
 func (r *polygonBuilder) buildRingsWithUsage(edgeRefs []spatialRef, orientations map[int64]int) ([]ringWithUsage, error) {
+	_ = orientations // FSPT orientation is read per-edge below via getFullEdgeCoordinates
 	if len(edgeRefs) == 0 {
-		return nil, &ErrInvalidGeometry{
-			Reason: "no edge references provided",
+		return nil, &ErrInvalidGeometry{Reason: "no edge references provided"}
+	}
+
+	// Resolve each FSPT edge to its full coordinate polyline (node + SG2D + node),
+	// in FSPT orientation, tagged with its ring usage.
+	type seg struct {
+		coords [][2]float64
+		usage  int
+		used   bool
+	}
+	segs := make([]seg, 0, len(edgeRefs))
+	for _, edgeRef := range edgeRefs {
+		edge, err := r.loadEdge(edgeRef.RCID)
+		if err != nil || edge == nil {
+			continue // skip failed / deleted edges
 		}
+		coords := r.getFullEdgeCoordinates(edge, edgeRef.Orientation)
+		if len(coords) < 2 {
+			continue
+		}
+		usage := edgeRef.Usage
+		if usage == 0 {
+			usage = 1 // default to exterior
+		}
+		segs = append(segs, seg{coords: coords, usage: usage})
+	}
+	if len(segs) == 0 {
+		return nil, &ErrInvalidGeometry{Reason: "no valid rings could be constructed"}
+	}
+
+	// Index both endpoints of every segment so a continuation can be found in O(1).
+	endpoints := make(map[[2]float64][]int, len(segs)*2)
+	for i, s := range segs {
+		a, b := s.coords[0], s.coords[len(s.coords)-1]
+		endpoints[a] = append(endpoints[a], i)
+		if b != a {
+			endpoints[b] = append(endpoints[b], i)
+		}
+	}
+	// nextAt returns an unused segment touching p, or -1.
+	nextAt := func(p [2]float64) int {
+		for _, j := range endpoints[p] {
+			if !segs[j].used {
+				return j
+			}
+		}
+		return -1
+	}
+	// appendSeg joins src to ring, dropping src's leading point when it duplicates
+	// the ring's tail (the shared connecting node).
+	appendSeg := func(ring, src [][2]float64) [][2]float64 {
+		if len(ring) > 0 && len(src) > 0 && ring[len(ring)-1] == src[0] {
+			src = src[1:]
+		}
+		return append(ring, src...)
 	}
 
 	rings := make([]ringWithUsage, 0)
-	currentRing := [][2]float64{}
-	currentUsage := 0
-	startCoord := [2]float64{}
-
-	for _, edgeRef := range edgeRefs {
-		// Load edge
-		edge, err := r.loadEdge(edgeRef.RCID)
-		if err != nil {
-			continue // Skip failed edges
-		}
-
-		// Get edge coordinates with orientation applied
-		edgeCoords := r.getFullEdgeCoordinates(edge, edgeRef.Orientation)
-		if len(edgeCoords) == 0 {
+	for i := range segs {
+		if segs[i].used {
 			continue
 		}
+		segs[i].used = true
+		ringUsage := segs[i].usage
+		ring := append([][2]float64(nil), segs[i].coords...)
+		start := ring[0]
 
-		// If starting a new ring, record the starting coordinate and usage
-		if len(currentRing) == 0 {
-			startCoord = edgeCoords[0]
-			currentUsage = edgeRef.Usage
-			if currentUsage == 0 {
-				currentUsage = 1 // Default to exterior
+		for {
+			tail := ring[len(ring)-1]
+			if tail == start {
+				break // ring closed
 			}
-		}
-
-		// Deduplicate: skip first coordinate if it matches last coordinate in ring
-		if len(currentRing) > 0 {
-			lastCoord := currentRing[len(currentRing)-1]
-			firstNewCoord := edgeCoords[0]
-			if lastCoord[0] == firstNewCoord[0] && lastCoord[1] == firstNewCoord[1] {
-				edgeCoords = edgeCoords[1:]
+			j := nextAt(tail)
+			if j < 0 {
+				break // dead end — no edge continues this ring
 			}
-		}
-
-		currentRing = append(currentRing, edgeCoords...)
-
-		// Check if ring is closed (last coord equals start coord)
-		if len(currentRing) >= 3 {
-			lastCoord := currentRing[len(currentRing)-1]
-			if lastCoord[0] == startCoord[0] && lastCoord[1] == startCoord[1] {
-				// Ring is closed - save it
-				rings = append(rings, ringWithUsage{
-					coords: currentRing,
-					usage:  currentUsage,
-				})
-				currentRing = [][2]float64{}
-				currentUsage = 0
+			next := segs[j].coords
+			if next[0] != tail { // connects at its far end → traverse it reversed
+				next = reverseCoords(next)
 			}
+			ring = appendSeg(ring, next)
+			segs[j].used = true
 		}
-	}
 
-	// After processing all edges, save any unclosed ring
-	if len(currentRing) > 0 {
-		if !isRingClosed(currentRing) {
-			currentRing = append(currentRing, startCoord)
-		}
-		// Only save ring if it has at least 3 points (minimum for a polygon)
-		if len(currentRing) >= 3 {
-			rings = append(rings, ringWithUsage{
-				coords: currentRing,
-				usage:  currentUsage,
-			})
+		if len(ring) >= 2 {
+			if ring[len(ring)-1] != ring[0] {
+				ring = append(ring, ring[0]) // close geometrically if it dead-ended
+			}
+			if len(ring) >= 3 {
+				rings = append(rings, ringWithUsage{coords: ring, usage: ringUsage})
+			}
 		}
 	}
 
 	if len(rings) == 0 {
-		return nil, &ErrInvalidGeometry{
-			Reason: "no valid rings could be constructed",
-		}
+		return nil, &ErrInvalidGeometry{Reason: "no valid rings could be constructed"}
 	}
 
-	// Sort rings: Exterior (1) first, then Truncated (3), then Interior (2)
-	// This matches GeoJSON convention where first ring is exterior, rest are holes
+	// GeoJSON-style order: exterior (1), truncated (3), then interior holes (2).
 	sortedRings := make([]ringWithUsage, 0, len(rings))
-
 	for _, usage := range []int{1, 3, 2} {
 		for _, ring := range rings {
 			if ring.usage == usage {
@@ -338,8 +366,16 @@ func (r *polygonBuilder) buildRingsWithUsage(edgeRefs []spatialRef, orientations
 			}
 		}
 	}
-
 	return sortedRings, nil
+}
+
+// reverseCoords returns a new slice with the points in reverse order.
+func reverseCoords(c [][2]float64) [][2]float64 {
+	out := make([][2]float64, len(c))
+	for i, p := range c {
+		out[len(c)-1-i] = p
+	}
+	return out
 }
 
 // isRingClosed checks if a ring is properly closed
