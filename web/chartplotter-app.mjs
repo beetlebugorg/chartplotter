@@ -357,6 +357,7 @@ export class ChartPlotterApp extends HTMLElement {
     // survives a reload. Seed from the local OPFS store for the first paint.
     this._installed = new Set(await this._store.list().catch(() => []));
     this._installedSets = new Set();
+    this._disabled = new Set(); // packs hidden from the map (server-side; loaded in _renderInstalledSets)
     // Chart discovery/acquisition domain (NOAA catalogue, packs, download, import).
     // Reads the installed set live via a getter (boot reassigns _installed above).
     this._dl = new ChartDownloader({
@@ -1329,10 +1330,13 @@ export class ChartPlotterApp extends HTMLElement {
     this._wirePackSearch();
     this._wirePacks();
     this._wireImport();
-    // A selected NOAA pack gets a real OSM preview map (built fresh each render) so
-    // its coverage footprints show over real geography.
-    const m = this._selPack && /^noaa-d(\d+)$/.exec(this._selPack);
-    if (m) this._buildPreviewMap(+m[1]);
+    this._renderPreview();
+  }
+
+  // Build (or tear down) the detail-pane preview map for the selected pack.
+  _renderPreview() {
+    const pk = this._selectedPack();
+    if (pk && pk.kind !== "user") this._buildPreviewMap(this._packCoverage(pk));
     else if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
   }
 
@@ -1363,19 +1367,52 @@ export class ChartPlotterApp extends HTMLElement {
 
   _providerName(id) { const p = this._providers().find((x) => x.id === id); return p ? p.name : id; }
 
-  // The packs for a provider: {key (set name), cg?, title, sub, installed, bbox?}.
+  // The packs for a provider: {key (set name), kind, title, sub, installed, …}.
   _providerPacks(id) {
     const sets = this._installedSets || new Set();
     if (id === "noaa") {
       return DISTRICTS.map((d) => {
         const { total, bytes } = this._districtStat(d.cg);
         if (!total) return null;
-        return { key: "noaa-d" + d.cg, cg: d.cg, title: d.region, sub: `${total.toLocaleString()} charts · ~${Math.round(bytes / 1e6)} MB`, installed: sets.has("noaa-d" + d.cg) };
+        return { key: "noaa-d" + d.cg, kind: "noaa", cg: d.cg, title: d.region, sub: `${total.toLocaleString()} charts · ~${Math.round(bytes / 1e6)} MB`, installed: sets.has("noaa-d" + d.cg) };
       }).filter(Boolean);
     }
-    if (id === "ienc") return [...sets].filter((n) => /^ienc-/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: "installed", installed: true }));
+    if (id === "ienc") return this._iencPacks() || [];
     // user: locally-imported packs (anything not NOAA/IENC).
-    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: "installed", installed: true }));
+    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, kind: "user", title: this._setLabel(n), sub: "installed", installed: true }));
+  }
+
+  // USACE Inland ENC catalogue: an array of cells, each {name, river, from, to,
+  // edition, url (s57 zip), bbox:[w,s,e,n]}. The SERVER fetches + parses it (the
+  // client only ever talks to our API); cached here once. Returns [] on failure.
+  async _iencCatalog() {
+    if (this._ienc !== undefined) return this._ienc;
+    if (!this._iencPromise) {
+      this._iencPromise = (async () => {
+        try {
+          const j = await fetch(`${this._assets}api/ienc/catalog`).then((r) => (r.ok ? r.json() : null));
+          return (j && Array.isArray(j.cells)) ? j.cells : [];
+        } catch (e) { console.warn("[ienc] catalogue:", e); return []; }
+      })();
+    }
+    this._ienc = await this._iencPromise;
+    return this._ienc;
+  }
+
+  // IENC packs = one per river (a group of cells), or null until the catalogue
+  // loads. Each: {key:"ienc-<river>", kind, title, sub, installed, cells, bbox}.
+  _iencPacks() {
+    const cells = this._ienc;
+    if (!cells) return null;
+    const sets = this._installedSets || new Set();
+    const byRiver = new Map();
+    for (const c of cells) { if (!byRiver.has(c.river)) byRiver.set(c.river, []); byRiver.get(c.river).push(c); }
+    return [...byRiver.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([river, cs]) => {
+      const key = "ienc-" + river.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+      let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+      for (const c of cs) { const [cw, cse, ce, cn] = c.bbox; if ([cw, cse, ce, cn].every(Number.isFinite)) { w = Math.min(w, cw); s = Math.min(s, cse); e = Math.max(e, ce); n = Math.max(n, cn); } }
+      return { key, kind: "ienc", title: river, sub: `${cs.length} chart${cs.length > 1 ? "s" : ""}`, installed: sets.has(key), cells: cs.map((c) => ({ name: c.name, url: c.url, bbox: c.bbox })), bbox: w <= e ? [w, s, e, n] : null };
+    });
   }
 
   // Pane 1: providers. With an active search, providers that contain a match are
@@ -1407,8 +1444,12 @@ export class ChartPlotterApp extends HTMLElement {
     const hits = this._searchHits();
     const q = (this._cellQuery || "").trim().toLowerCase();
     let rows;
-    if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : `<div class="m-empty">No imported charts yet — open this to add some.</div>`;
-    else if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs yet." : "Nothing installed."}</div>`;
+    if (prov === "ienc" && this._ienc === undefined) {
+      // Catalogue not loaded yet — fetch it, then refresh just this column.
+      if (!this._iencPromise) this._iencCatalog().then(() => { if (this._section === "charts" && (this._selProvider || "noaa") === "ienc") this._refreshPacksCol(); });
+      rows = `<div class="m-empty">Loading inland ENC catalogue…</div>`;
+    } else if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : `<div class="m-empty">No imported charts yet — open this to add some.</div>`;
+    else if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs available." : "Nothing installed."}</div>`;
     else rows = packs.map((pk) => {
       let cls = (this._selPack === pk.key ? " sel" : "") + (pk.installed ? " on" : "");
       let sub = pk.sub;
@@ -1417,11 +1458,8 @@ export class ChartPlotterApp extends HTMLElement {
         if (hit === undefined) cls += " dim";
         else { cls += " match"; if (hit) sub = `matches “${esc(hit.l || hit.n)}”`; }
       }
-      // Installed → a clear "Installed" badge; otherwise nothing (the row opens the
-      // detail where you download). No chevron/checkbox — they read as drill/toggle.
-      const badge = pk.installed ? '<span class="m-badge on">Installed</span>' : "";
       return `<div class="m-row${cls}" data-pack="${esc(pk.key)}"${pk.cg ? ` data-cg="${pk.cg}"` : ""} role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${sub}</span></span>${badge}</div>`;
+        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${sub}</span></span>${this._packBadge(pk.key, pk.installed)}</div>`;
     }).join("");
     return `<div class="mcol">${this._packsHeader(prov)}${rows}</div>`;
   }
@@ -1429,7 +1467,16 @@ export class ChartPlotterApp extends HTMLElement {
   // A user-imported pack row.
   _userPackRow(pk) {
     return `<div class="m-row on${this._selPack === pk.key ? " sel" : ""}" data-pack="${esc(pk.key)}" role="button" tabindex="0">
-      <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span><span class="m-badge on">Installed</span></div>`;
+      <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span>${this._packBadge(pk.key, true)}</div>`;
+  }
+
+  // Status pill for an installed pack: "Active" (rendering) or "Disabled" (kept on
+  // disk, hidden from the map). Nothing for a not-installed pack.
+  _packBadge(key, installed) {
+    if (!installed) return "";
+    return this._disabled.has(key)
+      ? '<span class="m-badge off">Disabled</span>'
+      : '<span class="m-badge on">Active</span>';
   }
 
   // Pane-2 header: the provider's name + a one-line description and when its source
@@ -1442,7 +1489,7 @@ export class ChartPlotterApp extends HTMLElement {
     return `<div class="mcol-head"><div class="mcol-h">${esc(this._providerName(prov))}</div><div class="mcol-meta">${esc(line)}</div></div>`;
   }
 
-  // Pane 3: the selected pack's detail — map preview + download/remove.
+  // Pane 3: the selected pack's detail — coverage map + download/remove.
   _renderDetailCol() {
     const key = this._selPack;
     if (!key) {
@@ -1451,28 +1498,40 @@ export class ChartPlotterApp extends HTMLElement {
     }
     const busy = this._taskRunning();
     const installed = this._installedSets && this._installedSets.has(key);
-    const m = /^noaa-d(\d+)$/.exec(key);
-    if (m) {
-      const d = DISTRICTS.find((x) => x.cg === +m[1]);
-      const { total, bytes } = this._districtStat(+m[1]);
-      const mb = Math.round(bytes / 1e6);
-      const act = installed
-        ? `<button class="pk-btn ghost" data-uninstall="${+m[1]}"${busy ? " disabled" : ""}>Remove</button>`
-        : `<button class="pk-btn" data-download="${+m[1]}"${busy ? " disabled" : ""}>⬇ Download · ~${mb} MB</button>`;
-      return `<div class="mcol mcol-detail">
-        <div id="preview-map" class="prev-map"></div>
-        <div class="m-detail-body">
-          <div class="m-detail-title">${esc(d ? d.region : key)}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
-          <div class="m-detail-sub">${d ? esc(d.name) + " · " + esc(d.blurb) : ""}</div>
-          <div class="m-detail-meta">${total.toLocaleString()} charts · ~${mb} MB · outlined area below is the coverage</div>
-          <div class="m-detail-act">${act}</div>
-        </div></div>`;
+    const pk = this._selectedPack();
+    // An installed pack not in the current catalogue (e.g. an old set) → remove only.
+    if (!pk) {
+      return `<div class="mcol mcol-detail"><div class="m-detail-body">
+        <div class="m-detail-title">${esc(this._setLabel(key))}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
+        <div class="m-detail-sub">${esc(key)}</div>
+        <div class="m-detail-act"><button class="pk-btn ghost" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div>
+      </div></div>`;
     }
-    return `<div class="mcol mcol-detail"><div class="m-detail-body">
-      <div class="m-detail-title">${esc(this._setLabel(key))}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
-      <div class="m-detail-sub">${esc(key)}</div>
-      <div class="m-detail-act"><button class="pk-btn ghost" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div>
-    </div></div>`;
+    const disabled = this._disabled.has(key);
+    const tick = installed ? (disabled ? ' <span class="m-badge off">Disabled</span>' : ' <span class="m-badge on">Active</span>') : "";
+    const act = installed
+      ? `<button class="pk-btn ghost" data-${disabled ? "enable" : "disable"}="${esc(key)}"${busy ? " disabled" : ""}>${disabled ? "Enable" : "Disable"}</button>
+         <button class="pk-btn ghost danger" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button>`
+      : `<button class="pk-btn" data-getpack="${esc(key)}"${busy ? " disabled" : ""}>⬇ Download</button>`;
+    let title, sub, meta;
+    if (pk.kind === "noaa") {
+      const d = DISTRICTS.find((x) => x.cg === pk.cg);
+      title = d ? d.region : pk.title;
+      sub = d ? `${esc(d.name)} · ${esc(d.blurb)}` : "";
+      meta = `${pk.sub} · outlined area below is the coverage`;
+    } else { // ienc
+      title = `${pk.title} River`;
+      sub = `USACE Inland ENC · ${pk.cells.length} chart${pk.cells.length > 1 ? "s" : ""}`;
+      meta = "outlined area below is the coverage";
+    }
+    return `<div class="mcol mcol-detail">
+      <div id="preview-map" class="prev-map"></div>
+      <div class="m-detail-body">
+        <div class="m-detail-title">${esc(title)}${tick}</div>
+        <div class="m-detail-sub">${sub}</div>
+        <div class="m-detail-meta">${esc(meta)}</div>
+        <div class="m-detail-act">${act}</div>
+      </div></div>`;
   }
 
   // The User-Charts detail: the import drop zone (baked server-side into the
@@ -1503,10 +1562,23 @@ export class ChartPlotterApp extends HTMLElement {
     return { fc: { type: "FeatureCollection", features: feats }, bounds: feats.length && w <= e ? [w, s, e, n] : null };
   }
 
-  // Build the detail-pane preview: a real OSM map framed to the district with every
+  // Coverage {fc, bounds} for any pack: NOAA cells (catalog bb) or IENC cells (their
+  // catalogue bbox), one outlined polygon each.
+  _packCoverage(pk) {
+    if (!pk) return { fc: { type: "FeatureCollection", features: [] }, bounds: null };
+    if (pk.kind === "noaa") return this._districtCoverage(pk.cg);
+    const feats = [];
+    for (const c of pk.cells || []) {
+      const [w, s, e, n] = c.bbox || [];
+      if ([w, s, e, n].every(Number.isFinite)) feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
+    }
+    return { fc: { type: "FeatureCollection", features: feats }, bounds: pk.bbox || null };
+  }
+
+  // Build the detail-pane preview: a real OSM map framed to the pack with every
   // cell's coverage footprint outlined, so the user can clearly see whether the pack
   // covers the area they care about. Rebuilt per selection (the old map is removed).
-  _buildPreviewMap(cg) {
+  _buildPreviewMap(cov) {
     const host = this.shadowRoot.getElementById("preview-map");
     if (!host || !window.maplibregl) return;
     if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
@@ -1516,7 +1588,6 @@ export class ChartPlotterApp extends HTMLElement {
       l.rel = "stylesheet"; l.href = this._assets + "vendor/maplibre-gl.css"; l.setAttribute("data-mlcss", "");
       this.shadowRoot.appendChild(l);
     }
-    const cov = this._districtCoverage(cg);
     const accent = getComputedStyle(this).getPropertyValue("--ui-accent").trim() || "#1565c0";
     const map = new window.maplibregl.Map({
       container: host, attributionControl: false, cooperativeGestures: false,
@@ -1567,9 +1638,7 @@ export class ChartPlotterApp extends HTMLElement {
     col.outerHTML = this._renderDetailCol();
     this._wireDetailButtons();
     this._wireImport(); // the User-Charts detail may render the drop zone
-    const m = this._selPack && /^noaa-d(\d+)$/.exec(this._selPack);
-    if (m) this._buildPreviewMap(+m[1]);
-    else if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
+    this._renderPreview();
   }
 
   // Human label for a set name (provider · pack).
@@ -1598,12 +1667,39 @@ export class ChartPlotterApp extends HTMLElement {
   // Wire the detail-pane action buttons (re-run after the detail column is swapped).
   _wireDetailButtons() {
     const r = this.shadowRoot;
-    r.querySelectorAll(".pk-btn[data-download]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadPack(+b.dataset.download); }));
-    r.querySelectorAll(".pk-btn[data-uninstall]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._uninstallPack(+b.dataset.uninstall); }));
+    r.querySelectorAll(".pk-btn[data-getpack]").forEach((b) =>
+      b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadSelected(b.dataset.getpack); }));
     r.querySelectorAll(".pk-btn[data-uninstall-set]").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); this._uninstallSet(b.dataset.uninstallSet); }));
+    r.querySelectorAll(".pk-btn[data-disable]").forEach((b) =>
+      b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.disable, true); }));
+    r.querySelectorAll(".pk-btn[data-enable]").forEach((b) =>
+      b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.enable, false); }));
+  }
+
+  // Download the pack with this key, dispatching by provider kind.
+  _downloadSelected(key) {
+    const pk = this._providerPacks(this._selProvider || "noaa").find((p) => p.key === key);
+    if (!pk) return;
+    if (pk.kind === "ienc") this._downloadIenc(pk);
+    else if (pk.kind === "noaa") this._downloadPack(pk.cg);
+  }
+
+  // Download an IENC river pack: the server fetches each cell's s57 zip from
+  // ienccloud.us and bakes them into the pack's set (ienc-<river>).
+  async _downloadIenc(pk) {
+    if (this._taskRunning()) return;
+    this._task = { kind: "download", status: "running" };
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    const prog = (p) => this._setProgress(p);
+    try {
+      const cells = pk.cells.map((c) => ({ name: c.name, url: c.url }));
+      await this._serverFetch({ set: pk.key, cells }, prog);
+    } catch (e) { console.error(`[ienc] ${pk.key} download:`, e.message); }
+    await this._renderInstalledSets();
+    this._task = null;
+    this._setProgress(null);
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
   // Find-a-chart search: typing a port/cell/region name HIGHLIGHTS the matching
@@ -1644,6 +1740,18 @@ export class ChartPlotterApp extends HTMLElement {
     cols[0].outerHTML = this._renderProvidersCol();
     cols[1].outerHTML = this._renderPacksCol();
     this._wireMillerRows();
+  }
+
+  // Re-render just the packs column (e.g. when the IENC catalogue finishes loading).
+  _refreshPacksCol() {
+    const cols = this.shadowRoot.querySelectorAll(".miller > .mcol");
+    if (cols[1]) { cols[1].outerHTML = this._renderPacksCol(); this._wireMillerRows(); }
+  }
+
+  // The currently-selected pack object (for the current provider), or null.
+  _selectedPack() {
+    if (!this._selPack) return null;
+    return this._providerPacks(this._selProvider || "noaa").find((p) => p.key === this._selPack) || null;
   }
 
   // Preview a pack on the map: highlight that district's cells and frame to them.
@@ -2884,19 +2992,33 @@ export class ChartPlotterApp extends HTMLElement {
   // server holds. Also rebuilds the installed-cell set (GET /api/cells) for the
   // pack-card counts. Returns the set names.
   async _renderInstalledSets() {
-    let sets = [];
-    try { const j = await fetch(`${this._assets}tiles/`).then((r) => (r.ok ? r.json() : null)); sets = (j && j.sets) || []; } catch (e) { /* offline */ }
+    // /api/packs is the single source of truth: every baked pack + its enabled
+    // state (server-side, in <data>/prefs.json). Render only the enabled ones;
+    // disabled packs stay baked on disk but off the map.
+    let packs = [];
+    try { const j = await fetch(`${this._assets}api/packs`).then((r) => (r.ok ? r.json() : null)); packs = (j && j.packs) || []; } catch (e) { /* offline */ }
     try {
       const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
       this._installed = new Set((j && j.cells) || []);
     } catch (e) { /* keep current */ }
-    this._installedSets = new Set(sets);
-    if (this._plotter) await this._plotter.setServerSets(sets);
-    this._hasArchive = sets.length > 0;
+    this._installedSets = new Set(packs.map((p) => p.name));
+    this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
+    const active = packs.filter((p) => p.enabled).map((p) => p.name);
+    if (this._plotter) await this._plotter.setServerSets(active);
+    this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
     this._refreshCellUsage();
-    return sets;
+    return active;
+  }
+
+  // Show/hide an installed pack on the map. The state is SERVER-side (the data is
+  // kept; this only toggles rendering); we just call the API and re-render.
+  async _setPackDisabled(key, off) {
+    try { await fetch(`${this._assets}api/set/${off ? "disable" : "enable"}?set=${encodeURIComponent(key)}`, { method: "POST" }); }
+    catch (e) { console.warn("[pack] toggle", key, e); }
+    await this._renderInstalledSets();
+    if (this._section === "charts" && this._drawerOpen()) { this._updateDetail(); this._refreshPacksCol(); }
   }
 
   // Bake the LOCALLY-imported cells (the OPFS store) into the "import" set and
@@ -3554,6 +3676,8 @@ export class ChartPlotterApp extends HTMLElement {
         .m-chev { flex:none; color:var(--ui-text-faint); font-size:16px; }
         .m-badge { flex:none; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:2px 7px; border-radius:10px; }
         .m-badge.on { background:#e4f5ea; color:#1f7a36; }
+        .m-badge.off { background:var(--ui-surface-2); color:var(--ui-text-faint); }
+        .m-row.dim .m-badge { opacity:.7; }
         .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; line-height:1.5; }
         /* detail pane — real OSM preview map with the pack's coverage outlined */
         .prev-map { width:100%; height:260px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; }
@@ -3562,7 +3686,9 @@ export class ChartPlotterApp extends HTMLElement {
         .m-detail-title { font-weight:700; font-size:15px; }
         .m-detail-sub { color:var(--ui-text-dim); font-size:12px; line-height:1.45; margin-top:3px; }
         .m-detail-meta { color:var(--ui-text-faint); font-size:11.5px; font-variant-numeric:tabular-nums; margin-top:5px; }
-        .m-detail-act { margin-top:12px; }
+        .m-detail-act { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+        .pk-btn.danger { color:#c0392b; }
+        .pk-btn.danger:hover { background:#fdeceb; border-color:#e2b6b1; }
         .pk-btn { border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:8px 14px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
         .pk-btn:hover { background:var(--ui-accent-hover); }
         .pk-btn:disabled { background:#9fb6cf; cursor:default; }
