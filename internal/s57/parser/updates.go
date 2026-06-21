@@ -307,13 +307,21 @@ func applySpatialUpdate(chart *chartData, record *iso8211.DataRecord, vridData [
 		}
 		// If neither SG2D nor SG3D nor SGCC present, preserve existing coordinates
 
-		// Update VRPT ONLY if VRPT field present in update record
-		_, hasVRPT := record.Fields["VRPT"]
-		if hasVRPT {
-			// VRPT update present - replace vector pointers
+		// Update VRPT (the edge's begin/end node pointers) via the VRPC control
+		// field — S-57 §8.4.3.2: a VRPT edit is an indexed insert/delete/modify
+		// (VRPC = VPUI instr + VPIX index + NVPT count), NOT a wholesale replace.
+		// Gate on the CONTROL field (VRPC), not the data field (VRPT): e.g. an edge
+		// whose end-node pointer is MODIFIED ships VRPC{modify,idx=2,count=1} + one
+		// new VRPT — replacing the whole list dropped the begin-node pointer, so the
+		// edge lost an endpoint (endNode=0), truncating it and tearing a sliver out
+		// of the area boundary. Same class as the SGCC/FSPC fix below. With no VRPC
+		// present, a bare VRPT is a full replacement.
+		if vrpc, ok := record.Fields["VRPC"]; ok && len(vrpc) >= 5 {
+			existing.VectorPointers = applyControl(existing.VectorPointers, spatialRec.VectorPointers, vrpc)
+		} else if _, hasVRPT := record.Fields["VRPT"]; hasVRPT {
 			existing.VectorPointers = spatialRec.VectorPointers
 		}
-		// If VRPT not present, preserve existing vector pointers
+		// If neither VRPC nor VRPT present, preserve existing vector pointers
 
 		// Keep existing record in map (already there, but make it explicit)
 		chart.spatialRecords[key] = existing
