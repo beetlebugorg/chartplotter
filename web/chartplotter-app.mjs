@@ -1334,24 +1334,20 @@ export class ChartPlotterApp extends HTMLElement {
       return;
     }
     el.innerHTML = `
-      <div class="charts-2col">
-        <div class="cl-list">
-          ${this._renderPackSearch()}
-          ${this._renderProviderList()}
-          <details class="import-more">
-            <summary>Import from a file</summary>
-            <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
-            <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-            <div id="import-log" class="muted"></div>
-            <div id="archive-list"></div>
-          </details>
-          ${this._renderDataFreshness()}
-        </div>
-        <div class="cl-map">
-          ${this._renderMapPane()}
-          ${this._renderMapSelection()}
-        </div>
-      </div>`;
+      ${this._renderPackSearch()}
+      <div class="miller">
+        ${this._renderProvidersCol()}
+        ${this._renderPacksCol()}
+        ${this._renderDetailCol()}
+      </div>
+      <details class="import-more">
+        <summary>Import from a file</summary>
+        <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
+        <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
+        <div id="import-log" class="muted"></div>
+        <div id="archive-list"></div>
+      </details>
+      ${this._renderDataFreshness()}`;
     this._wirePackSearch();
     this._wirePacks();
     this._wireImport();
@@ -1374,38 +1370,86 @@ export class ChartPlotterApp extends HTMLElement {
   // "Installed" group lists any non-NOAA packs you have (IENC, imports) so every
   // installed set is manageable in one place. Built provider-by-provider so more
   // providers (IENC waterways) slot in as their catalogues arrive.
-  // The left list: providers, each with its available packs. Tap a pack to select
-  // it — the map on the right highlights its area and the callout offers download.
-  _renderProviderList() {
-    const noaa = DISTRICTS.map((d) => this._packListRow(d)).join("");
-    let html = `<div class="pl-group"><div class="pl-group-h">NOAA · U.S. Coast Guard districts</div>${noaa}</div>`;
-    const ienc = [...(this._installedSets || [])].filter((n) => /^ienc-/.test(n)).sort();
-    html += `<div class="pl-group"><div class="pl-group-h">USACE · Inland ENC</div>` +
-      (ienc.length ? ienc.map((n) => this._installedRow(n)).join("") : `<div class="pl-empty">No inland ENC packs available yet.</div>`) +
-      `</div>`;
-    const imp = [...(this._installedSets || [])].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort();
-    if (imp.length) html += `<div class="pl-group"><div class="pl-group-h">Imported</div>${imp.map((n) => this._installedRow(n)).join("")}</div>`;
-    return html;
+  // -- chart download: Finder-style 3-pane drill-down --------------------------
+  // Pane 1 providers → pane 2 that provider's packs → pane 3 the selected pack's
+  // detail (map + download/remove). Selection state: _selProvider, _selPack.
+
+  // The providers shown in pane 1. NOAA + IENC always; Imported only if present.
+  _providers() {
+    const sets = this._installedSets || new Set();
+    const out = [
+      { id: "noaa", name: "NOAA", sub: "Coast Guard districts" },
+      { id: "ienc", name: "Inland ENC", sub: "USACE waterways" },
+    ];
+    if ([...sets].some((n) => !/^(noaa-d\d+|ienc-)/.test(n))) out.push({ id: "import", name: "Imported", sub: "Your files" });
+    return out;
   }
 
-  // A NOAA district pack row (left list). Tapping selects it (highlights the map).
-  _packListRow(d) {
-    const { total, bytes } = this._districtStat(d.cg);
-    if (!total) return "";
-    const installed = this._installedSets && this._installedSets.has("noaa-d" + d.cg);
-    const sel = this._activeDistrict === d.cg;
-    const mb = Math.round(bytes / 1e6);
-    return `<div class="pl-row${sel ? " sel" : ""}${installed ? " on" : ""}" data-cg="${d.cg}" role="button" tabindex="0" aria-label="${esc(d.region)}">
-      <span class="pl-info"><span class="pl-name">${esc(d.region)}</span><span class="pl-sub">${total.toLocaleString()} charts · ~${mb} MB</span></span>
-      ${installed ? '<span class="pl-tick" title="Installed">✓</span>' : ""}</div>`;
+  _providerName(id) { const p = this._providers().find((x) => x.id === id); return p ? p.name : id; }
+
+  // The packs for a provider: {key (set name), cg?, title, sub, installed, bbox?}.
+  _providerPacks(id) {
+    const sets = this._installedSets || new Set();
+    if (id === "noaa") {
+      return DISTRICTS.map((d) => {
+        const { total, bytes } = this._districtStat(d.cg);
+        if (!total) return null;
+        return { key: "noaa-d" + d.cg, cg: d.cg, title: d.region, sub: `${total.toLocaleString()} charts · ~${Math.round(bytes / 1e6)} MB`, installed: sets.has("noaa-d" + d.cg) };
+      }).filter(Boolean);
+    }
+    if (id === "ienc") return [...sets].filter((n) => /^ienc-/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: n, installed: true }));
+    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: n, installed: true }));
   }
 
-  // A row for an installed non-NOAA pack (IENC / import): no map area to preview,
-  // just a Remove control.
-  _installedRow(name) {
+  // Pane 1: providers.
+  _renderProvidersCol() {
+    const sel = this._selProvider || "noaa";
+    const rows = this._providers().map((p) =>
+      `<div class="m-row${sel === p.id ? " sel" : ""}" data-prov="${p.id}" role="button" tabindex="0">
+        <span class="m-info"><span class="m-name">${esc(p.name)}</span><span class="m-sub">${esc(p.sub)}</span></span><span class="m-chev">›</span></div>`).join("");
+    return `<div class="mcol"><div class="mcol-h">Source</div>${rows}</div>`;
+  }
+
+  // Pane 2: the selected provider's packs.
+  _renderPacksCol() {
+    const prov = this._selProvider || "noaa";
+    const packs = this._providerPacks(prov);
+    let rows;
+    if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs yet." : "Nothing installed."}</div>`;
+    else rows = packs.map((pk) =>
+      `<div class="m-row${this._selPack === pk.key ? " sel" : ""}${pk.installed ? " on" : ""}" data-pack="${esc(pk.key)}"${pk.cg ? ` data-cg="${pk.cg}"` : ""} role="button" tabindex="0">
+        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span>
+        ${pk.installed ? '<span class="m-tick" title="Installed">✓</span>' : '<span class="m-chev">›</span>'}</div>`).join("");
+    return `<div class="mcol"><div class="mcol-h">${esc(this._providerName(prov))}</div>${rows}</div>`;
+  }
+
+  // Pane 3: the selected pack's detail — map preview + download/remove.
+  _renderDetailCol() {
+    const key = this._selPack;
+    if (!key) return `<div class="mcol mcol-detail"><div class="m-empty">Select a chart pack.</div></div>`;
     const busy = this._taskRunning();
-    return `<div class="pl-row on"><span class="pl-info"><span class="pl-name">${esc(this._setLabel(name))}</span><span class="pl-sub">${esc(name)}</span></span>
-      <button class="pk-btn ghost mini" data-uninstall-set="${esc(name)}"${busy ? " disabled" : ""}>Remove</button></div>`;
+    const installed = this._installedSets && this._installedSets.has(key);
+    const m = /^noaa-d(\d+)$/.exec(key);
+    if (m) {
+      const d = DISTRICTS.find((x) => x.cg === +m[1]);
+      const { total, bytes } = this._districtStat(+m[1]);
+      const mb = Math.round(bytes / 1e6);
+      const act = installed
+        ? `<button class="pk-btn ghost" data-uninstall="${+m[1]}"${busy ? " disabled" : ""}>Remove</button>`
+        : `<button class="pk-btn" data-download="${+m[1]}"${busy ? " disabled" : ""}>⬇ Download · ~${mb} MB</button>`;
+      return `<div class="mcol mcol-detail">${this._renderMapPane()}
+        <div class="m-detail-body">
+          <div class="m-detail-title">${esc(d ? d.region : key)}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
+          <div class="m-detail-sub">${d ? esc(d.name) + " · " + esc(d.blurb) : ""}</div>
+          <div class="m-detail-meta">${total.toLocaleString()} charts · ~${mb} MB</div>
+          <div class="m-detail-act">${act}</div>
+        </div></div>`;
+    }
+    return `<div class="mcol mcol-detail"><div class="m-detail-body">
+      <div class="m-detail-title">${esc(this._setLabel(key))}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
+      <div class="m-detail-sub">${esc(key)}</div>
+      <div class="m-detail-act"><button class="pk-btn ghost" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div>
+    </div></div>`;
   }
 
   // Locator-map geometry (built once): a simplified US land silhouette from the
@@ -1484,29 +1528,18 @@ export class ChartPlotterApp extends HTMLElement {
       <rect class="mp-sea" x="0" y="0" width="${LOC_VW}" height="${LOC_VH}"/>${land}${rects}</svg></div>`;
   }
 
-  // The selection callout under the map: details + action for the picked district.
-  _renderMapSelection() {
-    const cg = this._activeDistrict;
-    if (!cg) return `<div class="map-hint">Select a pack from the list to preview it here and download.</div>`;
-    const d = DISTRICTS.find((x) => x.cg === cg);
-    if (!d) return "";
-    const { total, bytes } = this._districtStat(cg);
-    const mb = Math.round(bytes / 1e6);
-    const busy = this._taskRunning();
-    const installed = this._installedSets && this._installedSets.has("noaa-d" + cg);
-    const act = installed
-      ? `<button class="pk-btn ghost" data-uninstall="${cg}"${busy ? " disabled" : ""}>Remove</button>`
-      : `<button class="pk-btn" data-download="${cg}"${busy ? " disabled" : ""}>⬇ Download · ~${mb} MB</button>`;
-    const tick = installed ? ` <span class="pk-tick" title="Installed">✓</span>` : "";
-    return `<div class="map-sel"><div class="pk-info"><span class="pk-name">${esc(d.region)}${tick}</span>
-      <span class="pk-sub">${esc(d.name)} · ${esc(d.blurb)} · ${total.toLocaleString()} charts · ~${mb} MB</span></div>
-      <div class="pk-act">${act}</div></div>`;
+  // Pane 1 selection: choose a provider (resets the pack selection).
+  _selectProvider(id) {
+    this._selProvider = id;
+    this._selPack = null;
+    this._activeDistrict = null;
+    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
-  // Select a district from the map (highlights its pin + shows its callout). Does
-  // NOT move the real chart — the pane is the picker.
-  _selectDistrict(cg) {
-    this._activeDistrict = cg;
+  // Pane 2 selection: choose a pack (drives the detail pane + the map highlight).
+  _selectPack(key, cg) {
+    this._selPack = key;
+    this._activeDistrict = cg || null; // NOAA packs highlight on the detail map
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
   }
 
@@ -1522,13 +1555,12 @@ export class ChartPlotterApp extends HTMLElement {
 
   _wirePacks() {
     const r = this.shadowRoot;
-    r.querySelectorAll(".pl-row[data-cg]").forEach((row) => {
-      const cg = +row.dataset.cg;
-      row.addEventListener("click", () => this._selectDistrict(cg));
-      row.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this._selectDistrict(cg); }
-      });
-    });
+    const onActivate = (el, fn) => {
+      el.addEventListener("click", fn);
+      el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } });
+    };
+    r.querySelectorAll(".m-row[data-prov]").forEach((row) => onActivate(row, () => this._selectProvider(row.dataset.prov)));
+    r.querySelectorAll(".m-row[data-pack]").forEach((row) => onActivate(row, () => this._selectPack(row.dataset.pack, row.dataset.cg ? +row.dataset.cg : null)));
     r.querySelectorAll(".pk-btn[data-download]").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadPack(+b.dataset.download); }));
     r.querySelectorAll(".pk-btn[data-uninstall]").forEach((b) =>
@@ -3468,39 +3500,37 @@ export class ChartPlotterApp extends HTMLElement {
         /* settings */
         .set-section { margin:0 0 22px; }
         .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 4px; font-weight:700; }
-        /* chart download: two-pane (provider/pack list + embedded map) */
-        .charts-2col { display:flex; gap:16px; align-items:flex-start; }
-        .cl-list { flex:1 1 0; min-width:0; }
-        .cl-map { flex:0 0 46%; position:sticky; top:0; }
-        @media (max-width:780px) { .charts-2col { flex-direction:column-reverse; } .cl-map { flex:none; width:100%; position:static; } }
-        .pack-intro { color:var(--ui-text-dim); font-size:12px; line-height:1.5; margin:2px 0 12px; }
-        /* provider/pack list */
-        .pl-group { margin:0 0 14px; }
-        .pl-group-h { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); font-weight:700; margin:0 0 3px; }
-        .pl-empty { color:var(--ui-text-faint); font-size:12px; padding:6px 6px 8px; }
-        .pl-row { display:flex; align-items:center; gap:9px; padding:8px 8px; border-radius:8px; cursor:pointer; transition:background .1s; }
-        .pl-row:hover { background:var(--ui-hover); }
-        .pl-row:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--ui-accent); }
-        .pl-row.sel { background:var(--ui-hover); box-shadow:inset 3px 0 0 var(--ui-accent); }
-        .pl-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
-        .pl-name { font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .pl-sub { color:var(--ui-text-faint); font-size:11.5px; font-variant-numeric:tabular-nums; }
-        .pl-tick { flex:none; color:#1f7a36; font-weight:700; }
-        /* embedded map */
-        .map-pane { width:100%; border:1px solid var(--ui-border-2); border-radius:10px; background:var(--ui-surface-2); overflow:hidden; }
+        /* chart download: Finder-style 3-pane drill-down */
+        .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(60vh,520px); margin:2px 0 12px; }
+        .mcol { flex:0 0 30%; min-width:0; overflow-y:auto; border-right:1px solid var(--ui-border-2); padding:6px; }
+        .mcol:nth-child(2) { flex:0 0 34%; }
+        .mcol.mcol-detail { flex:1 1 0; border-right:none; padding:12px; }
+        .mcol-h { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); font-weight:700; padding:2px 6px 5px; position:sticky; top:0; background:var(--ui-surface); }
+        .m-row { display:flex; align-items:center; gap:8px; padding:8px; border-radius:7px; cursor:pointer; transition:background .1s; }
+        .m-row:hover { background:var(--ui-hover); }
+        .m-row:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--ui-accent); }
+        .m-row.sel { background:var(--ui-accent); }
+        .m-row.sel .m-name, .m-row.sel .m-sub, .m-row.sel .m-chev { color:var(--ui-accent-text); }
+        .m-row.sel .m-tick { color:var(--ui-accent-text); }
+        .m-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+        .m-name { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .m-sub { color:var(--ui-text-faint); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .m-chev { flex:none; color:var(--ui-text-faint); font-size:16px; }
+        .m-tick { flex:none; color:#1f7a36; font-weight:700; }
+        .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; }
+        /* detail pane */
+        .map-pane { width:100%; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; }
         .map-pane svg { display:block; width:100%; height:auto; }
         .mp-sea { fill:var(--ui-surface-2); }
         .mp-land { fill:var(--ui-border-strong); opacity:0.5; }
         .mp-inst { fill:#1f7a36; fill-opacity:0.2; stroke:#1f7a36; stroke-width:5; }
         .mp-sel { fill:var(--ui-accent); fill-opacity:0.25; stroke:var(--ui-accent); stroke-width:7; }
-        .map-hint { color:var(--ui-text-faint); font-size:12.5px; text-align:center; padding:12px 4px; }
-        .map-sel { display:flex; align-items:center; gap:10px; padding:10px 12px; margin:10px 0 0; border:1px solid var(--ui-accent); border-radius:9px; background:var(--ui-surface); }
-        .pk-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
-        .pk-name { font-weight:600; font-size:14px; }
-        .pk-tick { color:#1f7a36; font-weight:700; margin-left:5px; }
-        .pk-sub { color:var(--ui-text-dim); font-size:11.5px; line-height:1.4; }
-        .pk-act { flex:none; }
-        .pk-btn { border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:7px 12px; font:inherit; font-size:12.5px; font-weight:600; cursor:pointer; white-space:nowrap; }
+        .m-detail-body { padding:12px 2px 2px; }
+        .m-detail-title { font-weight:700; font-size:15px; }
+        .m-detail-sub { color:var(--ui-text-dim); font-size:12px; line-height:1.45; margin-top:3px; }
+        .m-detail-meta { color:var(--ui-text-faint); font-size:11.5px; font-variant-numeric:tabular-nums; margin-top:5px; }
+        .m-detail-act { margin-top:12px; }
+        .pk-btn { border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:8px 14px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
         .pk-btn:hover { background:var(--ui-accent-hover); }
         .pk-btn:disabled { background:#9fb6cf; cursor:default; }
         .pk-btn.ghost { background:var(--ui-surface); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
