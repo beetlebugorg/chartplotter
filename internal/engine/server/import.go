@@ -442,8 +442,12 @@ func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, a
 }
 
 // bakeAndRegister is the shared bake → write → register tail for every import
-// path (upload, cached, server-fetch). Progress and the terminal state are
-// recorded on the job.
+// path (upload, cached, server-fetch). The district `set` is baked into ONE archive
+// PER navigational-purpose band (set-overview, set-general, …), so a coarse-band-only
+// offshore area keeps tiles above the old merged archive's single maxzoom (no more
+// no-data hatch holes). Each band that produced tiles is written + registered as its
+// own set; the district aux.zip is written once (with the first band). Progress and
+// the terminal state are recorded on the job.
 func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, overzoom, applyUpdates bool) {
 	fail := func(err error) {
 		log.Printf("import %s (%s): %v", jobID, set, err)
@@ -460,16 +464,59 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		j.Phase, j.Unit, j.Note, j.Done, j.Total = "bake", "tiles", fmt.Sprintf("Baking %d cell(s)", b.ok), 0, 0
 	})
 
-	pb := baker.BakeToPMTiles(b.baker, func(done, total int) {
-		s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
-	})
+	// Drop any STALE merged archive named exactly `set` from a prior (pre-per-band)
+	// bake, so the old single-maxzoom set isn't left serving alongside the new bands.
+	s.removeMergedSet(set)
 
-	if err := s.writeAndRegister(set, pb, aux); err != nil {
-		fail(err)
+	bands := 0
+	tiles := 0
+	first := true
+	bandErr := baker.BakeToPMTilesBands(b.baker,
+		func(done, total int) {
+			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
+		},
+		func(slug string, pb *pmtiles.Builder) error {
+			bandSet := set + "-" + slug
+			bandAux := aux
+			if !first { // ship the district aux.zip ONCE, with the first band
+				bandAux = nil
+			}
+			if err := s.writeAndRegister(bandSet, pb, bandAux); err != nil {
+				return err
+			}
+			first = false
+			bands++
+			tiles += pb.Count()
+			log.Printf("import %s: baked %q (%d tiles)", jobID, bandSet, pb.Count())
+			return nil
+		})
+	if bandErr != nil {
+		fail(bandErr)
 		return
 	}
-	log.Printf("import %s: baked %q (%d cells, %d tiles)", jobID, set, b.ok, pb.Count())
+	if bands == 0 {
+		fail(fmt.Errorf("no bands produced tiles"))
+		return
+	}
+	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, b.ok, bands, tiles)
 	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
+}
+
+// removeMergedSet drops a stale MERGED archive named exactly `set` (the pre-per-band
+// layout) if one is still registered: unregister, untrack, and delete its
+// <set>.pmtiles/.aux.zip. The per-band sets ("set-<slug>") are left alone. Best-effort.
+func (s *Server) removeMergedSet(set string) {
+	if _, ok := s.packPath(set); !ok {
+		if _, live := s.sets.get(set); !live {
+			return // no merged set on disk or registered
+		}
+	}
+	s.sets.remove(set)
+	s.packDel(set)
+	s.prefs.setDisabled(set, false)
+	dir := s.setDir(set)
+	_ = os.Remove(filepath.Join(dir, set+".pmtiles"))
+	_ = os.Remove(filepath.Join(dir, set+".aux.zip"))
 }
 
 // bakerResult bundles a built Baker with the count of cells that parsed.
