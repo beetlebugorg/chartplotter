@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +12,9 @@ import (
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
+
+// tilesDir is the legacy flat archive directory: <cacheDir>/tiles.
+func tilesDir(cacheDir string) string { return filepath.Join(cacheDir, "tiles") }
 
 // tileSets is the server's registry of named tile sets (set name → backend). It is
 // safe for concurrent use: the HTTP handler reads under an RLock while discovery /
@@ -76,64 +78,6 @@ func (ts *tileSets) closeAll() {
 	ts.m = map[string]tilesource.TileSource{}
 }
 
-// discoverArchives registers every prebaked .pmtiles / .mbtiles archive found
-// directly under dir as a tile set named by its basename (sans extension). It is
-// best-effort: a file that fails to open is logged and skipped. Returns the count
-// registered.
-func (ts *tileSets) discoverArchives(dir string) int {
-	n := 0
-	for _, ext := range []string{"*.pmtiles", "*.mbtiles"} {
-		matches, _ := filepath.Glob(filepath.Join(dir, ext))
-		for _, path := range matches {
-			name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-			if !isSetName(name) {
-				log.Printf("tilesets: skip %q (invalid set name)", path)
-				continue
-			}
-			src, err := tilesource.Open(path)
-			if err != nil {
-				log.Printf("tilesets: skip %q: %v", path, err)
-				continue
-			}
-			ts.register(name, src)
-			m := src.Meta()
-			log.Printf("tilesets: registered %q from %s (z%d-%d)", name, filepath.Base(path), m.MinZoom, m.MaxZoom)
-			n++
-		}
-	}
-	return n
-}
-
-// tilesDir is the directory scanned for prebaked archives: <cacheDir>/tiles.
-func tilesDir(cacheDir string) string { return filepath.Join(cacheDir, "tiles") }
-
-// discoverTree walks dir recursively and registers every *.pmtiles as a tile set
-// named by its basename (e.g. <cache>/NOAA/D17/noaa-d17.pmtiles → set "noaa-d17").
-// Best-effort; returns the count registered.
-func (ts *tileSets) discoverTree(dir string) int {
-	n := 0
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".pmtiles") {
-			return nil
-		}
-		name := strings.TrimSuffix(filepath.Base(path), ".pmtiles")
-		if !isSetName(name) {
-			return nil
-		}
-		src, e := tilesource.Open(path)
-		if e != nil {
-			log.Printf("tilesets: skip %q: %v", path, e)
-			return nil
-		}
-		ts.register(name, src)
-		m := src.Meta()
-		log.Printf("tilesets: registered %q from %s (z%d-%d)", name, path, m.MinZoom, m.MaxZoom)
-		n++
-		return nil
-	})
-	return n
-}
-
 // isSetName accepts a safe single path component for a set name: letters, digits,
 // '-', '_', '.' (but no separators or traversal).
 func isSetName(s string) bool {
@@ -163,12 +107,61 @@ func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sets.remove(set)
+	s.packDel(set)
+	s.prefs.setDisabled(set, false) // drop any stale disabled flag
 	dir := s.setDir(set)
 	_ = os.Remove(filepath.Join(dir, set+".pmtiles"))
 	_ = os.Remove(filepath.Join(dir, set+".aux.zip"))
 	_ = os.Remove(dir) // best-effort: drop the pack dir if now empty
 	w.Header().Set("Content-Type", jsonCT)
 	io.WriteString(w, `{"ok":true}`)
+}
+
+// handlePacks lists every baked pack on disk with its enabled state, so the client
+// can show disabled packs (kept on disk, hidden from the map) for management.
+func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", jsonCT)
+	fmt.Fprint(w, `{"packs":[`)
+	for i, name := range s.packNames() {
+		if i > 0 {
+			fmt.Fprint(w, ",")
+		}
+		fmt.Fprintf(w, `{"name":%q,"enabled":%t}`, name, !s.prefs.isDisabled(name))
+	}
+	fmt.Fprint(w, "]}")
+}
+
+// handleSetEnabled shows or hides a pack on the map (POST /api/set/enable|disable
+// ?set=NAME). The baked data is kept; disabling just unregisters it so /tiles/{set}
+// stops serving + the client stops rendering it. Persists to prefs.
+func (s *Server) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		apiErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	set := r.URL.Query().Get("set")
+	if !isSetName(set) {
+		apiErr(w, http.StatusBadRequest, "bad set name")
+		return
+	}
+	enable := strings.HasSuffix(r.URL.Path, "/enable")
+	s.prefs.setDisabled(set, !enable)
+	if enable {
+		if path, ok := s.packPath(set); ok {
+			if _, live := s.sets.get(set); !live {
+				if src, err := tilesource.Open(path); err == nil {
+					s.sets.register(set, src)
+				} else {
+					apiErr(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+		}
+	} else {
+		s.sets.remove(set)
+	}
+	w.Header().Set("Content-Type", jsonCT)
+	fmt.Fprintf(w, `{"ok":true,"set":%q,"enabled":%t}`, set, enable)
 }
 
 // serveCells returns the names of cells currently in the server's ENC_ROOT source

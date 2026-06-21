@@ -184,13 +184,13 @@ func (s *Server) handleImportFetch(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "need zipUrl or cells")
 		return
 	}
-	if req.ZipURL != "" && !isNOAAURL(req.ZipURL) {
-		apiErr(w, http.StatusBadRequest, "zipUrl must be a charts.noaa.gov URL")
+	if req.ZipURL != "" && !isChartURL(req.ZipURL) {
+		apiErr(w, http.StatusBadRequest, "zipUrl must be a charts.noaa.gov or ienccloud.us URL")
 		return
 	}
 	for _, c := range req.Cells {
-		if c.URL != "" && !isNOAAURL(c.URL) {
-			apiErr(w, http.StatusBadRequest, "cell url must be a charts.noaa.gov URL")
+		if c.URL != "" && !isChartURL(c.URL) {
+			apiErr(w, http.StatusBadRequest, "cell url must be a charts.noaa.gov or ienccloud.us URL")
 			return
 		}
 	}
@@ -321,10 +321,10 @@ func filterCells(cells map[string]baker.CellData, names []string) map[string]bak
 	return out
 }
 
-// isNOAAURL reports whether raw is an http(s) URL on a NOAA chart host.
-func isNOAAURL(raw string) bool {
+// isChartURL reports whether raw is an http(s) URL on an allowed chart host.
+func isChartURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && isNOAAHost(u.Hostname())
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && isChartHost(u.Hostname())
 }
 
 // fetchURLProgress downloads raw (capped at maxImportBytes) and returns the bytes,
@@ -555,6 +555,8 @@ func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder, aux map[strin
 		return err
 	}
 	s.sets.register(set, src)
+	s.packAdd(set, final)           // track for /api/packs + enable/disable
+	s.prefs.setDisabled(set, false) // a freshly baked pack is enabled
 	return nil
 }
 

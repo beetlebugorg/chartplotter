@@ -15,8 +15,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 	"github.com/beetlebugorg/chartplotter/web"
 )
 
@@ -33,8 +35,11 @@ type Server struct {
 	share       shareStore // latest "share my view" snapshot (camera + cell list)
 	Version     string     // build version
 
-	sets    *tileSets   // registry of named tile sets served at /tiles/{set}/…
-	imports *importJobs // background server-side bake jobs (POST /api/import)
+	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
+	imports *importJobs       // background server-side bake jobs (POST /api/import)
+	packsMu sync.Mutex        // guards packs
+	packs   map[string]string // ALL baked packs on disk: set name → pmtiles path
+	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -49,13 +54,25 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 		dataDir = cacheDir
 	}
 	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs()}
-	// Register every baked archive under the cache as a tile set so /tiles/{set}/…
-	// serves them immediately: the provider trees (<cache>/NOAA/<d>/, IENC/, import/,
-	// …) via a recursive walk, plus legacy <cache>/tiles/*.mbtiles.
-	n := s.sets.discoverTree(cacheDir)
-	n += s.sets.discoverArchives(tilesDir(cacheDir))
-	if n > 0 {
-		log.Printf("tilesets: %d baked set(s) registered from %s", n, cacheDir)
+	// Discover every baked pack on disk (provider trees + legacy tiles/), then
+	// register the ENABLED ones (disabled packs stay on disk but off the map). State
+	// lives in <data>/prefs.json so it survives restarts and is shared across clients.
+	s.packs = scanPacks(cacheDir)
+	s.prefs = loadPrefs(dataDir)
+	n := 0
+	for _, name := range sortedKeys(s.packs) {
+		if s.prefs.isDisabled(name) {
+			continue
+		}
+		if src, err := tilesource.Open(s.packs[name]); err == nil {
+			s.sets.register(name, src)
+			n++
+		} else {
+			log.Printf("tilesets: skip %q: %v", s.packs[name], err)
+		}
+	}
+	if len(s.packs) > 0 {
+		log.Printf("tilesets: %d pack(s) on disk, %d enabled (from %s)", len(s.packs), n, cacheDir)
 	}
 	return s
 }
@@ -134,6 +151,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"ok":true}`)
 	case r.URL.Path == "/api/cells":
 		s.serveCells(w, r) // GET: names of cells currently in the server's ENC_ROOT cache
+	case r.URL.Path == "/api/ienc/catalog":
+		s.serveIENCCatalog(w, r) // GET: USACE Inland ENC products catalogue (server-fetched JSON)
 	case strings.HasPrefix(r.URL.Path, "/api/cell/"):
 		if r.Method == http.MethodPut {
 			s.uploadCell(w, r) // PUT raw .000 into the cache (share: hand-imported cells)
@@ -146,6 +165,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
 	case strings.HasPrefix(r.URL.Path, "/api/import"):
 		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
+	case r.URL.Path == "/api/packs":
+		s.handlePacks(w, r) // GET: all baked packs + enabled state
+	case r.URL.Path == "/api/set/enable" || r.URL.Path == "/api/set/disable":
+		s.handleSetEnabled(w, r) // POST: show/hide a pack on the map (data kept)
 	case r.URL.Path == "/api/set":
 		s.handleDeleteSet(w, r) // DELETE: unregister a tile set + remove its baked files
 	case r.URL.Path == "/api/proxy":
@@ -192,8 +215,8 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	raw := r.URL.Query().Get("url")
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !isNOAAHost(u.Hostname()) {
-		apiErr(w, http.StatusBadRequest, "url must be a charts.noaa.gov URL")
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !isChartHost(u.Hostname()) {
+		apiErr(w, http.StatusBadRequest, "url must be a charts.noaa.gov or ienccloud.us URL")
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, raw, nil)
@@ -221,10 +244,16 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// isNOAAHost reports whether host is one of NOAA's chart download hosts.
-func isNOAAHost(host string) bool {
+// isChartHost reports whether host is an allowed ENC download host — NOAA
+// (charts.noaa.gov) or USACE Inland ENC (ienccloud.us). The proxy + server-side
+// fetch are restricted to these so neither is an open relay.
+func isChartHost(host string) bool {
 	host = strings.ToLower(host)
-	return host == "charts.noaa.gov" || host == "www.charts.noaa.gov"
+	switch host {
+	case "charts.noaa.gov", "www.charts.noaa.gov", "ienccloud.us", "www.ienccloud.us":
+		return true
+	}
+	return false
 }
 
 // isCellName accepts the alphanumeric NOAA cell ids (e.g. US5MD1MC) — a safe
