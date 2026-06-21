@@ -15,6 +15,11 @@
 
 // S-57 date attributes; rendered "DD-MMM-YYYY" (PresLib §10.8 rule 6).
 const PICK_DATE_ATTRS = new Set(["SORDAT", "RECDAT", "DATSTA", "DATEND", "PERSTA", "PEREND", "SURSTA", "SUREND"]);
+// Attributes whose value is an external filename (shipped in the aux zip): the
+// textual descriptions and the pictorial representation. Resolved to inline
+// content from the AuxStore when one is loaded; otherwise shown as the filename.
+const PICK_TEXT_ATTRS = new Set(["TXTDSC", "NTXTDS"]);
+const PICK_PIC_ATTRS = new Set(["PICREP"]);
 const PICK_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 
 function esc(s) {
@@ -80,6 +85,10 @@ const STYLE = `
   .k .acr { margin-left:7px; }
   .v { font-size:13.5px; line-height:1.35; word-break:break-word; }
   .empty { color:var(--ui-text-faint,#9aa0a8); font-size:12.5px; padding:8px 16px 12px; }
+  /* Aux content (TXTDSC text / PICREP picture) resolved from the companion zip. */
+  .aux-text { white-space:pre-wrap; font-size:12.5px; line-height:1.4; }
+  .aux-img { display:block; max-width:100%; height:auto; margin-top:2px; border-radius:6px; border:1px solid var(--ui-border-2,#ededed); }
+  .aux-pending { color:var(--ui-text-faint,#9aa0a8); }
   .admin { margin:8px 16px 16px; align-self:flex-start; border:1px solid var(--ui-border-strong,#cfcfcf);
     background:var(--ui-surface,#fff); color:var(--ui-text-dim,#7a828b); border-radius:8px; padding:7px 13px;
     font:inherit; font-size:12px; cursor:pointer; }
@@ -95,6 +104,8 @@ export class PickReport extends HTMLElement {
     this._idx = 0;
     this._admin = false;
     this._userPos = null; // {left,top} once the mariner drags it; cleared on close
+    this._aux = null;     // AuxStore for TXTDSC/PICREP external files (optional)
+    this._renderSeq = 0;  // guards async aux fills against a newer render
     // NB: a custom-element constructor must not set attributes (incl. `hidden`) —
     // the spec forbids it ("result must not have attributes"). Hide in connectedCallback.
   }
@@ -133,6 +144,11 @@ export class PickReport extends HTMLElement {
 
   setCatalogue(cat) { if (cat) this._cat = cat; }
 
+  // Provide the AuxStore so TXTDSC/PICREP filenames resolve to inline text/picture.
+  // Optional: without it (or for a feature whose file isn't in the set) the report
+  // falls back to showing the raw filename.
+  setAux(aux) { this._aux = aux || null; if (!this.hidden) this._render(); }
+
   // Show the report for a feature stack; `anchor` is the picked point {x,y} in
   // viewport pixels, used for out-of-the-way auto-placement.
   show(feats, anchor) {
@@ -170,6 +186,7 @@ export class PickReport extends HTMLElement {
 
   _render() {
     const cat = this._cat;
+    const seq = ++this._renderSeq;
     const f = this._feats[Math.min(this._idx, this._feats.length - 1)];
     if (!f) return;
     const p = f.properties || {};
@@ -195,6 +212,7 @@ export class PickReport extends HTMLElement {
       rows.push(this._row(acr, attrs[acr], meta));
     }
     $("kv").innerHTML = rows.length ? rows.join("") : `<div class="empty">No attributes encoded.</div>`;
+    this._fillAux(seq); // resolve any TXTDSC/PICREP rows from the aux zip
 
     const n = this._feats.length;
     const cyc = n > 1
@@ -216,6 +234,14 @@ export class PickReport extends HTMLElement {
   // unpadded from the tile (rule 3). Unknown attributes still show, by acronym (§10.8.6).
   _row(acr, raw, meta) {
     const name = esc((meta && meta.name) || acr);
+    // External-file attributes: render the filename now, tag the value cell so
+    // _fillAux can swap in the actual text/picture once the aux zip resolves it.
+    const isText = PICK_TEXT_ATTRS.has(acr), isPic = PICK_PIC_ATTRS.has(acr);
+    if (isText || isPic) {
+      const ref = String(raw).trim();
+      const tag = this._aux && this._aux.has(ref) ? ` data-aux="${esc(ref)}" data-auxkind="${isPic ? "image" : "text"}"` : "";
+      return `<div class="row"><div class="k">${name}<span class="acr">${esc(acr)}</span></div><div class="v"${tag}>${esc(ref)}</div></div>`;
+    }
     let val;
     if (PICK_DATE_ATTRS.has(acr)) {
       val = String(raw).split(",").map((s) => fmtS57Date(s.trim())).join("; ");
@@ -226,6 +252,27 @@ export class PickReport extends HTMLElement {
       if (meta && meta.unit) val += " " + meta.unit;
     }
     return `<div class="row"><div class="k">${name}<span class="acr">${esc(acr)}</span></div><div class="v">${esc(val)}</div></div>`;
+  }
+
+  // Swap external-file filenames for their resolved content. Async (the aux zip
+  // inflates on demand); a `seq` guard drops the result if a newer render (a step
+  // or admin toggle) has since replaced the rows.
+  async _fillAux(seq) {
+    if (!this._aux) return;
+    const nodes = this.shadowRoot.querySelectorAll("[data-aux]");
+    for (const node of nodes) {
+      const ref = node.getAttribute("data-aux");
+      node.classList.add("aux-pending");
+      const res = await this._aux.resolve(ref).catch(() => null);
+      if (seq !== this._renderSeq) return; // a newer render owns the panel now
+      node.classList.remove("aux-pending");
+      if (!res) continue;
+      if (res.type === "image") {
+        node.innerHTML = `<img class="aux-img" src="${res.url}" alt="${esc(ref)}" loading="lazy">`;
+      } else {
+        node.innerHTML = `<div class="aux-text">${esc(res.text)}</div>`;
+      }
+    }
   }
 
   // --- placement & drag ----------------------------------------------------

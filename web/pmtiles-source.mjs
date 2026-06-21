@@ -235,7 +235,13 @@ export class MultiArchive {
   // Add (open) an archive from a Blob/File or a URL string. Returns the opened
   // PMTilesArchive (read its `.bounds` to frame the view).
   async add(src) {
-    const a = await new PMTilesArchive(src).init();
+    return this.addOpened(await new PMTilesArchive(src).init());
+  }
+
+  // Register an ALREADY-opened archive. Lets a bandless pack that fans across
+  // every band source share one opened handle instead of re-fetching its header
+  // + directory once per band (see chartplotter _openPrebaked).
+  addOpened(a) {
     this.archives.push(a);
     this._recompute();
     return a;

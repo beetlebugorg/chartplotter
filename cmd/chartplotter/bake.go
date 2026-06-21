@@ -28,7 +28,7 @@ type bakeCmd struct {
 }
 
 func (c bakeCmd) Run() error {
-	cells, err := collectCells(c.In)
+	cells, aux, err := collectCells(c.In)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func (c bakeCmd) Run() error {
 	// Per-band streaming holds only one band's geometry at a time, so it skips the
 	// all-cells BuildBakerWithUpdates entirely.
 	if c.Bands {
-		return c.runBands(cells)
+		return c.runBands(cells, aux)
 	}
 
 	b, ok, err := baker.BuildBakerWithUpdates(cells, c.Overzoom, func(name string, err error) {
@@ -86,6 +86,12 @@ func (c bakeCmd) Run() error {
 	st, _ := os.Stat(c.Out)
 	fmt.Printf("baked %d cell(s) → %s (%d tiles, %.1f MB)\n", len(ok), c.Out, pb.Count(), float64(st.Size())/(1<<20))
 
+	stem := strings.TrimSuffix(c.Out, filepath.Ext(c.Out))
+	auxFile, err := writeAuxZip(stem, aux)
+	if err != nil {
+		return err
+	}
+
 	if c.Manifest != "" {
 		file := c.BaseURL
 		if file == "" {
@@ -98,6 +104,9 @@ func (c bakeCmd) Run() error {
 				"band":   "all",
 				"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
 			}},
+		}
+		if auxFile != "" {
+			man["aux"] = auxFile
 		}
 		mf, err := os.Create(c.Manifest)
 		if err != nil {
@@ -118,7 +127,7 @@ func (c bakeCmd) Run() error {
 // runBands writes one gap-clipped PMTiles archive per navigational band
 // (<out-stem>-<slug>.pmtiles) plus a manifest tagging each with its band slug, so
 // the frontend loads each into its own chart-<slug> source.
-func (c bakeCmd) runBands(cells map[string]baker.CellData) error {
+func (c bakeCmd) runBands(cells map[string]baker.CellData, aux map[string][]byte) error {
 	ext := filepath.Ext(c.Out)
 	stem := strings.TrimSuffix(c.Out, ext)
 	var entries []map[string]any
@@ -171,6 +180,11 @@ func (c bakeCmd) runBands(cells map[string]baker.CellData) error {
 	}
 	fmt.Printf("baked %d cell(s) → %d band archive(s)\n", nCells, len(entries))
 
+	auxFile, err := writeAuxZip(stem, aux)
+	if err != nil {
+		return err
+	}
+
 	if c.Manifest != "" {
 		mf, err := os.Create(c.Manifest)
 		if err != nil {
@@ -178,7 +192,11 @@ func (c bakeCmd) runBands(cells map[string]baker.CellData) error {
 		}
 		enc := json.NewEncoder(mf)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(map[string]any{"districts": entries}); err != nil {
+		man := map[string]any{"districts": entries}
+		if auxFile != "" {
+			man["aux"] = auxFile
+		}
+		if err := enc.Encode(man); err != nil {
 			mf.Close()
 			return err
 		}
@@ -201,12 +219,21 @@ func encExt(p string) string {
 // collectCells gathers each cell's base (.000) plus its update files (.001…) from
 // the inputs (zip bundles, directories, and/or individual cell files), grouped by
 // cell name. First base wins on a duplicate; updates accumulate.
-func collectCells(paths []string) (map[string]baker.CellData, error) {
+func collectCells(paths []string) (map[string]baker.CellData, map[string][]byte, error) {
 	type acc struct {
 		base    []byte
 		updates map[string][]byte
 	}
-	byCell := map[string]*acc{} // keyed by cell stem (e.g. US4MD81M)
+	byCell := map[string]*acc{}  // keyed by cell stem (e.g. US4MD81M)
+	aux := map[string][]byte{}   // referenced aux files, keyed by auxKey (UPPER basename)
+	addAux := func(name string, data []byte) {
+		if !isAuxContent(name) {
+			return
+		}
+		if k := auxKey(name); aux[k] == nil {
+			aux[k] = data
+		}
+	}
 	add := func(name string, data []byte) {
 		ext := encExt(name)
 		if ext == "" {
@@ -232,7 +259,7 @@ func collectCells(paths []string) (map[string]baker.CellData, error) {
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		switch {
 		case info.IsDir():
@@ -247,23 +274,27 @@ func collectCells(paths []string) (map[string]baker.CellData, error) {
 				} else if strings.EqualFold(filepath.Ext(path), ".zip") {
 					// A directory of per-cell .zip bundles (e.g. an IENC download) — unpack
 					// each in place rather than requiring the cells be extracted first.
-					if e := addZipCells(path, add); e != nil {
+					if e := addZipCells(path, add, addAux); e != nil {
 						fmt.Fprintf(os.Stderr, "  skip zip %s: %v\n", path, e)
+					}
+				} else if isAuxContent(path) {
+					if b, e := os.ReadFile(path); e == nil {
+						addAux(path, b)
 					}
 				}
 				return nil
 			})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		case strings.EqualFold(filepath.Ext(p), ".zip"):
-			if err := addZipCells(p, add); err != nil {
-				return nil, err
+			if err := addZipCells(p, add, addAux); err != nil {
+				return nil, nil, err
 			}
 		case encExt(p) != "":
 			b, e := os.ReadFile(p)
 			if e != nil {
-				return nil, e
+				return nil, nil, e
 			}
 			add(p, b)
 		default:
@@ -278,17 +309,18 @@ func collectCells(paths []string) (map[string]baker.CellData, error) {
 		}
 		cells[stem+".000"] = baker.CellData{Base: a.base, Updates: a.updates}
 	}
-	return cells, nil
+	return cells, aux, nil
 }
 
-func addZipCells(zipPath string, add func(name string, data []byte)) error {
+func addZipCells(zipPath string, add, addAux func(name string, data []byte)) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
 	}
 	defer zr.Close()
 	for _, e := range zr.File {
-		if encExt(e.Name) == "" {
+		isCell := encExt(e.Name) != ""
+		if !isCell && !isAuxContent(e.Name) {
 			continue
 		}
 		rc, err := e.Open()
@@ -300,7 +332,11 @@ func addZipCells(zipPath string, add func(name string, data []byte)) error {
 		if err != nil {
 			return err
 		}
-		add(e.Name, data)
+		if isCell {
+			add(e.Name, data)
+		} else {
+			addAux(e.Name, data)
+		}
 	}
 	return nil
 }
