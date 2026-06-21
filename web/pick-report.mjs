@@ -284,12 +284,14 @@ export class PickReport extends HTMLElement {
     return { left: r.left, top: r.top, w: r.width, h: r.height };
   }
 
-  // Place the panel in the corner farthest from the picked point so it doesn't
-  // cover what was just tapped — unless the mariner has dragged it (then keep that).
+  // Place the panel right NEXT TO the picked point (a small gap to one side) so the
+  // report reads as attached to what was tapped — unless the mariner has dragged it
+  // (then keep that). Prefers the right of the point, flips left if it won't fit, and
+  // centres vertically on the point; _apply clamps it inside the viewport.
   _place(anchor) {
     const fr = this._frame();
     const w = this.offsetWidth || 340, ht = this.offsetHeight || 240;
-    const M = 12, botbar = 66; // leave room above the bottom tab bar
+    const M = 12, botbar = 66, GAP = 16; // leave room above the bottom tab bar
     if (this._userPos) {
       this._apply(this._userPos.left, this._userPos.top, fr, w, ht, M, botbar);
       return;
@@ -297,8 +299,9 @@ export class PickReport extends HTMLElement {
     // anchor is viewport-relative; convert to host-relative.
     const ax = anchor ? anchor.x - fr.left : fr.w / 2;
     const ay = anchor ? anchor.y - fr.top : fr.h / 2;
-    const left = ax > fr.w / 2 ? M : fr.w - w - M;     // opposite horizontal half
-    const top = ay > fr.h / 2 ? M : fr.h - ht - M - botbar; // opposite vertical half
+    let left = ax + GAP; // to the right of the point…
+    if (left + w + M > fr.w) left = ax - GAP - w; // …unless it overflows → to the left
+    const top = ay - ht / 2; // vertically centred on the point
     this._apply(left, top, fr, w, ht, M, botbar);
   }
 

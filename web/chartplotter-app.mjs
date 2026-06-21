@@ -2102,6 +2102,10 @@ export class ChartPlotterApp extends HTMLElement {
     // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
     // region and captures every chart feature inside it. Skipped while the area
     // (box-download) selector is armed (it owns pointer events).
+    // ECDIS-style crosshair cursor over the chart so it's clear the pointer is a
+    // pick point (a click runs the cursor pick / district preview). Inspect mode and
+    // the box selectors set their own cursor and restore this on exit.
+    map.getCanvas().style.cursor = "crosshair";
     let boxStart = null, boxEl = null;
     map.on("mousedown", (e) => {
       if (!this._inspectMode || this._areaCleanup || !e.originalEvent.shiftKey) return;
@@ -2163,7 +2167,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (on) this._cancelAreaSelect();
     const map = this._map;
     if (map) {
-      map.getCanvas().style.cursor = on ? "crosshair" : "";
+      map.getCanvas().style.cursor = "crosshair"; // chart default is also crosshair
       // Free SHIFT+drag for area capture (MapLibre uses it for box-zoom by default).
       if (on) map.boxZoom.disable(); else map.boxZoom.enable();
     }
@@ -2729,7 +2733,7 @@ export class ChartPlotterApp extends HTMLElement {
     const body = this.shadowRoot.getElementById("inspect-body");
     if (body) body.innerHTML = ""; // drop any feature cards so the dev tools sit at the top
     if (this._map) {
-      this._map.getCanvas().style.cursor = "";
+      this._map.getCanvas().style.cursor = "crosshair"; // back to the chart pick cursor
       const src = this._map.getSource("inspect");
       if (src) src.setData({ type: "FeatureCollection", features: [] });
       this._clearInspectFocus();
