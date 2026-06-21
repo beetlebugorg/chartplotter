@@ -75,19 +75,120 @@ func commandInteger(id, count uint32) uint32 {
 
 // -- geometry command stream -------------------------------------------------
 
+// encodePolygon encodes one (multi)polygon feature. The input is a flat list of
+// rings (exteriors and holes intermixed). Rings are classified by geometric
+// NESTING depth — how many other rings contain them — so a feature that is really
+// several disjoint polygons (e.g. a dredged area split into separate basins, or a
+// depth area with island holes) encodes as a proper MVT multipolygon rather than
+// forcing only ring 0 to be the exterior and punching every other ring out as a
+// hole (which left no-data slivers where a second exterior was wrongly treated as
+// a hole). Even depth ⇒ exterior (starts a new polygon, positive winding); odd
+// depth ⇒ hole (negative winding). Exteriors are emitted immediately followed by
+// their child holes so a decoder attaches each hole to the right exterior.
 func encodePolygon(rings [][]IPoint) []uint32 {
-	var out []uint32
-	cursor := IPoint{X: 0, Y: 0}
-	for ringIdx, raw := range rings {
+	type pring struct {
+		pts                    []IPoint
+		minX, minY, maxX, maxY int32
+		depth                  int
+	}
+	ps := make([]pring, 0, len(rings))
+	for _, raw := range rings {
 		ring := dropClosingDuplicate(raw)
 		if len(ring) < 3 {
 			continue
 		}
-		wantPositive := ringIdx == 0
-		reversed := (signedArea(ring) >= 0) != wantPositive
-		out = emitRing(out, &cursor, ring, reversed, true)
+		pr := pring{pts: ring, minX: ring[0].X, minY: ring[0].Y, maxX: ring[0].X, maxY: ring[0].Y}
+		for _, p := range ring {
+			if p.X < pr.minX {
+				pr.minX = p.X
+			}
+			if p.X > pr.maxX {
+				pr.maxX = p.X
+			}
+			if p.Y < pr.minY {
+				pr.minY = p.Y
+			}
+			if p.Y > pr.maxY {
+				pr.maxY = p.Y
+			}
+		}
+		ps = append(ps, pr)
+	}
+	if len(ps) == 0 {
+		return nil
+	}
+
+	// Nesting depth: count rings that contain this ring's first vertex. Distinct
+	// rings never share a vertex, so vertex[0] is strictly inside-or-outside every
+	// other ring (no on-boundary ambiguity). Bounding boxes prune most pairs.
+	contains := func(j int, p IPoint) bool {
+		b := &ps[j]
+		if p.X < b.minX || p.X > b.maxX || p.Y < b.minY || p.Y > b.maxY {
+			return false
+		}
+		return pointInRingI(p, b.pts)
+	}
+	for i := range ps {
+		d := 0
+		v := ps[i].pts[0]
+		for j := range ps {
+			if i != j && contains(j, v) {
+				d++
+			}
+		}
+		ps[i].depth = d
+	}
+
+	// Emit each exterior (even depth) followed by the holes it directly contains
+	// (depth exactly one greater and geometrically inside it).
+	var out []uint32
+	cursor := IPoint{X: 0, Y: 0}
+	emit := func(pr *pring) {
+		wantPositive := pr.depth%2 == 0
+		reversed := (signedArea(pr.pts) >= 0) != wantPositive
+		out = emitRing(out, &cursor, pr.pts, reversed, true)
+	}
+	done := make([]bool, len(ps))
+	for i := range ps {
+		if done[i] || ps[i].depth%2 != 0 {
+			continue
+		}
+		done[i] = true
+		emit(&ps[i])
+		for j := range ps {
+			if done[j] || ps[j].depth != ps[i].depth+1 {
+				continue
+			}
+			if contains(i, ps[j].pts[0]) {
+				done[j] = true
+				emit(&ps[j])
+			}
+		}
+	}
+	// Safety net: emit anything not yet placed (malformed nesting) as its own ring.
+	for i := range ps {
+		if !done[i] {
+			emit(&ps[i])
+		}
 	}
 	return out
+}
+
+// pointInRingI reports whether p is inside the polygon ring (even-odd rule).
+func pointInRingI(p IPoint, ring []IPoint) bool {
+	in := false
+	j := len(ring) - 1
+	for i := range ring {
+		pi, pj := ring[i], ring[j]
+		if (pi.Y > p.Y) != (pj.Y > p.Y) {
+			xCross := float64(pi.X) + float64(pj.X-pi.X)*float64(p.Y-pi.Y)/float64(pj.Y-pi.Y)
+			if float64(p.X) < xCross {
+				in = !in
+			}
+		}
+		j = i
+	}
+	return in
 }
 
 func encodeLines(lines [][]IPoint) []uint32 {
