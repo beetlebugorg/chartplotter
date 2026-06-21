@@ -1933,7 +1933,9 @@ export class ChartPlotterApp extends HTMLElement {
     }
 
     await this._renderInstalledSets(); // pick up the new pack + refresh installed state
-    if (this._installedSets && this._installedSets.has(set)) this._frameCells(this._districtCellNames(cg));
+    // Deliberately DON'T frame the map to the new pack — yanking the camera when a
+    // background download finishes is distracting and fights wherever the user has
+    // navigated. They can preview a pack on the map via _showDistrictOnMap (a tap).
     this._task = null;
     this._setProgress(null);
     this._refreshCellSel();
