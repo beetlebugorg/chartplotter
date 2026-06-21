@@ -961,12 +961,6 @@ export class ChartPlotterApp extends HTMLElement {
           this.shadowRoot.getElementById("search-tab").classList.remove("on");
         }
       }
-      // Close the notification detail panel on an outside click (the pill's own
-      // handler stopPropagation's, so this only fires for clicks elsewhere).
-      if (this._notifOpen) {
-        const notif = this.shadowRoot.getElementById("notif");
-        if (notif && !e.composedPath().some((n) => n === notif)) this._toggleNotif(false);
-      }
     });
   }
 
@@ -989,7 +983,7 @@ export class ChartPlotterApp extends HTMLElement {
     let over = "";
     if (this._coverScale && dispDenom < this._coverScale) {
       const f = this._coverScale / dispDenom;
-      if (f >= 1.15) over = `<span class="hud-sep">·</span><span class="hud-over" title="Chart data magnified beyond its compilation scale — detail is enlarged and not to be relied on">overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)}</span>`;
+      if (f >= 1.15) over = `<span class="hud-over" title="Chart data magnified beyond its compilation scale — detail is enlarged and not to be relied on"><svg class="hud-over-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)}</span>`;
     }
     // Fixed-width fields (+ tabular-nums in CSS) so scale/zoom don't reflow the
     // bar as their digit counts change.
@@ -3451,45 +3445,34 @@ export class ChartPlotterApp extends HTMLElement {
   // drop-down). The bottom card stays a static nav readout.
   _setProgress(p) { this._setNotification(p); }
 
-  // Top-centre notification pill: visible only while a job is active (or briefly
-  // on completion/error). It "lights up" (pulsing glow + spinner) to signal work
-  // without blocking the UI, and is clickable to drop a panel with the full
-  // label · detail · percentage. Driven by the same job updates as the progress.
+  // Job progress (download / import / bake) lives in a row ABOVE the live nav
+  // readout inside the bottom status card — one box, no separate pill or pop-out.
+  // `p` carries { label, pill, sub, frac, error }; null clears the row. The label
+  // and detail are packed onto one line so all the context (region · cell · count
+  // · size) is visible at a glance; the bar shows the fraction (indeterminate when
+  // unknown). Spacing is handled by the card's flex gap + the divider rule.
   _setNotification(p) {
     const r = this.shadowRoot;
-    const el = r.getElementById("notif"); if (!el) return;
+    const box = r.getElementById("databox");
+    const prog = r.getElementById("db-prog");
+    if (!box || !prog) return;
     if (!p) {
-      el.hidden = true; el.classList.remove("busy", "error", "open");
-      this._notifOpen = false;
-      const pop = r.getElementById("notif-pop"); if (pop) pop.hidden = true;
+      prog.hidden = true;
+      prog.classList.remove("busy", "error");
       return;
     }
+    box.hidden = false; // a job can finish before the map readout first paints
     const done = p.frac === 1 || !!p.error;
-    el.hidden = false;
-    el.classList.toggle("busy", !done);   // pulsing glow + spinner while working
-    el.classList.toggle("error", !!p.error);
-    r.getElementById("notif-label").textContent = p.pill || p.label || "";
-    // The drop-down only exists when there's genuine detail beyond the pill label
-    // (e.g. the cell + count + size of a download). Otherwise the pill is just a
-    // non-clickable indicator — no chevron, no panel.
-    const hasDetail = !!(p.sub && p.sub.trim());
-    el.classList.toggle("has-detail", hasDetail);
-    if (hasDetail) {
-      r.getElementById("notif-pop-title").textContent = p.label || p.pill || "";
-      r.getElementById("notif-pop-sub").textContent = p.sub;
-      r.getElementById("notif-pop-pct").textContent = p.frac != null ? `${Math.round(p.frac * 100)}%` : "";
-    } else if (this._notifOpen) {
-      this._toggleNotif(false); // detail vanished while open → collapse
-    }
-  }
-
-  _toggleNotif(force) {
-    const r = this.shadowRoot;
-    const el = r.getElementById("notif"), pop = r.getElementById("notif-pop");
-    if (!el || !pop || el.hidden || !el.classList.contains("has-detail")) return;
-    this._notifOpen = force != null ? force : !this._notifOpen;
-    pop.hidden = !this._notifOpen;
-    el.classList.toggle("open", this._notifOpen);
+    prog.hidden = false;
+    prog.classList.toggle("busy", !done); // spinner while working
+    prog.classList.toggle("error", !!p.error);
+    const detail = p.sub && p.sub.trim() ? p.sub.trim() : "";
+    const label = p.label || p.pill || "";
+    r.getElementById("db-prog-label").textContent = detail ? `${label} · ${detail}` : label;
+    r.getElementById("db-prog-pct").textContent = p.frac != null ? `${Math.round(p.frac * 100)}%` : "";
+    const fill = r.getElementById("db-prog-fill");
+    fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
+    fill.classList.toggle("indet", p.frac == null && !done); // sweeping bar when no fraction
   }
 
   // Frame the map to the combined extent of the given catalog cells.
@@ -3953,17 +3936,19 @@ export class ChartPlotterApp extends HTMLElement {
            buttons, no transient status (activity lives in the notification pill). */
         #databox { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 14px);
           transform:translateX(-50%); z-index:6; box-sizing:border-box;
-          display:flex; flex-direction:column; align-items:center; gap:5px; padding:8px 14px;
-          min-width:240px; max-width:calc(100vw - 24px);
+          display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px 14px;
+          width:min(94vw, 420px);
           background:color-mix(in srgb, var(--ui-surface) 92%, transparent); border:1px solid var(--ui-border);
           border-radius:13px; backdrop-filter:blur(7px);
           box-shadow:0 4px 18px rgba(0,0,0,.18);
           font:11px system-ui,sans-serif; color:var(--ui-text); }
         #databox[hidden] { display:none; }
         /* Live band·scale·zoom·position readout — fixed-width fields + tabular
-           figures so panning/zooming never reflows the card. */
-        .db-readout { display:flex; align-items:center; }
-        .db-readout .hud-main { display:flex; align-items:center; gap:6px;
+           figures so panning/zooming never reflows the card. The card width is
+           FIXED (above) so it never grows/shrinks as the message changes; the
+           overscale chip wraps to its own centred line rather than widening it. */
+        .db-readout { display:flex; align-items:center; width:100%; justify-content:center; }
+        .db-readout .hud-main { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:6px; row-gap:5px;
           font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .db-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:1px; }
         .db-readout .hud-band { display:inline-block; width:56px; }
@@ -3971,8 +3956,12 @@ export class ChartPlotterApp extends HTMLElement {
         .db-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
         .db-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
         .db-readout .hud-sep { color:var(--ui-text-faint); }
-        /* Overscale indication (S-52 §10.1.10.1) — amber, like the SCLBR colour. */
-        .db-readout .hud-over { color:#e8820c; font-weight:700; white-space:nowrap; }
+        /* Overscale indication (S-52 §10.1.10.1) — an amber warning chip so the
+           "data magnified beyond survey scale" caution is unmissable in the card. */
+        .db-readout .hud-over { display:inline-flex; align-items:center; gap:4px; margin-left:8px;
+          padding:2px 7px 2px 5px; border-radius:8px; color:#fff; background:#e8820c; font-weight:700; white-space:nowrap;
+          box-shadow:0 1px 4px rgba(232,130,12,.4); }
+        .db-readout .hud-over-ico { width:13px; height:13px; flex:none; }
         /* Cell-list popup above a band pill (hover on desktop; tap to pin on touch). */
         .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
           background:var(--ui-surface); border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
@@ -4105,44 +4094,29 @@ export class ChartPlotterApp extends HTMLElement {
         /* Top-centre notification pill — non-blocking "work happening" indicator.
            Hidden unless a job is active; "lights up" (pulsing ring + spinner) while
            busy; click drops a detail panel. */
-        #notif { position:absolute; top:calc(12px + env(safe-area-inset-top,0px)); left:50%; transform:translateX(-50%); z-index:7; }
-        #notif[hidden] { display:none; }
-        /* Fixed width so the pill never resizes as the message changes; the label
-           centres and truncates within it. */
-        .notif-btn { display:flex; align-items:center; gap:8px; width:min(88vw, 320px); box-sizing:border-box; cursor:pointer;
-          padding:8px 14px; border-radius:20px; font:600 12px/1.1 system-ui,sans-serif; color:var(--ui-text);
-          background:color-mix(in srgb, var(--ui-surface) 92%, transparent); border:1px solid var(--ui-border);
-          box-shadow:0 2px 10px rgba(0,0,0,.18); backdrop-filter:blur(6px); transition:box-shadow .2s, border-color .2s; }
-        .notif-btn:hover { border-color:var(--ui-accent); }
-        .notif-label { flex:1; min-width:0; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        /* Chevron + clickability only when there's a detail panel to open. */
-        .notif-chev { width:15px; height:15px; flex:none; color:var(--ui-text-faint); transition:transform .15s; display:none; }
-        #notif.has-detail .notif-chev { display:block; }
-        #notif:not(.has-detail) .notif-btn { cursor:default; }
-        #notif:not(.has-detail) .notif-btn:hover { border-color:var(--ui-border); }
-        #notif.open .notif-chev { transform:rotate(180deg); }
-        /* "Lights up" while busy: an accent ring that gently pulses + a spinner. */
-        #notif.busy .notif-btn { border-color:var(--ui-accent); animation:notif-pulse 1.6s ease-in-out infinite; }
-        #notif.error .notif-btn { border-color:#c0392b; color:#c0392b; box-shadow:0 2px 10px rgba(192,57,43,.25); }
-        @keyframes notif-pulse {
-          0%,100% { box-shadow:0 2px 10px rgba(0,0,0,.18), 0 0 0 0 color-mix(in srgb, var(--ui-accent) 40%, transparent); }
-          50% { box-shadow:0 2px 10px rgba(0,0,0,.18), 0 0 0 5px color-mix(in srgb, var(--ui-accent) 0%, transparent); }
-        }
-        .notif-spin { width:13px; height:13px; flex:none; border-radius:50%; display:none;
+        /* Job-progress row inside the bottom status card — sits ABOVE the nav
+           readout, separated by a hairline divider. One width with the card so the
+           label can run full-width; the percentage is pinned right. */
+        .db-prog { width:100%; box-sizing:border-box; display:flex; flex-direction:column; gap:6px;
+          padding-bottom:7px; margin-bottom:1px; border-bottom:1px solid var(--ui-border); }
+        .db-prog[hidden] { display:none; }
+        .db-prog-head { display:flex; align-items:center; gap:8px; font:600 12px/1.2 system-ui,sans-serif; color:var(--ui-text); }
+        .db-prog-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .db-prog-pct { flex:none; font-weight:700; color:var(--ui-accent); font-variant-numeric:tabular-nums; }
+        .db-prog.error .db-prog-pct { color:#c0392b; }
+        .db-prog.error .db-prog-label { color:#c0392b; }
+        /* Spinner shows only while actively working (not on the done/error frame). */
+        .db-prog-spin { width:13px; height:13px; flex:none; border-radius:50%; display:none;
           border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
           animation:dlspin .8s linear infinite; }
-        #notif.busy .notif-spin { display:inline-block; }
-        @media (prefers-reduced-motion: reduce) { #notif.busy .notif-btn { animation:none; } .notif-spin { animation-duration:2s; } }
-        /* Detail panel dropping from the pill. */
-        .notif-pop { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); min-width:220px; max-width:min(86vw, 360px);
-          background:var(--ui-surface); border:1px solid var(--ui-border); border-radius:12px; padding:12px 14px;
-          box-shadow:0 12px 32px rgba(0,0,0,.26); }
-        .notif-pop[hidden] { display:none; }
-        .notif-pop-title { font:600 13px/1.3 system-ui,sans-serif; color:var(--ui-text); }
-        .notif-pop-sub { margin-top:5px; font:12px/1.4 system-ui,sans-serif; color:var(--ui-text-dim); white-space:normal; word-break:break-word; }
-        .notif-pop-sub[hidden] { display:none; }
-        .notif-pop-pct { margin-top:8px; font:700 12px/1 system-ui,sans-serif; color:var(--ui-accent); font-variant-numeric:tabular-nums; }
-        #notif.error .notif-pop-pct { color:#c0392b; }
+        .db-prog.busy .db-prog-spin { display:inline-block; }
+        .db-prog-track { position:relative; width:100%; height:5px; border-radius:3px; overflow:hidden; background:var(--ui-surface-2); }
+        .db-prog-fill { position:absolute; left:0; top:0; bottom:0; width:0; border-radius:3px; background:var(--ui-accent); transition:width .25s ease; }
+        .db-prog.error .db-prog-fill { background:#c0392b; }
+        /* Indeterminate (no known fraction): a sweeping segment instead of a fill. */
+        .db-prog-fill.indet { width:35% !important; animation:db-sweep 1.1s ease-in-out infinite; }
+        @keyframes db-sweep { 0% { left:-35%; } 100% { left:100%; } }
+        @media (prefers-reduced-motion: reduce) { .db-prog-spin { animation-duration:2s; } .db-prog-fill.indet { animation:none; left:0; width:100% !important; } }
         progress { width:100%; height:8px; -webkit-appearance:none; appearance:none; border:none; border-radius:5px; overflow:hidden; background:var(--ui-surface-2); }
         progress::-webkit-progress-bar { background:var(--ui-surface-2); border-radius:5px; }
         progress::-webkit-progress-value { background:var(--ui-accent); border-radius:5px; }
@@ -4233,25 +4207,19 @@ export class ChartPlotterApp extends HTMLElement {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         </button>
       </div>
-      <!-- Top-centre notification pill — hidden unless a job is running; lights up
-           (pulse + spinner) to signal background work without blocking the UI, and
-           drops a detail panel when clicked. Driven by _setNotification. -->
-      <div id="notif" hidden>
-        <button id="notif-btn" class="notif-btn" type="button" title="Show details">
-          <span class="notif-spin"></span>
-          <span id="notif-label" class="notif-label"></span>
-          <svg class="notif-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-        </button>
-        <div id="notif-pop" class="notif-pop" hidden>
-          <div id="notif-pop-title" class="notif-pop-title"></div>
-          <div id="notif-pop-sub" class="notif-pop-sub"></div>
-          <div id="notif-pop-pct" class="notif-pop-pct"></div>
-        </div>
-      </div>
-      <!-- Bottom-centre data card: ONLY the live nav readout (band · scale · zoom ·
-           position). All activity/progress is signalled by the top notification
-           pill — nothing transient lives here. See _updateHud. -->
+      <!-- Bottom-centre status card — the SINGLE surface for both the live nav
+           readout (band · scale · zoom · position · overscale, always shown) and
+           job progress (download / import / bake), which grows a row above the
+           readout while a job runs. Driven by _updateHud + _setNotification. -->
       <div id="databox" hidden>
+        <div id="db-prog" class="db-prog" hidden>
+          <div class="db-prog-head">
+            <span class="db-prog-spin"></span>
+            <span id="db-prog-label" class="db-prog-label"></span>
+            <span id="db-prog-pct" class="db-prog-pct"></span>
+          </div>
+          <div class="db-prog-track"><span id="db-prog-fill" class="db-prog-fill"></span></div>
+        </div>
         <span id="cov-readout" class="db-readout"></span>
       </div>
       <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
@@ -4323,7 +4291,6 @@ export class ChartPlotterApp extends HTMLElement {
       const agree = root.getElementById("agree");
       if (agree && !agree.hidden) { this._resolveAgreement(false); return; } // cancel
       if (this._cellPopOpen) { this._toggleCellStatusPopup(); return; }
-      if (this._notifOpen) { this._toggleNotif(false); return; }
       const search = root.getElementById("search");
       if (search && !search.hidden) { search.hidden = true; root.getElementById("search-tab").classList.remove("on"); return; }
       if (this._drawerOpen()) { this.closeDrawer(); return; }
@@ -4347,9 +4314,6 @@ export class ChartPlotterApp extends HTMLElement {
       else if (e.key === "Escape") { si.value = ""; closeSearch(); }
     };
     si.onfocus = () => { if (si.value.trim().length >= 2) this.doSearch(si.value); };
-
-    // Top notification pill: click to drop its detail panel.
-    $("notif-btn").onclick = (e) => { e.stopPropagation(); this._toggleNotif(); };
 
     this.renderSettings();
   }
