@@ -1215,17 +1215,34 @@ export class ChartPlotterApp extends HTMLElement {
   // On boot, re-attach to a job that's still running on the server (refresh-
   // resume — no client-side job persistence). A finished/idle task is ignored so
   // a stale "done" never shows a phantom pill.
+  // Refresh-resume: a bake / download / rebuild may still be running server-side
+  // after a page refresh (we no longer hold the job id). Ask the server what's
+  // running and, if anything is, RE-ATTACH — stream its progress back into the
+  // notification pill and refresh the installed charts when it finishes.
   async _reattachTask() {
-    try {
-      const r = await fetch(`api/tasks?t=${Date.now()}`);
-      const j = await r.json();
-      if (j && j.task != null && j.status === "running") {
-        this._task = j;
-        this._taskMeta = { name: null, verb: "Downloading" }; // we didn't start it → generic label
-        this._renderTaskUI();
-        this._startPolling();
-      }
-    } catch { /* no server / transient — nothing to re-attach */ }
+    let j = null;
+    try { j = await fetch(`${this._assets}api/import/status?t=${Date.now()}`).then((r) => (r.ok ? r.json() : null)); }
+    catch { return; } // no server / transient
+    if (!j || j.state !== "running" || !j.id) return;
+    this._task = { kind: "download", status: "running" };
+    const name = this._reattachName(j.set);
+    this._setProgress({ label: "Working", pill: `Working on ${name}`, sub: "", frac: j.percent ? j.percent / 100 : null });
+    this._pollImport(j.id, (p) => this._setProgress(p), name).catch(() => {}).then(async () => {
+      this._task = null;
+      this._setProgress(null);
+      try { await this._renderInstalledSets(); } catch (e) { /* ignore */ }
+      if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } }
+      if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    });
+  }
+
+  // Friendly region/river name from a (band-)set name, for the re-attached job label.
+  _reattachName(set) {
+    const m = /^noaa-d(\d+)/.exec(set || "");
+    if (m) { const d = DISTRICTS.find((x) => x.cg === +m[1]); return d ? d.region : `District ${m[1]}`; }
+    const ie = /^ienc-(.+)/.exec(set || "");
+    if (ie) return ie[1].replace(/-(overview|general|coastal|approach|harbor|berthing)$/, "");
+    return set || "charts";
   }
 
   _startPolling() {

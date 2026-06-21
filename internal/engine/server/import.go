@@ -93,6 +93,27 @@ func (j *importJobs) snapshot(id string) (importJob, bool) {
 	return *job, true
 }
 
+// running returns a copy of the most-recently-started still-running job, if any.
+// The client uses this to RE-ATTACH after a page refresh, when it no longer holds
+// the job id but a bake/download may still be in flight.
+func (j *importJobs) running() (importJob, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var best *importJob
+	for _, job := range j.m {
+		if job.State != "running" {
+			continue
+		}
+		if best == nil || job.Started > best.Started || (job.Started == best.Started && job.ID > best.ID) {
+			best = job
+		}
+	}
+	if best == nil {
+		return importJob{}, false
+	}
+	return *best, true
+}
+
 // handleImport routes the import endpoints (already past the /api host check).
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/import/status" {
@@ -621,7 +642,19 @@ func (j importJob) statusJSON() string {
 
 // importStatus returns a job's state as JSON (one-shot poll).
 func (s *Server) importStatus(w http.ResponseWriter, r *http.Request) {
-	job, ok := s.imports.snapshot(r.URL.Query().Get("job"))
+	id := r.URL.Query().Get("job")
+	if id == "" {
+		// No id → "what's running right now?" (a refresh re-attach query). Report the
+		// current running job so the client can resume tracking it, or idle.
+		w.Header().Set("Content-Type", jsonCT)
+		if job, ok := s.imports.running(); ok {
+			io.WriteString(w, job.statusJSON())
+		} else {
+			io.WriteString(w, `{"ok":true,"state":"idle"}`)
+		}
+		return
+	}
+	job, ok := s.imports.snapshot(id)
 	if !ok {
 		apiErr(w, http.StatusNotFound, "unknown job")
 		return
