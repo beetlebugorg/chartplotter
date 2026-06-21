@@ -112,21 +112,6 @@ const DISTRICTS = [
   { cg: 17, name: "17th District", region: "Alaska", blurb: "All of Alaska" },
 ];
 
-// Locator-map projection: a fixed equirectangular window over the US (Alaska west
-// through Puerto Rico east, Hawaii south through northern Alaska), into a viewBox.
-// Longitudes east of the antimeridian (Alaska's ~172°E) are shifted to continuous
-// negative so AK doesn't wrap. Used by the per-row mini coastline map.
-const LOC_W = -185, LOC_S = 15, LOC_E = -64, LOC_N = 72;
-const LOC_VW = 1000, LOC_VH = Math.round((LOC_VW * (LOC_N - LOC_S)) / (LOC_E - LOC_W));
-function locProject(pt) {
-  if (!pt || pt.length < 2) return null;
-  let lon = pt[0]; const lat = pt[1];
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
-  if (lon > 0) lon -= 360;
-  const x = ((lon - LOC_W) / (LOC_E - LOC_W)) * LOC_VW;
-  const y = ((LOC_N - lat) / (LOC_N - LOC_S)) * LOC_VH;
-  return { x: Math.round(x), y: Math.round(y), in: lon >= LOC_W && lon <= LOC_E && lat >= LOC_S && lat <= LOC_N };
-}
 
 // Escape text for safe innerHTML insertion (inspector panel renders feature
 // properties straight from the tiles).
@@ -1340,22 +1325,15 @@ export class ChartPlotterApp extends HTMLElement {
         ${this._renderPacksCol()}
         ${this._renderDetailCol()}
       </div>
-      <details class="import-more">
-        <summary>Import from a file</summary>
-        <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
-        <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-        <div id="import-log" class="muted"></div>
-        <div id="archive-list"></div>
-      </details>
       ${this._renderDataFreshness()}`;
     this._wirePackSearch();
     this._wirePacks();
     this._wireImport();
-    // Build the coastline locator once, then re-render so the rows upgrade from the
-    // abstract box maps to the real US silhouette.
-    if (this._locator === undefined && !this._locatorPromise) {
-      this._buildLocator().then(() => { if (this._section === "charts" && this._drawerOpen()) this.renderCharts(); });
-    }
+    // A selected NOAA pack gets a real OSM preview map (built fresh each render) so
+    // its coverage footprints show over real geography.
+    const m = this._selPack && /^noaa-d(\d+)$/.exec(this._selPack);
+    if (m) this._buildPreviewMap(+m[1]);
+    else if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
   }
 
   // -- chart packs (Coast Guard districts) ---------------------------------
@@ -1374,15 +1352,13 @@ export class ChartPlotterApp extends HTMLElement {
   // Pane 1 providers → pane 2 that provider's packs → pane 3 the selected pack's
   // detail (map + download/remove). Selection state: _selProvider, _selPack.
 
-  // The providers shown in pane 1. NOAA + IENC always; Imported only if present.
+  // The providers shown in pane 1.
   _providers() {
-    const sets = this._installedSets || new Set();
-    const out = [
+    return [
       { id: "noaa", name: "NOAA", sub: "Coast Guard districts" },
       { id: "ienc", name: "Inland ENC", sub: "USACE waterways" },
+      { id: "user", name: "User Charts", sub: "Import your own" },
     ];
-    if ([...sets].some((n) => !/^(noaa-d\d+|ienc-)/.test(n))) out.push({ id: "import", name: "Imported", sub: "Your files" });
-    return out;
   }
 
   _providerName(id) { const p = this._providers().find((x) => x.id === id); return p ? p.name : id; }
@@ -1397,36 +1373,82 @@ export class ChartPlotterApp extends HTMLElement {
         return { key: "noaa-d" + d.cg, cg: d.cg, title: d.region, sub: `${total.toLocaleString()} charts · ~${Math.round(bytes / 1e6)} MB`, installed: sets.has("noaa-d" + d.cg) };
       }).filter(Boolean);
     }
-    if (id === "ienc") return [...sets].filter((n) => /^ienc-/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: n, installed: true }));
-    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: n, installed: true }));
+    if (id === "ienc") return [...sets].filter((n) => /^ienc-/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: "installed", installed: true }));
+    // user: locally-imported packs (anything not NOAA/IENC).
+    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, title: this._setLabel(n), sub: "installed", installed: true }));
   }
 
-  // Pane 1: providers.
+  // Pane 1: providers. With an active search, providers that contain a match are
+  // highlighted and the rest dimmed.
   _renderProvidersCol() {
     const sel = this._selProvider || "noaa";
-    const rows = this._providers().map((p) =>
-      `<div class="m-row${sel === p.id ? " sel" : ""}" data-prov="${p.id}" role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(p.name)}</span><span class="m-sub">${esc(p.sub)}</span></span><span class="m-chev">›</span></div>`).join("");
+    const hits = this._searchHits();
+    const rows = this._providers().map((p) => {
+      let cls = sel === p.id ? " sel" : "";
+      if (hits) cls += this._providerHasMatch(p.id, hits) ? " match" : " dim";
+      return `<div class="m-row${cls}" data-prov="${p.id}" role="button" tabindex="0">
+        <span class="m-info"><span class="m-name">${esc(p.name)}</span><span class="m-sub">${esc(p.sub)}</span></span><span class="m-chev">›</span></div>`;
+    }).join("");
     return `<div class="mcol"><div class="mcol-h">Source</div>${rows}</div>`;
+  }
+
+  // Does a provider contain a search match? NOAA → any matched district; others →
+  // a pack whose label matches the raw query.
+  _providerHasMatch(id, hits) {
+    if (id === "noaa") return hits.size > 0;
+    const q = (this._cellQuery || "").trim().toLowerCase();
+    return this._providerPacks(id).some((pk) => pk.title.toLowerCase().includes(q) || pk.key.toLowerCase().includes(q));
   }
 
   // Pane 2: the selected provider's packs.
   _renderPacksCol() {
     const prov = this._selProvider || "noaa";
     const packs = this._providerPacks(prov);
+    const hits = this._searchHits();
+    const q = (this._cellQuery || "").trim().toLowerCase();
     let rows;
-    if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs yet." : "Nothing installed."}</div>`;
-    else rows = packs.map((pk) =>
-      `<div class="m-row${this._selPack === pk.key ? " sel" : ""}${pk.installed ? " on" : ""}" data-pack="${esc(pk.key)}"${pk.cg ? ` data-cg="${pk.cg}"` : ""} role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span>
-        ${pk.installed ? '<span class="m-tick" title="Installed">✓</span>' : '<span class="m-chev">›</span>'}</div>`).join("");
-    return `<div class="mcol"><div class="mcol-h">${esc(this._providerName(prov))}</div>${rows}</div>`;
+    if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : `<div class="m-empty">No imported charts yet — open this to add some.</div>`;
+    else if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs yet." : "Nothing installed."}</div>`;
+    else rows = packs.map((pk) => {
+      let cls = (this._selPack === pk.key ? " sel" : "") + (pk.installed ? " on" : "");
+      let sub = pk.sub;
+      if (hits) {
+        const hit = pk.cg != null ? (hits.has(pk.cg) ? hits.get(pk.cg) : undefined) : (pk.title.toLowerCase().includes(q) ? null : undefined);
+        if (hit === undefined) cls += " dim";
+        else { cls += " match"; if (hit) sub = `matches “${esc(hit.l || hit.n)}”`; }
+      }
+      // Installed → a clear "Installed" badge; otherwise nothing (the row opens the
+      // detail where you download). No chevron/checkbox — they read as drill/toggle.
+      const badge = pk.installed ? '<span class="m-badge on">Installed</span>' : "";
+      return `<div class="m-row${cls}" data-pack="${esc(pk.key)}"${pk.cg ? ` data-cg="${pk.cg}"` : ""} role="button" tabindex="0">
+        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${sub}</span></span>${badge}</div>`;
+    }).join("");
+    return `<div class="mcol">${this._packsHeader(prov)}${rows}</div>`;
+  }
+
+  // A user-imported pack row.
+  _userPackRow(pk) {
+    return `<div class="m-row on${this._selPack === pk.key ? " sel" : ""}" data-pack="${esc(pk.key)}" role="button" tabindex="0">
+      <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span><span class="m-badge on">Installed</span></div>`;
+  }
+
+  // Pane-2 header: the provider's name + a one-line description and when its source
+  // catalogue was last refreshed.
+  _packsHeader(prov) {
+    let line = "";
+    if (prov === "noaa") line = `U.S. Coast Guard districts${this._catalogDate ? ` · catalogue ${fmtIssue(this._catalogDate)}` : ""} · ${this._catalog.length.toLocaleString()} charts`;
+    else if (prov === "ienc") line = "USACE inland waterway ENC";
+    else line = "Charts you've imported from a file";
+    return `<div class="mcol-head"><div class="mcol-h">${esc(this._providerName(prov))}</div><div class="mcol-meta">${esc(line)}</div></div>`;
   }
 
   // Pane 3: the selected pack's detail — map preview + download/remove.
   _renderDetailCol() {
     const key = this._selPack;
-    if (!key) return `<div class="mcol mcol-detail"><div class="m-empty">Select a chart pack.</div></div>`;
+    if (!key) {
+      if ((this._selProvider || "noaa") === "user") return this._renderImportDetail();
+      return `<div class="mcol mcol-detail"><div class="m-empty">Select a chart pack.</div></div>`;
+    }
     const busy = this._taskRunning();
     const installed = this._installedSets && this._installedSets.has(key);
     const m = /^noaa-d(\d+)$/.exec(key);
@@ -1437,11 +1459,12 @@ export class ChartPlotterApp extends HTMLElement {
       const act = installed
         ? `<button class="pk-btn ghost" data-uninstall="${+m[1]}"${busy ? " disabled" : ""}>Remove</button>`
         : `<button class="pk-btn" data-download="${+m[1]}"${busy ? " disabled" : ""}>⬇ Download · ~${mb} MB</button>`;
-      return `<div class="mcol mcol-detail">${this._renderMapPane()}
+      return `<div class="mcol mcol-detail">
+        <div id="preview-map" class="prev-map"></div>
         <div class="m-detail-body">
           <div class="m-detail-title">${esc(d ? d.region : key)}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
           <div class="m-detail-sub">${d ? esc(d.name) + " · " + esc(d.blurb) : ""}</div>
-          <div class="m-detail-meta">${total.toLocaleString()} charts · ~${mb} MB</div>
+          <div class="m-detail-meta">${total.toLocaleString()} charts · ~${mb} MB · outlined area below is the coverage</div>
           <div class="m-detail-act">${act}</div>
         </div></div>`;
     }
@@ -1452,95 +1475,101 @@ export class ChartPlotterApp extends HTMLElement {
     </div></div>`;
   }
 
-  // Locator-map geometry (built once): a simplified US land silhouette from the
-  // shipped GSHHG coastline, projected equirectangular into LOC_VW×LOC_VH, plus a
-  // helper to project lon/lat. Returns {land} where land is an SVG path string, or
-  // null on failure (the row falls back to the abstract box locator).
-  async _buildLocator() {
-    if (this._locator !== undefined) return this._locator;
-    if (!this._locatorPromise) {
-      this._locatorPromise = (async () => {
-        try {
-          const gj = await fetch(`${this._assets}basemap/coastline.geojson`).then((r) => (r.ok ? r.json() : null));
-          if (!gj || !Array.isArray(gj.features)) return null;
-          let land = "";
-          for (const f of gj.features) {
-            const g = f.geometry; if (!g) continue;
-            const polys = g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
-            for (const poly of polys) {
-              const ring = poly[0]; if (!ring || ring.length < 12) continue;
-              let inWin = false;
-              for (let i = 0; i < ring.length; i += 5) { const p = locProject(ring[i]); if (p && p.in) { inWin = true; break; } }
-              if (!inWin) continue;
-              let d = "";
-              for (let i = 0; i < ring.length; i += 3) { const p = locProject(ring[i]); if (p) d += (d ? "L" : "M") + p.x + " " + p.y; }
-              if (d) land += d + "Z";
-            }
-          }
-          return land ? { land } : null;
-        } catch (e) { return null; }
-      })();
-    }
-    this._locator = await this._locatorPromise;
-    return this._locator;
+  // The User-Charts detail: the import drop zone (baked server-side into the
+  // "import" pack). Shown when the User Charts provider is open with no pack picked.
+  _renderImportDetail() {
+    return `<div class="mcol mcol-detail"><div class="m-detail-body">
+      <div class="m-detail-title">Import your charts</div>
+      <div class="m-detail-sub">Add ENC you already have — a NOAA/IENC exchange-set <code>.zip</code>, individual <code>.000</code> cells, or a baked <code>.pmtiles</code>. They're baked on the server and kept under User Charts.</div>
+      <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:8px">Choose files…</button></div>
+      <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
+      <div id="import-log" class="muted"></div>
+      <div id="archive-list"></div>
+    </div></div>`;
   }
 
-  // Each district's REAL bounding box (lon/lat), unioned from its catalog cells
-  // (skipping antimeridian-wrapping cells so Alaska stays sane). Cached.
-  _districtBBoxes() {
-    if (this._dBBox) return this._dBBox;
-    const m = new Map();
+  // The coverage GeoJSON for a district: one polygon per catalog cell (its bbox),
+  // so the preview map shows the ACTUAL covered area — every chart's footprint — not
+  // just one big box. Returns {fc, bounds:[w,s,e,n]} (bounds skip wrapped cells).
+  _districtCoverage(cg) {
+    const feats = [];
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
     for (const c of this._catalog) {
-      if (!Array.isArray(c.bb) || c.bb.length !== 4 || typeof c.cg !== "number") continue;
-      let [w, s, e, n] = c.bb;
-      if (w > 0) w -= 360; if (e > 0) e -= 360; // continuous negative lon (Alaska)
-      if (e <= w || e - w > 90) continue; // skip world-spanning / wrapped cells
-      const cur = m.get(c.cg);
-      if (!cur) m.set(c.cg, [w, s, e, n]);
-      else { cur[0] = Math.min(cur[0], w); cur[1] = Math.min(cur[1], s); cur[2] = Math.max(cur[2], e); cur[3] = Math.max(cur[3], n); }
+      if (c.cg !== cg || !Array.isArray(c.bb) || c.bb.length !== 4) continue;
+      const [cw, cs, ce, cn] = c.bb;
+      feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[cw, cs], [ce, cs], [ce, cn], [cw, cn], [cw, cs]]] } });
+      if (ce - cw < 90) { w = Math.min(w, cw); s = Math.min(s, cs); e = Math.max(e, ce); n = Math.max(n, cn); } // skip world-spanning for the fit
     }
-    this._dBBox = m;
-    return m;
+    return { fc: { type: "FeatureCollection", features: feats }, bounds: feats.length && w <= e ? [w, s, e, n] : null };
   }
 
-  // The embedded map (right pane): a simple US coastline. Installed packs are boxed
-  // faintly in green; the selected pack's area is boxed in the accent colour. Driven
-  // by the left list — tapping a pack sets _activeDistrict and the box appears here.
-  _renderMapPane() {
-    const loc = this._locator;
-    const land = loc && loc.land ? `<path d="${loc.land}" class="mp-land"/>` : "";
-    const bb = this._districtBBoxes();
-    const rectFor = (cg, cls) => {
-      const box = bb.get(cg);
-      if (!box) return "";
-      const a = locProject([box[0], box[3]]), b = locProject([box[2], box[1]]); // NW, SE
-      if (!a || !b) return "";
-      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
-      const w = Math.max(8, Math.abs(b.x - a.x)), h = Math.max(8, Math.abs(b.y - a.y));
-      return `<rect class="${cls}" x="${x}" y="${y}" width="${w}" height="${h}" rx="4"/>`;
-    };
-    let rects = "";
-    for (const d of DISTRICTS) {
-      if (d.cg !== this._activeDistrict && this._installedSets && this._installedSets.has("noaa-d" + d.cg)) rects += rectFor(d.cg, "mp-inst");
+  // Build the detail-pane preview: a real OSM map framed to the district with every
+  // cell's coverage footprint outlined, so the user can clearly see whether the pack
+  // covers the area they care about. Rebuilt per selection (the old map is removed).
+  _buildPreviewMap(cg) {
+    const host = this.shadowRoot.getElementById("preview-map");
+    if (!host || !window.maplibregl) return;
+    if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
+    // MapLibre's stylesheet must live in THIS shadow root for the canvas to size.
+    if (!this.shadowRoot.querySelector("link[data-mlcss]")) {
+      const l = document.createElement("link");
+      l.rel = "stylesheet"; l.href = this._assets + "vendor/maplibre-gl.css"; l.setAttribute("data-mlcss", "");
+      this.shadowRoot.appendChild(l);
     }
-    if (this._activeDistrict) rects += rectFor(this._activeDistrict, "mp-sel");
-    return `<div class="map-pane"><svg viewBox="0 0 ${LOC_VW} ${LOC_VH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Chart coverage map">
-      <rect class="mp-sea" x="0" y="0" width="${LOC_VW}" height="${LOC_VH}"/>${land}${rects}</svg></div>`;
+    const cov = this._districtCoverage(cg);
+    const accent = getComputedStyle(this).getPropertyValue("--ui-accent").trim() || "#1565c0";
+    const map = new window.maplibregl.Map({
+      container: host, attributionControl: false, cooperativeGestures: false,
+      style: {
+        version: 8,
+        sources: { osm: { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap" } },
+        layers: [{ id: "osm", type: "raster", source: "osm" }],
+      },
+      center: cov.bounds ? [(cov.bounds[0] + cov.bounds[2]) / 2, (cov.bounds[1] + cov.bounds[3]) / 2] : [-98, 39],
+      zoom: 3,
+    });
+    this._previewMap = map;
+    map.on("load", () => {
+      map.addSource("cov", { type: "geojson", data: cov.fc });
+      map.addLayer({ id: "cov-fill", type: "fill", source: "cov", paint: { "fill-color": accent, "fill-opacity": 0.18 } });
+      map.addLayer({ id: "cov-line", type: "line", source: "cov", paint: { "line-color": accent, "line-width": 1, "line-opacity": 0.9 } });
+      if (cov.bounds) map.fitBounds([[cov.bounds[0], cov.bounds[1]], [cov.bounds[2], cov.bounds[3]]], { padding: 16, duration: 0 });
+    });
   }
 
-  // Pane 1 selection: choose a provider (resets the pack selection).
+  // Pane 1 selection: choose a provider. Partial update — swap the packs + detail
+  // columns only (the list keeps its scroll position; no full re-render).
   _selectProvider(id) {
     this._selProvider = id;
     this._selPack = null;
     this._activeDistrict = null;
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    const r = this.shadowRoot;
+    r.querySelectorAll(".m-row[data-prov]").forEach((el) => el.classList.toggle("sel", el.dataset.prov === id));
+    const cols = r.querySelectorAll(".miller > .mcol");
+    if (cols[1]) { cols[1].outerHTML = this._renderPacksCol(); this._wireMillerRows(); }
+    this._updateDetail();
   }
 
-  // Pane 2 selection: choose a pack (drives the detail pane + the map highlight).
+  // Pane 2 selection: choose a pack. Partial update — just re-highlight the rows and
+  // rebuild the detail column, so clicking a pack DOESN'T scroll/jump the list.
   _selectPack(key, cg) {
     this._selPack = key;
     this._activeDistrict = cg || null; // NOAA packs highlight on the detail map
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    this.shadowRoot.querySelectorAll(".m-row[data-pack]").forEach((el) => el.classList.toggle("sel", el.dataset.pack === key));
+    this._updateDetail();
+  }
+
+  // Rebuild only the detail column (+ its buttons + preview map), leaving the list
+  // columns and their scroll untouched.
+  _updateDetail() {
+    const col = this.shadowRoot.querySelector(".miller > .mcol-detail");
+    if (!col) return;
+    col.outerHTML = this._renderDetailCol();
+    this._wireDetailButtons();
+    this._wireImport(); // the User-Charts detail may render the drop zone
+    const m = this._selPack && /^noaa-d(\d+)$/.exec(this._selPack);
+    if (m) this._buildPreviewMap(+m[1]);
+    else if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
   }
 
   // Human label for a set name (provider · pack).
@@ -1553,7 +1582,10 @@ export class ChartPlotterApp extends HTMLElement {
     return name;
   }
 
-  _wirePacks() {
+  _wirePacks() { this._wireMillerRows(); this._wireDetailButtons(); }
+
+  // Wire the provider/pack rows (re-run after a column is swapped).
+  _wireMillerRows() {
     const r = this.shadowRoot;
     const onActivate = (el, fn) => {
       el.addEventListener("click", fn);
@@ -1561,6 +1593,11 @@ export class ChartPlotterApp extends HTMLElement {
     };
     r.querySelectorAll(".m-row[data-prov]").forEach((row) => onActivate(row, () => this._selectProvider(row.dataset.prov)));
     r.querySelectorAll(".m-row[data-pack]").forEach((row) => onActivate(row, () => this._selectPack(row.dataset.pack, row.dataset.cg ? +row.dataset.cg : null)));
+  }
+
+  // Wire the detail-pane action buttons (re-run after the detail column is swapped).
+  _wireDetailButtons() {
+    const r = this.shadowRoot;
     r.querySelectorAll(".pk-btn[data-download]").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadPack(+b.dataset.download); }));
     r.querySelectorAll(".pk-btn[data-uninstall]").forEach((b) =>
@@ -1569,50 +1606,44 @@ export class ChartPlotterApp extends HTMLElement {
       b.addEventListener("click", (e) => { e.stopPropagation(); this._uninstallSet(b.dataset.uninstallSet); }));
   }
 
-  // Find-a-chart search: type a port or cell name, get the matching charts and
-  // which pack each lives in, with a one-tap button to grab that whole pack
-  // (individual cells aren't downloadable on their own — packs are the unit).
+  // Find-a-chart search: typing a port/cell/region name HIGHLIGHTS the matching
+  // providers + packs in the columns (and shows which port matched on a pack), so
+  // the user can see at a glance which pack to grab. Packs are the download unit.
   _renderPackSearch() {
     const q = this._cellQuery || "";
-    return `<input id="pack-search" class="pack-search" type="search" placeholder="Find a chart or port…" autocomplete="off" spellcheck="false" value="${esc(q)}">
-      <div id="pack-results" class="pack-results"></div>`;
+    return `<input id="pack-search" class="pack-search" type="search" placeholder="Find a chart, port, or region…" autocomplete="off" spellcheck="false" value="${esc(q)}">`;
   }
   _wirePackSearch() {
     const i = this.shadowRoot.getElementById("pack-search");
     if (!i) return;
-    i.oninput = () => { this._cellQuery = i.value; this._renderPackResultsInto(); };
-    this._renderPackResultsInto();
+    i.oninput = () => { this._cellQuery = i.value; this._applySearch(); };
   }
-  _renderPackResultsInto() {
-    const box = this.shadowRoot.getElementById("pack-results");
-    if (!box) return;
+
+  // Packs/regions matching the current query. Returns null when the query is too
+  // short, else a Map cg → matching cell object (or null for a region-name match).
+  _searchHits() {
     const q = (this._cellQuery || "").trim().toLowerCase();
-    if (q.length < 2) { box.innerHTML = ""; return; }
-    const hits = [];
+    if (q.length < 2) return null;
+    const hits = new Map();
     for (const c of this._catalog) {
-      if (c.n.toLowerCase().includes(q) || (c.l && c.l.toLowerCase().includes(q))) hits.push(c);
-      if (hits.length >= 40) break;
+      if (typeof c.cg !== "number" || hits.has(c.cg)) continue;
+      if (c.n.toLowerCase().includes(q) || (c.l && c.l.toLowerCase().includes(q))) hits.set(c.cg, c);
     }
-    if (!hits.length) { box.innerHTML = `<div class="pkr-empty">No charts match “${esc(this._cellQuery)}”.</div>`; return; }
-    box.innerHTML = hits.map((c) => {
-      const d = DISTRICTS.find((x) => x.cg === c.cg);
-      const have = this._installed.has(c.n);
-      const where = d ? `${d.region} · ${d.name}` : (c.cg ? `District ${c.cg}` : "no district");
-      const action = !d ? "" : have
-        ? `<span class="pkr-have">✓ installed</span>`
-        : `<button class="pkr-dl pk-btn" data-download="${c.cg}">Download ${esc(d.region)} pack</button>`;
-      return `<div class="pkr-row" data-pack="${d ? c.cg : ""}" title="${d ? `Show the ${esc(d.region)} pack on the map` : ""}">
-        <div class="pkr-info">
-          <span class="pkr-title">${esc(c.l || c.n)}</span>
-          <span class="pkr-sub">${esc(c.n)} · in the <b>${esc(where)}</b> pack</span>
-        </div>${action}</div>`;
-    }).join("");
-    box.querySelectorAll(".pkr-row[data-pack]").forEach((row) => {
-      const cg = +row.dataset.pack;
-      if (cg) row.addEventListener("click", () => this._showDistrictOnMap(cg));
-    });
-    box.querySelectorAll(".pkr-dl[data-download]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadPack(+b.dataset.download); }));
+    for (const d of DISTRICTS) {
+      if (hits.has(d.cg)) continue;
+      if (d.region.toLowerCase().includes(q) || d.name.toLowerCase().includes(q) || (d.blurb && d.blurb.toLowerCase().includes(q))) hits.set(d.cg, null);
+    }
+    return hits;
+  }
+
+  // Re-render just the provider + pack columns (highlight + dim by the query),
+  // preserving the rest of the panel.
+  _applySearch() {
+    const cols = this.shadowRoot.querySelectorAll(".miller > .mcol");
+    if (cols.length < 2) return;
+    cols[0].outerHTML = this._renderProvidersCol();
+    cols[1].outerHTML = this._renderPacksCol();
+    this._wireMillerRows();
   }
 
   // Preview a pack on the map: highlight that district's cells and frame to them.
@@ -3501,30 +3532,32 @@ export class ChartPlotterApp extends HTMLElement {
         .set-section { margin:0 0 22px; }
         .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 4px; font-weight:700; }
         /* chart download: Finder-style 3-pane drill-down */
-        .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(60vh,520px); margin:2px 0 12px; }
-        .mcol { flex:0 0 30%; min-width:0; overflow-y:auto; border-right:1px solid var(--ui-border-2); padding:6px; }
-        .mcol:nth-child(2) { flex:0 0 34%; }
+        .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(62vh,560px); margin:2px 0 12px; }
+        .mcol { flex:0 0 26%; min-width:0; overflow-y:auto; border-right:1px solid var(--ui-border-2); padding:6px; }
+        .mcol:nth-child(2) { flex:0 0 32%; }
         .mcol.mcol-detail { flex:1 1 0; border-right:none; padding:12px; }
-        .mcol-h { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); font-weight:700; padding:2px 6px 5px; position:sticky; top:0; background:var(--ui-surface); }
+        .mcol-h { font-size:11px; font-weight:700; color:var(--ui-text); padding:1px 6px 0; }
+        .mcol-head { position:sticky; top:0; background:var(--ui-surface); padding:4px 0 7px; margin-bottom:2px; border-bottom:1px solid var(--ui-border-2); z-index:1; }
+        .mcol-meta { font-size:10.5px; color:var(--ui-text-faint); padding:1px 6px 0; line-height:1.35; }
         .m-row { display:flex; align-items:center; gap:8px; padding:8px; border-radius:7px; cursor:pointer; transition:background .1s; }
         .m-row:hover { background:var(--ui-hover); }
         .m-row:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--ui-accent); }
         .m-row.sel { background:var(--ui-accent); }
         .m-row.sel .m-name, .m-row.sel .m-sub, .m-row.sel .m-chev { color:var(--ui-accent-text); }
-        .m-row.sel .m-tick { color:var(--ui-accent-text); }
+        .m-row.sel .m-badge.on { background:rgba(255,255,255,.25); color:var(--ui-accent-text); }
+        .m-row.dim { opacity:.4; }
+        .m-row.match { background:rgba(21,101,192,.10); }
+        .m-row.match.sel { background:var(--ui-accent); }
         .m-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
         .m-name { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .m-sub { color:var(--ui-text-faint); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .m-chev { flex:none; color:var(--ui-text-faint); font-size:16px; }
-        .m-tick { flex:none; color:#1f7a36; font-weight:700; }
-        .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; }
-        /* detail pane */
-        .map-pane { width:100%; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; }
-        .map-pane svg { display:block; width:100%; height:auto; }
-        .mp-sea { fill:var(--ui-surface-2); }
-        .mp-land { fill:var(--ui-border-strong); opacity:0.5; }
-        .mp-inst { fill:#1f7a36; fill-opacity:0.2; stroke:#1f7a36; stroke-width:5; }
-        .mp-sel { fill:var(--ui-accent); fill-opacity:0.25; stroke:var(--ui-accent); stroke-width:7; }
+        .m-badge { flex:none; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:2px 7px; border-radius:10px; }
+        .m-badge.on { background:#e4f5ea; color:#1f7a36; }
+        .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; line-height:1.5; }
+        /* detail pane — real OSM preview map with the pack's coverage outlined */
+        .prev-map { width:100%; height:260px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; }
+        .prev-map canvas { border-radius:8px; }
         .m-detail-body { padding:12px 2px 2px; }
         .m-detail-title { font-weight:700; font-size:15px; }
         .m-detail-sub { color:var(--ui-text-dim); font-size:12px; line-height:1.45; margin-top:3px; }
@@ -3908,6 +3941,7 @@ export class ChartPlotterApp extends HTMLElement {
           #drawer.open, #search:not([hidden]) { transform:none; }
           #drawer { left:116px; top:14px; bottom:14px; width:min(40vw, 520px); max-height:none; }
           #drawer.wide { width:min(80vw, 960px); } /* charts: two-pane list + map */
+          #drawer.wide .miller { height:calc(100vh - 168px); max-height:none; } /* full-height columns */
           #search { left:116px; top:auto; bottom:14px; width:340px; max-height:calc(100vh - 28px); }
           /* caret points LEFT toward the dock tab */
           #drawer::after, #search::after { left:calc(-1 * var(--caret)); right:auto; bottom:auto; top:var(--caret-top,50%);
@@ -4041,7 +4075,7 @@ export class ChartPlotterApp extends HTMLElement {
       if (this._drawerOpen()) { this.closeDrawer(); return; }
     });
     $("empty-add").onclick = () => this.openCharts();
-    $("empty-import").onclick = () => { this.openCharts(); const det = r.querySelector(".import-more"); if (det) det.open = true; };
+    $("empty-import").onclick = () => { this._selProvider = "user"; this._selPack = null; this.openCharts(); };
     $("rail-home").classList.add("on"); // boot shows the bare chart viewer
     // NOAA ENC user-agreement gate + attribution "Terms" link.
     $("attr-terms").onclick = () => this._showAgreement();
@@ -4096,7 +4130,10 @@ export class ChartPlotterApp extends HTMLElement {
     this.closeDrawer();
   }
 
-  closeDrawer() { this.setDrawerOpen(false); }
+  closeDrawer() {
+    if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
+    this.setDrawerOpen(false);
+  }
 
   // Slide the panel sheet up/down from the tab bar. data-sec drives its per-section
   // size (Charts wide+short, Settings/Dev tall); set before opening so it animates
