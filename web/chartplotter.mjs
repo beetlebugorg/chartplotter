@@ -100,6 +100,21 @@ const CHART_BANDS = [
   { slug: "all", min: 0, max: 18, bake: 18 },
 ];
 
+// Server sets are baked PER BAND, named "<district>-<band>" (e.g. noaa-d5-general).
+// bandOfSet recovers the band slug from a set name ("all" for a bandless/merged set
+// — a user upload or a legacy pack). BAND_RANK orders sets coarse→fine so a finer
+// band's fill draws over a coarser one (the same stacking the per-band pmtiles path
+// gets for free). Both let server mode do per-band overzoom + suppression, so a
+// coarse-only spot (open water) is filled by the general/overview source overzooming
+// instead of blanking to the S-52 no-data hatch.
+const BAND_SLUGS = CHART_BANDS.map((b) => b.slug).filter((s) => s !== "all");
+const BAND_RANK = Object.fromEntries(CHART_BANDS.map((b, i) => [b.slug, i]));
+function bandOfSet(name) {
+  const i = name.lastIndexOf("-");
+  if (i > 0) { const s = name.slice(i + 1); if (BAND_SLUGS.includes(s)) return s; }
+  return "all";
+}
+
 // Ensure the vendored MapLibre UMD global is loaded (the component injects it if
 // the host page hasn't), resolving to window.maplibregl.
 function ensureMapLibre(assets) {
@@ -148,7 +163,7 @@ export class ChartPlotter extends HTMLElement {
   // fixed 18 when a harbor cell only bakes to z16), MapLibre requests tiles past the
   // bake (empty → no-data holes) instead of overzooming the deepest real tile.
   async _fetchSetMeta(name) {
-    const meta = { name, min: 0, max: 18 };
+    const meta = { name, band: bandOfSet(name), min: 0, max: 18 };
     try {
       const base = new URL(this._assets, location.href).href;
       const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
@@ -158,6 +173,14 @@ export class ChartPlotter extends HTMLElement {
       }
     } catch (e) { /* keep defaults */ }
     return meta;
+  }
+
+  // Fetch every set's zoom range + band, ordered coarse→fine so the per-band fills
+  // stack correctly in expandChartLayers (template-outer, set-inner draw order).
+  async _loadSetMetas(names) {
+    const metas = await Promise.all(names.map((n) => this._fetchSetMeta(n)));
+    metas.sort((a, b) => (BAND_RANK[a.band] ?? 99) - (BAND_RANK[b.band] ?? 99));
+    return metas;
   }
 
   connectedCallback() {
@@ -253,7 +276,7 @@ export class ChartPlotter extends HTMLElement {
         .split(",").map((s) => s.trim()).filter(Boolean);
       // Learn each set's real zoom range before the first buildStyle so the source
       // maxzoom is truthful (overzoom, not empty-tile holes).
-      this._serverSets = await Promise.all(names.map((n) => this._fetchSetMeta(n)));
+      this._serverSets = await this._loadSetMetas(names);
     }
 
     // Per-band prebaked sources (chart-<slug>), one PMTiles protocol each. Each
@@ -273,7 +296,11 @@ export class ChartPlotter extends HTMLElement {
       style: this.buildStyle(),
       center: [lon, lat],
       zoom: Number(this.getAttribute("zoom") || 13),
-      minZoom: 1,
+      // Max zoom-OUT clamped to z3.5 (continental scale) — there's no finer-than-
+      // useless world view to show. Max zoom-IN is 18, but the app lowers it
+      // dynamically to the finest band that actually covers the view (overscale cap,
+      // see _updateZoomCap) so you can't zoom into featureless open water.
+      minZoom: 3.5,
       maxZoom: 18,
       // Attribution bottom-left so the bottom-right corner is free for the app's
       // scale/zoom readout.
@@ -826,7 +853,7 @@ export class ChartPlotter extends HTMLElement {
     const prevKey = this._serverSets.map((s) => s.name).sort().join(",");
     const wasServer = this._server;
     this._server = true;
-    this._serverSets = await Promise.all(want.map((n) => this._fetchSetMeta(n)));
+    this._serverSets = await this._loadSetMetas(want);
     const map = this._map;
     // Rebuild the style when the set OF sets changes (sources must be created/
     // recreated). A same-set rebake (same names) just bumps the tile version.
@@ -1285,16 +1312,19 @@ export class ChartPlotter extends HTMLElement {
   // filter in `_layerBase` (so a category/boundary toggle re-applies
   // combineFilters per layer) and a baseId→[variantId…] map in `_variants` (so
   // mariner/colour updates that target a layer by name hit all its band copies).
-  // Only LINES and pattern (hatch) FILLS are capped to their band: those are the
-  // marks that visibly duplicate — a coarse and a finer band draw the same coast/
-  // contour/boundary as two offset strokes. Base area fills (solid depth/land
-  // colour) and POINT symbols / soundings / text keep overzooming: a base fill is
-  // the continuous gap-fill base (a finer fill draws on top), and a coarse + finer
-  // symbol at the same object land on the same spot and collapse to ~one mark. So
-  // symbols stay visible as you zoom past a band boundary instead of popping out
-  // and back (the z13 "soundings disappear then return" gap).
+  // What's capped to a coarse band's max (so it isn't drawn at a finer zoom): LINES
+  // and pattern (hatch) FILLS — the marks that visibly duplicate a finer band's
+  // coast/contour/boundary as offset strokes — PLUS `point_symbols`, because the
+  // chevron/anchor/"!" marks embedded in complex line styles ride that layer: cap
+  // them WITH their line, or (where a coarse band overzooms a finer band's gap, e.g.
+  // open water at the approach band) the line is cut but the chevrons float on their
+  // own. Base area fills (solid depth/land colour), SOUNDINGS and TEXT keep
+  // overzooming: the base fill is the continuous gap-fill (a finer fill draws over
+  // it), and soundings/text are their own layers that read fine overscale. Where a
+  // finer band exists it supplies its own symbols at the band boundary, so capping
+  // the coarse copies there is seamless.
   _capsAtBand(L) {
-    return L.type === "line" || (L.type === "fill" && L.paint && L.paint["fill-pattern"] !== undefined);
+    return L.type === "line" || L.id === "point_symbols" || (L.type === "fill" && L.paint && L.paint["fill-pattern"] !== undefined);
   }
 
   expandChartLayers() {
@@ -1302,11 +1332,15 @@ export class ChartPlotter extends HTMLElement {
     this._layerBase = {};
     this._variants = {};
     const out = [];
-    // Server mode: one source per active pack (chart-<set>), each a merged all-band
-    // bake. Iterate template-outer, pack-inner so the global draw order is by S-52
-    // class across all packs (fills, then lines, then symbols, then text); packs are
-    // geographically disjoint so they don't fight. Each variant is "<id>@<set>" so
-    // scheme/mariner updates by base id hit every pack's copy via _variants.
+    // Server mode: one source per active per-band set (chart-<district>-<band>).
+    // Iterate template-outer, set-inner — and _serverSets is ordered coarse→fine —
+    // so the global draw order is by S-52 class (all fills, then lines, then symbols,
+    // then text), with finer bands' fills over coarser ones. Each band's source
+    // overzooms above its own max (from its TileJSON), so a coarse-only spot (open
+    // water) is filled by the general/overview source instead of blanking. As in the
+    // pmtiles path, overview/general LINE + pattern layers are capped at their band
+    // max so the coarse marks don't bleed into a finer band's zooms. Variant id is
+    // "<id>@<set>" so scheme/mariner updates by base id hit every set's copy.
     if (this._server) {
       for (const L of tmpl) {
         const base = L.filter ?? null;
@@ -1314,7 +1348,11 @@ export class ChartPlotter extends HTMLElement {
           const id = L.id + "@" + set.name;
           this._layerBase[id] = base;
           (this._variants[L.id] ||= []).push(id);
-          out.push({ ...L, id, source: "chart-" + set.name, filter: this.combineFilters(base) });
+          const v = { ...L, id, source: "chart-" + set.name, filter: this.combineFilters(base) };
+          if ((set.band === "overview" || set.band === "general") && this._capsAtBand(L)) {
+            v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
+          }
+          out.push(v);
         }
       }
       return out;

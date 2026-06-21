@@ -91,6 +91,12 @@ const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a"
 // General is overzoomed out to z0 (it renders where no overview covers — see
 // generalOverzoomMin in the baker), so it loads from z0 rather than its native z7.
 const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
+// Native MAX (display) zoom per band (matches CHART_BANDS .max in chartplotter.mjs).
+// Drives the overscale cap: zooming past a band's native max + a small margin over
+// open water just enlarges blank water, so _updateZoomCap clamps to the finest band
+// that actually covers the view.
+const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
+const OVERSCALE_MARGIN = 2; // levels of zoom-in allowed past the finest covering band
 // Usage bands in coarse→fine order, for the dev band-filter rows.
 const DEV_BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing"];
 // Chart packs = U.S. Coast Guard districts. NOAA publishes one ENC bundle per
@@ -314,6 +320,12 @@ export class ChartPlotterApp extends HTMLElement {
     this._task = null;                  // mirror of the server's current task (or null)
     this._taskMeta = null;              // { name, verb, bytes, errMsg } — pill labelling
     this._poll = null;                  // setInterval handle while a task is observed
+    // Download queue: one pack downloads at a time; clicking Download on another
+    // pack while one runs enqueues it. `_activeDownloadKey` is the set key being
+    // baked now; `_dlQueue` holds the pack objects waiting their turn. Each pack's
+    // detail button reflects its state (Download / Downloading… / Queued).
+    this._activeDownloadKey = null;
+    this._dlQueue = [];
     // Resolves once the inner renderer's `ready` fires.
     this._readyPromise = new Promise((res) => (this._resolveReady = res));
   }
@@ -701,36 +713,13 @@ export class ChartPlotterApp extends HTMLElement {
 
   _countStatus(s) { let n = 0; for (const v of this._cellStatus.values()) if (v === s) n++; return n; }
 
-  // Centered statusbar indicator. Priority: cells currently parsing (lazy) → live
-  // tile baking → a resting "N charts" affordance (kept visible so it stays
-  // clickable for the per-cell popup). Hidden only when nothing is installed.
+  // Background tile baking + lazy cell parsing (the constant on-pan work) is shown
+  // only by the subtle hairline load bar at the top of the map — not the
+  // notification pill, which is reserved for discrete jobs (download / import /
+  // remove) so it doesn't pulse continuously while panning.
   _updateBakeStatus() {
-    const root = this.shadowRoot; if (!root) return;
-    this._updateLoadBar(); // subtle top-bar cue (independent of the pill below)
-    const el = root.getElementById("bake-status"); if (!el) return;
-    const txt = el.querySelector(".sb-bake-txt");
-    const loading = this._countStatus("loading"), failed = this._countStatus("failed");
-    let busy = false, label = "";
-    if (loading > 0) {
-      busy = true; label = loading > 1 ? `Loading ${loading} charts…` : "Loading chart…";
-    } else if (this._bakeInflight > 0) {
-      busy = true; label = this._bakeInflight > 1 ? `Generating ${this._bakeInflight} tiles…` : "Generating tile…";
-    } else if (this._installed.size > 0) {
-      // Cells parse lazily (only when an area is baked), so a "loaded" count would
-      // read 0/N after a cached refresh even with charts on screen. Show the chart
-      // count instead — the per-cell popup still has the detailed parse status.
-      const n = this._installed.size;
-      label = `${n} chart${n !== 1 ? "s" : ""}` + (failed ? ` · ${failed} failed` : "");
-    } else {
-      el.hidden = true; el.classList.remove("busy");
-      const sb = root.getElementById("statusbar"); if (sb) sb.hidden = true;
-      return;
-    }
-    txt.textContent = label;
-    el.classList.toggle("busy", busy);
-    el.classList.toggle("has-fail", failed > 0);
-    el.hidden = false;
-    const sb = root.getElementById("statusbar"); if (sb) sb.hidden = false;
+    if (!this.shadowRoot) return;
+    this._updateLoadBar();
   }
 
   // Subtle "loading more while data is shown" cue: a thin indeterminate bar at the
@@ -911,13 +900,10 @@ export class ChartPlotterApp extends HTMLElement {
     this._assessCoverage();
     // If the user opened Charts before the renderer was ready (the drawer's
     // already on the charts panel), engage selection mode now that the map exists
-    // — otherwise they'd be left in a half state (panel open, map not framed). The
-    // drawer's resize already fired (map was null then), so size + frame directly.
+    // — otherwise they'd be left in a half state (panel open, cell overlay off).
     if (this._section === "charts" && this._drawerOpen()) {
       this._enterChartsMode();
-      this._pendingChartsFrame = false;
       map.resize();
-      this._frameChartsWorld();
     }
     // Refresh-resume: if a provision job is still running on the server, re-attach
     // (show the pill + start polling). A finished/idle task is ignored.
@@ -928,10 +914,12 @@ export class ChartPlotterApp extends HTMLElement {
     map.on("moveend", () => {
       this.saveView();
       this._assessCoverage();
+      this._updateZoomCap(); // clamp zoom-in to the finest band covering the new view
       // Dev tile inspector: refresh in-view band counts; a prior coverage measure
       // is now stale (different viewport), so drop its hole overlay.
       if (this._section === "inspect" && this._drawerOpen()) { this._clearDevHoles(); this._renderDevPanel(); }
     });
+    this._updateZoomCap(); // initial cap for the boot view
 
     // Live zoom/scale/band readout (left of the statusbar).
     this._updateHud();
@@ -966,6 +954,12 @@ export class ChartPlotterApp extends HTMLElement {
           this.shadowRoot.getElementById("search-tab").classList.remove("on");
         }
       }
+      // Close the notification detail panel on an outside click (the pill's own
+      // handler stopPropagation's, so this only fires for clicks elsewhere).
+      if (this._notifOpen) {
+        const notif = this.shadowRoot.getElementById("notif");
+        if (notif && !e.composedPath().some((n) => n === notif)) this._toggleNotif(false);
+      }
     });
   }
 
@@ -976,6 +970,7 @@ export class ChartPlotterApp extends HTMLElement {
   _updateHud() {
     const el = this.shadowRoot.getElementById("cov-readout");
     if (!el || !this._map) return;
+    const box = this.shadowRoot.getElementById("databox"); if (box) box.hidden = false;
     const z = this._map.getZoom(), c = this._map.getCenter();
     const band = bandForZoom(z);
     // Fixed-width fields (+ tabular-nums in CSS) so scale/zoom don't reflow the
@@ -988,6 +983,32 @@ export class ChartPlotterApp extends HTMLElement {
       `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span></span>`;
   }
 
+  // Overscale cap: limit zoom-IN to the finest installed chart band that actually
+  // covers the view centre, plus a small margin — so you can't keep zooming into
+  // featureless open water (where only the coarse general/overview band overzooms).
+  // "Prevent further in, don't yank the camera": the cap never drops below the
+  // current zoom, so panning from a harbour into open water leaves your view alone;
+  // it just stops you zooming deeper until you zoom back out toward usable scale.
+  _updateZoomCap() {
+    const map = this._map;
+    if (!map) return;
+    const c = map.getCenter();
+    let finest = -1; // index into BANDS (coarse→fine)
+    for (const n of this._installed) {
+      const cell = this._byName.get(n);
+      if (!cell || typeof cell.s !== "number" || !Array.isArray(cell.bb) || cell.bb.length !== 4) continue;
+      const [w, s, e, nN] = cell.bb;
+      if (c.lng < w || c.lng > e || c.lat < s || c.lat > nN) continue;
+      const idx = BANDS.indexOf(bandForScale(cell.s));
+      if (idx > finest) finest = idx;
+    }
+    // No installed cell covers the centre → allow general-level zoom so you can still
+    // navigate toward coverage. Otherwise cap at the finest covering band + margin.
+    const band = finest >= 0 ? BANDS[finest] : "general";
+    const target = Math.min(18, (BAND_MAXZOOM[band] || 9) + OVERSCALE_MARGIN);
+    const cap = Math.max(target, map.getZoom()); // never below current zoom → no yank
+    if (Math.abs(map.getMaxZoom() - cap) > 0.01) map.setMaxZoom(cap);
+  }
 
   // Load the chart archive(s) on boot. An explicit `?pmtiles=` query pins ONE
   // archive; otherwise we open EVERY hosted district at once (each opens by
@@ -1263,10 +1284,11 @@ export class ChartPlotterApp extends HTMLElement {
       return { pill: `⬇ ${name || "Charts"}`, label: "Downloading from NOAA", sub: `${t.cell || ""}${total ? ` · ${Math.min(t.done + 1, total)} of ${total}` : ""}${mb}`, frac };
     }
     const frac = t.total ? t.done / t.total : null;
-    const tiles = t.total ? `${(t.done || 0).toLocaleString()} / ${t.total.toLocaleString()} tiles` : "preparing";
+    // No per-item detail to surface for the server-side bake — just the pill +
+    // bar (so no notification drop-down; see _setNotification's `sub` gate).
     if (removing)
-      return { pill: `Removing ${name || ""}`.trim(), label: "Removing region…", sub: `rebuilding · ${tiles}`, frac };
-    return { pill: `Importing ${name || "charts"}`, label: "Importing charts…", sub: tiles, frac };
+      return { pill: `Removing ${name || ""}`.trim(), label: "Removing region…", sub: "", frac };
+    return { pill: `Importing ${name || "charts"}`, label: "Importing charts…", sub: "", frac };
   }
 
   // Project `_task` to the persistent pill + (when the drawer's open) the
@@ -1274,25 +1296,19 @@ export class ChartPlotterApp extends HTMLElement {
   // opens the region (or the Charts drawer).
   _renderTaskUI() {
     const d = this._taskDisplay();
-    const el = this.shadowRoot.getElementById("dlpill");
-    if (el) {
-      if (!d) { el.hidden = true; el.innerHTML = ""; }
-      else {
-        const pct = d.frac != null ? ` · ${Math.round(d.frac * 100)}%` : "";
-        el.hidden = false;
-        el.classList.toggle("error", !!d.error);
-        el.innerHTML = `<span class="dlp-spin"></span><span class="dlp-txt">${d.pill}${pct}</span>`;
-        el.onclick = () => this.openCharts();
-      }
-    }
-    this._setProgress(d ? { label: d.label, sub: d.sub, frac: d.frac } : null);
-    // Keep the Charts panel's action buttons in step with the job state without a
-    // full re-render each poll tick (which would flicker / collapse the import
-    // panel) — just disable Download/Remove while a job runs. The completed-state
-    // re-render happens in _onTaskDone.
+    // All job progress (download/import/bake/remove) flows through _setProgress,
+    // which paints the bottom data card's slot (always visible) and the in-drawer
+    // card. The compact card line uses the short pill text; the drawer keeps the
+    // fuller label + sub.
+    this._setProgress(d ? { label: d.label, pill: d.pill, sub: d.sub, frac: d.frac, error: d.error } : null);
+    // Keep the Charts panel's MUTATING buttons (Remove/Disable/Enable) disabled
+    // while a job runs, without a full re-render each poll tick (which would
+    // flicker / collapse the import panel). Download buttons are intentionally left
+    // alone — they're queue-managed (_downloadBtnHtml) so you can queue more while
+    // one runs. The completed-state re-render happens in _onTaskDone.
     if (this._section === "charts" && this._drawerOpen()) {
       const busy = this._taskRunning();
-      this.shadowRoot.querySelectorAll(".pk-btn").forEach((b) => { b.disabled = busy; });
+      this.shadowRoot.querySelectorAll(".pk-btn:not([data-getpack])").forEach((b) => { b.disabled = busy; });
     }
     // A running download means charts are inbound — don't show the empty-state
     // welcome over the map (and restore it if the task failed with no coverage).
@@ -1470,10 +1486,19 @@ export class ChartPlotterApp extends HTMLElement {
       <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span>${this._packBadge(pk.key, true)}</div>`;
   }
 
-  // Status pill for an installed pack: "Active" (rendering) or "Disabled" (kept on
-  // disk, hidden from the map). Nothing for a not-installed pack.
+  // Status pill for a pack row. A pending/active download takes priority (so you
+  // can see at a glance which packs are downloading/queued); otherwise an installed
+  // pack shows "Active"/"Disabled", and a plain not-installed pack shows nothing.
   _packBadge(key, installed) {
-    if (!installed) return "";
+    // A pack being downloaded is by definition not yet installed; once it lands,
+    // the installed badge wins (so there's no transient "Downloading" on a pack
+    // that just finished).
+    if (!installed) {
+      const dl = this._packDownloadState(key);
+      if (dl === "downloading") return '<span class="m-badge dl"><span class="pk-spin"></span>Downloading</span>';
+      if (dl === "queued") return '<span class="m-badge queued">Queued</span>';
+      return "";
+    }
     return this._disabled.has(key)
       ? '<span class="m-badge off">Disabled</span>'
       : '<span class="m-badge on">Active</span>';
@@ -1512,7 +1537,7 @@ export class ChartPlotterApp extends HTMLElement {
     const act = installed
       ? `<button class="pk-btn ghost" data-${disabled ? "enable" : "disable"}="${esc(key)}"${busy ? " disabled" : ""}>${disabled ? "Enable" : "Disable"}</button>
          <button class="pk-btn ghost danger" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button>`
-      : `<button class="pk-btn" data-getpack="${esc(key)}"${busy ? " disabled" : ""}>⬇ Download</button>`;
+      : this._downloadBtnHtml(key);
     let title, sub, meta;
     if (pk.kind === "noaa") {
       const d = DISTRICTS.find((x) => x.cg === pk.cg);
@@ -1677,24 +1702,77 @@ export class ChartPlotterApp extends HTMLElement {
       b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.enable, false); }));
   }
 
-  // Download the pack with this key, dispatching by provider kind.
+  // Click Download on a pack: enqueue it (or start immediately if idle). Re-clicking
+  // an already-active/queued/installed pack is a no-op. The queue runs one job at a
+  // time so the server isn't hammered; each pack's button shows its state.
   _downloadSelected(key) {
     const pk = this._providerPacks(this._selProvider || "noaa").find((p) => p.key === key);
     if (!pk) return;
-    if (pk.kind === "ienc") this._downloadIenc(pk);
-    else if (pk.kind === "noaa") this._downloadPack(pk.cg);
+    if (this._activeDownloadKey === key) return;          // downloading now
+    if (this._dlQueue.some((j) => j.key === key)) return; // already queued
+    if (this._installedSets && this._installedSets.has(key)) return; // already have it
+    this._dlQueue.push(pk);
+    this._reflectDownloadState();
+    this._pumpDownloads();
+  }
+
+  // Run the next queued download, one at a time. Re-entrant-safe: returns early if a
+  // download is already in flight; called again when each finishes.
+  async _pumpDownloads() {
+    if (this._activeDownloadKey || !this._dlQueue.length) return;
+    const pk = this._dlQueue.shift();
+    this._activeDownloadKey = pk.key;
+    this._reflectDownloadState();
+    try {
+      if (pk.kind === "ienc") await this._runDownloadIenc(pk);
+      else if (pk.kind === "noaa") await this._runDownloadPack(pk.cg);
+    } catch (e) { console.error("[download]", pk.key, e); }
+    this._activeDownloadKey = null;
+    this._reflectDownloadState();
+    this._pumpDownloads(); // next in line
+  }
+
+  // Reflect queue state on the visible pack buttons (no full re-render → no map
+  // flicker): update each Download button in place, and refresh the pack list so
+  // its rows can badge "Downloading"/"Queued".
+  _reflectDownloadState() {
+    if (this._section !== "charts" || !this._drawerOpen()) return;
+    this._refreshDownloadButtons();
+    this._refreshPacksCol();
+  }
+
+  _refreshDownloadButtons() {
+    this.shadowRoot.querySelectorAll(".pk-btn[data-getpack]").forEach((b) => {
+      b.outerHTML = this._downloadBtnHtml(b.dataset.getpack);
+    });
+    this._wireDetailButtons(); // re-bind the swapped button(s)
+  }
+
+  // The Download button's HTML for a pack key, by queue state.
+  _downloadBtnHtml(key) {
+    if (this._activeDownloadKey === key)
+      return `<button class="pk-btn downloading" data-getpack="${esc(key)}" disabled><span class="pk-spin"></span>Downloading…</button>`;
+    if (this._dlQueue.some((j) => j.key === key))
+      return `<button class="pk-btn queued" data-getpack="${esc(key)}" disabled>Queued</button>`;
+    return `<button class="pk-btn" data-getpack="${esc(key)}">⬇ Download</button>`;
+  }
+
+  // Whether a pack key is downloading now / waiting in the queue (for list badges).
+  _packDownloadState(key) {
+    if (this._activeDownloadKey === key) return "downloading";
+    if (this._dlQueue.some((j) => j.key === key)) return "queued";
+    return null;
   }
 
   // Download an IENC river pack: the server fetches each cell's s57 zip from
   // ienccloud.us and bakes them into the pack's set (ienc-<river>).
-  async _downloadIenc(pk) {
-    if (this._taskRunning()) return;
+  async _runDownloadIenc(pk) {
     this._task = { kind: "download", status: "running" };
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
     const prog = (p) => this._setProgress(p);
     try {
       const cells = pk.cells.map((c) => ({ name: c.name, url: c.url }));
-      await this._serverFetch({ set: pk.key, cells }, prog);
+      await this._serverFetch({ set: pk.key, cells }, prog, pk.title || pk.name || "river");
     } catch (e) { console.error(`[ienc] ${pk.key} download:`, e.message); }
     await this._renderInstalledSets();
     this._task = null;
@@ -1780,8 +1858,7 @@ export class ChartPlotterApp extends HTMLElement {
   // into its XDG data store and bakes it into its OWN tile set (noaa-d<cg> →
   // NOAA/D<cg>/), then we render every installed set. Falls back to per-cell server
   // fetches if the district bundle can't be opened. No client-side download / OPFS.
-  async _downloadPack(cg) {
-    if (this._taskRunning()) return;
+  async _runDownloadPack(cg) {
     const d = DISTRICTS.find((x) => x.cg === cg);
     const label = d ? `${d.region} pack` : `District ${cg}`;
     const all = this._districtCellNames(cg);
@@ -1794,15 +1871,16 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
 
     const set = "noaa-d" + cg;
+    const region = d ? d.region : "NOAA";
     const prog = (p) => this._setProgress(p);
     try {
       // The district bundle holds the whole district; bake the FULL district into the
       // pack so it's a complete set (names=all, not just the not-yet-installed ones).
-      await this._serverFetch({ set, zipUrl: this._districtZipUrl(cg), names: all }, prog);
+      await this._serverFetch({ set, zipUrl: this._districtZipUrl(cg), names: all }, prog, region);
     } catch (e) {
       console.warn(`[pack] ${label} server bundle failed — per-cell:`, e.message);
       const cells = all.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
-      try { await this._serverFetch({ set, cells }, prog); }
+      try { await this._serverFetch({ set, cells }, prog, region); }
       catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); }
     }
 
@@ -2274,6 +2352,8 @@ export class ChartPlotterApp extends HTMLElement {
     const inspecting = this._inspectMode;
     const dbgOn = this._debugCells;
     el.innerHTML = `
+      <button id="dev-back" class="dev-back" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>Settings</button>
       <section class="dev-sec">
         <div class="dev-h">Share view</div>
         <button id="dev-share" class="btn wide">Copy share link</button>
@@ -2314,6 +2394,7 @@ export class ChartPlotterApp extends HTMLElement {
         <p class="dev-note">Grid-samples the view for holes (no chart data) and paints them red.</p>
       </section>`;
     const q = (id) => el.querySelector("#" + id);
+    q("dev-back").onclick = () => this.toggleSection("settings");
     q("dev-share").onclick = (e) => this._shareView(e.currentTarget);
     q("dev-inspect").onclick = () => this._setInspectMode(!this._inspectMode);
     const feat = q("dev-feat"); if (!feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
@@ -2714,70 +2795,26 @@ export class ChartPlotterApp extends HTMLElement {
     }
   }
 
-  // Enter selection mode: hide the ENC render, show the cell overlay, frame to a
-  // wide view (remembering where we were so Home can fly back). The map pans/zooms
-  // freely; cells are picked by tapping them (see the map click handler) or via
-  // the region buttons / search / cell list.
+  // Enter selection mode: overlay the catalog cell boxes on the LIVE chart, in
+  // place. Opening Charts must never move the map or hide the chart — you pick
+  // charts for wherever you're already looking, with the ENC render still beneath
+  // the selection boxes. Cells are picked by tapping them (see the map click
+  // handler) or via the region buttons / search / cell list.
   _enterChartsMode() {
     if (!this._map) return;
-    const first = !this._chartsMode;
-    if (first) this._preChartsView = { center: this._map.getCenter(), zoom: this._map.getZoom() };
     this._chartsMode = true;
     this._closePick(); // the cursor-pick report is for the chart view only
-    this._setChartLayersVisible(false);
     this._setCellOverlay(true);
-    const wb = this.shadowRoot.getElementById("world-btn");
-    if (wb) wb.hidden = false; // "All charts" jump-to-world control
-    // Zoom all the way out so every catalog cell is in frame at once (small) — the
-    // "show the world" selection map. Framed after the drawer finishes opening (it
-    // resizes the map at ~230ms) so the coverage centres in the narrower map area
-    // rather than the full pre-open width. See setDrawerOpen's resize callback.
-    if (first) this._pendingChartsFrame = true;
   }
-  // Extent that frames essentially all NOAA coverage, centred on the bulk (cached).
-  // Uses the 2nd–98th percentile of cell centres rather than the raw union: a
-  // handful of far-flung EEZ/territory cells (Guam, American Samoa, the Arctic,
-  // mid-Atlantic) would otherwise stretch the box across an empty ocean and push
-  // the mainland into a corner. Those outliers are a region-button tap away.
-  _catalogBounds() {
-    if (this._catBounds) return this._catBounds;
-    const xs = [], ys = [];
-    for (const c of this._catalog) {
-      const b = c.bb;
-      if (!Array.isArray(b) || b.length !== 4) continue;
-      xs.push((b[0] + b[2]) / 2); ys.push((b[1] + b[3]) / 2);
-    }
-    if (!xs.length) return null;
-    xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
-    const q = (arr, p) => arr[Math.floor((arr.length - 1) * p)];
-    this._catBounds = [[q(xs, 0.02) - 2, Math.max(q(ys, 0.02) - 2, -84)], [q(xs, 0.98) + 2, Math.min(q(ys, 0.98) + 2, 84)]];
-    return this._catBounds;
-  }
-  // Frame the selection map to the full coverage extent, centred in the visible
-  // (drawer-open) map area.
-  _frameChartsWorld() {
-    const b = this._catalogBounds();
-    if (this._map && b) this._map.fitBounds(b, { padding: 26, duration: 400 });
-  }
-
-  // Leave selection mode: disarm box-select, restore the ENC render + the
-  // pre-Charts view, drop the cell overlay.
+  // Leave selection mode: disarm box-select, drop the cell overlay. The chart
+  // render and camera are untouched (Charts never hid or moved them).
   _exitChartsMode() {
     this._cancelAreaSelect();
     this._activeDistrict = null; // clear the previewed-pack highlight so it doesn't persist across open/close
     this._setCellOverlay(false);
     this._clearFocus();
-    const wb = this.shadowRoot.getElementById("world-btn");
-    if (wb) wb.hidden = true;
     if (!this._chartsMode) return;
     this._chartsMode = false;
-    this._setChartLayersVisible(true);
-    if (this._preChartsView && this._map) {
-      const v = this._preChartsView;
-      this._preChartsView = null;
-      // Defer past the drawer-close resize (230ms) so the restore isn't truncated.
-      setTimeout(() => { if (!this._chartsMode && this._map) this._map.easeTo({ center: v.center, zoom: v.zoom, duration: 400 }); }, 280);
-    }
   }
 
   // Click a cell on the selection map to preview its pack. Picks the finest
@@ -3001,9 +3038,14 @@ export class ChartPlotterApp extends HTMLElement {
       const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
       this._installed = new Set((j && j.cells) || []);
     } catch (e) { /* keep current */ }
+    // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
+    // district and the server fans to its band-sets.
     this._installedSets = new Set(packs.map((p) => p.name));
     this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
-    const active = packs.filter((p) => p.enabled).map((p) => p.name);
+    // Rendering needs each enabled district's PER-BAND tile sets (noaa-d5-general …),
+    // listed in `bands` ("all" for a bandless/merged pack → the bare set name).
+    const active = packs.filter((p) => p.enabled).flatMap((p) =>
+      (p.bands && p.bands.length ? p.bands : ["all"]).map((b) => (b === "all" ? p.name : `${p.name}-${b}`)));
     if (this._plotter) await this._plotter.setServerSets(active);
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
@@ -3022,7 +3064,7 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   // Bake the LOCALLY-imported cells (the OPFS store) into the "import" set and
-  // re-render. Downloads use their own per-district packs (see _downloadPack); this
+  // re-render. Downloads use their own per-district packs (see _runDownloadPack); this
   // is only the drag-a-zip/.000 path. The wasm baker is gone — baking is server-side.
   async _refreshCharts() {
     if (!this._plotter) return;
@@ -3040,7 +3082,7 @@ export class ChartPlotterApp extends HTMLElement {
         const res = await fetch(`${this._assets}api/import?set=import&cells=${encodeURIComponent(local.join(","))}`, { method: "POST" });
         const j = await res.json().catch(() => ({}));
         if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
-        await this._pollImport(j.job, (p) => this._setProgress(p));
+        await this._pollImport(j.job, (p) => this._setProgress(p), "your");
       }
       await this._renderInstalledSets();
     } catch (e) {
@@ -3056,9 +3098,9 @@ export class ChartPlotterApp extends HTMLElement {
   // connection, server pushes on change) and falls back to polling if EventSource
   // is unavailable or the stream drops. Resolves with the final status; throws on
   // error/timeout.
-  async _pollImport(job, prog = () => {}) {
+  async _pollImport(job, prog = () => {}, name) {
     if (typeof EventSource !== "undefined") {
-      try { return await this._streamJob(job, prog); }
+      try { return await this._streamJob(job, prog, name); }
       catch (e) { console.warn("[job] event stream failed — polling:", e.message); }
     }
     for (let i = 0; i < 2400; i++) { // ~20 min ceiling at 500ms
@@ -3066,7 +3108,7 @@ export class ChartPlotterApp extends HTMLElement {
       const s = await r.json().catch(() => ({}));
       if (s.state === "done") return s;
       if (s.state === "error") throw new Error(s.error || "job failed");
-      this._reportJob(s, prog);
+      this._reportJob(s, prog, name);
       await new Promise((res) => setTimeout(res, 500));
     }
     throw new Error("job timed out");
@@ -3074,7 +3116,7 @@ export class ChartPlotterApp extends HTMLElement {
 
   // Stream a job's progress over SSE (GET /api/import/events). One long-lived
   // connection; the server pushes a status event whenever it changes.
-  _streamJob(job, prog) {
+  _streamJob(job, prog, name) {
     return new Promise((resolve, reject) => {
       const es = new EventSource(`${this._assets}api/import/events?job=${encodeURIComponent(job)}`);
       let settled = false;
@@ -3083,28 +3125,45 @@ export class ChartPlotterApp extends HTMLElement {
         let s; try { s = JSON.parse(ev.data); } catch { return; }
         if (s.state === "done") return done(resolve, s);
         if (s.state === "error") return done(reject, new Error(s.error || "job failed"));
-        this._reportJob(s, prog);
+        this._reportJob(s, prog, name);
       };
       es.onerror = () => done(reject, new Error("event stream closed"));
     });
   }
 
-  // Map a job status into the progress UI. The server reports a human note + a
-  // (done/total, unit) counter per phase (download bytes/cells → extract → bake tiles).
-  _reportJob(s, prog) {
-    const label = s.note || (s.phase ? s.phase[0].toUpperCase() + s.phase.slice(1) + "…" : "Working…");
+  // Map a job status into the progress UI. We build a friendly label from the
+  // phase + the region name ("Extracting Mid-Atlantic charts…") rather than echo
+  // the server's raw note (which carries filenames). The numeric detail (counts /
+  // bytes / percent) becomes the notification drop-down's sub-line.
+  _reportJob(s, prog, name) {
+    const PHASE = {
+      download: "Downloading", fetch: "Downloading", dl: "Downloading", upload: "Uploading",
+      extract: "Extracting", unzip: "Extracting", expand: "Extracting",
+      parse: "Reading", read: "Reading", import: "Importing",
+      bake: "Baking", tiles: "Baking", render: "Baking",
+      register: "Finishing", finalize: "Finishing", index: "Finishing",
+    };
+    const subject = name ? `${name} charts` : "charts";
+    const verb = s.phase ? (PHASE[s.phase] || s.phase[0].toUpperCase() + s.phase.slice(1)) : "Working on";
+    const label = `${verb} ${subject}…`;
+    // Numeric detail only — friendly unit (cells → charts; tiles → unitless
+    // count). The percentage is shown separately in the drop-down, so it's not
+    // repeated here.
     let sub = "";
     if (s.unit === "bytes") sub = s.total ? `${this._fmtBytes(s.done)} / ${this._fmtBytes(s.total)}` : this._fmtBytes(s.done);
-    else if (s.total) sub = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${s.unit || ""}`.trim();
-    if (s.percent) sub += sub ? ` · ${s.percent}%` : `${s.percent}%`;
-    prog({ label, sub, frac: s.total ? s.done / s.total : null });
+    else if (s.total) {
+      const u = s.unit === "cells" ? "charts" : s.unit === "tiles" ? "" : (s.unit || "");
+      sub = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
+    }
+    const frac = s.total ? s.done / s.total : (s.percent ? s.percent / 100 : null);
+    prog({ label, sub, frac });
   }
 
   // Server-side download + bake of one pack: the SERVER fetches the cells from NOAA
   // into its XDG data store and bakes them into the named set (no client download /
   // OPFS). spec is {set, zipUrl, names} (one district bundle) or {set, cells:
   // [{name,url}]} (per-cell). Resolves when the pack is baked + registered.
-  async _serverFetch(spec, prog = () => {}) {
+  async _serverFetch(spec, prog = () => {}, name) {
     const res = await fetch(`${this._assets}api/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3112,7 +3171,7 @@ export class ChartPlotterApp extends HTMLElement {
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok || !j.job) throw new Error(j.error || `download HTTP ${res.status}`);
-    return this._pollImport(j.job, prog);
+    return this._pollImport(j.job, prog, name);
   }
 
   // Footprint + render-start zoom for each installed cell, from the catalog —
@@ -3312,18 +3371,55 @@ export class ChartPlotterApp extends HTMLElement {
     r.getElementById("search-tab").classList.remove("on");
   }
 
-  // Drive the drawer's progress card. Pass null to hide it.
-  _setProgress(p) {
+  // Single progress surface for every job (download / import / bake / remove).
+  // Activity is signalled ONLY by the top notification pill (a non-blocking "work
+  // is happening" indicator that expands for details); the bottom data card stays
+  // a static nav readout. Pass null to clear.
+  // The single entry point for all job updates (download / import / bake / remove).
+  // There is no progress surface in the bottom data card any more — every job is
+  // signalled purely by the top notification pill (lit indicator + % in its detail
+  // drop-down). The bottom card stays a static nav readout.
+  _setProgress(p) { this._setNotification(p); }
+
+  // Top-centre notification pill: visible only while a job is active (or briefly
+  // on completion/error). It "lights up" (pulsing glow + spinner) to signal work
+  // without blocking the UI, and is clickable to drop a panel with the full
+  // label · detail · percentage. Driven by the same job updates as the progress.
+  _setNotification(p) {
     const r = this.shadowRoot;
-    const wrap = r.querySelector(".progwrap");
-    if (!wrap) return;
-    if (!p) { wrap.hidden = true; return; }
-    wrap.hidden = false;
-    r.getElementById("prog-label").textContent = p.label || "";
-    const bar = r.getElementById("prog");
-    if (p.frac == null) bar.removeAttribute("value"); else bar.value = p.frac;
-    r.getElementById("prog-pct").textContent = p.frac == null ? "" : `${Math.round(p.frac * 100)}%`;
-    r.getElementById("prog-sub").textContent = p.sub || "";
+    const el = r.getElementById("notif"); if (!el) return;
+    if (!p) {
+      el.hidden = true; el.classList.remove("busy", "error", "open");
+      this._notifOpen = false;
+      const pop = r.getElementById("notif-pop"); if (pop) pop.hidden = true;
+      return;
+    }
+    const done = p.frac === 1 || !!p.error;
+    el.hidden = false;
+    el.classList.toggle("busy", !done);   // pulsing glow + spinner while working
+    el.classList.toggle("error", !!p.error);
+    r.getElementById("notif-label").textContent = p.pill || p.label || "";
+    // The drop-down only exists when there's genuine detail beyond the pill label
+    // (e.g. the cell + count + size of a download). Otherwise the pill is just a
+    // non-clickable indicator — no chevron, no panel.
+    const hasDetail = !!(p.sub && p.sub.trim());
+    el.classList.toggle("has-detail", hasDetail);
+    if (hasDetail) {
+      r.getElementById("notif-pop-title").textContent = p.label || p.pill || "";
+      r.getElementById("notif-pop-sub").textContent = p.sub;
+      r.getElementById("notif-pop-pct").textContent = p.frac != null ? `${Math.round(p.frac * 100)}%` : "";
+    } else if (this._notifOpen) {
+      this._toggleNotif(false); // detail vanished while open → collapse
+    }
+  }
+
+  _toggleNotif(force) {
+    const r = this.shadowRoot;
+    const el = r.getElementById("notif"), pop = r.getElementById("notif-pop");
+    if (!el || !pop || el.hidden || !el.classList.contains("has-detail")) return;
+    this._notifOpen = force != null ? force : !this._notifOpen;
+    pop.hidden = !this._notifOpen;
+    el.classList.toggle("open", this._notifOpen);
   }
 
   // Frame the map to the combined extent of the given catalog cells.
@@ -3534,45 +3630,40 @@ export class ChartPlotterApp extends HTMLElement {
     r.innerHTML = `
       <style>
         :host { display:block; position:relative; width:100%; height:100%; font:13px/1.4 system-ui,sans-serif;
-          /* One layout for every width: a full-bleed map over a slim bottom tab
-             bar; panels rise as a sheet from the bar (full-screen on a phone, a
-             contained per-section dialog on desktop). */
-          --botbar-h:calc(54px + env(safe-area-inset-bottom,0px));
+          /* The map is the UI: it fills the whole element. All chrome floats over
+             it — four round buttons in the corners and one data card at the bottom
+             centre. Panels drop down from their corner button as caret popovers. */
+          --botbar-h:env(safe-area-inset-bottom,0px);
           --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2); }
         :host([data-scheme="dusk"]) {
           --ui-bg:#20262b; --ui-surface:#2a3137; --ui-surface-2:#333b42; --ui-text:#cdd6dc; --ui-text-dim:#9aa6ae; --ui-text-faint:#7d8990; --ui-border:#3a434a; --ui-border-2:#333b42; --ui-border-strong:#4a555d; --ui-hover:#353f47; --ui-accent:#4f9be6; --ui-accent-hover:#69abe9; --ui-accent-text:#0c1318; --ui-shadow:rgba(0,0,0,.5); }
         :host([data-scheme="night"]) {
           --ui-bg:#14181b; --ui-surface:#1b2024; --ui-surface-2:#232a2f; --ui-text:#aeb8be; --ui-text-dim:#7e898f; --ui-text-faint:#626c72; --ui-border:#2a3137; --ui-border-2:#232a2f; --ui-border-strong:#38424a; --ui-hover:#232a30; --ui-accent:#3f7fb5; --ui-accent-hover:#4d8cc2; --ui-accent-text:#0a0e11; --ui-shadow:rgba(0,0,0,.6); }
-        /* Full-bleed map filling everything above the bottom tab bar; panels rise
-           over it as a sheet rather than displacing it. */
-        #map { position:absolute; inset:0 0 var(--botbar-h) 0; }
+        /* Full-bleed map; everything else floats over it. */
+        #map { position:absolute; inset:0; }
         #map chart-plotter { width:100%; height:100%; }
         .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
         .btn:hover { background:var(--ui-hover); }
-        /* Bottom bar — the navigation tabs, centred. The drawer flies up over the
-           map above it; the bar itself stays put. (Live status lives in the thin
-           top strip, see #statusbar.) */
-        /* 3-column grid keeps the nav tabs centred in the viewport while the
-           scheme toggle pins to the right edge. */
-        #rail { position:absolute; left:0; right:0; bottom:0; height:var(--botbar-h); z-index:7;
-          background:var(--ui-surface); border-top:1px solid var(--ui-border); box-shadow:0 -1px 5px rgba(0,0,0,.07);
-          display:grid; grid-template-columns:1fr auto 1fr; align-items:center;
-          padding:0 6px env(safe-area-inset-bottom,0px); box-sizing:border-box; }
-        #rail .rail-tabs { grid-column:2; display:flex; flex-direction:row; align-items:center; justify-content:center; gap:8px; }
-        #rail .rail-end { grid-column:3; justify-self:end; display:flex; flex-direction:row; align-items:center; gap:2px; }
-        #rail .scheme-toggle, #rail .search-toggle { width:44px; }
-        #rail .ri { flex:none; width:64px; height:44px; border:none; background:none; border-radius:12px; cursor:pointer; color:var(--ui-text-dim);
-          display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
-          transition:background .12s, color .12s; }
-        #rail .ri:hover { background:var(--ui-surface-2); color:var(--ui-accent); }
-        #rail .ri.on { background:var(--ui-accent); color:var(--ui-accent-text); }
-        #rail .ri svg { width:20px; height:20px; display:block; }
-        #rail .ri .cap { font-size:9.5px; font-weight:500; letter-spacing:.02em; }
+        /* Floating corner controls — a top-left group (search) and a top-right
+           group (charts · scheme · settings). Each is a round button; the active
+           section's button lights up while its panel is open. */
+        #tl-controls, #tr-controls { position:absolute; top:calc(12px + env(safe-area-inset-top,0px)); z-index:7;
+          display:flex; align-items:center; gap:8px; }
+        #tl-controls { left:calc(12px + env(safe-area-inset-left,0px)); }
+        #tr-controls { right:calc(12px + env(safe-area-inset-right,0px)); }
+        .rbtn { flex:none; width:44px; height:44px; border-radius:50%; cursor:pointer; padding:0;
+          display:flex; align-items:center; justify-content:center; color:var(--ui-text);
+          background:color-mix(in srgb, var(--ui-surface) 90%, transparent); border:1px solid var(--ui-border);
+          box-shadow:0 2px 10px rgba(0,0,0,.18); backdrop-filter:blur(6px);
+          transition:background .12s, color .12s, box-shadow .12s, transform .08s; }
+        .rbtn:hover { color:var(--ui-accent); border-color:var(--ui-accent); box-shadow:0 3px 14px rgba(0,0,0,.24); }
+        .rbtn:active { transform:scale(.94); }
+        .rbtn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
+        .rbtn svg { width:21px; height:21px; display:block; }
         /* Prod / prebaked deployment: charts load from a configured hosted archive
            (pmtiles="…" / catalog="…"); there's no NOAA download and no Dev tools.
-           The Library tab stays but becomes import-only (drop your own ENC, baked
-           in-browser) — see renderCharts. */
-        :host([prod]) #dev-toggle,
+           The Charts button stays but its panel becomes import-only (drop your own
+           ENC, baked server-side) — see renderCharts. */
         :host([prod]) #empty-add, :host([prod]) #empty .welcome-sub { display:none; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
         /* charts panel: action header + "your charts" cards */
@@ -3634,14 +3725,8 @@ export class ChartPlotterApp extends HTMLElement {
         .region-status { background:#e4f5ea; color:#1f7a36; font-weight:600; font-size:12.5px; padding:6px 10px; border-radius:8px; margin:2px 0 4px; }
         .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:8px 0; display:block; }
         .linkbtn.danger { color:#c0392b; }
-        /* persistent in-flight download/import pill (bottom-centre) */
-        #dlpill { position:absolute; bottom:calc(var(--botbar-h) + 12px); left:50%; transform:translateX(-50%); z-index:7; display:inline-flex; align-items:center;
-          gap:9px; background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:22px; padding:8px 16px; font:inherit; font-size:13px; font-weight:600;
-          cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.28); }
-        #dlpill[hidden] { display:none; }
-        #dlpill.error { background:#c0392b; }
-        #dlpill .dlp-spin { width:13px; height:13px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation:dlspin .8s linear infinite; }
-        #dlpill.error .dlp-spin { display:none; }
+        /* Job activity is signalled by the top notification pill; the dlspin
+           keyframes drive its spinner. */
         @keyframes dlspin { to { transform:rotate(360deg); } }
         /* The ECDIS cursor-pick report (S-52 PresLib §10.8) is its own element,
            <pick-report> — see pick-report.mjs (styled via the inherited --ui-* tokens). */
@@ -3651,8 +3736,8 @@ export class ChartPlotterApp extends HTMLElement {
         .chart-pill .cp-meta { color:var(--ui-text-dim); font-size:12px; }
         .chart-pill .cp-ed { margin-top:5px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12px; color:var(--ui-text-dim); }
         /* settings */
-        .set-section { margin:0 0 22px; }
-        .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 4px; font-weight:700; }
+        .set-section { margin:0 0 28px; }
+        .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 6px; padding-bottom:6px; border-bottom:1px solid var(--ui-border-2); font-weight:700; }
         /* chart download: Finder-style 3-pane drill-down */
         .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(62vh,560px); margin:2px 0 12px; }
         .mcol { flex:0 0 26%; min-width:0; overflow-y:auto; border-right:1px solid var(--ui-border-2); padding:6px; }
@@ -3674,9 +3759,11 @@ export class ChartPlotterApp extends HTMLElement {
         .m-name { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .m-sub { color:var(--ui-text-faint); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .m-chev { flex:none; color:var(--ui-text-faint); font-size:16px; }
-        .m-badge { flex:none; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:2px 7px; border-radius:10px; }
+        .m-badge { flex:none; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:2px 7px; border-radius:10px; display:inline-flex; align-items:center; gap:5px; }
         .m-badge.on { background:#e4f5ea; color:#1f7a36; }
         .m-badge.off { background:var(--ui-surface-2); color:var(--ui-text-faint); }
+        .m-badge.dl { background:color-mix(in srgb, var(--ui-accent) 16%, transparent); color:var(--ui-accent); }
+        .m-badge.queued { background:var(--ui-surface-2); color:var(--ui-text-dim); }
         .m-row.dim .m-badge { opacity:.7; }
         .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; line-height:1.5; }
         /* detail pane — real OSM preview map with the pack's coverage outlined */
@@ -3689,12 +3776,20 @@ export class ChartPlotterApp extends HTMLElement {
         .m-detail-act { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
         .pk-btn.danger { color:#c0392b; }
         .pk-btn.danger:hover { background:#fdeceb; border-color:#e2b6b1; }
-        .pk-btn { border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:8px 14px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
+        .pk-btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:8px 14px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
         .pk-btn:hover { background:var(--ui-accent-hover); }
         .pk-btn:disabled { background:#9fb6cf; cursor:default; }
+        /* Downloading now: greyed, spinner, no hover lift. Queued: muted, waiting. */
+        .pk-btn.downloading, .pk-btn.downloading:hover { background:#9fb6cf; cursor:default; }
+        .pk-btn.queued, .pk-btn.queued:hover { background:var(--ui-surface-2); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
         .pk-btn.ghost { background:var(--ui-surface); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
         .pk-btn.ghost:hover { background:#fdeceb; color:#c0392b; border-color:#e2b6b1; }
         .pk-btn.mini { padding:5px 9px; font-size:11.5px; }
+        /* Spinner used in the Downloading button + list badge. */
+        .pk-spin { width:12px; height:12px; flex:none; border-radius:50%;
+          border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:dlspin .8s linear infinite; }
+        .m-badge.dl .pk-spin { width:9px; height:9px; border-width:2px; border-color:color-mix(in srgb, var(--ui-accent) 35%, transparent); border-top-color:var(--ui-accent); }
+        @media (prefers-reduced-motion: reduce) { .pk-spin { animation-duration:2s; } }
         /* find-a-chart search results */
         .pkr-row { display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid var(--ui-border-2); cursor:pointer; }
         .pkr-row:last-child { border-bottom:none; }
@@ -3707,7 +3802,7 @@ export class ChartPlotterApp extends HTMLElement {
         .pkr-empty { color:var(--ui-text-faint); font-size:13px; text-align:center; padding:14px 0; }
         /* NOAA data freshness footer */
         .data-fresh { color:var(--ui-text-faint); font-size:11.5px; text-align:center; line-height:1.5; padding:14px 0 4px; border-top:1px solid var(--ui-border-2); margin-top:4px; }
-        .set-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:10px 0; border-bottom:1px solid var(--ui-border-2); }
+        .set-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:12px 2px; border-bottom:1px solid var(--ui-border-2); }
         .set-row:last-child { border-bottom:none; }
         .set-row .lbl { display:flex; flex-direction:column; min-width:0; }
         .set-row .lbl .t { font-weight:500; }
@@ -3730,20 +3825,10 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
-        /* Live status as a small chip embedded in the bottom-right corner (the
-           scale bar owns the bottom-left), over a full-bleed map; the subtle
-           attribution line sits just above it. Anchors the per-cell popup above it. */
-        #statusbar { position:absolute; right:calc(10px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 8px); z-index:6;
-          display:inline-flex; align-items:center; gap:10px; padding:5px 11px; box-sizing:border-box;
-          max-width:calc(100vw - 20px); /* no overflow:hidden — it would clip the cell-status popup */
-          background:color-mix(in srgb, var(--ui-surface) 82%, transparent); border:1px solid rgba(0,0,0,.06);
-          border-radius:11px; backdrop-filter:blur(6px);
-          box-shadow:inset 0 1px 2px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.4), 0 1px 0 rgba(255,255,255,.4);
-          font:11px system-ui,sans-serif; color:var(--ui-text); }
         /* NOAA attribution + "not for navigation" — subtle one-line text tucked
-           under the status chip (no box), kept legible over the chart with a soft
-           halo in the current surface colour. */
-        #noaa-attr { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 40px); z-index:5; pointer-events:auto;
+           into the bottom-right corner (no box), kept legible over the chart with a
+           soft halo in the current surface colour. */
+        #noaa-attr { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 10px); z-index:5; pointer-events:auto;
           font:500 10px/1.35 system-ui,sans-serif; letter-spacing:.01em; white-space:nowrap; text-align:right;
           color:var(--ui-text-dim);
           text-shadow:0 0 3px var(--ui-surface), 0 0 3px var(--ui-surface), 0 1px 1px var(--ui-surface); }
@@ -3767,30 +3852,6 @@ export class ChartPlotterApp extends HTMLElement {
         .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
         .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--ui-text-dim); }
         .ins-cycler .btn { padding:2px 9px; line-height:1.3; }
-        /* Tile/cell generation indicator — inline in the status overlay, clickable
-           to open the per-cell status popup. Spinner shows only while busy
-           (loading cells or baking tiles); otherwise it's a resting "N charts". */
-        .sb-bake { flex:0 1 auto; min-width:0; display:inline-flex; align-items:center; gap:6px; color:var(--ui-accent); cursor:pointer;
-          border:1px solid transparent; background:transparent; border-radius:9px; padding:2px 6px; margin:-2px -2px -2px -4px;
-          font:600 11px/1 system-ui,sans-serif; white-space:nowrap; font-variant-numeric:tabular-nums; }
-        .sb-bake .sb-bake-txt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
-        .sb-bake:hover { border-color:var(--ui-border-strong); background:var(--ui-surface-2); }
-        .sb-bake[hidden] { display:none; }
-        .sb-bake.has-fail { color:#cf3b3b; }
-        /* When nothing is installed, hide the whole overlay's leading gap cleanly. */
-        .sb-bake-spin { display:none; width:12px; height:12px; flex:none; border-radius:50%;
-          border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
-          animation:sb-bake-spin .7s linear infinite; }
-        .sb-bake.busy .sb-bake-spin { display:inline-block; }
-        @keyframes sb-bake-spin { to { transform:rotate(360deg); } }
-        @media (prefers-reduced-motion: reduce) { .sb-bake-spin { animation-duration:2s; } }
-        /* Per-cell status popup, opening upward from the chip's right edge. */
-        #cell-status-pop { position:absolute; bottom:calc(100% + 8px); right:0; z-index:9;
-          width:min(400px,calc(100vw - 24px)); max-height:min(70vh,560px); overflow:hidden;
-          display:flex; flex-direction:column;
-          background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:12px;
-          box-shadow:0 10px 32px rgba(0,0,0,.24); padding:14px 16px; }
-        #cell-status-pop[hidden] { display:none; }
         .csp-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
           font:600 11px/1.2 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
           letter-spacing:.04em; padding:0 0 12px; }
@@ -3816,37 +3877,30 @@ export class ChartPlotterApp extends HTMLElement {
         .csp-stat { flex:none; font-weight:600; font-size:11px; }
         .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
         .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:8px 0; }
-        /* Scale/zoom/position readout — its own fixed-size pill, pinned to the
-           bottom-MIDDLE. Every field below has a fixed width + tabular figures so
-           the pill's size never changes and nothing shifts as the scale, zoom, or
-           centre coordinates update (panning changes only the position field). */
-        .sb-readout { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 8px);
+        /* Bottom-centre DATA CARD — adopts the surface look of the old sidebar: a
+           solid rounded card pinned to the bottom middle. Holds ONLY the live nav
+           readout (band · scale · zoom · position). Purely presentational — no
+           buttons, no transient status (activity lives in the notification pill). */
+        #databox { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 14px);
           transform:translateX(-50%); z-index:6; box-sizing:border-box;
-          display:inline-flex; align-items:center; padding:5px 12px; max-width:calc(100vw - 20px);
-          background:color-mix(in srgb, var(--ui-surface) 82%, transparent); border:1px solid rgba(0,0,0,.06);
-          border-radius:11px; backdrop-filter:blur(6px);
-          box-shadow:inset 0 1px 2px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.4), 0 1px 0 rgba(255,255,255,.4);
+          display:flex; flex-direction:column; align-items:center; gap:5px; padding:8px 14px;
+          min-width:240px; max-width:calc(100vw - 24px);
+          background:color-mix(in srgb, var(--ui-surface) 92%, transparent); border:1px solid var(--ui-border);
+          border-radius:13px; backdrop-filter:blur(7px);
+          box-shadow:0 4px 18px rgba(0,0,0,.18);
           font:11px system-ui,sans-serif; color:var(--ui-text); }
-        .sb-readout:empty { display:none; }
-        .sb-readout .hud-main { display:flex; align-items:center; gap:6px;
+        #databox[hidden] { display:none; }
+        /* Live band·scale·zoom·position readout — fixed-width fields + tabular
+           figures so panning/zooming never reflows the card. */
+        .db-readout { display:flex; align-items:center; }
+        .db-readout .hud-main { display:flex; align-items:center; gap:6px;
           font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
-        .sb-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:1px; }
-        /* Fixed-width fields (left-aligned) so the pill is a constant size. */
-        .sb-readout .hud-band { display:inline-block; width:56px; }
-        .sb-readout .hud-scale { display:inline-block; width:74px; color:var(--ui-accent); }
-        .sb-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
-        .sb-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
-        .sb-readout .hud-sep { color:var(--ui-text-faint); }
-        /* In-view band pills, right-aligned; each opens a cell-list popup. */
-        .sb-bands { display:flex; align-items:center; gap:8px; min-width:0; margin-left:auto; }
-        .sb-band-wrap { position:relative; flex:none; }
-        .sb-band { display:inline-flex; align-items:center; gap:5px; font:600 11px/1 system-ui,sans-serif; color:var(--ui-text);
-          background:var(--ui-surface); border:1px solid rgba(0,0,0,.14); border-radius:13px; padding:4px 9px; cursor:pointer; white-space:nowrap; }
-        .sb-band:hover { border-color:var(--ui-accent); }
-        .sb-band .sb-dot { width:8px; height:8px; border-radius:50%; background:var(--bc); flex:none; }
-        .sb-band .sb-ct { color:var(--ui-text-faint); font-weight:500; }
-        .sb-band .sb-miss { color:var(--ui-accent); font-weight:700; }
-        .sb-band.has-missing { border-color:rgba(21,101,192,.5); }
+        .db-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:1px; }
+        .db-readout .hud-band { display:inline-block; width:56px; }
+        .db-readout .hud-scale { display:inline-block; width:74px; color:var(--ui-accent); }
+        .db-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
+        .db-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
+        .db-readout .hud-sep { color:var(--ui-text-faint); }
         /* Cell-list popup above a band pill (hover on desktop; tap to pin on touch). */
         .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
           background:var(--ui-surface); border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
@@ -3865,29 +3919,46 @@ export class ChartPlotterApp extends HTMLElement {
         .cov-empty { font:12px system-ui,sans-serif; color:var(--ui-text-faint); }
         #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
-        /* Panels are dialog popovers that pop FROM their tab, with a little caret
-           arrow pointing back to it. MOBILE (base): above the bottom bar, caret
-           down. DESKTOP: right of the dock, caret left (see min-width query). The
-           caret position (--caret-left / --caret-top) is set in JS to the active
-           tab's centre. Pops in with a fade+scale from the caret edge; fully
-           hidden (visibility) when closed. */
-        #drawer, #search { --caret:9px; }
+        /* Panels are dialog popovers that DROP DOWN from their corner button, with a
+           caret on the top edge pointing back up at it. The Charts/Settings panel
+           anchors top-right; search anchors top-left. The caret's horizontal offset
+           (--caret-left) is set in JS to the originating button's centre. Pops in
+           with a fade+scale from the caret edge; fully hidden when closed. */
+        /* --panel-bottom: viewport-bottom space reserved for the data card so a
+           panel never covers it (the card is bottom-centre, panels drop from the
+           top — capping their height keeps the two from overlapping). */
+        #drawer, #search { --caret:9px; --ctrl-top:calc(64px + env(safe-area-inset-top,0px));
+          --panel-bottom:calc(var(--botbar-h) + 92px); }
         /* NB: no overflow:hidden on the popover itself — it would clip the caret.
            Inner scroll areas (.body / #search-results) round their own corners. */
-        #drawer { position:absolute; left:8px; right:8px; bottom:calc(var(--botbar-h) + 14px); width:auto; max-height:76vh; z-index:6;
+        #drawer { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); top:var(--ctrl-top);
+          width:min(440px, calc(100vw - 24px)); max-height:calc(100vh - var(--ctrl-top) - var(--panel-bottom)); z-index:6;
           background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border); border-radius:14px;
           box-shadow:0 12px 38px rgba(0,0,0,.30); display:flex; flex-direction:column;
-          transform-origin:bottom center; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
+          transform-origin:top right; transform:translateY(-6px) scale(.97); opacity:0; visibility:hidden;
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
+        #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
+        #drawer.wide .miller { height:calc(100vh - var(--ctrl-top) - var(--panel-bottom) - 118px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
-        /* caret (base = pointing down at the tab below) */
-        #drawer::after, #search::after { content:""; position:absolute; bottom:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
+        /* caret on the TOP edge, pointing up at the button above */
+        #drawer::after, #search::after { content:""; position:absolute; top:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
           width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
-          border-top:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 2px 1px rgba(0,0,0,.12)); }
-        #search::after { border-top-color:var(--ui-surface); }
+          border-bottom:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 -2px 1px rgba(0,0,0,.08)); }
+        #search::after { border-bottom-color:var(--ui-surface); }
         /* Settings lays its sections in responsive columns to use the panel width. */
-        #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0 28px; align-items:start; }
+        #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:8px 40px; align-items:start; padding-top:2px; }
+        /* Dev tools live behind a button at the very top of Settings (spans all
+           columns). The Dev panel itself opens as the inspect section with a back
+           link to Settings. */
+        .set-section.dev-entry { grid-column:1/-1; margin:0 0 14px; }
+        .dev-open { display:flex; align-items:center; gap:9px; font-weight:600; padding:10px 12px; }
+        .dev-open svg { width:17px; height:17px; flex:none; }
+        .dev-open .dev-open-chev { margin-left:auto; color:var(--ui-text-faint); }
+        .dev-back { display:inline-flex; align-items:center; gap:4px; margin:0 0 8px -4px; padding:4px 8px 4px 4px;
+          border:none; background:none; color:var(--ui-accent); cursor:pointer; font:600 13px system-ui,sans-serif; border-radius:7px; }
+        .dev-back:hover { background:var(--ui-hover); }
+        .dev-back svg { width:16px; height:16px; }
         /* Feature inspector — slides in from the RIGHT (overlays the map). */
         .ins-body { overflow:auto; padding:12px 0; }
         .ins-empty { color:var(--ui-text-faint); text-align:center; padding:24px 10px; }
@@ -3910,7 +3981,7 @@ export class ChartPlotterApp extends HTMLElement {
         .ins-kv .v { color:var(--ui-text); word-break:break-word; }
         .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
         .dhead strong { flex:1; font-size:14px; }
-        .body { overflow:auto; padding:12px; flex:1; }
+        .body { overflow:auto; padding:14px 16px; flex:1; }
         .panel { display:none; } .panel.sel { display:block; }
         .drop { border:2px dashed var(--ui-border-strong); border-radius:8px; padding:18px; text-align:center; color:var(--ui-text-dim); margin-bottom:10px; }
         .drop.over { border-color:var(--ui-accent); background:var(--ui-hover); color:var(--ui-accent); }
@@ -3959,12 +4030,47 @@ export class ChartPlotterApp extends HTMLElement {
         label.fld { display:block; margin:8px 0; }
         label.fld span { display:inline-block; min-width:135px; }
         input[type=number] { width:64px; }
-        /* progress surface (drawer): phase label + percent, bar, detail sub-line */
-        .progwrap { margin:4px 0 16px; background:var(--ui-surface-2); border:1px solid var(--ui-border); border-radius:10px; padding:11px 13px; }
-        .progwrap .prog-top { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:7px; }
-        .progwrap .prog-label { font-weight:600; }
-        .progwrap .prog-pct { color:var(--ui-accent); font-weight:600; font-variant-numeric:tabular-nums; }
-        .progwrap .prog-sub { margin-top:6px; font-size:12px; }
+        /* Top-centre notification pill — non-blocking "work happening" indicator.
+           Hidden unless a job is active; "lights up" (pulsing ring + spinner) while
+           busy; click drops a detail panel. */
+        #notif { position:absolute; top:calc(12px + env(safe-area-inset-top,0px)); left:50%; transform:translateX(-50%); z-index:7; }
+        #notif[hidden] { display:none; }
+        /* Fixed width so the pill never resizes as the message changes; the label
+           centres and truncates within it. */
+        .notif-btn { display:flex; align-items:center; gap:8px; width:min(88vw, 320px); box-sizing:border-box; cursor:pointer;
+          padding:8px 14px; border-radius:20px; font:600 12px/1.1 system-ui,sans-serif; color:var(--ui-text);
+          background:color-mix(in srgb, var(--ui-surface) 92%, transparent); border:1px solid var(--ui-border);
+          box-shadow:0 2px 10px rgba(0,0,0,.18); backdrop-filter:blur(6px); transition:box-shadow .2s, border-color .2s; }
+        .notif-btn:hover { border-color:var(--ui-accent); }
+        .notif-label { flex:1; min-width:0; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        /* Chevron + clickability only when there's a detail panel to open. */
+        .notif-chev { width:15px; height:15px; flex:none; color:var(--ui-text-faint); transition:transform .15s; display:none; }
+        #notif.has-detail .notif-chev { display:block; }
+        #notif:not(.has-detail) .notif-btn { cursor:default; }
+        #notif:not(.has-detail) .notif-btn:hover { border-color:var(--ui-border); }
+        #notif.open .notif-chev { transform:rotate(180deg); }
+        /* "Lights up" while busy: an accent ring that gently pulses + a spinner. */
+        #notif.busy .notif-btn { border-color:var(--ui-accent); animation:notif-pulse 1.6s ease-in-out infinite; }
+        #notif.error .notif-btn { border-color:#c0392b; color:#c0392b; box-shadow:0 2px 10px rgba(192,57,43,.25); }
+        @keyframes notif-pulse {
+          0%,100% { box-shadow:0 2px 10px rgba(0,0,0,.18), 0 0 0 0 color-mix(in srgb, var(--ui-accent) 40%, transparent); }
+          50% { box-shadow:0 2px 10px rgba(0,0,0,.18), 0 0 0 5px color-mix(in srgb, var(--ui-accent) 0%, transparent); }
+        }
+        .notif-spin { width:13px; height:13px; flex:none; border-radius:50%; display:none;
+          border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
+          animation:dlspin .8s linear infinite; }
+        #notif.busy .notif-spin { display:inline-block; }
+        @media (prefers-reduced-motion: reduce) { #notif.busy .notif-btn { animation:none; } .notif-spin { animation-duration:2s; } }
+        /* Detail panel dropping from the pill. */
+        .notif-pop { position:absolute; top:calc(100% + 8px); left:50%; transform:translateX(-50%); min-width:220px; max-width:min(86vw, 360px);
+          background:var(--ui-surface); border:1px solid var(--ui-border); border-radius:12px; padding:12px 14px;
+          box-shadow:0 12px 32px rgba(0,0,0,.26); }
+        .notif-pop[hidden] { display:none; }
+        .notif-pop-title { font:600 13px/1.3 system-ui,sans-serif; color:var(--ui-text); }
+        .notif-pop-sub { margin-top:5px; font:12px/1.4 system-ui,sans-serif; color:var(--ui-text-dim); white-space:normal; word-break:break-word; }
+        .notif-pop-sub[hidden] { display:none; }
+        .notif-pop-pct { margin-top:8px; font:700 12px/1 system-ui,sans-serif; color:var(--ui-accent); font-variant-numeric:tabular-nums; }
+        #notif.error .notif-pop-pct { color:#c0392b; }
         progress { width:100%; height:8px; -webkit-appearance:none; appearance:none; border:none; border-radius:5px; overflow:hidden; background:var(--ui-surface-2); }
         progress::-webkit-progress-bar { background:var(--ui-surface-2); border-radius:5px; }
         progress::-webkit-progress-value { background:var(--ui-accent); border-radius:5px; }
@@ -3987,38 +4093,28 @@ export class ChartPlotterApp extends HTMLElement {
         #empty .welcome-cta { display:inline-flex; align-items:center; gap:8px; width:auto; padding:11px 22px; font-size:15px; }
         #empty .welcome-sub { margin-top:12px; font-size:13px; color:var(--ui-text-faint); }
         #empty .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
-        /* Search sits beside the day/night toggle (the .rail-end group); tapping it
-           opens the tiny flyout. */
-        #rail .search-toggle.on { background:var(--ui-accent); color:var(--ui-accent-text); }
         #search[hidden] { display:block; } /* defeat UA hidden so the popover can fade out (base styles keep it invisible/non-interactive) */
-        /* "All charts" — jump back to the zoomed-out world view (Charts mode only).
-           Sits at the top-left of the map area, which starts past the open drawer. */
-        #world-btn { position:absolute; top:12px; left:12px; z-index:5; display:inline-flex; align-items:center; gap:6px;
-          border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:18px; padding:7px 13px 7px 10px;
-          font:600 12px system-ui,sans-serif; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,.25); transition:left .2s; }
-        #world-btn:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
-        #world-btn svg { width:16px; height:16px; }
-        #world-btn[hidden] { display:none; }
         /* Search: same caret-popover as the panels — a dialog card with the input
-           on top and results filling in underneath, popping from the search tab. */
-        #search { position:absolute; right:8px; left:auto; bottom:calc(var(--botbar-h) + 14px); z-index:8; width:min(340px, calc(100vw - 16px));
+           on top and results filling in underneath, dropping from the search button
+           at the top-left. */
+        #search { position:absolute; left:calc(12px + env(safe-area-inset-left,0px)); right:auto; top:var(--ctrl-top); z-index:8; width:min(360px, calc(100vw - 24px));
           background:var(--ui-surface); border:1px solid var(--ui-border); border-radius:14px;
           box-shadow:0 12px 38px rgba(0,0,0,.30);
-          transform-origin:bottom center; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
+          transform-origin:top left; transform:translateY(-6px) scale(.97); opacity:0; visibility:hidden;
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #search:not([hidden]) { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #search input { width:100%; box-sizing:border-box; border:none; border-radius:14px; padding:11px 16px;
           font:inherit; background:transparent; color:var(--ui-text); outline:none; }
-        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(50vh, 360px); overflow-y:auto; border-radius:0 0 13px 13px; }
+        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(360px, calc(100vh - var(--ctrl-top) - var(--panel-bottom) - 52px)); overflow-y:auto; border-radius:0 0 13px 13px; }
         #search-results[hidden] { display:none; }
         .sr-item { padding:8px 16px; cursor:pointer; border-bottom:1px solid var(--ui-border-2); }
         .sr-item:last-child { border-bottom:none; }
         .sr-item:hover, .sr-item.sel { background:var(--ui-hover); }
         .sr-item .t { font-weight:600; } .sr-item .s { color:var(--ui-text-faint); font-size:12px; }
         /* Subtle "loading more while data is shown" cue: a hairline indeterminate
-           bar riding the top edge of the bottom tab bar. Opacity-controlled (always
-           in DOM) so it fades in/out; the slide animation runs continuously. */
-        .load-bar { position:absolute; bottom:var(--botbar-h); left:0; right:0; height:3px; z-index:25; pointer-events:none; overflow:hidden;
+           bar riding the top edge of the viewport. Opacity-controlled (always in
+           DOM) so it fades in/out; the slide animation runs continuously. */
+        .load-bar { position:absolute; top:0; left:0; right:0; height:3px; z-index:25; pointer-events:none; overflow:hidden;
           opacity:0; transition:opacity .2s ease; background:rgba(13,71,161,.3); }
         .load-bar.on { opacity:1; }
         .load-bar::before { content:""; position:absolute; top:0; height:100%; width:40%;
@@ -4038,87 +4134,55 @@ export class ChartPlotterApp extends HTMLElement {
           .set-row .lbl { flex:1 1 60%; }
           .seg-multi { flex-wrap:wrap; gap:8px 14px; }
         }
-        /* On a narrow phone, drop the zoom from the status chip so the readout +
-           chart-count never run past the screen edge (scale is what matters). */
+        /* On a narrow phone, drop the zoom from the readout so the band·scale·
+           position line never runs past the card edge (scale is what matters). */
         @media (max-width: 430px) {
-          .sb-readout .hud-z, .sb-readout .hud-scale + .hud-sep { display:none; }
-        }
-        /* ---- Desktop: floating left dock + 40% left overlay panel -----------
-           The nav becomes a floating vertical dock; opening a section overlays a
-           panel over the LEFT of the map without moving it, so the right of the
-           chart (and live S-52 changes) stays visible. */
-        @media (min-width: 641px) {
-          :host { --botbar-h:0px; }
-          #map { inset:0; }
-          #rail { left:14px; right:auto; top:50%; bottom:auto; transform:translateY(-50%);
-            width:auto; height:auto; grid-template-columns:none;
-            display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px;
-            border:1px solid var(--ui-border); border-radius:20px; box-shadow:0 6px 26px rgba(0,0,0,.20); }
-          #rail .rail-tabs { flex-direction:column; gap:4px; }
-          /* search + day/night group sits at the bottom of the dock, divided off. */
-          #rail .rail-end { flex-direction:column; gap:4px; margin-top:6px; padding-top:10px;
-            border-top:1px solid var(--ui-border-2); }
-          #rail .scheme-toggle, #rail .search-toggle { width:64px; }
-          .load-bar { top:0; bottom:auto; }
-          /* Popovers sit right of the dock and pop from the left (caret points at
-             the dock tab). The panel is the tall 40% left overlay; search is a
-             compact card near the bottom (by the search tab). */
-          #drawer, #search { right:auto; transform-origin:left center; transform:translateX(-6px) scale(.985); }
-          #drawer.open, #search:not([hidden]) { transform:none; }
-          #drawer { left:116px; top:14px; bottom:14px; width:min(40vw, 520px); max-height:none; }
-          #drawer.wide { width:min(80vw, 960px); } /* charts: two-pane list + map */
-          #drawer.wide .miller { height:calc(100vh - 168px); max-height:none; } /* full-height columns */
-          #search { left:116px; top:auto; bottom:14px; width:340px; max-height:calc(100vh - 28px); }
-          /* caret points LEFT toward the dock tab */
-          #drawer::after, #search::after { left:calc(-1 * var(--caret)); right:auto; bottom:auto; top:var(--caret-top,50%);
-            transform:translateY(-50%); border-left:none;
-            border-top:var(--caret) solid transparent; border-bottom:var(--caret) solid transparent;
-            border-right:var(--caret) solid var(--ui-bg); }
-          #search::after { border-right-color:var(--ui-surface); }
+          .db-readout .hud-z, .db-readout .hud-scale + .hud-sep { display:none; }
         }
       </style>
       <div id="map"></div>
-      <div id="statusbar" hidden>
-        <button id="bake-status" class="sb-bake" type="button" hidden title="Chart tile generation — click for per-cell status">
-          <span class="sb-bake-spin"></span><span class="sb-bake-txt"></span>
-        </button>
-        <div id="cell-status-pop" hidden></div>
-      </div>
-      <div id="cov-readout" class="sb-readout"></div>
       <div id="load-bar" class="load-bar" aria-hidden="true"></div>
-      <div id="rail">
-        <div class="rail-tabs">
-        <button class="ri" id="rail-home" title="Chart view">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3 3 5.5v15L9 18l6 3 6-2.5v-15L15 6 9 3Z"/><path d="M9 3v15M15 6v15"/></svg>
-          <span class="cap">Charts</span>
+      <!-- The map is the UI. Chrome is reduced to four round buttons floating in
+           the corners — search alone top-left; charts · scheme · settings top-right
+           — plus a read-only data card pinned to the bottom centre. -->
+      <div id="tl-controls" class="ctrl-group">
+        <button class="rbtn" id="search-tab" type="button" title="Search charts &amp; features" aria-label="Search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         </button>
-        <button class="ri" id="rail-menu" title="Get &amp; manage charts">
+      </div>
+      <div id="tr-controls" class="ctrl-group">
+        <button class="rbtn" id="charts-btn" type="button" title="Get &amp; manage charts" aria-label="Charts">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12l9 4.5L21 12"/><path d="M3 16.5 12 21l9-4.5"/></svg>
-          <span class="cap">Library</span>
         </button>
-        <button class="ri" id="rail-settings" title="Settings">
+        <button class="rbtn" id="scheme-toggle" type="button" title="Colour scheme — tap to cycle Day · Dusk · Night" aria-label="Colour scheme">
+          <svg id="scheme-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg>
+        </button>
+        <button class="rbtn" id="settings-btn" type="button" title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
-          <span class="cap">Settings</span>
         </button>
-        <button class="ri" id="dev-toggle" title="Developer tools — share, tile/band inspector, feature inspect">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3"/><path d="m16 9 4 3-4 3"/><path d="m13 6-2 12"/></svg>
-          <span class="cap">Dev</span>
+      </div>
+      <!-- Top-centre notification pill — hidden unless a job is running; lights up
+           (pulse + spinner) to signal background work without blocking the UI, and
+           drops a detail panel when clicked. Driven by _setNotification. -->
+      <div id="notif" hidden>
+        <button id="notif-btn" class="notif-btn" type="button" title="Show details">
+          <span class="notif-spin"></span>
+          <span id="notif-label" class="notif-label"></span>
+          <svg class="notif-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </button>
+        <div id="notif-pop" class="notif-pop" hidden>
+          <div id="notif-pop-title" class="notif-pop-title"></div>
+          <div id="notif-pop-sub" class="notif-pop-sub"></div>
+          <div id="notif-pop-pct" class="notif-pop-pct"></div>
         </div>
-        <div class="rail-end">
-          <button class="ri search-toggle" id="search-tab" type="button" title="Search charts & features">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-          </button>
-          <button class="ri scheme-toggle" id="scheme-toggle" type="button" title="Colour scheme — tap to cycle Day · Dusk · Night">
-            <svg id="scheme-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg>
-          </button>
-        </div>
+      </div>
+      <!-- Bottom-centre data card: ONLY the live nav readout (band · scale · zoom ·
+           position). All activity/progress is signalled by the top notification
+           pill — nothing transient lives here. See _updateHud. -->
+      <div id="databox" hidden>
+        <span id="cov-readout" class="db-readout"></span>
       </div>
       <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
-      <button id="world-btn" hidden title="Zoom out to all charts">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z"/></svg>
-        <span>All charts</span>
-      </button>
       <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
       <div id="agree" class="modal" hidden>
         <div class="modal-card">
@@ -4138,7 +4202,6 @@ export class ChartPlotterApp extends HTMLElement {
           </div>
         </div>
       </div>
-      <button id="dlpill" hidden></button>
       <div id="ctx-menu" class="ctx-menu" hidden></div>
       <div id="debug-hud" class="debug-hud" hidden></div>
       <div id="empty" hidden><div class="card">
@@ -4152,13 +4215,8 @@ export class ChartPlotterApp extends HTMLElement {
         <div class="dhead"><strong id="dtitle">Chart library</strong><button id="close" class="btn">✕</button></div>
         <div class="body">
           <div class="panel sel" data-panel="charts">
-            <!-- shared progress card (download / import), visible in any view -->
-            <div class="progwrap" hidden>
-              <div class="prog-top"><span id="prog-label" class="prog-label"></span><span id="prog-pct" class="prog-pct"></span></div>
-              <progress id="prog" max="1" value="0"></progress>
-              <div id="prog-sub" class="prog-sub muted"></div>
-            </div>
-            <!-- the whole chart UI is one region browser (renderCharts fills this) -->
+            <!-- Job progress lives in the bottom data card + top notification pill,
+                 not in the drawer. This panel is purely the region browser. -->
             <div id="charts-body"></div>
           </div>
           <div class="panel" data-panel="settings">
@@ -4173,18 +4231,15 @@ export class ChartPlotterApp extends HTMLElement {
 
     // wiring
     const $ = (id) => r.getElementById(id);
-    // The rail is the sidebar's docked spine: its icons pick which drawer section
-    // flies out (clicking the active one closes it). "Add charts" / "Update all"
-    // live inside the Charts section itself.
-    $("rail-home").onclick = () => this.goHome();
-    $("rail-menu").onclick = () => this.toggleSection("charts");
-    $("rail-settings").onclick = () => this.toggleSection("settings");
+    // The corner round buttons are the whole nav: search top-left; charts · scheme
+    // · settings top-right. Each section toggles its drawer (clicking the active
+    // one closes it). Dev tools live behind a button at the top of Settings.
+    $("charts-btn").onclick = () => this.toggleSection("charts");
+    $("settings-btn").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
-    $("dev-toggle").onclick = () => this.toggleSection("inspect");
     $("scheme-toggle").onclick = () => this._cycleScheme();
     this._syncSchemeUI(); // paint the toggle's initial icon
     this._renderDevPanel(); // fills #dev-tools (share, band toggles, tile inspector)
-    $("bake-status").onclick = (e) => { e.stopPropagation(); this._toggleCellStatusPopup(); };
     // Esc dismisses the debug context menu, else exits the feature inspector.
     // Escape closes the topmost open dialog/overlay (one per press). The
     // cursor-pick report closes itself (its own captured handler runs first).
@@ -4196,13 +4251,13 @@ export class ChartPlotterApp extends HTMLElement {
       const agree = root.getElementById("agree");
       if (agree && !agree.hidden) { this._resolveAgreement(false); return; } // cancel
       if (this._cellPopOpen) { this._toggleCellStatusPopup(); return; }
+      if (this._notifOpen) { this._toggleNotif(false); return; }
       const search = root.getElementById("search");
       if (search && !search.hidden) { search.hidden = true; root.getElementById("search-tab").classList.remove("on"); return; }
       if (this._drawerOpen()) { this.closeDrawer(); return; }
     });
     $("empty-add").onclick = () => this.openCharts();
     $("empty-import").onclick = () => { this._selProvider = "user"; this._selPack = null; this.openCharts(); };
-    $("rail-home").classList.add("on"); // boot shows the bare chart viewer
     // NOAA ENC user-agreement gate + attribution "Terms" link.
     $("attr-terms").onclick = () => this._showAgreement();
     $("agree-accept").onclick = () => this._resolveAgreement(true);
@@ -4214,14 +4269,15 @@ export class ChartPlotterApp extends HTMLElement {
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
     const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._positionSearch(); si.focus(); };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
-    // "All charts" — re-frame the selection map to the zoomed-out world view.
-    $("world-btn").onclick = () => this._frameChartsWorld();
     si.oninput = () => this.doSearch(si.value);
     si.onkeydown = (e) => {
       if (e.key === "Enter") this.gotoSearchHit(0);
       else if (e.key === "Escape") { si.value = ""; closeSearch(); }
     };
     si.onfocus = () => { if (si.value.trim().length >= 2) this.doSearch(si.value); };
+
+    // Top notification pill: click to drop its detail panel.
+    $("notif-btn").onclick = (e) => { e.stopPropagation(); this._toggleNotif(); };
 
     this.renderSettings();
   }
@@ -4236,7 +4292,7 @@ export class ChartPlotterApp extends HTMLElement {
     const r = this.shadowRoot;
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
     r.getElementById("drawer").classList.toggle("wide", name === "charts"); // two-pane list+map
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Dev" : "Chart library";
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Developer tools" : "Chart library";
     // Charts is the "get & see charts" mode: overlay every catalog cell on the
     // map (selected ones highlighted) so you can see and box-select coverage.
     // Any other section is just chrome over the live viewer — no overlay.
@@ -4270,35 +4326,23 @@ export class ChartPlotterApp extends HTMLElement {
   // pop-in transform removed so the rect is the final resting position.
   _positionCaret(pop, tab) {
     if (!pop || !tab) return;
-    const desktop = window.matchMedia("(min-width:641px)").matches;
     const tr = tab.getBoundingClientRect();
     const prev = pop.style.transform; pop.style.transform = "none";
     const pr = pop.getBoundingClientRect();
     pop.style.transform = prev;
-    if (desktop) pop.style.setProperty("--caret-top", `${Math.max(16, Math.min(pr.height - 16, tr.top + tr.height / 2 - pr.top))}px`);
-    else pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
+    // Panels drop DOWN from their corner button, caret on the top edge: set its
+    // horizontal offset to the button's centre, clamped to the panel's edges.
+    pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
   }
 
-  // The search popover grows with results, so unlike the full-height panel it must
-  // be vertically aligned to the search tab (desktop) every time its height
-  // changes — otherwise a short popover sits below the tab and the caret can't
-  // reach it. Called on open and after each query.
+  // The search flyout grows with results; since it's anchored from the top its
+  // height can change freely without re-aligning. Just re-point the caret at the
+  // search button (called on open and after each query).
   _positionSearch() {
     const r = this.shadowRoot;
     const pop = r.getElementById("search"), tab = r.getElementById("search-tab");
     if (!pop || pop.hidden || !tab) return;
-    const tr = tab.getBoundingClientRect();
-    if (window.matchMedia("(min-width:641px)").matches) {
-      const h = pop.offsetHeight, vh = window.innerHeight;
-      const top = Math.min(Math.max(tr.top, 14), Math.max(14, vh - h - 14)); // align to tab, clamp on-screen
-      pop.style.bottom = "auto"; pop.style.top = `${top}px`;
-      pop.style.setProperty("--caret-top", `${Math.max(16, Math.min(h - 16, tr.top + tr.height / 2 - top))}px`);
-    } else {
-      pop.style.top = ""; pop.style.bottom = ""; // revert to the CSS bottom anchor
-      const prev = pop.style.transform; pop.style.transform = "none";
-      const pr = pop.getBoundingClientRect(); pop.style.transform = prev;
-      pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
-    }
+    this._positionCaret(pop, tab);
   }
 
   setDrawerOpen(open) {
@@ -4306,26 +4350,19 @@ export class ChartPlotterApp extends HTMLElement {
     const drawer = r.getElementById("drawer");
     if (open && this._section) drawer.dataset.sec = this._section;
     drawer.classList.toggle("open", open);
-    r.getElementById("rail-menu").classList.toggle("on", open && this._section === "charts");
-    r.getElementById("rail-settings").classList.toggle("on", open && this._section === "settings");
-    r.getElementById("dev-toggle").classList.toggle("on", open && this._section === "inspect");
+    // Charts opens from its own button; Settings + its Dev sub-view both anchor on
+    // (and light up) the Settings button.
+    r.getElementById("charts-btn").classList.toggle("on", open && this._section === "charts");
+    r.getElementById("settings-btn").classList.toggle("on", open && (this._section === "settings" || this._section === "inspect"));
     if (open) {
-      const tabId = this._section === "settings" ? "rail-settings" : this._section === "inspect" ? "dev-toggle" : "rail-menu";
+      const tabId = this._section === "charts" ? "charts-btn" : "settings-btn";
       this._positionCaret(drawer, r.getElementById(tabId));
     }
-    // Home is "active" whenever the drawer is shut — i.e. the bare chart viewer.
-    r.getElementById("rail-home").classList.toggle("on", !open);
-    // Closing the drawer leaves Charts mode: restore the ENC render + prior view,
-    // clear the region highlight, and cancel any in-progress box drag. Also disarm
+    // Closing the drawer leaves Charts mode: restore the ENC render, clear the
+    // region highlight, and cancel any in-progress box drag. Also disarm
     // feature-inspect (crosshair/box-zoom) so it doesn't linger over the bare map.
     if (!open) { this._exitChartsMode(); this._setInspectMode(false); }
     this.updateEmptyState(); // the welcome card hides while the drawer is open
-    setTimeout(() => {
-      if (!this._map) return;
-      this._map.resize();
-      // Frame the world view when entering Charts mode (once the sheet has settled).
-      if (this._pendingChartsFrame) { this._pendingChartsFrame = false; this._frameChartsWorld(); }
-    }, 230);
   }
 
   // Empty only when there's nothing to show AND nothing to pick: no archive
@@ -4394,6 +4431,13 @@ export class ChartPlotterApp extends HTMLElement {
         <label class="switch"><input type="checkbox" data-key="${key}" ${on ? "checked" : ""}><span class="sl"></span></label></div>`;
 
     el.innerHTML = `
+      ${this._prod ? "" : `<div class="set-section dev-entry">
+        <button id="open-dev" class="btn wide dev-open" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3"/><path d="m16 9 4 3-4 3"/><path d="m13 6-2 12"/></svg>
+          Developer tools
+          <svg class="dev-open-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>`}
       <div class="set-section">
         <h3>Appearance</h3>
         <div class="set-row"><div class="lbl"><span class="t">Colour scheme</span></div>
@@ -4445,6 +4489,8 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("showScaleBoundaries", "Scale boundaries", "Lines where the chart's navigational purpose changes — larger-scale (more detailed) data is available inside (S-52 DATCVR §10.1.9.1)", m.showScaleBoundaries !== false)}
       </div>`;
 
+    const devBtn = el.querySelector("#open-dev");
+    if (devBtn) devBtn.onclick = () => this.toggleSection("inspect");
     el.querySelectorAll("#scheme-seg button").forEach((b) =>
       (b.onclick = () => { this.applyScheme(b.dataset.scheme); this.renderSettings(); }));
     el.querySelectorAll("#basemap-seg button").forEach((b) =>
