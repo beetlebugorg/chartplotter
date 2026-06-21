@@ -975,16 +975,6 @@ export class ChartPlotterApp extends HTMLElement {
     const z = this._map.getZoom(), c = this._map.getCenter();
     const band = bandForZoom(z);
     const dispDenom = scaleDenom(z, c.lat);
-    // Overscale indication (S-52 §10.1.10.1): when the display scale is larger than
-    // the compilation scale of the chart shown here, the data is "grossly enlarged"
-    // beyond its survey scale. Show the ×n factor (= comp-denom / display-denom) so
-    // the mariner knows the detail is magnified and not to be relied on. _coverScale
-    // is the finest covering chart's compilation scale (set in _updateZoomCap).
-    let over = "";
-    if (this._coverScale && dispDenom < this._coverScale) {
-      const f = this._coverScale / dispDenom;
-      if (f >= 1.15) over = `<span class="hud-over" title="Chart data magnified beyond its compilation scale — detail is enlarged and not to be relied on"><svg class="hud-over-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)}</span>`;
-    }
     // Fixed-width fields (+ tabular-nums in CSS) so scale/zoom don't reflow the
     // bar as their digit counts change.
     el.innerHTML =
@@ -992,7 +982,24 @@ export class ChartPlotterApp extends HTMLElement {
       `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
       `<span class="hud-scale">1:${fmtScale(dispDenom)}</span><span class="hud-sep">·</span>` +
       `<span class="hud-z">z${z.toFixed(1)}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span>${over}</span>`;
+      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span></span>`;
+    // Overscale indication (S-52 §10.1.10.1): when the display scale is larger than
+    // the compilation scale of the chart shown here, the data is "grossly enlarged"
+    // beyond its survey scale. Show the ×n factor (= comp-denom / display-denom) as
+    // a full-width amber warning band filling the bottom of the card so the caution
+    // is unmissable. _coverScale = finest covering chart's CSCL (set in _updateZoomCap).
+    const warn = this.shadowRoot.getElementById("db-warn");
+    if (warn) {
+      const f = this._coverScale && dispDenom < this._coverScale ? this._coverScale / dispDenom : 0;
+      if (f >= 1.15) {
+        warn.hidden = false;
+        warn.innerHTML =
+          `<svg class="db-warn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>` +
+          `<span>Overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)} — data magnified beyond survey scale</span>`;
+      } else {
+        warn.hidden = true;
+      }
+    }
   }
 
   // Overscale cap: limit zoom-IN to the finest installed chart band that actually
@@ -3939,7 +3946,7 @@ export class ChartPlotterApp extends HTMLElement {
           display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px 14px;
           width:min(94vw, 420px);
           background:color-mix(in srgb, var(--ui-surface) 92%, transparent); border:1px solid var(--ui-border);
-          border-radius:13px; backdrop-filter:blur(7px);
+          border-radius:13px; backdrop-filter:blur(7px); overflow:hidden;
           box-shadow:0 4px 18px rgba(0,0,0,.18);
           font:11px system-ui,sans-serif; color:var(--ui-text); }
         #databox[hidden] { display:none; }
@@ -3956,12 +3963,15 @@ export class ChartPlotterApp extends HTMLElement {
         .db-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
         .db-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
         .db-readout .hud-sep { color:var(--ui-text-faint); }
-        /* Overscale indication (S-52 §10.1.10.1) — an amber warning chip so the
-           "data magnified beyond survey scale" caution is unmissable in the card. */
-        .db-readout .hud-over { display:inline-flex; align-items:center; gap:4px; margin-left:8px;
-          padding:2px 7px 2px 5px; border-radius:8px; color:#fff; background:#e8820c; font-weight:700; white-space:nowrap;
-          box-shadow:0 1px 4px rgba(232,130,12,.4); }
-        .db-readout .hud-over-ico { width:13px; height:13px; flex:none; }
+        /* Overscale indication (S-52 §10.1.10.1) — a full-width amber band filling
+           the bottom of the card (its own warning notification area). Negative
+           margins cancel the card's padding so it reaches the rounded edges; the
+           card's overflow:hidden clips it to the bottom corners. */
+        .db-warn { box-sizing:border-box; width:calc(100% + 28px); margin:1px -14px -8px; padding:5px 12px;
+          display:flex; align-items:center; justify-content:center; gap:5px;
+          background:#e8820c; color:#fff; font:700 11.5px/1.25 system-ui,sans-serif; text-align:center; }
+        .db-warn[hidden] { display:none; }
+        .db-warn-ico { width:14px; height:14px; flex:none; }
         /* Cell-list popup above a band pill (hover on desktop; tap to pin on touch). */
         .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
           background:var(--ui-surface); border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
@@ -4221,6 +4231,7 @@ export class ChartPlotterApp extends HTMLElement {
           <div class="db-prog-track"><span id="db-prog-fill" class="db-prog-fill"></span></div>
         </div>
         <span id="cov-readout" class="db-readout"></span>
+        <div id="db-warn" class="db-warn" hidden></div>
       </div>
       <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
       <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
