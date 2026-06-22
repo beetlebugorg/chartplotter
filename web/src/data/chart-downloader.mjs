@@ -1,5 +1,5 @@
 // ChartDownloader — the chart discovery + acquisition domain, extracted from the
-// <chart-plotter-app> shell so "getting charts" (NOAA catalog, district packs,
+// <chart-plotter> shell so "getting charts" (NOAA catalog, district packs,
 // download, ZIP/.000 import) lives in one place rather than threaded through the
 // shell. See specs/web-architecture.md.
 //

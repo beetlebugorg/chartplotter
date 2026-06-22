@@ -6,7 +6,7 @@
   <title>chartplotter — WASM S-52 ENC plotter</title>
   <style>
     html, body { margin: 0; height: 100%; }
-    chart-plotter-app { display: block; height: 100%; width: 100%; }
+    chart-plotter { display: block; height: 100%; width: 100%; }
     /* Splash: painted from the static HTML before any module/wasm/tiles load, so
        the user sees feedback instantly; faded out on the plotter's `ready` event. */
     #splash {
@@ -25,7 +25,7 @@
     @keyframes cp-spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { #splash .spinner { animation: none; } }
   </style>
-  <!-- <chart-plotter-app> is the chart-management shell: discover charts on the
+  <!-- <chart-plotter> is the chart-management shell: discover charts on the
        map (NOAA catalog cell boxes over an offline GSHHG coastline), get chart
        data in, manage what's installed, and set S-52 mariner options.
        Tiles are baked SERVER-SIDE. Get charts in by dropping a NOAA `.zip` /
@@ -37,7 +37,7 @@
        colortables/sprite/linestyles/patterns + glyphs (`chartplotter --emit-assets web`),
        vendor/maplibre-gl.*, basemap/coastline.geojson (`scripts/fetch-basemap.sh`),
        and optionally catalog.json (`chartplotter --catalog-json …`). -->
-  <script type="module" src="./src/chartplotter-app.mjs"></script>
+  <script type="module" src="./src/chartplotter.mjs"></script>
 </head>
 <body>
   <!-- `pmtiles="charts.pmtiles"` renders the hosted default archive (baked by
@@ -62,11 +62,11 @@
     })();
   </script>
 
-  <chart-plotter-app pmtiles="charts.pmtiles" center="-76.4875,38.975" zoom="11"></chart-plotter-app>
+  <chart-plotter pmtiles="charts.pmtiles" center="-76.4875,38.975" zoom="11"></chart-plotter>
 
   <!-- Embedding just the renderer (no management UI) stays a one-liner — point
        it at a prebaked archive:
-       <script type="module" src="./src/chartplotter.mjs"></script>
-       <chart-plotter pmtiles="charts.pmtiles"></chart-plotter> -->
+       <script type="module" src="./src/chart-canvas/chart-canvas.mjs"></script>
+       <chart-canvas pmtiles="charts.pmtiles"></chart-canvas> -->
 </body>
 </html>

@@ -1,6 +1,6 @@
 // bands.mjs — NOAA navigational-purpose "usage bands" (coarse→fine) shared across
 // the web app: the band list, display colours/labels, the native Web-Mercator zoom
-// range per band (mirrors CHART_BANDS in chartplotter.mjs), and the scale↔band and
+// range per band (mirrors CHART_BANDS in chart-canvas.mjs), and the scale↔band and
 // zoom↔band mappings. One source of truth so the shell, the renderer overlays, and
 // the feature controllers all agree.
 

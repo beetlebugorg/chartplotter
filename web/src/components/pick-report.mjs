@@ -1,6 +1,6 @@
 // <pick-report> — the ECDIS cursor-pick report panel (S-52 PresLib §10.8).
 //
-// A self-contained, draggable floating panel. The shell (<chart-plotter-app>)
+// A self-contained, draggable floating panel. The shell (<chart-plotter>)
 // gathers the feature stack under a tapped point and hands it here; this element
 // owns the decode (full names, enumerated values, units, dates, the category-C
 // administrative split) and all panel behaviour. It:
