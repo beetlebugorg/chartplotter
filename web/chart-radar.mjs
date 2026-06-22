@@ -8,11 +8,11 @@
 // caps the count, so the number of chips stays small whatever the install size.
 //
 // The shell wires it with accessors (no app internals leak in here):
-//   new ChartRadar({ host, map, getPacks, getUnits, labelFor, bandColor,
-//                    bandMinZoom, bands, onPick, visible })
+//   new ChartRadar({ host, map, getPacks, getUnits, labelFor, onPick, visible })
 // where getPacks() → [{name, enabled, bands:[coarse→fine], bounds:[w,s,e,n]}].
 
 import { format as fmtUnit } from "./units.mjs";
+import { BAND_COLOR } from "./bands.mjs";
 
 const MERGE_PX = 46; // chips closer than this on screen merge into one cluster
 const CAP = 8;       // max chips shown (nearest clusters win)
@@ -27,9 +27,6 @@ export class ChartRadar {
     this.getPacks = opts.getPacks;
     this.getUnits = opts.getUnits || (() => ({}));
     this.labelFor = opts.labelFor || ((n) => n);
-    this.bandColor = opts.bandColor || {};
-    this.bandMinZoom = opts.bandMinZoom || {};
-    this.bands = opts.bands || [];
     this.onPick = opts.onPick || (() => {});
     this._visible = opts.visible !== false;
     this._raf = 0;
@@ -101,7 +98,7 @@ export class ChartRadar {
       chip.className = "radar-chip";
       chip.style.left = cl.pos.x + "px";
       chip.style.top = cl.pos.y + "px";
-      const dot = multi ? "" : `<span class="rc-band" style="background:${this.bandColor[finest] || "#888"}"></span>`;
+      const dot = multi ? "" : `<span class="rc-band" style="background:${BAND_COLOR[finest] || "#888"}"></span>`;
       const name = multi ? `${cl.items.length} charts` : this.labelFor(near.pack.name);
       chip.innerHTML = `${arrowSvg(cl.bearing)}${dot}<span class="rc-name">${esc(name)}</span>` +
         `<span class="rc-dist">${esc(fmtUnit("distance", near.distNm, units))}</span>`;

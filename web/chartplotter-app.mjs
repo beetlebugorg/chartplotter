@@ -24,6 +24,7 @@ import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./units.mjs"; // configurable display units
 import { ChartRadar } from "./chart-radar.mjs"; // off-screen installed-chart edge pointers
+import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, BAND_MAXZOOM, OVERSCALE_MARGIN, DEV_BANDS, bandForScale, bandForZoom } from "./bands.mjs";
 
 const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
@@ -88,24 +89,8 @@ const NOAA_AGREEMENT_URL = "https://www.charts.noaa.gov/ENCs/ENC_Agreement.shtml
 // Box colours by state (kept readable in both day and night chrome).
 const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000" };
 
-// NOAA navigational-purpose bands, coarse→fine, with a colour for the picker so
-// overlapping cells are distinguishable and each band's toggle is identifiable.
-const BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing"];
-const BAND_LABEL = { overview: "Overview", general: "General", coastal: "Coastal", approach: "Approach", harbor: "Harbor", berthing: "Berthing" };
-const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#26a69a", approach: "#9ccc65", harbor: "#ffa726", berthing: "#ef5350" };
-// Native min Web-Mercator zoom per band (matches CHART_BANDS in chartplotter.mjs).
-// Below it a cell's chart detail isn't baked, so we draw its coverage outline.
-// General is overzoomed out to z0 (it renders where no overview covers — see
-// generalOverzoomMin in the baker), so it loads from z0 rather than its native z7.
-const BAND_MINZOOM = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16 };
-// Native MAX (display) zoom per band (matches CHART_BANDS .max in chartplotter.mjs).
-// Drives the overscale cap: zooming past a band's native max + a small margin over
-// open water just enlarges blank water, so _updateZoomCap clamps to the finest band
-// that actually covers the view.
-const BAND_MAXZOOM = { overview: 8, general: 10, coastal: 12, approach: 14, harbor: 16, berthing: 18 };
-const OVERSCALE_MARGIN = 2; // levels of zoom-in allowed past the finest covering band
-// Usage bands in coarse→fine order, for the dev band-filter rows.
-const DEV_BANDS = ["overview", "general", "coastal", "approach", "harbor", "berthing"];
+// Navigational-purpose bands (colours, zoom ranges, scale/zoom mappings) live in
+// bands.mjs — imported at the top of this file.
 // Chart packs = U.S. Coast Guard districts. NOAA publishes one ENC bundle per
 // district (NNCGD_ENCs.zip on charts.noaa.gov/ENCs/ENCs.shtml) and tags every
 // catalog cell with its district (the `cg` field), so a pack is exactly the set
@@ -1031,9 +1016,6 @@ export class ChartPlotterApp extends HTMLElement {
       getPacks: () => this._packsMeta || [],
       getUnits: () => this._mariner,
       labelFor: (name) => this._setLabel(name),
-      bandColor: BAND_COLOR,
-      bandMinZoom: BAND_MINZOOM,
-      bands: BANDS,
       onPick: (packs) => this._flyToPacks(packs),
       visible: this._showChartRadar,
     });
@@ -4930,27 +4912,7 @@ function loadJSON(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; }
 }
 
-// Mirror of bake.zig `bandForScale`: a cell's compilation scale → its NOAA band.
-function bandForScale(s) {
-  const n = s || 0;
-  if (n <= 8000) return "berthing";
-  if (n <= 32000) return "harbor";
-  if (n <= 130000) return "approach";
-  if (n <= 500000) return "coastal";
-  if (n <= 2300000) return "general";
-  return "overview";
-}
-
-// The finest band whose source paints at zoom z (Band.zoomRange mins in bake.zig:
-// overview 0, general 7, coastal 9, approach 11, harbor 13, berthing 16).
-function bandForZoom(z) {
-  if (z >= 16) return "berthing";
-  if (z >= 14) return "harbor";
-  if (z >= 12) return "approach";
-  if (z >= 10) return "coastal";
-  if (z >= 8) return "general";
-  return "overview";
-}
+// bandForScale / bandForZoom now live in bands.mjs (imported at the top).
 
 // Web-Mercator map scale denominator at zoom z / latitude lat (OGC 0.28mm pixel).
 function scaleDenom(z, lat) {
