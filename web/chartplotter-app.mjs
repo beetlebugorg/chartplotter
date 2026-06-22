@@ -24,8 +24,9 @@ import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./units.mjs"; // configurable display units
 import { ChartRadar } from "./chart-radar.mjs"; // off-screen installed-chart edge pointers
-import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, BAND_MAXZOOM, OVERSCALE_MARGIN, DEV_BANDS, bandForScale, bandForZoom } from "./bands.mjs";
-import { esc, loadJSON, scaleDenom, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, fmtScale, fmtLatLon, isShareUrl, parseViewHash, copyText, flashBtn } from "./util.mjs";
+import { HudController } from "./hud-controller.mjs"; // status readout + overscale zoom cap
+import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./bands.mjs";
+import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./util.mjs";
 import { archivePut, archiveGet } from "./archive-store.mjs";
 
 const SCHEMES = ["day", "dusk", "night"];
@@ -988,21 +989,28 @@ export class ChartPlotterApp extends HTMLElement {
     // (show the pill + start polling). A finished/idle task is ignored.
     this._reattachTask();
 
+    // HUD / status readout (band·scale·zoom·position + warning band) and the
+    // overscale zoom cap — own controller; owns the `move` listener for the readout
+    // and does an initial draw + cap. updateZoomCap is driven from moveend below.
+    this._hud = new HudController({
+      map,
+      root: this.shadowRoot,
+      getInstalled: () => this._installed,
+      cellMeta: (name) => this._byName.get(name),
+      serverSetMetas: () => (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [],
+      noChartsEnabled: () => this._noChartsEnabled(),
+    });
+
     // Persist the view so a refresh resumes where you were; refresh the coverage
     // panel's in-view cell list for the new viewport.
     map.on("moveend", () => {
       this.saveView();
       this._assessCoverage();
-      this._updateZoomCap(); // clamp zoom-in to the finest band covering the new view
+      this._hud.updateZoomCap(); // clamp zoom-in to the finest band covering the new view
       // Dev tile inspector: refresh in-view band counts; a prior coverage measure
       // is now stale (different viewport), so drop its hole overlay.
       if (this._devVisible()) { this._clearDevHoles(); this._renderDevPanel(); }
     });
-    this._updateZoomCap(); // initial cap for the boot view
-
-    // Live zoom/scale/band readout (left of the statusbar).
-    this._updateHud();
-    map.on("move", () => this._updateHud());
 
     // Chart radar: edge pointers to off-screen installed charts (its own module;
     // owns its overlay + map listener). Fed from the installed-pack metadata.
@@ -1048,93 +1056,6 @@ export class ChartPlotterApp extends HTMLElement {
     });
   }
 
-  // -- zoom/scale HUD + inspect tool --------------------------------------
-  // Live readout of the current view: zoom, map scale denominator (web-Mercator
-  // at the centre latitude), and the active NOAA band for this zoom (the source
-  // that paints here — see CHART_BANDS in chartplotter.mjs).
-  _updateHud() {
-    const el = this.shadowRoot.getElementById("cov-readout");
-    if (!el || !this._map) return;
-    const box = this.shadowRoot.getElementById("databox"); if (box) box.hidden = false;
-    const z = this._map.getZoom(), c = this._map.getCenter();
-    const band = bandForZoom(z);
-    const dispDenom = scaleDenom(z, c.lat);
-    // Fixed-width fields (+ tabular-nums in CSS) so scale/zoom don't reflow the
-    // bar as their digit counts change.
-    el.innerHTML =
-      `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
-      `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-scale">1:${fmtScale(dispDenom)}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-z">z${z.toFixed(1)}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span></span>`;
-    // Overscale indication (S-52 §10.1.10.1): when the display scale is larger than
-    // the compilation scale of the chart shown here, the data is "grossly enlarged"
-    // beyond its survey scale. Show the ×n factor (= comp-denom / display-denom) as
-    // a full-width amber warning band filling the bottom of the card so the caution
-    // is unmissable. _coverScale = finest covering chart's CSCL (set in _updateZoomCap).
-    const warn = this.shadowRoot.getElementById("db-warn");
-    if (warn) {
-      const warnIco = `<svg class="db-warn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>`;
-      const f = this._coverScale && dispDenom < this._coverScale ? this._coverScale / dispDenom : 0;
-      // Charts installed but all disabled outranks overscale — nothing is drawing.
-      if (this._noChartsEnabled()) {
-        warn.hidden = false;
-        warn.innerHTML = warnIco + `<span>No charts are enabled — turn one on in the Chart library</span>`;
-      } else if (f >= 1.15) {
-        warn.hidden = false;
-        warn.innerHTML = warnIco + `<span>Overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)} — data magnified beyond survey scale</span>`;
-      } else {
-        warn.hidden = true;
-      }
-    }
-  }
-
-  // Overscale cap: limit zoom-IN to the finest installed chart band that actually
-  // covers the view centre, plus a small margin — so you can't keep zooming into
-  // featureless open water (where only the coarse general/overview band overzooms).
-  // "Prevent further in, don't yank the camera": the cap never drops below the
-  // current zoom, so panning from a harbour into open water leaves your view alone;
-  // it just stops you zooming deeper until you zoom back out toward usable scale.
-  _updateZoomCap() {
-    const map = this._map;
-    if (!map) return;
-    const c = map.getCenter();
-    let finest = -1;        // index into BANDS (coarse→fine)
-    let finestScale = 0;    // compilation scale of the largest-scale (smallest-denom) chart covering the centre
-    for (const n of this._installed) {
-      const cell = this._byName.get(n);
-      if (!cell || typeof cell.s !== "number" || !Array.isArray(cell.bb) || cell.bb.length !== 4) continue;
-      const [w, s, e, nN] = cell.bb;
-      if (c.lng < w || c.lng > e || c.lat < s || c.lat > nN) continue;
-      const idx = BANDS.indexOf(bandForScale(cell.s));
-      if (idx > finest) finest = idx;
-      if (!finestScale || cell.s < finestScale) finestScale = cell.s;
-    }
-    // Server mode: imported/inland sets aren't in the NOAA catalogue (_byName), so
-    // the loop above misses them and the cap falls back to "general" — pinning zoom
-    // at ~approach even though finer (e.g. inland berthing) data is installed. Consult
-    // each installed tile set's own band + bounds (from its TileJSON) so the finest
-    // set covering the centre raises the cap to its band.
-    if (this._plotter && this._plotter.serverSetMetas) {
-      for (const set of this._plotter.serverSetMetas()) {
-        const bb = set.bounds;
-        if (!Array.isArray(bb) || bb.length !== 4) continue;
-        if (c.lng < bb[0] || c.lng > bb[2] || c.lat < bb[1] || c.lat > bb[3]) continue;
-        const idx = BANDS.indexOf(set.band);
-        if (idx > finest) finest = idx;
-      }
-    }
-    // Compilation scale of the chart actually shown at the centre — the reference for
-    // the overscale "×n" indication (see _updateHud). 0 = no chart covers the centre.
-    this._coverScale = finestScale;
-    // No installed cell covers the centre → allow general-level zoom so you can still
-    // navigate toward coverage. Otherwise cap at the finest covering band + margin.
-    const band = finest >= 0 ? BANDS[finest] : "general";
-    const target = Math.min(18, (BAND_MAXZOOM[band] || 9) + OVERSCALE_MARGIN);
-    const cap = Math.max(target, map.getZoom()); // never below current zoom → no yank
-    if (Math.abs(map.getMaxZoom() - cap) > 0.01) map.setMaxZoom(cap);
-    this._updateHud(); // repaint the readout with the fresh cover-scale (overscale ×n)
-  }
 
   // Load the chart archive(s) on boot. An explicit `?pmtiles=` query pins ONE
   // archive; otherwise we open EVERY hosted district at once (each opens by
@@ -4734,7 +4655,7 @@ export class ChartPlotterApp extends HTMLElement {
     // not an empty library, it's a deliberate state (surfaced as a bottom-bar
     // warning instead, see _updateHud / _noChartsEnabled).
     if (el) el.hidden = this._hasArchive || this._hasInstalledPacks() || this._drawerOpen() || !!(this._task && this._task.status === "running");
-    this._updateHud(); // refresh the "no charts enabled" bottom-bar warning
+    if (this._hud) this._hud.updateHud(); // refresh the "no charts enabled" bottom-bar warning
   }
 
   // Are any chart packs installed on the server (enabled OR disabled)? Distinguishes
