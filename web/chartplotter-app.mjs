@@ -538,7 +538,7 @@ export class ChartPlotterApp extends HTMLElement {
     const map = this._map;
 
     // What's actually painted here, grouped by source cell → { layer: {cls:count} }.
-    const chartLayers = map.getStyle().layers.filter((l) => l.source && isChartSource(l.source) && !l.id.startsWith("scaminprobe")).map((l) => l.id);
+    const chartLayers = (map.getStyle()?.layers || []).filter((l) => l.source && isChartSource(l.source) && !l.id.startsWith("scaminprobe")).map((l) => l.id);
     const drawn = new Map(); // cell -> Map(sourceLayer -> Map(class -> count))
     if (chartLayers.length) {
       for (const f of map.queryRenderedFeatures(e.point, { layers: chartLayers })) {
@@ -2641,7 +2641,7 @@ export class ChartPlotterApp extends HTMLElement {
     const map = this._map;
     if (!map) return;
     if (btn) flashBtn(btn, "…");
-    const layers = map.getStyle().layers.filter((l) => l.source && isChartSource(l.source)).map((l) => l.id);
+    const layers = (map.getStyle()?.layers || []).filter((l) => l.source && isChartSource(l.source)).map((l) => l.id);
     const W = map.getCanvas().clientWidth, H = map.getCanvas().clientHeight;
     const cols = 32, rows = 20;
     const holes = [];

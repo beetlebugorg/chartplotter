@@ -691,7 +691,7 @@ export class ChartPlotter extends HTMLElement {
     // tiles coalesces into ONE rebuild. Converges: once every value in view is known,
     // no further growth ⇒ no rebuild, and SCAMIN gating is then fully native.
     clearTimeout(this._scaminRebuildT);
-    this._scaminRebuildT = setTimeout(() => { if (this._map) this._map.setStyle(this.buildStyle(), { validate: false }); }, 450);
+    this._scaminRebuildT = setTimeout(() => { if (this._map) this._map.setStyle(this.buildStyle(), { diff: false, validate: false }); }, 450);
   }
 
   // Combine a layer's intrinsic (base) filter with the live category +
@@ -779,7 +779,7 @@ export class ChartPlotter extends HTMLElement {
     // (the "toggling offline after OSM doesn't reload" case).
     if (m === "coastline") await this._ensureCoastline();
     this.setAttribute("basemap", m);
-    if (this._map) this._map.setStyle(this.buildStyle(), { validate: false });
+    if (this._map) this._map.setStyle(this.buildStyle(), { diff: false, validate: false });
   }
 
   // Load the offline GSHHG coastline basemap once (best-effort): the tiled vector
@@ -1039,7 +1039,12 @@ export class ChartPlotter extends HTMLElement {
     // Rebuild the style when the set OF sets changes (sources must be created/
     // recreated). A same-set rebake (same names) just bumps the tile version.
     const changed = !wasServer || this._serverSets.map((s) => s.name).sort().join(",") !== prevKey;
-    if (map && changed) map.setStyle(this.buildStyle(), { validate: false }); // skip per-layer validation (see Map ctor)
+    // diff:false → full _load (build layers directly, validate once + skip). A
+    // server install has THOUSANDS of SCAMIN-bucket layers; setStyle's default DIFF
+    // applies them via per-op addLayer calls that re-validate + re-serialize the
+    // whole style (~28s in a startup profile) — and {validate:false} doesn't reach
+    // those internal calls. A full load bypasses all of it.
+    if (map && changed) map.setStyle(this.buildStyle(), { diff: false, validate: false });
     else if (map) this.refresh();
     return this._serverSets.map((s) => s.name);
   }
@@ -1724,7 +1729,7 @@ export class ChartPlotter extends HTMLElement {
     if (visible) this._bandsHidden.delete(band); else this._bandsHidden.add(band);
     const map = this._map;
     if (!map || !map.getStyle) return;
-    for (const l of map.getStyle().layers) {
+    for (const l of (map.getStyle()?.layers || [])) { // style may be mid-reload (diff:false)
       if (!l.source || !String(l.source).startsWith("chart-")) continue;
       if (this._bandOfLayerId(l.id) !== band) continue;
       map.setLayoutProperty(l.id, "visibility", visible ? (this._layerVis[l.id] || "visible") : "none");
