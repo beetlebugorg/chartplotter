@@ -224,7 +224,15 @@ export class ChartLibrary extends HTMLElement {
   }
 
   // Re-render the panel (shell re-opened the charts section, or state changed).
-  refresh() { this.render(); }
+  // Pulls a fresh installed/disabled snapshot from the server first so the pack
+  // badges + counts reflect what's actually baked — the shell's boot reconcile
+  // updates the MAP, but this component keeps its own registry snapshot. Renders
+  // the current snapshot immediately (instant structure) then again once synced.
+  async refresh() {
+    this.render();
+    await this._syncRegistry();
+    if (this._active) this.render();
+  }
 
   // True while a download / import / uninstall job is running (the shell's dev
   // panel + task gating read this).
