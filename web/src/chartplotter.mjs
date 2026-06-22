@@ -236,9 +236,7 @@ export class ChartPlotter extends HTMLElement {
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage boxes when zoomed out past chart data (default ON; opt-out)
     this._showChartRadar = localStorage.getItem("cp-chart-radar") !== "0"; // edge pointers to off-screen installed charts (default ON)
-    this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
-    this._renderSel = new Set();         // dev (debug mode): hand-picked cells — when non-empty, ONLY these render, at any zoom
     // Feature-inspect + tile-debugger state now live in DevTools (Advanced tab).
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = { ...DEFAULT_MARINER, ...loadJSON(LS_MARINER, {}) };
@@ -409,247 +407,6 @@ export class ChartPlotter extends HTMLElement {
     plotter.addEventListener("ready", (e) => this.onReady(e.detail.map), { once: true });
   }
 
-  // Per-cell load status, streamed from the wasm baker as cells are parsed one at
-  // a time. name → "queued" | "loading" | "ready" | "failed".
-  _onCellStatus({ name, status, info }) {
-    if (!this._cellStatus) this._cellStatus = new Map();
-    this._cellStatus.set(name, status);
-    if (status === "loading") console.log(`[charts] loading ${name}…`);
-    else if (status === "ready") {
-      this._cellError.delete(name);
-      if (info && Array.isArray(info.bounds) && info.bounds.length === 4) this._cellBounds.set(name, info.bounds);
-      console.log(`[charts] ${name} ready${info && info.ms != null ? ` (${info.ms}ms)` : ""}`);
-    }
-    else if (status === "failed") { this._cellError.set(name, (info && info.error) || "parse failed"); console.warn(`[charts] ${name} failed:`, info && info.error); }
-    this._updateBakeStatus();
-    this._renderCellStatusPopup();
-    if (this._debugCells) {
-      this._refreshInstalledBounds(); // recolour the debug footprints by new state
-      if (status === "ready") { this._pulseCell(name); this._refreshCoverage(); } // ping + real coverage
-    }
-  }
-
-  // Pull the loaded cells' real M_COVR coverage from the baker and draw it on the
-  // debug overlay (debounced — many cells can go ready in a burst).
-  _refreshCoverage() {
-    clearTimeout(this._covTimer);
-    this._covTimer = setTimeout(() => {
-      if (!this._plotter || !this._plotter.realtimeCoverage) return;
-      this._plotter.realtimeCoverage().then((fc) => {
-        const s = this._map && this._map.getSource("inst-cov");
-        if (s) s.setData(fc || { type: "FeatureCollection", features: [] });
-      }).catch(() => {});
-    }, 250);
-  }
-
-  // Pulse a cell's border once (an expanding, fading ring) when it becomes ready.
-  _pulseCell(name) {
-    const c = this._byName.get(name);
-    if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) return;
-    if (!this._pulses) this._pulses = new Map();
-    this._pulses.set(name, performance.now());
-    if (!this._pulseRAF) this._pulseTick();
-  }
-  _pulseTick() {
-    const src = this._map && this._map.getSource("inst-pulse");
-    if (!src || !this._pulses) { this._pulseRAF = 0; return; }
-    const now = performance.now(), DUR = 650, feats = [];
-    for (const [name, start] of this._pulses) {
-      const t = (now - start) / DUR;
-      if (t >= 1) { this._pulses.delete(name); continue; }
-      const c = this._byName.get(name);
-      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) { this._pulses.delete(name); continue; }
-      const [w, s, e, n] = c.bb;
-      feats.push({ type: "Feature", properties: { prog: t }, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
-    }
-    src.setData({ type: "FeatureCollection", features: feats });
-    this._pulseRAF = this._pulses.size ? requestAnimationFrame(() => this._pulseTick()) : 0;
-  }
-
-
-  // Pick the cell under `point` for the debug overlay. Prefers REAL data coverage
-  // (M_COVR, the inst-cov layer) over the raw catalog bbox, so the result matches
-  // where the cell actually has data — and only considers cells VISIBLE at the
-  // current zoom (band not gated out), so hover/select track what's rendering. The
-  // bbox layer is a fallback for cells not yet loaded (no M_COVR drawn). Smallest
-  // area wins on overlap (the most detailed cell under the cursor). Returns
-  // { name, geometry, status } or null.
-  _debugCellsAt(point) {
-    const map = this._map;
-    if (!map) return [];
-    const z = map.getZoom();
-    const visible = (name) => {
-      const c = this._byName.get(name);
-      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
-      return z >= (BAND_MINZOOM[band] || 0);
-    };
-    const byName = new Map(); // name -> { name, geometry, area, cov }
-    const scan = (layer, key, isCov) => {
-      if (!map.getLayer(layer)) return;
-      for (const f of map.queryRenderedFeatures(point, { layers: [layer] })) {
-        const name = f.properties[key];
-        if (!name || !visible(name)) continue;
-        const a = bboxArea(f.geometry);
-        const prev = byName.get(name);
-        // Prefer the real M_COVR geometry; among the same kind keep the smallest.
-        if (!prev || (isCov && !prev.cov) || (isCov === prev.cov && a < prev.area)) {
-          byName.set(name, { name, geometry: f.geometry, area: a, cov: isCov });
-        }
-      }
-    };
-    scan("inst-cov-fill", "cell", true);  // real M_COVR coverage (loaded cells)
-    scan("inst-dbg-fill", "name", false); // bbox footprints (incl. not-yet-loaded)
-    // Coverage-backed cells first, then by ascending area (most detailed first).
-    return [...byName.values()].sort((a, b) => (b.cov ? 1 : 0) - (a.cov ? 1 : 0) || a.area - b.area);
-  }
-  _debugCellAt(point) { return this._debugCellsAt(point)[0] || null; }
-
-  // Debug overlay hover: report EVERY cell under the cursor and, per cell, exactly
-  // what it's drawing here — grouped from the actually-rendered chart features
-  // (queryRenderedFeatures, which returns only what's painted) by their `cell`
-  // attribute. Cells whose M_COVR covers the point but draw nothing (gated /
-  // suppressed) are listed as "(not drawing)" — the key signal when debugging a
-  // cut-off or empty patch. Highlights all candidate footprints + a HUD readout.
-  _onDebugHover(e) {
-    if (!this._debugCells || !this._map) return;
-    const map = this._map;
-
-    // What's actually painted here, grouped by source cell → { layer: {cls:count} }.
-    const chartLayers = (map.getStyle()?.layers || []).filter((l) => l.source && isChartSource(l.source) && !l.id.startsWith("scaminprobe")).map((l) => l.id);
-    const drawn = new Map(); // cell -> Map(sourceLayer -> Map(class -> count))
-    if (chartLayers.length) {
-      for (const f of map.queryRenderedFeatures(e.point, { layers: chartLayers })) {
-        const cell = (f.properties && f.properties.cell) || "?";
-        const lyr = f.sourceLayer || "?";
-        const cls = (f.properties && f.properties.class) || "";
-        const byLyr = drawn.get(cell) || new Map();
-        const byCls = byLyr.get(lyr) || new Map();
-        byCls.set(cls, (byCls.get(cls) || 0) + 1);
-        byLyr.set(lyr, byCls); drawn.set(cell, byLyr);
-      }
-    }
-
-    // Cells whose footprint/coverage is under the cursor (visible at this zoom),
-    // smallest-first — so cells that cover here but draw nothing still get listed.
-    const covering = this._debugCellsAt(e.point); // [{name, geometry}], smallest area first
-    const order = covering.map((c) => c.name);
-    for (const cell of drawn.keys()) if (!order.includes(cell)) order.push(cell);
-
-    if (!order.length) { this._clearDebugHover(); this._hideDebugHud(); return; }
-
-    // Highlight all candidate footprints on the map.
-    const src = map.getSource("inst-dbg-hover");
-    if (src) src.setData({ type: "FeatureCollection", features: covering.map((c) => ({ type: "Feature", properties: { name: c.name, status: this._cellStatus.get(c.name) || "" }, geometry: c.geometry })) });
-
-    // HUD readout: per cell, the layers/classes it's drawing (or "not drawing").
-    // Cap the list (most-detailed cells sort first) so it can't grow unwieldy.
-    const CAP = 10;
-    const shown = order.slice(0, CAP);
-    const more = order.length - shown.length;
-    const rows = shown.map((cell) => {
-      const c = this._byName.get(cell);
-      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
-      const dot = `<span class="dh-dot" style="background:${BAND_COLOR[band] || "#888"}"></span>`;
-      const byLyr = drawn.get(cell);
-      let body;
-      if (!byLyr) {
-        body = `<div class="dh-draw dh-none">not drawing here</div>`;
-      } else {
-        body = [...byLyr.entries()].map(([lyr, byCls]) => {
-          const parts = [...byCls.entries()].map(([cls, n]) => (cls ? `${cls}×${n}` : `×${n}`)).join(", ");
-          return `<div class="dh-draw"><span class="dh-lyr">${esc(lyr)}</span>: ${esc(parts)}</div>`;
-        }).join("");
-      }
-      return `<div class="dh-cell"><div class="dh-name">${dot}${esc(cell)}</div>${body}</div>`;
-    }).join("") + (more > 0 ? `<div class="dh-cell dh-none">+${more} more cell${more > 1 ? "s" : ""}</div>` : "");
-    this._showDebugHud(e, rows);
-  }
-
-  _showDebugHud(e, html) {
-    const hud = this.shadowRoot.getElementById("debug-hud");
-    if (!hud) return;
-    hud.innerHTML = html;
-    hud.hidden = false;
-    const rect = this.getBoundingClientRect();
-    const oe = e.originalEvent || e;
-    let x = (oe.clientX - rect.left) + 14, y = (oe.clientY - rect.top) + 14;
-    // Keep it on-screen.
-    const w = hud.offsetWidth, h = hud.offsetHeight;
-    if (x + w > rect.width) x = (oe.clientX - rect.left) - w - 14;
-    if (y + h > rect.height) y = Math.max(4, rect.height - h - 4);
-    hud.style.left = x + "px";
-    hud.style.top = y + "px";
-  }
-  _hideDebugHud() {
-    const hud = this.shadowRoot.getElementById("debug-hud");
-    if (hud && !hud.hidden) hud.hidden = true;
-  }
-
-  _clearDebugHover() {
-    const src = this._map && this._map.getSource("inst-dbg-hover");
-    if (src) src.setData({ type: "FeatureCollection", features: [] });
-    this._hideDebugHud();
-  }
-
-  // Right-click a cell box in the debug overlay → context menu to pick which cells
-  // render. Once any cell is picked, ONLY the picked set renders (at any zoom), so
-  // you can isolate exactly the cells you care about. Picks the smallest box on
-  // overlap (the most detailed cell under the cursor).
-  _onDebugContextMenu(e) {
-    if (!this._debugCells || !this._map) return;
-    const hit = this._debugCellAt(e.point); // M_COVR-aware, visible-at-this-zoom only
-    if (!hit) return;
-    if (e.preventDefault) e.preventDefault();
-    if (e.originalEvent && e.originalEvent.preventDefault) e.originalEvent.preventDefault();
-    const name = hit.name;
-    const picked = this._renderSel.has(name);
-    const items = [
-      { label: `Render only ${name}`, onClick: () => this._setRenderSel([name]) },
-      picked
-        ? { label: `Remove ${name} from render set`, onClick: () => this._toggleRenderCell(name) }
-        : { label: `Add ${name} to render set`, onClick: () => this._toggleRenderCell(name) },
-    ];
-    if (this._renderSel.size) items.push({ label: `Clear render set (show all)`, onClick: () => this._setRenderSel([]) });
-    const rect = this.getBoundingClientRect();
-    const oe = e.originalEvent;
-    this._showContextMenu(oe.clientX - rect.left, oe.clientY - rect.top, items);
-  }
-
-  // Add/remove one cell from the debug render selection, then re-bake in place.
-  async _toggleRenderCell(name) {
-    if (this._renderSel.has(name)) this._renderSel.delete(name); else this._renderSel.add(name);
-    await this._applyRenderSel();
-  }
-
-  // Replace the whole render selection (e.g. "render only this", or clear with []).
-  async _setRenderSel(names) {
-    this._renderSel = new Set(names);
-    await this._applyRenderSel();
-  }
-
-  async _applyRenderSel() {
-    console.log(`[debug] render set: ${this._renderSel.size ? [...this._renderSel].join(", ") : "(all)"}`);
-    await this._refreshCharts(false); // keep the camera put
-  }
-
-  // A tiny shadow-DOM context menu. items: [{ label, onClick }]. Positioned at
-  // host-relative (x,y); dismissed on any click or map move.
-  _showContextMenu(x, y, items) {
-    const m = this.shadowRoot.getElementById("ctx-menu");
-    if (!m) return;
-    m.innerHTML = "";
-    for (const it of items) {
-      const btn = document.createElement("button");
-      btn.className = "ctx-item";
-      btn.textContent = it.label;
-      btn.onclick = (ev) => { ev.stopPropagation(); this._hideContextMenu(); it.onClick(); };
-      m.appendChild(btn);
-    }
-    m.style.left = x + "px";
-    m.style.top = y + "px";
-    m.hidden = false;
-  }
-
   _hideContextMenu() {
     const m = this.shadowRoot.getElementById("ctx-menu");
     if (m && !m.hidden) m.hidden = true;
@@ -669,22 +426,6 @@ export class ChartPlotter extends HTMLElement {
     console.log("[charts] removed failed cells:", failed);
     await this._refreshCharts();
     if (this._chartLib) this._chartLib.refresh();
-    this._renderCellStatusPopup();
-  }
-
-  // Live wasm tile-baking count (tiles currently baking in the worker, 0 = idle).
-  _onBakeActivity(inflight) {
-    this._bakeInflight = inflight;
-    this._updateBakeStatus();
-  }
-
-  // The installed set / registry changed: mark every installed cell "queued"
-  // (not yet parsed — cells lazy-load on demand) and prune orphans.
-  _resetCellStatus() {
-    const next = new Map();
-    for (const n of this._installed) next.set(n, "queued");
-    this._cellStatus = next;
-    this._updateBakeStatus();
     this._renderCellStatusPopup();
   }
 
@@ -983,12 +724,6 @@ export class ChartPlotter extends HTMLElement {
       visible: this._showChartRadar,
     });
 
-    // Debug overlay: tint + name the cell footprint under the cursor (only while
-    // the overlay is on); clear when the pointer leaves the map. Right-click a cell
-    // to force-bake it at the current zoom regardless of its band min-zoom.
-    map.on("mousemove", (e) => this._onDebugHover(e));
-    map.on("mouseout", () => this._clearDebugHover());
-    map.on("contextmenu", (e) => this._onDebugContextMenu(e));
     map.on("movestart", () => this._hideContextMenu());
 
     // Close any pinned band-pill popup when clicking elsewhere (pill/cell clicks
@@ -1235,11 +970,6 @@ export class ChartPlotter extends HTMLElement {
     return set || "charts";
   }
 
-  _startPolling() {
-    if (this._poll) return;
-    this._pollTask();
-    this._poll = setInterval(() => this._pollTask(), 750);
-  }
   _stopPolling() { if (this._poll) { clearInterval(this._poll); this._poll = null; } }
 
   // One poll tick: mirror GET /api/tasks into `_task`, re-render, and on a
@@ -1364,35 +1094,6 @@ export class ChartPlotter extends HTMLElement {
   // gone, but still called on Charts-mode exit / section switch).
   _cancelAreaSelect() { if (this._areaCleanup) this._areaCleanup(); }
 
-  // Remove ALL regions at once (DELETE /api/charts), then reflect empty by
-  // re-applying the now-empty manifest — no reload needed.
-  async _deleteAllCharts(name) {
-    if (this._taskRunning()) return;
-    this._taskMeta = { name, verb: "Removing" };
-    this._task = { kind: "remove", status: "running", phase: "import", done: 0, total: 0 };
-    this._renderTaskUI();
-    try {
-      const res = await fetch("api/charts", { method: "DELETE" });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
-    } catch (e) {
-      console.error("[remove]", e);
-      this._task = { kind: "remove", status: "error", error: "delete" };
-      this._taskMeta = { name, verb: "Removing", errMsg: "Couldn’t remove charts" };
-      this._renderTaskUI();
-      this._clearTaskSoon(3000);
-      return;
-    }
-    await this._loadManifest();
-    await this._applyArchives();
-    this.updateEmptyState();
-    this._assessCoverage();
-    if (this._chartLib) this._chartLib.refresh();
-    this._task = { status: "done", _flourish: true };
-    this._renderTaskUI();
-    this._clearTaskSoon(1200);
-  }
-
   // Public: open the viewport on a position at a target paper scale or zoom — a
   // shell-level entry to the <chart-plotter> primitive (see its setView for the
   // option shape). The map's move/moveend then update the readout and persist the
@@ -1464,11 +1165,11 @@ export class ChartPlotter extends HTMLElement {
     // loaded vs missing and whether their (catalog-bbox) load region is where you
     // expect, so "some cells of the same band don't render" is diagnosable.
     const dbgColor = ["match", ["get", "status"], "ready", "#2e9b57", "loading", "#d9892b", "failed", "#cf3b3b", "#9aa7b4"];
-    const dbgVis = this._debugCells ? "visible" : "none";
+    const dbgVis = "none";
     // Default debug overlay is just coloured outlines (green=loaded, amber=loading,
     // red=failed, grey=not loaded). inst-dbg-fill is an invisible hit-target so a
     // hover anywhere inside a box is detectable; the tint + name show only for the
-    // hovered cell, via the one-feature inst-dbg-hover source (see _onDebugHover) —
+    // hovered cell, via the one-feature inst-dbg-hover source —
     // so we never lay out a label per cell across the whole library.
     map.addLayer({ id: "inst-dbg-fill", type: "fill", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0 } });
     map.addLayer({ id: "inst-dbg-line", type: "line", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "line-color": dbgColor, "line-width": 1.6 } });
@@ -1631,28 +1332,6 @@ export class ChartPlotter extends HTMLElement {
   // cell boxes show, framed out to a wide overview, with box-select armed. Home
   // restores the chart render and the view you came from.
 
-  // Toggle visibility of the ENC render: every per-band chart layer
-  // (source:"chart-…") plus the world "no chart data" hatch. The offline basemap
-  // (source:"coastline"), the sea background, and the selection overlays stay put,
-  // so Charts mode reads as a clean land/sea map with just the cell boxes on top.
-  _setChartLayersVisible(on) {
-    const map = this._map;
-    if (!map || !map.getStyle) return;
-    const isChartLayer = (l) => isChartSource(l.source) || l.id === "nodata";
-    for (const l of map.getStyle().layers || []) {
-      if (!isChartLayer(l)) continue;
-      // Restoring is NOT a blanket "visible": a couple of chart layers are kept
-      // hidden by mariner toggles (shallow-pattern, contour-labels), so re-derive
-      // those from the current settings rather than force-showing them — otherwise
-      // leaving Charts mode would switch them on while the settings still read off.
-      let vis = on ? "visible" : "none";
-      if (on && l.id.startsWith("shallow-pattern")) vis = this._mariner.shallowPattern ? "visible" : "none";
-      else if (on && l.id.startsWith("contour-labels")) vis = this._mariner.showContourLabels ? "visible" : "none";
-      else if (on && l.id === "nodata") vis = this._mariner.showNoData === false ? "none" : "visible";
-      map.setLayoutProperty(l.id, "visibility", vis);
-    }
-  }
-
   // The main-map cell picker (cell-box overlay + tap-to-preview-a-district) was
   // removed: the <chart-library> panel is the one chart surface now. Closing the
   // drawer/leaving the charts section no longer toggles a map mode; _clearFocus()
@@ -1667,8 +1346,6 @@ export class ChartPlotter extends HTMLElement {
     if (this._archive.has(name)) return "archive";
     return "catalog";
   }
-
-  refreshBoxes() { /* region-centric UI: no per-cell overlay to refresh */ }
 
   // (legacy) focus a single chart cell — kept for reference; superseded by
   // the map drag-a-box selector's highlight.
@@ -1876,49 +1553,6 @@ export class ChartPlotter extends HTMLElement {
     }
     this._rgBBox = m;
     return m;
-  }
-
-  _realtimeCellMeta() {
-    // Debug solo: when cells are hand-picked (debug mode), render ONLY those — at
-    // any zoom — and exclude everything else. The render selection overrides the
-    // band gate and the per-band toggles entirely.
-    const solo = this._debugCells && this._renderSel.size > 0;
-    const meta = new Map();
-    for (const name of this._installed) {
-      const c = this._byName.get(name);
-      let bb = c && Array.isArray(c.bb) && c.bb.length === 4 ? c.bb : null;
-      // No catalog footprint → bound to the union of the cell's region bboxes so
-      // it only loads near its actual area (not globally). Null only as a last
-      // resort (no regions either), which setCellRegistry treats as world-wide.
-      if (!bb && c && Array.isArray(c.rg) && c.rg.length) {
-        const rm = this._regionBBoxes();
-        let u = null;
-        for (const r of c.rg) {
-          const rb = rm.get(r); if (!rb) continue;
-          if (!u) u = rb.slice();
-          else { u[0] = Math.min(u[0], rb[0]); u[1] = Math.min(u[1], rb[1]); u[2] = Math.max(u[2], rb[2]); u[3] = Math.max(u[3], rb[3]); }
-        }
-        if (u) bb = u;
-      }
-      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "overview";
-      // 999 is a sentinel min-zoom the baker's `z < minzoom` gate never satisfies,
-      // so the cell never bakes; 0 means "bake at any zoom".
-      // Overzoom-down loading is scoped to FOREIGN uploads (cells with no catalog
-      // entry, hence no overview/general coverage of their own): they load at ANY
-      // zoom so the baker can draw their zoomed-out skeleton (Baker.OverzoomAllBands).
-      // Catalog (NOAA) cells keep band-gated loading — with a large installed set
-      // (e.g. 1700+ cells) a minzoom of 0 would make every overlapping cell try to
-      // load per tile, overwhelming the worker and starving the prebaked fallback
-      // (empty tiles → no-data hatch). The overview/general bands already supply
-      // the zoomed-out skeleton for catalog charts.
-      const isForeign = !this._byName.has(name);
-      let minzoom;
-      if (solo) minzoom = this._renderSel.has(name) ? 0 : 999;
-      else if (this._bandsOff.has(band)) minzoom = 999;
-      else minzoom = isForeign ? 0 : (BAND_MINZOOM[band] || 0);
-      meta.set(name, { bb, minzoom });
-    }
-    return meta;
   }
 
   // Rebuild the installed-cell coverage outlines (shown when zoomed out past a
@@ -2136,21 +1770,6 @@ export class ChartPlotter extends HTMLElement {
     return scale ? (BAND_MINZOOM[bandForScale(scale)] || 0) : 0;
   }
 
-  _frameCells(names) {
-    let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false, need = 0;
-    for (const n of names) {
-      const bb = this._cellLocation(n); // catalog bbox OR baker/parsed bounds (foreign cells)
-      if (bb) {
-        W = Math.min(W, bb[0]); S = Math.min(S, bb[1]); E = Math.max(E, bb[2]); N = Math.max(N, bb[3]); any = true;
-        need = Math.max(need, this._cellTargetZoom(n)); // zoom in enough to actually render
-      }
-    }
-    if (!any || !this._map) return;
-    const cam = this._map.cameraForBounds([[W, S], [E, N]], { padding: 60 });
-    const zoom = Math.min(18, Math.max(cam ? cam.zoom : 12, need ? need + 0.5 : 0));
-    this._map.easeTo({ center: cam ? cam.center : [(W + E) / 2, (S + N) / 2], zoom, duration: 800 });
-  }
-
   // For installed cells with no catalog footprint (foreign uploads), parse their
   // bounds in the wasm (no bake) so we can frame/locate them. Capped so a huge
   // import doesn't stall; the rest still become locatable once they bake.
@@ -2194,22 +1813,6 @@ export class ChartPlotter extends HTMLElement {
   // The archive import path (importSelected / rebakeArchive / installCell) moved
   // into <chart-library>, which owns the OPFS store upload + server bake and
   // dispatches "charts-changed" when it finishes.
-
-  // Close the drawer and frame the map to the combined extent of `names` (their
-  // catalog cell boxes). Tiles for the new view bake on demand.
-  launchInto(names) {
-    if (!this._map) return;
-    this.closeDrawer();
-    let W = Infinity, S = Infinity, E = -Infinity, N = -Infinity, any = false;
-    for (const n of names) {
-      const c = this._byName.get(n);
-      if (c && Array.isArray(c.bb) && c.bb.length === 4) {
-        W = Math.min(W, c.bb[0]); S = Math.min(S, c.bb[1]);
-        E = Math.max(E, c.bb[2]); N = Math.max(N, c.bb[3]); any = true;
-      }
-    }
-    if (any) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
-  }
 
   // -- settings ------------------------------------------------------------
 
@@ -2918,13 +2521,6 @@ export class ChartPlotter extends HTMLElement {
       this._settingsDlg.show(this._settingsDlg.activeTab || "general");
     }
     this.setDrawerOpen(true);
-  }
-
-  // Home: the full-screen chart viewer — drop any selection overlay/section and
-  // show just the map.
-  goHome() {
-    this._cancelAreaSelect();
-    this.closeDrawer();
   }
 
   closeDrawer() {
