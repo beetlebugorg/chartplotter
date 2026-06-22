@@ -17,23 +17,23 @@
 // listCharts/setScheme/setMariner and its `map` handle) plus the shared ChartStore.
 
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
-import "./components/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
-import "./components/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
-import "./components/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
-import { SettingsRegistry } from "./app/settings-registry.mjs"; // contribution registry for the settings panel
-import { coreSettingsContributions } from "./app/core-settings.mjs"; // the app's own display settings as contributions
-import { DevTools } from "./components/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
-import { DISTRICTS, NOAA_ENC_URL } from "./components/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
+import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
+import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
+import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
+import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
+import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
+import { DISTRICTS, NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
-import { NotificationCenter } from "./app/notification-center.mjs"; // app-level task-progress + banner bus
+import { NotificationCenter } from "./core/notification-center.mjs"; // app-level task-progress + banner bus
 import { ChartService } from "./data/chart-service.mjs"; // server import/bake jobs + pack registry
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
 import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (categories now in core-settings.mjs)
-import { ChartFinder } from "./map/chart-finder.mjs"; // off-screen installed-chart edge pointers
-import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
-import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
-import { SearchBox } from "./map/search-box.mjs"; // offline catalog + chart-feature search
+import { ChartFinder } from "./plugins/chart-finder.mjs"; // off-screen installed-chart edge pointers
+import { HudController } from "./plugins/hud.mjs"; // status readout + overscale zoom cap
+import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart coverage overlay
+import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
 import { loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";

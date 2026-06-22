@@ -9,7 +9,7 @@
 //
 // Convention reference: chart-library.mjs / chart-library.view.mjs.
 
-import { NOAA_ENC_URL } from "./components/chart-library.mjs"; // NOAA ENC page (static attribution link)
+import { NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA ENC page (static attribution link)
 
 export const STYLE = `
         :host { display:block; position:relative; width:100%; height:100%; font:13px/1.4 system-ui,sans-serif;
