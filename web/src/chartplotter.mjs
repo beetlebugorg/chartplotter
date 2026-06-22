@@ -19,6 +19,7 @@
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
 import "./components/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
+import { NotificationCenter } from "./app/notification-center.mjs"; // app-level task-progress + banner bus
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./data/zip-import.mjs";
@@ -374,6 +375,14 @@ export class ChartPlotter extends HTMLElement {
       cfg: (n) => this._cfg(n),
       store: this._store,
       getInstalled: () => this._installed,
+    });
+
+    // App-level notification bus: feature components (chart-library now, plugins
+    // later) post task progress + banners here instead of touching shell DOM.
+    // Progress renders into the existing databox/db-prog row; messages toast.
+    this._notify = new NotificationCenter({
+      onProgress: (p) => this._setNotification(p),
+      onMessage: (m) => this._toast(m),
     });
 
     // Catalog drives the picker AND the lazy-load gating (cell bboxes). Kick it
@@ -3475,6 +3484,22 @@ export class ChartPlotter extends HTMLElement {
   // drop-down). The bottom card stays a static nav readout.
   _setProgress(p) { this._setNotification(p); }
 
+  // Transient banner for NotificationCenter messages (download failures, "GPS
+  // lost", etc.) that aren't task progress. Appends an auto-dismissing toast to
+  // the #toasts stack; falls back to the console if the stack isn't mounted.
+  _toast(m) {
+    const msg = (m && m.msg) || "";
+    const level = (m && m.level) || "info";
+    const stack = this.shadowRoot && this.shadowRoot.getElementById("toasts");
+    if (level === "error") console.error("[notify]", msg); else if (level === "warn") console.warn("[notify]", msg); else console.log("[notify]", msg);
+    if (!stack || !msg) return;
+    const el = document.createElement("div");
+    el.className = `toast ${level}`;
+    el.textContent = msg;
+    stack.appendChild(el);
+    setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, level === "error" ? 6000 : 3500);
+  }
+
   // Job progress (download / import / bake) lives in a row ABOVE the live nav
   // readout inside the bottom status card — one box, no separate pill or pop-out.
   // `p` carries { label, pill, sub, frac, error }; null clears the row. The label
@@ -4227,6 +4252,11 @@ export class ChartPlotter extends HTMLElement {
         .db-prog-fill.indet { width:35% !important; animation:db-sweep 1.1s ease-in-out infinite; }
         @keyframes db-sweep { 0% { left:-35%; } 100% { left:100%; } }
         @media (prefers-reduced-motion: reduce) { .db-prog-spin { animation-duration:2s; } .db-prog-fill.indet { animation:none; left:0; width:100% !important; } }
+        /* NotificationCenter banners: a bottom-stacked toast list (non-task messages). */
+        #toasts { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 14px); transform:translateX(-50%); z-index:9; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+        .toast { pointer-events:auto; max-width:80vw; padding:9px 14px; border-radius:8px; font:600 12.5px/1.3 system-ui,sans-serif; color:var(--ui-text); background:var(--ui-surface); border:1px solid var(--ui-border-2); box-shadow:0 4px 16px rgba(0,0,0,.28); opacity:1; transition:opacity .3s ease, transform .3s ease; }
+        .toast.warn { border-color:#c0922f; } .toast.error { border-color:#c0392b; color:#e06b5c; }
+        .toast.out { opacity:0; transform:translateY(6px); }
         progress { width:100%; height:8px; -webkit-appearance:none; appearance:none; border:none; border-radius:5px; overflow:hidden; background:var(--ui-surface-2); }
         progress::-webkit-progress-bar { background:var(--ui-surface-2); border-radius:5px; }
         progress::-webkit-progress-value { background:var(--ui-accent); border-radius:5px; }
@@ -4321,6 +4351,8 @@ export class ChartPlotter extends HTMLElement {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         </button>
       </div>
+      <!-- NotificationCenter banner stack (non-task messages: failures, alerts). -->
+      <div id="toasts"></div>
       <!-- Bottom-centre status card — the SINGLE surface for both the live nav
            readout (band · scale · zoom · position · overscale, always shown) and
            job progress (download / import / bake), which grows a row above the
