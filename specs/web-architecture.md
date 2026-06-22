@@ -135,6 +135,53 @@ Result: the shell dropped ~850 lines (4688 → 3834); the domain is ~1026 lines 
 its own element. The shell now keeps the canvas reconcile, the drawer/tab chrome,
 the notification chrome, and the data-component instances.
 
+**Two-file convention.** Each component is split into LOGIC + CHROME: `<name>.mjs`
+(the element/controller — state, deps, lifecycle, events, render orchestration)
++ `<name>.view.mjs` (`export const STYLE` + pure, stateless markup builders —
+no `this`, no DOM, no deps; `(args) → HTML string`). `chart-library`,
+`settings-dialog`, and `dev-tools` all follow this; `chart-library` is the
+reference.
+
+## The settings panel: a contribution host (implemented)
+
+The settings panel is `<settings-dialog>` (`web/src/components/settings-dialog.mjs`),
+a HOST that owns no settings — it renders whatever is registered in a
+`SettingsRegistry`. So the app's display settings AND every plugin's settings
+share one panel with one look, and a plugin gets space in the global panel
+without the dialog knowing it exists.
+
+- **`SettingsRegistry`** (`web/src/app/settings-registry.mjs`): `register(contribution)`
+  / `unregister` / `tabs()` / `forTab()` / `onChange()`. A contribution is a
+  declarative descriptor `{ id, tab:{id,label}|"<id>", group?, order, items|()=>items,
+  get(k,def), set(k,v), render?(host,ctx) }`. `items` (array or function) are
+  rendered with the shared control library; `render(host)` is an escape hatch for
+  custom UI (the dev tools use it).
+- **Control types** (in `settings-dialog.view.mjs`): `toggle`, `segmented`,
+  `multi` (independent bools + locked items, e.g. Detail level), `number`
+  (+ unit + display `transform:{toView,fromView}`), `select`. `transform` lets a
+  control DISPLAY one value while STORING another (Point symbols paper↔bool;
+  depths feet↔metres).
+- **`SettingsStore`** (`web/src/app/settings-store.mjs`): the one persistence
+  layer — a single blob mirrored to localStorage + POSTed to `/api/settings`
+  (debounced), addressed by namespace. `ns("core")` = top-level keys
+  (backward-compatible with the old flat blob); plugins nest under their id. (The
+  CORE display settings currently still persist through the shell's existing
+  apply methods; `SettingsStore` is wired and ready for plugin namespaces.)
+- **Core settings** (`web/src/app/core-settings.mjs`): `coreSettingsContributions(app)`
+  registers the app's own display settings (General/Text/Units/Depths/Advanced)
+  as five contributions whose `get/set` wrap the shell's existing
+  `applyScheme`/`applyBasemap`/`applyMariner`/app-toggle methods — so persistence
+  + apply are unchanged; only the UI is now a contribution.
+
+**Dev tools as the first plugin-style contributor.** `DevTools`
+(`web/src/components/dev-tools.mjs`) is a plain controller (like the map
+controllers) that self-registers a contribution on the Advanced tab via the
+`render(host)` escape hatch. It owns only two tools — "Rebuild all charts"
+(rebake) and the Feature inspector (S-52 attribute inspection + its map
+listeners). The old 7-section dev panel (share/coverage/bands/cell-footprints/
+tile-debugger/refresh) was pitched. This validates the contribution model:
+adding a settings section needs **no edits to `<settings-dialog>`**.
+
 ## Staged migration
 
 1. ✅ Extract `<pick-report>`; establish the plugin pattern.
@@ -142,6 +189,10 @@ the notification chrome, and the data-component instances.
 3. ✅ Extract chart downloading: `ChartDownloader` (discovery) + `ChartService`
    (server jobs/registry) + `NotificationCenter` (progress bus) + the
    `<chart-library>` element (browse/download/import/agreement). Map picker removed.
-4. ☐ `MapOverlay` base + first `<own-ship>` plugin (proves the contract end-to-end).
-5. ☐ `<ais-overlay>`.
-6. ☐ Trim the shell to composition + chrome.
+4. ✅ Settings as a contribution host: `SettingsRegistry` + `SettingsStore` +
+   `<settings-dialog>` + `core-settings` contributions; `<dev-tools>` slimmed to a
+   contributor. Shell 4729 → 3020 lines.
+5. ☐ `MapOverlay` base + first `<own-ship>` plugin (proves the camera/overlay +
+   settings-contribution + notify contracts end-to-end).
+6. ☐ `<ais-overlay>`.
+7. ☐ Trim the shell to composition + chrome.
