@@ -33,8 +33,9 @@ import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (
 import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
+import { SearchBox } from "./map/search-box.mjs"; // offline catalog + chart-feature search
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
-import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
+import { loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 import { STYLE, CHROME } from "./chartplotter.view.mjs"; // shell chrome (CSS + static markup)
 
@@ -108,56 +109,6 @@ const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000
 // pmtiles path had a "chart-<band>" source per band. (Used by the cursor pick.)
 function isChartSource(s) {
   return typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
-}
-
-// Fuzzy match score: does `q` appear as a (possibly non-contiguous) subsequence
-// of `text`? Both must already be lowercase. Returns a score (higher = better) or
-// -1 for no match. Rewards contiguous runs, matches at word starts, and an early
-// first match — so "chesbay" finds "Chesapeake Bay" and a clean substring beats a
-// scattered one. A leading exact-substring hit gets a big bonus so it ranks first.
-function fuzzyScore(q, text) {
-  if (!q) return 0;
-  if (!text) return -1;
-  let qi = 0, score = 0, run = 0, prev = -2;
-  for (let i = 0; i < text.length && qi < q.length; i++) {
-    if (text[i] !== q[qi]) continue;
-    let s = 1;
-    if (prev === i - 1) { run++; s += run * 5; } else run = 0; // contiguous run bonus
-    const before = i === 0 ? " " : text[i - 1];
-    if (i === 0 || before === " " || before === "-" || before === "/" || before === "," || before === ".") s += 10; // word-start bonus
-    if (qi === 0) s += Math.max(0, 8 - i); // earlier first match is better
-    score += s;
-    prev = i; qi++;
-  }
-  if (qi < q.length) return -1; // not all query chars matched, in order
-  if (text.includes(q)) score += 25 + (text.startsWith(q) ? 15 : 0); // contiguous / prefix boost
-  return score;
-}
-
-// A representative [lng,lat] for any GeoJSON geometry (first vertex) — used to fly
-// to a search hit.
-function firstCoord(g) {
-  if (!g) return null;
-  const c = g.coordinates;
-  switch (g.type) {
-    case "Point": return c;
-    case "MultiPoint": case "LineString": return c[0];
-    case "MultiLineString": case "Polygon": return c[0] && c[0][0];
-    case "MultiPolygon": return c[0] && c[0][0] && c[0][0][0];
-    default: return null;
-  }
-}
-
-// Lon/lat bbox area of a polygon ring — used to pick the smallest (most detailed)
-// cell box when several overlap under the debug-overlay hover.
-function bboxArea(g) {
-  if (!g || g.type !== "Polygon" || !g.coordinates || !g.coordinates[0]) return Infinity;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [x, y] of g.coordinates[0]) {
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-  }
-  return (maxX - minX) * (maxY - minY);
 }
 
 // S-57 object-class acronym → human label (the baked `class` attribute is the
@@ -1478,83 +1429,6 @@ export class ChartPlotter extends HTMLElement {
     if (this._coverage) this._coverage.setVisible(on);
   }
 
-  // -- search: catalog (places/charts) + loaded chart feature data ---------
-  doSearch(q) {
-    const el = this.shadowRoot.getElementById("search-results");
-    if (!el) return;
-    const needle = q.trim().toLowerCase();
-    if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._searchHits = []; this._positionSearch(); return; }
-    // 1) Catalog cells (chart titles / numbers), fuzzy-matched. Best score wins;
-    // ties break to the coarser chart (overview before an arbitrary harbour inset).
-    const cells = [];
-    for (const c of this._catalog) {
-      if (!Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      const score = Math.max(fuzzyScore(needle, (c.l || "").toLowerCase()), fuzzyScore(needle, c.n.toLowerCase()));
-      if (score >= 0) cells.push({ c, score });
-    }
-    cells.sort((a, b) => (b.score - a.score) || ((b.c.s || 0) - (a.c.s || 0)));
-    // 2) Every loaded chart feature, fuzzy-matched across its attribute data.
-    const feats = this._searchFeatures(needle);
-    const hits = [...cells.slice(0, 5).map(({ c }) => ({ type: "cell", c })), ...feats.slice(0, 8)];
-    this._searchHits = hits;
-    el.innerHTML = hits.length
-      ? hits.map((h, i) => {
-          const sel = i === 0 ? " sel" : "";
-          if (h.type === "cell") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">Chart · ${esc(h.c.n)} · 1:${(h.c.s || 0).toLocaleString()}</div></div>`;
-          return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.label)}</div><div class="s">${esc(h.sub)}</div></div>`;
-        }).join("")
-      : `<div class="sr-item"><span class="muted">No matches in view</span></div>`;
-    el.hidden = false;
-    el.querySelectorAll(".sr-item[data-i]").forEach((d) => (d.onmousedown = (e) => { e.preventDefault(); this.gotoSearchHit(+d.dataset.i); }));
-    this._positionSearch(); // re-align to the search tab as the result count changes the height
-  }
-
-  // Search the loaded chart vector tiles across EVERY attribute value (name, class,
-  // readable type, and any other string field). Limited to currently-loaded tiles
-  // (roughly the area you've viewed), since that's all the data the client holds.
-  _searchFeatures(needle) {
-    const map = this._map; if (!map) return [];
-    let sources;
-    try { sources = Object.keys(map.getStyle().sources || {}).filter(isChartSource); } catch { return []; }
-    const layers = ["point_symbols", "soundings", "areas", "area_patterns", "lines", "complex_lines", "text"];
-    const seen = new Set(), out = [];
-    for (const src of sources) {
-      for (const layer of layers) {
-        let feats; try { feats = map.querySourceFeatures(src, { sourceLayer: layer }); } catch { continue; }
-        for (const f of feats) {
-          const p = f.properties || {};
-          const objnam = p.objnam || "", cls = p.class || "";
-          const typeName = S57_CLASS[cls] || INSPECT_LAYER_LABEL[layer] || cls || layer;
-          // Score the name/type strongly; also fuzzy-match the rest of the attribute
-          // data (lower weight) so "search all feature data" still works.
-          let score = Math.max(fuzzyScore(needle, objnam.toLowerCase()), fuzzyScore(needle, typeName.toLowerCase()), fuzzyScore(needle, cls.toLowerCase()));
-          if (score < 0) for (const k in p) { const v = p[k]; if (typeof v === "string") { const s = fuzzyScore(needle, v.toLowerCase()); if (s >= 0) { score = Math.max(score, s - 6); break; } } }
-          if (score < 0) continue;
-          const co = firstCoord(f.geometry); if (!co) continue;
-          const key = cls + "|" + objnam + "|" + co[0].toFixed(3) + "," + co[1].toFixed(3);
-          if (seen.has(key)) continue; seen.add(key);
-          out.push({ type: "feat", score, label: objnam || typeName, sub: objnam ? typeName : (p.cell ? `▦ ${p.cell}` : typeName), lng: co[0], lat: co[1] });
-        }
-      }
-    }
-    out.sort((a, b) => (b.score - a.score) || a.label.localeCompare(b.label)); // best matches first
-    return out;
-  }
-
-  gotoSearchHit(i) {
-    const h = (this._searchHits || [])[i];
-    if (!h || !this._map) return;
-    if (h.type === "feat") this._map.flyTo({ center: [h.lng, h.lat], zoom: Math.max(this._map.getZoom(), 14), duration: 800 });
-    else { const c = h.c; this._map.fitBounds([[c.bb[0], c.bb[1]], [c.bb[2], c.bb[3]]], { padding: 80, maxZoom: 13, duration: 800 }); }
-    const r = this.shadowRoot;
-    const el = r.getElementById("search-results"); if (el) el.hidden = true;
-    // Keep the query (and selected highlight) so reopening search returns you to
-    // the same results — the input is persisted, not cleared.
-    const si = r.getElementById("search-input"); if (si) si.blur();
-    r.getElementById("search").hidden = true;
-    r.getElementById("search-tab").classList.remove("on");
-  }
-
   // Single progress surface for every job (download / import / bake / remove).
   // Activity is signalled ONLY by the top notification pill (a non-blocking "work
   // is happening" indicator that expands for details); the bottom data card stays
@@ -1803,18 +1677,32 @@ export class ChartPlotter extends HTMLElement {
     // Attribution "Terms" link → the agreement modal owned by <chart-library>.
     $("attr-terms").onclick = () => { if (this._chartLib) this._chartLib._showAgreement(); };
 
-    // Search (offline, over catalog titles + loaded chart feature data). The nav
-    // button toggles a tiny flyout with the input + results.
+    // Search (offline, over catalog titles + loaded chart feature data) — the logic
+    // + results rendering live in the SearchBox controller; the input + flyout are
+    // shell chrome, so the handlers here just delegate. The map is late-bound (set
+    // in onReady), so SearchBox reads it lazily via getMap.
     const si = $("search-input");
+    this._search = new SearchBox({
+      getMap: () => this._map,
+      getResultsEl: () => $("search-results"),
+      getInput: () => $("search-input"),
+      getSearchPop: () => $("search"),
+      getSearchTab: () => $("search-tab"),
+      getCatalog: () => this._catalog,
+      isChartSource,
+      classLabel: (acr) => S57_CLASS[acr],
+      layerLabel: (srcLayer) => INSPECT_LAYER_LABEL[srcLayer],
+      positionCaret: (pop, tab) => this._positionCaret(pop, tab),
+    });
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
-    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._positionSearch(); si.focus(); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
-    si.oninput = () => this.doSearch(si.value);
+    si.oninput = () => this._search.doSearch(si.value);
     si.onkeydown = (e) => {
-      if (e.key === "Enter") this.gotoSearchHit(0);
+      if (e.key === "Enter") this._search.gotoHit(0);
       else if (e.key === "Escape") { si.value = ""; closeSearch(); }
     };
-    si.onfocus = () => { if (si.value.trim().length >= 2) this.doSearch(si.value); };
+    si.onfocus = () => { if (si.value.trim().length >= 2) this._search.doSearch(si.value); };
     // The settings panel (<settings-dialog>) renders lazily when opened via
     // toggleSection("settings") → dlg.show(); it's configured after the shadow DOM
     // is built (see boot/init), so there's nothing to pre-render here.
@@ -1867,15 +1755,6 @@ export class ChartPlotter extends HTMLElement {
     pop.style.setProperty("--caret-left", `${Math.max(18, Math.min(pr.width - 18, tr.left + tr.width / 2 - pr.left))}px`);
   }
 
-  // The search flyout grows with results; since it's anchored from the top its
-  // height can change freely without re-aligning. Just re-point the caret at the
-  // search button (called on open and after each query).
-  _positionSearch() {
-    const r = this.shadowRoot;
-    const pop = r.getElementById("search"), tab = r.getElementById("search-tab");
-    if (!pop || pop.hidden || !tab) return;
-    this._positionCaret(pop, tab);
-  }
 
   setDrawerOpen(open) {
     const r = this.shadowRoot;
