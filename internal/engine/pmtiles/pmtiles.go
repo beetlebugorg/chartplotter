@@ -17,6 +17,8 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 const (
@@ -86,8 +88,15 @@ type Builder struct {
 	minZ       uint8
 	maxZ       uint8
 	w, s, e, n float64
-	tilesGz    bool // tile contents are gzipped (caller gzips before AddTile)
+	tilesGz    bool     // tile contents are gzipped (caller gzips before AddTile)
+	scamin     []uint32 // distinct SCAMIN denominators present → published in metadata
 }
+
+// SetScamin records the archive's distinct SCAMIN denominators (ascending) so the
+// metadata can publish them. The client builds one native-minzoom bucket layer per
+// value ONCE at load — no runtime probe/collect/setStyle (the per-frame cost this
+// removes). Empty/nil ⇒ the metadata omits the field.
+func (b *Builder) SetScamin(v []uint32) { b.scamin = v }
 
 // SetTilesGzipped marks the tile contents as gzip-compressed, so WriteArchive
 // records gzip in the header's tile-compression field. The caller is responsible
@@ -197,7 +206,7 @@ func (b *Builder) WriteArchive(out io.Writer) error {
 		root = serializeDir(rootEntries)
 	}
 
-	meta := []byte(metadataJSON)
+	meta := b.metadata()
 	const rootOff uint64 = 127
 	rootLen := uint64(len(root))
 	metaOff := rootOff + rootLen
@@ -330,3 +339,19 @@ func serializeDir(entries []entry) []byte {
 // metadataJSON lists the vector layers MapLibre reads from the archive — these
 // match the layer names the baker emits.
 const metadataJSON = `{"name":"chartplotter","format":"pbf","vector_layers":[{"id":"areas","fields":{}},{"id":"area_patterns","fields":{}},{"id":"lines","fields":{}},{"id":"complex_lines","fields":{}},{"id":"point_symbols","fields":{}},{"id":"soundings","fields":{}},{"id":"text","fields":{}}]}`
+
+// metadata is the archive's metadata JSON. It's the static vector-layer list, plus
+// a "scamin" array of the distinct SCAMIN denominators present (when any) so the
+// client can build per-SCAMIN bucket layers at load without runtime collection.
+func (b *Builder) metadata() []byte {
+	if len(b.scamin) == 0 {
+		return []byte(metadataJSON)
+	}
+	parts := make([]string, len(b.scamin))
+	for i, v := range b.scamin {
+		parts[i] = strconv.FormatUint(uint64(v), 10)
+	}
+	// Splice "scamin":[…] into the known-good static JSON (avoids re-encoding the
+	// vector_layers list). metadataJSON ends with "}" — insert before it.
+	return []byte(metadataJSON[:len(metadataJSON)-1] + `,"scamin":[` + strings.Join(parts, ",") + `]}`)
+}

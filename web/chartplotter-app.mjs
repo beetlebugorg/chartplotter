@@ -277,7 +277,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._regionArchives = [];          // [{num,file,bounds}] — one pmtiles per installed region
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
-    this._showCellBounds = localStorage.getItem("cp-cell-bounds") === "1"; // coverage outlines on/off (default OFF, opt-in)
+    this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage boxes when zoomed out past chart data (default ON; opt-out)
     this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
     this._renderSel = new Set();         // dev (debug mode): hand-picked cells — when non-empty, ONLY these render, at any zoom
@@ -865,7 +865,10 @@ export class ChartPlotterApp extends HTMLElement {
     // external files); load it so the pick report can show that content inline.
     this._aux = new AuxStore();
     const dl = this._dl.loadCatalog().then(async (r) => {
+      // Prod/hosted: a companion aux.zip named in the manifest (fetched whole once).
+      // Server: per-file on demand via GET api/aux — the raw zip is never exposed.
       if (this._dl.auxUrl) await this._aux.load(this._dl.auxUrl);
+      else await this._aux.loadApi(this._assets);
       return r;
     });
     // S-57 object/attribute catalogue for the cursor-pick report (decodes class
@@ -895,6 +898,14 @@ export class ChartPlotterApp extends HTMLElement {
     }
     await this._catalogReady;
     this.addCatalogOverlay(map);
+    // The plotter rebuilds the whole style (setStyle) when server sets load or the
+    // SCAMIN buckets refresh, wiping every app-added overlay (coverage boxes, pick &
+    // inspect highlights). Re-apply them after each rebuild, and repopulate the
+    // coverage boxes — otherwise they vanish the moment a set renders.
+    map.on("style.load", () => {
+      this.addCatalogOverlay(map);
+      this._refreshInstalledBounds();
+    });
     await this.restoreArchive();
     // Local serve: render every baked pack the server holds (survives reload). Prod
     // already loaded its prebaked archives in restoreArchive() above.
@@ -1022,6 +1033,20 @@ export class ChartPlotterApp extends HTMLElement {
       const idx = BANDS.indexOf(bandForScale(cell.s));
       if (idx > finest) finest = idx;
       if (!finestScale || cell.s < finestScale) finestScale = cell.s;
+    }
+    // Server mode: imported/inland sets aren't in the NOAA catalogue (_byName), so
+    // the loop above misses them and the cap falls back to "general" — pinning zoom
+    // at ~approach even though finer (e.g. inland berthing) data is installed. Consult
+    // each installed tile set's own band + bounds (from its TileJSON) so the finest
+    // set covering the centre raises the cap to its band.
+    if (this._plotter && this._plotter.serverSetMetas) {
+      for (const set of this._plotter.serverSetMetas()) {
+        const bb = set.bounds;
+        if (!Array.isArray(bb) || bb.length !== 4) continue;
+        if (c.lng < bb[0] || c.lng > bb[2] || c.lat < bb[1] || c.lat > bb[3]) continue;
+        const idx = BANDS.indexOf(set.band);
+        if (idx > finest) finest = idx;
+      }
     }
     // Compilation scale of the chart actually shown at the centre — the reference for
     // the overscale "×n" indication (see _updateHud). 0 = no chart covers the centre.
@@ -2017,6 +2042,12 @@ export class ChartPlotterApp extends HTMLElement {
   // selection mode), the already-selected cells (blue fill), and a live amber
   // preview of the cells the in-progress drag box will grab.
   addCatalogOverlay(map) {
+    // Idempotent: the plotter REBUILDS the style (setStyle) on every server-set
+    // change and SCAMIN-bucket refresh, which drops all these app-added sources/
+    // layers. A style.load handler (see onReady) re-invokes this against the fresh
+    // style; the guard makes a redundant call (when the overlay is still present) a
+    // no-op so we never double-add.
+    if (map.getSource("focus")) return;
     const empty = { type: "FeatureCollection", features: [] };
     map.addSource("focus", { type: "geojson", data: empty });
     map.addLayer({ id: "focus-fill", type: "fill", source: "focus", paint: { "fill-color": "#1565c0", "fill-opacity": 0.12 } });
@@ -3109,6 +3140,9 @@ export class ChartPlotterApp extends HTMLElement {
     // disabled packs stay baked on disk but off the map.
     let packs = [];
     try { const j = await fetch(`${this._assets}api/packs`).then((r) => (r.ok ? r.json() : null)); packs = (j && j.packs) || []; } catch (e) { /* offline */ }
+    // Re-index aux content (server mode): a just-imported district's TXTDSC/PICREP
+    // files become resolvable in the pick report without a page reload.
+    if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
     try {
       const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
       this._installed = new Set((j && j.cells) || []);
@@ -3337,6 +3371,33 @@ export class ChartPlotterApp extends HTMLElement {
         properties: { name, band, status: this._cellStatus.get(name) || "queued" },
         geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
       });
+    }
+    // Server mode: the per-cell footprints above come from the (retired) wasm baker,
+    // so they're empty here. Add ONE coverage box per installed district from its
+    // tile-set bounds, tagged with the district's COARSEST band — so the box auto-
+    // hides (the layer's maxzoom == that band's display min) exactly when the chart's
+    // own data takes over. A full NOAA stack (overview/general band) hides at coarse
+    // zoom (no stray box); a standalone inland set (berthing only) keeps its box until
+    // you zoom in far enough to see it — "boxes when you've zoomed out too far".
+    if (this._plotter && this._plotter.serverSetMetas) {
+      const byDistrict = new Map();
+      for (const set of this._plotter.serverSetMetas()) {
+        const bb = set.bounds;
+        if (!Array.isArray(bb) || bb.length !== 4) continue;
+        const i = set.name.lastIndexOf("-");
+        const district = i > 0 && BANDS.includes(set.name.slice(i + 1)) ? set.name.slice(0, i) : set.name;
+        const rank = BANDS.indexOf(set.band);
+        const prev = byDistrict.get(district);
+        if (!prev || rank < prev.rank) byDistrict.set(district, { bb, band: set.band, rank });
+      }
+      for (const [district, d] of byDistrict) {
+        const [w, s, e, n] = d.bb;
+        feats.push({
+          type: "Feature",
+          properties: { name: district, band: d.band, status: "ready" },
+          geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+        });
+      }
     }
     src.setData({ type: "FeatureCollection", features: feats });
     // Foreign cells carry no catalog footprint, so they'd be invisible when zoomed

@@ -40,6 +40,7 @@ type Server struct {
 	packsMu sync.Mutex        // guards packs
 	packs   map[string]string // ALL baked packs on disk: set name → pmtiles path
 	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
+	auxIdx  *auxIndex         // index of companion aux.zips for /api/aux (TXTDSC/PICREP)
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -53,7 +54,7 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if dataDir == "" {
 		dataDir = cacheDir
 	}
-	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs()}
+	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex()}
 	// Discover every baked pack on disk (provider trees + legacy tiles/), then
 	// register the ENABLED ones (disabled packs stay on disk but off the map). State
 	// lives in <data>/prefs.json so it survives restarts and is shared across clients.
@@ -163,6 +164,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveShare(w, r) // GET/POST the latest "share my view" snapshot
 	case strings.HasPrefix(r.URL.Path, "/api/tile/"):
 		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
+	case r.URL.Path == "/api/aux" || strings.HasPrefix(r.URL.Path, "/api/aux/"):
+		s.serveAux(w, r) // GET aux manifest, or one TXTDSC/PICREP file on demand (not the raw zip)
 	case strings.HasPrefix(r.URL.Path, "/api/import"):
 		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
 	case r.URL.Path == "/api/packs":

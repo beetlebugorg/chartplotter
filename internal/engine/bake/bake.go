@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -295,6 +296,7 @@ type Baker struct {
 	curLightSkip bool                  // current LIGHTS is a non-primary co-located light
 	curLightText string                // merged multi-line characteristic for the primary
 	seenSector   map[sectorKey]struct{} // sector dedup for the current cell
+	scaminSeen   map[uint32]struct{}    // distinct SCAMIN denominators routed this band → published manifest
 	coverage     []CellCoverage         // M_COVR data-coverage polygons of added cells (debug)
 
 	// DATCVR §10.1.9.1 chart scale boundaries: per-cell M_COVR(CATCOV=1) coverage
@@ -497,6 +499,31 @@ func (b *Baker) ResetPrims() {
 	b.emitIndex = nil
 	b.scaleBndEmitted = false
 	b.seenSector = nil
+	b.scaminSeen = nil
+}
+
+// recordScamin notes a distinct SCAMIN denominator routed into this band, so the
+// bake can publish the band's SCAMIN manifest (pmtiles metadata → TileJSON). The
+// client builds one native-minzoom bucket layer per value ONCE at load — no
+// runtime probe/collect/setStyle needed (the per-frame cost the manifest removes).
+func (b *Baker) recordScamin(scamin uint32) {
+	if scamin == 0 {
+		return
+	}
+	if b.scaminSeen == nil {
+		b.scaminSeen = map[uint32]struct{}{}
+	}
+	b.scaminSeen[scamin] = struct{}{}
+}
+
+// ScaminValues returns this band's distinct SCAMIN denominators, ascending.
+func (b *Baker) ScaminValues() []uint32 {
+	out := make([]uint32, 0, len(b.scaminSeen))
+	for v := range b.scaminSeen {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // AddCell expands every feature of a parsed cell into routed primitives at the
@@ -566,6 +593,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			pts := int64(pass.Pts)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
 			b.curScamin = scamin // baked as the `scamin` tag → client per-SCAMIN bucket layers
+			b.recordScamin(scamin) // publish the band's distinct values (manifest → TileJSON)
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
@@ -1192,6 +1220,7 @@ func (b *Baker) BakePMTiles(extent uint32, buffer float64) *pmtiles.Builder {
 			pb.AddTile(uint8(c.Z), c.X, c.Y, data)
 		}
 	}
+	pb.SetScamin(b.ScaminValues()) // SCAMIN manifest in metadata (client builds buckets at load)
 	// Override the tile-derived bounds (a z0 world tile would make them global)
 	// with the real cell-union extent so clients frame to the charts.
 	if bb := b.bbox; bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {

@@ -197,13 +197,15 @@ export class ChartPlotter extends HTMLElement {
     // GENERATION (?g=<mtime>) — re-fetching this JSON (it's no-cache) after a re-bake
     // yields a new URL, so pointing the source at it bypasses every tile cache by
     // content. Falls back to the plain URL if the server omits it.
-    const meta = { name, band: bandOfSet(name), min: 0, max: 18, tiles: this._serverTilesUrl(name) };
+    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name) };
     try {
       const base = new URL(this._assets, location.href).href;
       const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
       if (tj) {
         if (Number.isFinite(tj.minzoom)) meta.min = tj.minzoom;
         if (Number.isFinite(tj.maxzoom)) meta.max = tj.maxzoom;
+        if (Array.isArray(tj.bounds) && tj.bounds.length === 4) meta.bounds = tj.bounds; // [w,s,e,n] — host zoom-cap
+        if (Array.isArray(tj.scamin)) meta.scamin = tj.scamin; // SCAMIN manifest → per-set bucket layers (no runtime collect)
         if (Array.isArray(tj.tiles) && tj.tiles[0]) meta.tiles = tj.tiles[0];
       }
     } catch (e) { /* keep defaults */ }
@@ -653,6 +655,11 @@ export class ChartPlotter extends HTMLElement {
   _refreshScaminBuckets() {
     const m = this._map;
     if (!m) return;
+    // Server mode publishes the SCAMIN manifest in each set's TileJSON (set.scamin),
+    // so buckets are built at load — no runtime collection, no setStyle churn (this
+    // idle loop + the probe layers were the per-frame cost). Only the prebaked
+    // (pmtiles) path, which has no manifest, still discovers values from tiles.
+    if (this._server) return;
     const seen = new Set(this._scaminValues);
     const before = seen.size;
     const srcs = this._server ? (this._serverSets || []).map((s) => "chart-" + s.name) : CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
@@ -994,6 +1001,11 @@ export class ChartPlotter extends HTMLElement {
 
   // The active server tile-set names ([] when not in server mode).
   serverSets() { return this._server ? this._serverSets.map((s) => s.name) : []; }
+
+  // The active server sets' metadata ({name,band,min,max,bounds}) — so the host's
+  // zoom-cap can tell which finest band covers the view centre for imported/inland
+  // sets that aren't in the NOAA catalogue. [] when not in server mode.
+  serverSetMetas() { return this._server ? this._serverSets.map((s) => ({ ...s })) : []; }
 
   // Resolve an archive source: a Blob/File is passed through; a URL string is
   // made absolute (relative to the page) for the HTTP-Range reader.
@@ -1468,19 +1480,43 @@ export class ChartPlotter extends HTMLElement {
     // max so the coarse marks don't bleed into a finer band's zooms. Variant id is
     // "<id>@<set>" so scheme/mariner updates by base id hit every set's copy.
     if (this._server) {
+      const lat = this._scaminLat != null ? this._scaminLat : this._map ? this._map.getCenter().lat : 0;
       for (const L of tmpl) {
         const base = L.filter ?? null;
         for (const set of this._serverSets) {
-          const id = L.id + "@" + set.name;
-          this._layerBase[id] = base;
-          (this._variants[L.id] ||= []).push(id);
-          const v = { ...L, id, source: "chart-" + set.name, filter: this.combineFilters(base), layout: this._variantLayout(L, set.band, id) };
           const dmin = BAND_DISPLAY_MIN[set.band];
-          if (dmin) v.minzoom = dmin; // band appears at its scale, not the baked floor
-          if ((set.band === "overview" || set.band === "general") && this._capsAtBand(L)) {
-            v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
+          const capped = (set.band === "overview" || set.band === "general") && this._capsAtBand(L);
+          // mk pushes one variant of L for this set — same shape as the pmtiles path's
+          // mk, keyed by set name. Stores its base filter (for live re-combine) and a
+          // native minzoom, and mirrors the coarse-band maxzoom cap.
+          const mk = (suffix, baseFilter, minzoom) => {
+            const id = L.id + "@" + set.name + suffix;
+            this._layerBase[id] = baseFilter;
+            (this._variants[L.id] ||= []).push(id);
+            const v = { ...L, id, source: "chart-" + set.name, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, set.band, id) };
+            if (minzoom != null) v.minzoom = minzoom; // band appears at its scale, not the baked floor
+            if (capped) v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
+            out.push(v);
+          };
+          const and = (extra) => (base ? ["all", base, extra] : extra);
+          // SCAMIN buckets, BAKED MANIFEST: one native fractional-minzoom layer per
+          // distinct SCAMIN value (from the set's TileJSON `scamin`, published by the
+          // baker), so a feature shows exactly from its 1:N scale in both directions;
+          // features lacking SCAMIN take the `#no` variant. The values are known at
+          // load — NO runtime probe / querySourceFeatures / setStyle (the per-frame
+          // cost the manifest removes). MapLibre flips each bucket on its zoom crossing
+          // natively (zero JS/frame). The per-band archive is FLOOR-GATED at bake, so
+          // tile CONTENT controls appearance: client layers need no band minzoom.
+          const scaminVals = set.scamin || [];
+          if (SCAMIN_BUCKET_LAYERS.has(L.id) && scaminVals.length) {
+            mk("#no", and(["!", ["has", "scamin"]]), undefined);
+            for (const sc of scaminVals) {
+              mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
+            }
+          } else {
+            mk("", base, undefined);
           }
-          out.push(v);
+          void dmin; // band display-min superseded by bake floor-gating (kept for ref)
           // Right after this band's base depth/land fill, drop the S-52 overscale
           // pattern AP(OVERSC01) for the zooms where the band is GROSSLY overscale
           // (display scale ≥ ~×2 its compilation scale → above its native max). It's
@@ -1550,7 +1586,12 @@ export class ChartPlotter extends HTMLElement {
   // them, the bucket layers can't exist until their tiles load, but those tiles
   // won't load until the buckets exist — a deadlock at sub-band zooms.
   _pushScaminProbes(out) {
-    const srcs = this._server ? (this._serverSets || []).map((s) => "chart-" + s.name) : CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
+    // Server mode gets its SCAMIN values from the baked manifest, so it needs no
+    // probes (these were the per-frame cost: minzoom-0 layers processed at every
+    // zoom to force sub-band tiles to load for runtime collection). Only the prebaked
+    // (pmtiles) path, which still discovers values from tiles, needs them.
+    if (this._server) return;
+    const srcs = CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
     for (const src of srcs) {
       for (const sl of SCAMIN_BUCKET_LAYERS) {
         out.push({ id: "scaminprobe-" + src + "-" + sl, source: src, "source-layer": sl, type: "circle", minzoom: 0, filter: ["has", "scamin"], paint: { "circle-radius": 0, "circle-opacity": 0, "circle-stroke-width": 0 } });

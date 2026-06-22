@@ -171,6 +171,7 @@ func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
 		_ = os.Remove(filepath.Join(dir, name+".aux.zip"))
 		_ = os.Remove(dir) // best-effort: drop the pack dir if now empty
 	}
+	s.auxIdx.invalidate() // a district's companion aux.zip is gone — re-index /api/aux
 	w.Header().Set("Content-Type", jsonCT)
 	io.WriteString(w, `{"ok":true}`)
 }

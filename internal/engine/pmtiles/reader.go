@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -28,11 +29,12 @@ type Reader struct {
 	meta    TileMeta
 }
 
-// TileMeta is an archive's display metadata (header fields).
+// TileMeta is an archive's display metadata (header fields + JSON metadata).
 type TileMeta struct {
 	MinZoom, MaxZoom uint8
-	W, S, E, N       float64 // lon/lat bounds (degrees)
-	Gzipped          bool    // tile bodies are gzip-compressed
+	W, S, E, N       float64  // lon/lat bounds (degrees)
+	Gzipped          bool     // tile bodies are gzip-compressed
+	Scamin           []uint32 // distinct SCAMIN denominators present (from JSON metadata)
 }
 
 // Open opens a .pmtiles file for reading. Close releases the file handle.
@@ -69,6 +71,8 @@ func NewReader(src io.ReaderAt, size int64) (*Reader, error) {
 	}
 	rootOff := binary.LittleEndian.Uint64(h[8:16])
 	rootLen := binary.LittleEndian.Uint64(h[16:24])
+	metaOff := binary.LittleEndian.Uint64(h[24:32])
+	metaLen := binary.LittleEndian.Uint64(h[32:40])
 	leafOff := binary.LittleEndian.Uint64(h[40:48])
 	dataOff := binary.LittleEndian.Uint64(h[56:64])
 
@@ -96,6 +100,20 @@ func NewReader(src io.ReaderAt, size int64) (*Reader, error) {
 			N:       float64(int32(binary.LittleEndian.Uint32(h[114:118]))) / 1e7,
 			Gzipped: h[98] == compressionGzip,
 		},
+	}
+	// JSON metadata (between metaOff and leafOff): parse the SCAMIN manifest so the
+	// client can build per-SCAMIN bucket layers at load. Best-effort — absence just
+	// means the older runtime-collection path is used.
+	if metaLen > 0 && metaLen < 1<<20 {
+		mb := make([]byte, metaLen)
+		if _, err := src.ReadAt(mb, int64(metaOff)); err == nil {
+			var md struct {
+				Scamin []uint32 `json:"scamin"`
+			}
+			if json.Unmarshal(mb, &md) == nil {
+				rd.meta.Scamin = md.Scamin
+			}
+		}
 	}
 	// Leaf section sits between leafOff and dataOff; load it once if present.
 	if dataOff > leafOff {

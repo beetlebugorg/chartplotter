@@ -523,6 +523,7 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		return
 	}
 	s.imports.update(jobID, func(j *importJob) { j.Cells = nCells })
+	s.auxIdx.invalidate() // the district's companion aux.zip changed — re-index /api/aux
 	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, nCells, bands, tiles)
 	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
 }

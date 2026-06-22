@@ -115,12 +115,22 @@ func (s *Server) serveTileJSON(w http.ResponseWriter, r *http.Request, name stri
 		}
 	}
 	tilesURL := fmt.Sprintf("%s://%s/tiles/%s/{z}/{x}/{y}.mvt?g=%d", scheme, r.Host, name, gen)
+	// SCAMIN manifest (from the archive metadata): the client builds one native-
+	// minzoom bucket layer per value at load — no runtime probe/collect/setStyle.
+	scaminJSON := ""
+	if len(m.Scamin) > 0 {
+		parts := make([]string, len(m.Scamin))
+		for i, v := range m.Scamin {
+			parts[i] = strconv.FormatUint(uint64(v), 10)
+		}
+		scaminJSON = `,"scamin":[` + strings.Join(parts, ",") + `]`
+	}
 	w.Header().Set("Content-Type", jsonCT)
 	w.Header().Set("Cache-Control", "no-cache")
 	fmt.Fprintf(w,
-		`{"tilejson":"3.0.0","scheme":"xyz","format":"pbf","tiles":[%q],"minzoom":%d,"maxzoom":%d,"bounds":[%g,%g,%g,%g],"center":[%g,%g,%d]}`,
+		`{"tilejson":"3.0.0","scheme":"xyz","format":"pbf","tiles":[%q],"minzoom":%d,"maxzoom":%d,"bounds":[%g,%g,%g,%g],"center":[%g,%g,%d]%s}`,
 		tilesURL, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N,
-		(m.W+m.E)/2, (m.S+m.N)/2, m.MinZoom,
+		(m.W+m.E)/2, (m.S+m.N)/2, m.MinZoom, scaminJSON,
 	)
 }
 

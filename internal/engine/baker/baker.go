@@ -322,6 +322,7 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, bd.Max)
 		})
 		b.ClearEmitIndex()
+		pb.SetScamin(b.ScaminValues()) // publish this band's SCAMIN manifest in the archive metadata
 		if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
 			pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
 		}
