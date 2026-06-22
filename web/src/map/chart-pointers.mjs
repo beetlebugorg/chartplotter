@@ -1,6 +1,6 @@
-// chart-radar.mjs — "chart radar": edge chips pointing toward installed chart
-// packs that aren't currently in view, so off-screen charts are always findable
-// (and one tap flies you there at the zoom where they render).
+// chart-pointers.mjs — off-screen chart pointers: edge chips pointing toward
+// installed chart packs that aren't currently in view, so off-screen charts are
+// always findable (and one tap flies you there at the zoom where they render).
 //
 // Self-contained: owns its overlay DOM + a single map "move" listener, throttled
 // to one update per frame. Operates on PACKS (a few dozen at most), never cells,
@@ -8,7 +8,7 @@
 // caps the count, so the number of chips stays small whatever the install size.
 //
 // The shell wires it with accessors (no app internals leak in here):
-//   new ChartRadar({ host, map, getPacks, getUnits, labelFor, onPick, visible })
+//   new ChartPointers({ host, map, getPacks, getUnits, labelFor, onPick, visible })
 // where getPacks() → [{name, enabled, bands:[coarse→fine], bounds:[w,s,e,n]}].
 
 import { format as fmtUnit } from "../lib/units.mjs";
@@ -20,7 +20,7 @@ const MARGIN = 30;   // keep chips this far inside the map edge
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-export class ChartRadar {
+export class ChartPointers {
   constructor(opts) {
     this.host = opts.host;
     this.map = opts.map;

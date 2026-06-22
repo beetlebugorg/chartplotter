@@ -30,7 +30,7 @@ import { ChartService } from "./data/chart-service.mjs"; // server import/bake j
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
 import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (categories now in core-settings.mjs)
-import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge pointers
+import { ChartPointers } from "./map/chart-pointers.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { SearchBox } from "./map/search-box.mjs"; // offline catalog + chart-feature search
@@ -423,7 +423,7 @@ export class ChartPlotter extends HTMLElement {
     this._showChartRadar = on;
     localStorage.setItem("cp-chart-radar", on ? "1" : "0");
     this._persistSettings();
-    if (this._radar) this._radar.setVisible(on);
+    if (this._chartPointers) this._chartPointers.setVisible(on);
   }
 
   // A deploy-time config value from an attribute, overridable per-load by the
@@ -547,9 +547,9 @@ export class ChartPlotter extends HTMLElement {
       this._hud.updateZoomCap(); // clamp zoom-in to the finest band covering the new view
     });
 
-    // Chart radar: edge pointers to off-screen installed charts (its own module;
-    // owns its overlay + map listener). Fed from the installed-pack metadata.
-    this._radar = new ChartRadar({
+    // Off-screen chart pointers: edge pointers to installed charts not in view
+    // (its own module; owns its overlay + map listener). Fed from pack metadata.
+    this._chartPointers = new ChartPointers({
       host: this.shadowRoot.getElementById("chart-radar"),
       map,
       getPacks: () => this._packsMeta || [],
@@ -1296,7 +1296,7 @@ export class ChartPlotter extends HTMLElement {
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
-    if (this._radar) this._radar.update(); // packs changed → recompute off-screen pointers
+    if (this._chartPointers) this._chartPointers.update(); // packs changed → recompute off-screen pointers
     return active;
   }
 
