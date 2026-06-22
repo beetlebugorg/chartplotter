@@ -28,6 +28,12 @@
 
 import { esc, fmtIssue } from "../lib/util.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "../data/zip-import.mjs";
+import {
+  STYLE, prodBody, libraryBody, packSearch, providersCol, packsHeader,
+  packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
+  detailEmpty, detailUnknownSet, detailPack, installedActions, previewMapHost,
+  importDetail, dataFreshness, agreementModal, archiveList,
+} from "./chart-library.view.mjs";
 
 // NOAA ENC User Agreement acceptance (localStorage). Exported so the shell can
 // share the same key if it ever needs to read it.
@@ -56,95 +62,6 @@ export const DISTRICTS = [
   { cg: 14, name: "14th District", region: "Pacific Islands", blurb: "Hawaii, Guam & American Samoa" },
   { cg: 17, name: "17th District", region: "Alaska", blurb: "All of Alaska" },
 ];
-
-// Charts-panel styles, lifted verbatim from the shell <style> (the rules that
-// only ever applied inside #charts-body). The element has its own shadow DOM, so
-// a handful of generic helpers (.btn, .muted, .row, .grow) are duplicated here
-// rather than relying on the shell's sheet — they no longer cross the boundary.
-const STYLE = `
-  :host { display:block; }
-  .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
-  .btn:hover { background:var(--ui-hover); }
-  .add-hint { color:var(--ui-text-dim); font-size:12px; line-height:1.5; margin:0 0 12px; }
-  .pack-search { width:100%; box-sizing:border-box; border:1px solid var(--ui-border-strong); border-radius:8px; padding:9px 12px; font:inherit; margin-bottom:10px; background:var(--ui-surface); color:var(--ui-text); }
-  .pack-search:focus { outline:none; border-color:var(--ui-accent); }
-  @keyframes dlspin { to { transform:rotate(360deg); } }
-  /* chart download: Finder-style 3-pane drill-down */
-  .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(62vh,560px); margin:2px 0 12px; }
-  .mcol { flex:0 0 26%; min-width:0; overflow-y:auto; border-right:1px solid var(--ui-border-2); padding:6px; }
-  .mcol:nth-child(2) { flex:0 0 32%; }
-  .mcol.mcol-detail { flex:1 1 0; border-right:none; padding:12px; }
-  .mcol-h { font-size:11px; font-weight:700; color:var(--ui-text); padding:1px 6px 0; }
-  .mcol-head { position:sticky; top:0; background:var(--ui-surface); padding:4px 0 7px; margin-bottom:2px; border-bottom:1px solid var(--ui-border-2); z-index:1; }
-  .mcol-meta { font-size:10.5px; color:var(--ui-text-faint); padding:1px 6px 0; line-height:1.35; }
-  .m-row { display:flex; align-items:center; gap:8px; padding:8px; border-radius:7px; cursor:pointer; transition:background .1s; }
-  .m-row:hover { background:var(--ui-hover); }
-  .m-row:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--ui-accent); }
-  .m-row.sel { background:var(--ui-accent); }
-  .m-row.sel .m-name, .m-row.sel .m-sub, .m-row.sel .m-chev { color:var(--ui-accent-text); }
-  .m-row.sel .m-badge.on { background:rgba(255,255,255,.25); color:var(--ui-accent-text); }
-  .m-row.dim { opacity:.4; }
-  .m-row.match { background:rgba(21,101,192,.10); }
-  .m-row.match.sel { background:var(--ui-accent); }
-  .m-info { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
-  .m-name { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .m-sub { color:var(--ui-text-faint); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .m-chev { flex:none; color:var(--ui-text-faint); font-size:16px; }
-  .m-badge { flex:none; font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; padding:2px 7px; border-radius:10px; display:inline-flex; align-items:center; gap:5px; }
-  .m-badge.on { background:#e4f5ea; color:#1f7a36; }
-  .m-badge.off { background:var(--ui-surface-2); color:var(--ui-text-faint); }
-  .m-badge.dl { background:color-mix(in srgb, var(--ui-accent) 16%, transparent); color:var(--ui-accent); }
-  .m-badge.queued { background:var(--ui-surface-2); color:var(--ui-text-dim); }
-  .m-row.dim .m-badge { opacity:.7; }
-  .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; line-height:1.5; }
-  /* detail pane — real OSM preview map with the pack's coverage outlined */
-  .prev-map { width:100%; height:260px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; }
-  .prev-map canvas { border-radius:8px; }
-  .m-detail-body { padding:12px 2px 2px; }
-  .m-detail-title { font-weight:700; font-size:15px; }
-  .m-detail-sub { color:var(--ui-text-dim); font-size:12px; line-height:1.45; margin-top:3px; }
-  .m-detail-meta { color:var(--ui-text-faint); font-size:11.5px; font-variant-numeric:tabular-nums; margin-top:5px; }
-  .m-detail-act { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
-  .pk-btn.danger { color:#c0392b; }
-  .pk-btn.danger:hover { background:#fdeceb; border-color:#e2b6b1; }
-  .pk-btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; border:none; background:var(--ui-accent); color:var(--ui-accent-text); border-radius:7px; padding:8px 14px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
-  .pk-btn:hover { background:var(--ui-accent-hover); }
-  .pk-btn:disabled { background:#9fb6cf; cursor:default; }
-  /* Downloading now: greyed, spinner, no hover lift. Queued: muted, waiting. */
-  .pk-btn.downloading, .pk-btn.downloading:hover { background:#9fb6cf; cursor:default; }
-  .pk-btn.queued, .pk-btn.queued:hover { background:var(--ui-surface-2); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
-  .pk-btn.ghost { background:var(--ui-surface); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
-  .pk-btn.ghost:hover { background:#fdeceb; color:#c0392b; border-color:#e2b6b1; }
-  .pk-btn.mini { padding:5px 9px; font-size:11.5px; }
-  /* Spinner used in the Downloading button + list badge. */
-  .pk-spin { width:12px; height:12px; flex:none; border-radius:50%;
-    border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:dlspin .8s linear infinite; }
-  .m-badge.dl .pk-spin { width:9px; height:9px; border-width:2px; border-color:color-mix(in srgb, var(--ui-accent) 35%, transparent); border-top-color:var(--ui-accent); }
-  @media (prefers-reduced-motion: reduce) { .pk-spin { animation-duration:2s; } }
-  /* NOAA data freshness footer */
-  .data-fresh { color:var(--ui-text-faint); font-size:11.5px; text-align:center; line-height:1.5; padding:14px 0 4px; border-top:1px solid var(--ui-border-2); margin-top:4px; }
-  /* import drop zone + archive list */
-  .drop { border:2px dashed var(--ui-border-strong); border-radius:8px; padding:18px; text-align:center; color:var(--ui-text-dim); margin-bottom:10px; }
-  .drop.over { border-color:var(--ui-accent); background:var(--ui-hover); color:var(--ui-accent); }
-  .row { display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid var(--ui-border-2); }
-  .row .name { font-weight:600; } .row .meta { color:var(--ui-text-dim); font-size:12px; }
-  .grow { flex:1; }
-  .muted { color:var(--ui-text-dim); }
-  /* NOAA ENC user-agreement gate (shown before the first download). */
-  .modal { position:fixed; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
-    background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
-  .modal[hidden] { display:none; }
-  .modal-card { background:var(--ui-surface); max-width:520px; width:calc(100% - 40px); max-height:86%; overflow:auto;
-    border-radius:12px; padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.3); font:14px/1.5 system-ui,sans-serif; color:var(--ui-text); }
-  .modal-card h2 { margin:0 0 10px; font-size:18px; }
-  .modal-card .agree-body ul { margin:8px 0; padding-left:20px; }
-  .modal-card .agree-body li { margin:5px 0; }
-  .modal-card a { color:var(--ui-accent); }
-  .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
-  .cta { background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:8px; padding:11px 12px; font:inherit;
-    font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:7px; }
-  .cta:hover { background:var(--ui-accent-hover); }
-`;
 
 export class ChartLibrary extends HTMLElement {
   constructor() {
@@ -332,23 +249,17 @@ export class ChartLibrary extends HTMLElement {
     const el = this.shadowRoot.getElementById("body");
     if (!el) return;
     if (this._prod) {
-      el.innerHTML = `
-        <p class="add-hint">Add your own charts — drop a NOAA <code>.zip</code> / <code>.000</code>, or a baked <code>.pmtiles</code>. They're baked right here in your browser and kept offline alongside the prebaked charts.</p>
-        <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
-        <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-        <div id="import-log" class="muted"></div>
-        <div id="archive-list"></div>`;
+      el.innerHTML = prodBody();
       this._wireImport();
       return;
     }
-    el.innerHTML = `
-      ${this._renderPackSearch()}
-      <div class="miller">
-        ${this._renderProvidersCol()}
-        ${this._renderPacksCol()}
-        ${this._renderDetailCol()}
-      </div>
-      ${this._renderDataFreshness()}`;
+    el.innerHTML = libraryBody({
+      searchHtml: this._renderPackSearch(),
+      providersCol: this._renderProvidersCol(),
+      packsCol: this._renderPacksCol(),
+      detailCol: this._renderDetailCol(),
+      freshnessHtml: this._renderDataFreshness(),
+    });
     this._wirePackSearch();
     this._wirePacks();
     this._wireImport();
@@ -367,13 +278,12 @@ export class ChartLibrary extends HTMLElement {
   _renderProvidersCol() {
     const sel = this._selProvider || "noaa";
     const hits = this._searchHits();
-    const rows = this._providers().map((p) => {
+    const providers = this._providers().map((p) => {
       let cls = sel === p.id ? " sel" : "";
       if (hits) cls += this._providerHasMatch(p.id, hits) ? " match" : " dim";
-      return `<div class="m-row${cls}" data-prov="${p.id}" role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(p.name)}</span><span class="m-sub">${esc(p.sub)}</span></span><span class="m-chev">›</span></div>`;
-    }).join("");
-    return `<div class="mcol"><div class="mcol-h">Source</div>${rows}</div>`;
+      return { ...p, cls };
+    });
+    return providersCol(providers);
   }
 
   // Does a provider contain a search match? NOAA → any matched district; others →
@@ -394,9 +304,9 @@ export class ChartLibrary extends HTMLElement {
     if (prov === "ienc" && this._ienc === undefined) {
       // Catalogue not loaded yet — fetch it, then refresh just this column.
       if (!this._iencPromise) this._iencCatalog().then(() => { if (this._active && (this._selProvider || "noaa") === "ienc") this._refreshPacksCol(); });
-      rows = `<div class="m-empty">Loading inland ENC catalogue…</div>`;
-    } else if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : `<div class="m-empty">No imported charts yet — open this to add some.</div>`;
-    else if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs available." : "Nothing installed."}</div>`;
+      rows = emptyRow("Loading inland ENC catalogue…");
+    } else if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : emptyRow("No imported charts yet — open this to add some.");
+    else if (!packs.length) rows = emptyRow(prov === "ienc" ? "No inland ENC packs available." : "Nothing installed.");
     else rows = packs.map((pk) => {
       let cls = (this._selPack === pk.key ? " sel" : "") + (pk.installed ? " on" : "");
       let sub = pk.sub;
@@ -405,31 +315,21 @@ export class ChartLibrary extends HTMLElement {
         if (hit === undefined) cls += " dim";
         else { cls += " match"; if (hit) sub = `matches “${esc(hit.l || hit.n)}”`; }
       }
-      return `<div class="m-row${cls}" data-pack="${esc(pk.key)}"${pk.cg ? ` data-cg="${pk.cg}"` : ""} role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${sub}</span></span>${this._packBadge(pk.key, pk.installed)}</div>`;
+      return packRow({ key: pk.key, title: pk.title, cls, sub, cg: pk.cg, badge: this._packBadge(pk.key, pk.installed) });
     }).join("");
-    return `<div class="mcol">${this._packsHeader(prov)}${rows}</div>`;
+    return packsCol({ header: this._packsHeader(prov), rows });
   }
 
   // A user-imported pack row.
   _userPackRow(pk) {
-    return `<div class="m-row on${this._selPack === pk.key ? " sel" : ""}" data-pack="${esc(pk.key)}" role="button" tabindex="0">
-      <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span>${this._packBadge(pk.key, true)}</div>`;
+    return userPackRow(pk, { selPack: this._selPack, badge: this._packBadge(pk.key, true) });
   }
 
   // Status pill for a pack row. A pending/active download takes priority (so you
   // can see at a glance which packs are downloading/queued); otherwise an installed
   // pack shows "Active"/"Disabled", and a plain not-installed pack shows nothing.
   _packBadge(key, installed) {
-    if (!installed) {
-      const dl = this._packDownloadState(key);
-      if (dl === "downloading") return '<span class="m-badge dl"><span class="pk-spin"></span>Downloading</span>';
-      if (dl === "queued") return '<span class="m-badge queued">Queued</span>';
-      return "";
-    }
-    return this._disabled.has(key)
-      ? '<span class="m-badge off">Disabled</span>'
-      : '<span class="m-badge on">Active</span>';
+    return packBadge({ installed, disabled: this._disabled.has(key), downloadState: this._packDownloadState(key) });
   }
 
   // Pane-2 header: the provider's name + a one-line description and when its source
@@ -439,7 +339,7 @@ export class ChartLibrary extends HTMLElement {
     if (prov === "noaa") line = `U.S. Coast Guard districts${this._catalogDate ? ` · catalogue ${fmtIssue(this._catalogDate)}` : ""} · ${this._catalog.length.toLocaleString()} charts`;
     else if (prov === "ienc") line = "USACE inland waterway ENC";
     else line = "Charts you've imported from a file";
-    return `<div class="mcol-head"><div class="mcol-h">${esc(this._providerName(prov))}</div><div class="mcol-meta">${esc(line)}</div></div>`;
+    return packsHeader({ providerName: this._providerName(prov), line });
   }
 
   // Pane 3: the selected pack's detail — coverage map + download/remove.
@@ -447,24 +347,19 @@ export class ChartLibrary extends HTMLElement {
     const key = this._selPack;
     if (!key) {
       if ((this._selProvider || "noaa") === "user") return this._renderImportDetail();
-      return `<div class="mcol mcol-detail"><div class="m-empty">Select a chart pack.</div></div>`;
+      return detailEmpty();
     }
     const busy = this.busy;
     const installed = this._installedSets && this._installedSets.has(key);
     const pk = this._selectedPack();
     // An installed pack not in the current catalogue (e.g. an old set) → remove only.
     if (!pk) {
-      return `<div class="mcol mcol-detail"><div class="m-detail-body">
-        <div class="m-detail-title">${esc(this._setLabel(key))}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
-        <div class="m-detail-sub">${esc(key)}</div>
-        <div class="m-detail-act"><button class="pk-btn ghost" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div>
-      </div></div>`;
+      return detailUnknownSet({ label: this._setLabel(key), key, installed, busy });
     }
     const disabled = this._disabled.has(key);
     const tick = installed ? (disabled ? ' <span class="m-badge off">Disabled</span>' : ' <span class="m-badge on">Active</span>') : "";
     const act = installed
-      ? `<button class="pk-btn ghost" data-${disabled ? "enable" : "disable"}="${esc(key)}"${busy ? " disabled" : ""}>${disabled ? "Enable" : "Disable"}</button>
-         <button class="pk-btn ghost danger" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button>`
+      ? installedActions({ key, disabled, busy })
       : this._downloadBtnHtml(key);
     let title, sub, meta;
     if (pk.kind === "noaa") {
@@ -482,28 +377,14 @@ export class ChartLibrary extends HTMLElement {
       meta = "outlined area below is the coverage";
     }
     // User packs have no coverage map; everything else shows the preview.
-    const previewMap = pk.kind === "user" ? "" : `<div id="preview-map" class="prev-map"></div>`;
-    return `<div class="mcol mcol-detail">
-      ${previewMap}
-      <div class="m-detail-body">
-        <div class="m-detail-title">${esc(title)}${tick}</div>
-        <div class="m-detail-sub">${sub}</div>
-        ${meta ? `<div class="m-detail-meta">${esc(meta)}</div>` : ""}
-        <div class="m-detail-act">${act}</div>
-      </div></div>`;
+    const previewMap = pk.kind === "user" ? "" : previewMapHost();
+    return detailPack({ title, tick, sub, meta, act, previewMap });
   }
 
   // The User-Charts detail: the import drop zone (baked server-side into the
   // "import" pack). Shown when the User Charts provider is open with no pack picked.
   _renderImportDetail() {
-    return `<div class="mcol mcol-detail"><div class="m-detail-body">
-      <div class="m-detail-title">Import your charts</div>
-      <div class="m-detail-sub">Add ENC you already have — a NOAA/IENC exchange-set <code>.zip</code>, individual <code>.000</code> cells, or a baked <code>.pmtiles</code>. They're baked on the server and kept under User Charts.</div>
-      <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:8px">Choose files…</button></div>
-      <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-      <div id="import-log" class="muted"></div>
-      <div id="archive-list"></div>
-    </div></div>`;
+    return importDetail();
   }
 
   // The coverage GeoJSON for a district: one polygon per catalog cell (its bbox),
@@ -676,11 +557,10 @@ export class ChartLibrary extends HTMLElement {
 
   // The Download button's HTML for a pack key, by queue state.
   _downloadBtnHtml(key) {
-    if (this._activeDownloadKey === key)
-      return `<button class="pk-btn downloading" data-getpack="${esc(key)}" disabled><span class="pk-spin"></span>Downloading…</button>`;
-    if (this._dlQueue.some((j) => j.key === key))
-      return `<button class="pk-btn queued" data-getpack="${esc(key)}" disabled>Queued</button>`;
-    return `<button class="pk-btn" data-getpack="${esc(key)}">⬇ Download</button>`;
+    return downloadBtn(key, {
+      downloading: this._activeDownloadKey === key,
+      queued: this._dlQueue.some((j) => j.key === key),
+    });
   }
 
   // Whether a pack key is downloading now / waiting in the queue (for list badges).
@@ -749,8 +629,7 @@ export class ChartLibrary extends HTMLElement {
 
   // Find-a-chart search box.
   _renderPackSearch() {
-    const q = this._cellQuery || "";
-    return `<input id="pack-search" class="pack-search" type="search" placeholder="Find a chart, port, or region…" autocomplete="off" spellcheck="false" value="${esc(q)}">`;
+    return packSearch(this._cellQuery || "");
   }
   _wirePackSearch() {
     const i = this.shadowRoot.getElementById("pack-search");
@@ -798,9 +677,7 @@ export class ChartLibrary extends HTMLElement {
 
   // NOAA data freshness footer.
   _renderDataFreshness() {
-    if (!this._catalogDate) return "";
-    const total = this._catalog.length.toLocaleString();
-    return `<div class="data-fresh">NOAA chart data current as of <b>${fmtIssue(this._catalogDate)}</b> · ${total} charts available</div>`;
+    return dataFreshness({ catalogDate: this._catalogDate, total: this._catalog.length.toLocaleString() });
   }
 
   // Uninstall any pack by set name: DELETE /api/set removes the baked pmtiles/aux
@@ -841,25 +718,7 @@ export class ChartLibrary extends HTMLElement {
     return new Promise((resolve) => {
       const host = this.shadowRoot.getElementById("agree-host");
       if (!host) return resolve(this._agreed);
-      host.innerHTML = `
-        <div id="agree" class="modal">
-          <div class="modal-card">
-            <h2>NOAA ENC® — User Agreement</h2>
-            <div class="agree-body">
-              <p>NOAA Electronic Navigational Charts (NOAA ENC®) are downloaded directly from NOAA. By continuing you acknowledge that you have read, understood, and accepted NOAA's User Agreement.</p>
-              <ul>
-                <li><b>Not for navigation.</b> Charts downloaded and baked here are processed for display and are <b>not</b> the official NOAA ENC; they do not meet chart-carriage regulations. Use official, up-to-date charts for navigation.</li>
-                <li><b>Updates.</b> NOAA updates ENCs weekly on a best-efforts basis. You are responsible for ensuring you have the current edition and latest updates.</li>
-                <li><b>Origin.</b> Charts are sourced from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA Office of Coast Survey</a>. NOAA makes no warranty and assumes no liability for their use.</li>
-              </ul>
-              <p>Read the full terms: <a href="${NOAA_AGREEMENT_URL}" target="_blank" rel="noopener">NOAA ENC User Agreement</a>.</p>
-            </div>
-            <div class="agree-actions">
-              <button id="agree-decline" class="btn" type="button">Decline</button>
-              <button id="agree-accept" class="cta" type="button">Accept &amp; continue</button>
-            </div>
-          </div>
-        </div>`;
+      host.innerHTML = agreementModal({ encUrl: NOAA_ENC_URL, agreementUrl: NOAA_AGREEMENT_URL });
       this._agreeResolve = resolve;
       const accept = host.querySelector("#agree-accept");
       const decline = host.querySelector("#agree-decline");
@@ -1005,13 +864,8 @@ export class ChartLibrary extends HTMLElement {
     const names = [...this._archive.keys()].sort();
     if (!names.length) { el.innerHTML = ""; return; }
     const nSel = [...this._selected].filter((n) => this._archive.has(n)).length;
-    el.innerHTML = `<h4>From archive (${names.length})</h4>` + names.map((name) => {
-      const c = this._byName.get(name);
-      const checked = this._selected.has(name) ? "checked" : "";
-      return `<label class="row"><input type="checkbox" data-name="${name}" ${checked}>
-        <span class="grow"><span class="name">${name}</span> <span class="meta">${c?.l || ""}</span></span></label>`;
-    }).join("") +
-      `<div style="margin-top:8px"><button id="import-btn" class="btn">Import ${nSel} chart(s)</button></div>`;
+    const items = names.map((name) => ({ name, label: this._byName.get(name)?.l || "", checked: this._selected.has(name) }));
+    el.innerHTML = archiveList({ items, nSel });
     el.querySelectorAll("input[type=checkbox]").forEach((cb) => (cb.onchange = () => this.toggleSelect(cb.dataset.name)));
     const ib = this.shadowRoot.getElementById("import-btn");
     if (ib) ib.onclick = () => this.importSelected();
