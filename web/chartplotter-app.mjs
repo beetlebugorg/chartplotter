@@ -23,6 +23,7 @@ import { AuxStore } from "./aux-store.mjs"; // TXTDSC/PICREP external files (com
 import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
 import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./units.mjs"; // configurable display units
+import { ChartRadar } from "./chart-radar.mjs"; // off-screen installed-chart edge pointers
 
 const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
@@ -283,6 +284,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage boxes when zoomed out past chart data (default ON; opt-out)
+    this._showChartRadar = localStorage.getItem("cp-chart-radar") !== "0"; // edge pointers to off-screen installed charts (default ON)
     this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
     this._renderSel = new Set();         // dev (debug mode): hand-picked cells — when non-empty, ONLY these render, at any zoom
@@ -891,7 +893,42 @@ export class ChartPlotterApp extends HTMLElement {
     const need = (BAND_MINZOOM[(f.properties && f.properties.band)] || 12) + 1; // safely into detail
     const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
     const zoom = Math.min(18, Math.max(cam ? cam.zoom : need, need));
+    if (map.getMaxZoom() < zoom) map.setMaxZoom(zoom); // don't let the departure cap clamp the fly short
     map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
+  }
+
+  // Fly to a set of packs from a tapped chart-radar chip. A single pack lands at
+  // its finest band's render zoom (so a berthing-only set actually draws); a
+  // cluster just fits all of them so they come into view (and split into their own
+  // chips / coverage boxes from there).
+  _flyToPacks(packs) {
+    const map = this._map;
+    if (!map || !packs || !packs.length) return;
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity, finest = -1;
+    for (const p of packs) {
+      const [pw, ps, pe, pn] = p.bounds;
+      w = Math.min(w, pw); s = Math.min(s, ps); e = Math.max(e, pe); n = Math.max(n, pn);
+      const fb = p.bands && p.bands[p.bands.length - 1];
+      finest = Math.max(finest, BANDS.indexOf(fb));
+    }
+    const need = packs.length === 1 ? (BAND_MINZOOM[BANDS[finest]] || 12) + 0.3 : 0;
+    const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
+    const zoom = Math.min(18, Math.max(cam ? cam.zoom : Math.max(need, 9), need));
+    // Raise the dynamic zoom cap to the target FIRST — we're flying from open water
+    // (low cap) into the pack's coverage, so without this the fly clamps short and a
+    // berthing-only set wouldn't reach the zoom where it renders. _updateZoomCap
+    // recomputes at the destination (which has the charts) and won't yank back.
+    if (map.getMaxZoom() < zoom) map.setMaxZoom(zoom);
+    map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
+  }
+
+  // Show/hide the chart radar (off-screen chart pointers). App-level setting,
+  // persisted locally + server-side (shared across screens).
+  _setChartRadarVisible(on) {
+    this._showChartRadar = on;
+    localStorage.setItem("cp-chart-radar", on ? "1" : "0");
+    this._persistSettings();
+    if (this._radar) this._radar.setVisible(on);
   }
 
   // A deploy-time config value from an attribute, overridable per-load by the
@@ -985,6 +1022,21 @@ export class ChartPlotterApp extends HTMLElement {
     // Live zoom/scale/band readout (left of the statusbar).
     this._updateHud();
     map.on("move", () => this._updateHud());
+
+    // Chart radar: edge pointers to off-screen installed charts (its own module;
+    // owns its overlay + map listener). Fed from the installed-pack metadata.
+    this._radar = new ChartRadar({
+      host: this.shadowRoot.getElementById("chart-radar"),
+      map,
+      getPacks: () => this._packsMeta || [],
+      getUnits: () => this._mariner,
+      labelFor: (name) => this._setLabel(name),
+      bandColor: BAND_COLOR,
+      bandMinZoom: BAND_MINZOOM,
+      bands: BANDS,
+      onPick: (packs) => this._flyToPacks(packs),
+      visible: this._showChartRadar,
+    });
 
     // Debug overlay: tint + name the cell footprint under the cursor (only while
     // the overlay is on); clear when the pointer leaves the map. Right-click a cell
@@ -3233,6 +3285,7 @@ export class ChartPlotterApp extends HTMLElement {
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
+    if (this._radar) this._radar.update(); // packs changed → recompute off-screen pointers
     this._refreshCellUsage();
     return active;
   }
@@ -3819,6 +3872,7 @@ export class ChartPlotterApp extends HTMLElement {
       scheme: this._scheme,
       basemap: this._basemap,
       showCellBounds: this._showCellBounds,
+      chartRadar: this._showChartRadar,
       bandsOff: [...this._bandsOff],
       mariner: this._mariner,
     };
@@ -3837,6 +3891,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (typeof s.scheme === "string" && SCHEMES.includes(s.scheme)) this._scheme = s.scheme;
     if (typeof s.basemap === "string" && ["coastline", "osm", "osmvec", "none"].includes(s.basemap)) this._serverBasemap = s.basemap;
     if (typeof s.showCellBounds === "boolean") this._showCellBounds = s.showCellBounds;
+    if (typeof s.chartRadar === "boolean") this._showChartRadar = s.chartRadar;
     if (Array.isArray(s.bandsOff)) this._bandsOff = new Set(s.bandsOff);
     // Merge mariner over the (migrated) defaults; Display Base is always forced on.
     if (s.mariner && typeof s.mariner === "object") this._mariner = { ...this._mariner, ...s.mariner, displayBase: true };
@@ -3931,6 +3986,19 @@ export class ChartPlotterApp extends HTMLElement {
         /* Full-bleed map; everything else floats over it. */
         #map { position:absolute; inset:0; }
         #map chart-plotter { width:100%; height:100%; }
+        /* Chart radar: edge chips pointing at off-screen installed charts. The
+           overlay is click-through; chips opt back into pointer events. */
+        #chart-radar { position:absolute; inset:0; z-index:5; pointer-events:none; overflow:hidden; }
+        .radar-chip { position:absolute; transform:translate(-50%,-50%); display:flex; align-items:center; gap:6px;
+          padding:5px 9px 5px 7px; border-radius:999px; background:var(--ui-surface); color:var(--ui-text);
+          border:1px solid var(--ui-border-strong); box-shadow:0 2px 8px var(--ui-shadow); cursor:pointer;
+          font:600 12px/1 system-ui,sans-serif; white-space:nowrap; pointer-events:auto; user-select:none;
+          max-width:42vw; transition:background .1s; }
+        .radar-chip:hover { background:var(--ui-hover); }
+        .radar-chip .rc-arrow { flex:none; width:14px; height:14px; color:var(--ui-accent); }
+        .radar-chip .rc-band { flex:none; width:8px; height:8px; border-radius:50%; box-shadow:0 0 0 1.5px var(--ui-surface); }
+        .radar-chip .rc-name { overflow:hidden; text-overflow:ellipsis; }
+        .radar-chip .rc-dist { flex:none; color:var(--ui-text-dim); font-weight:500; }
         .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
         .btn:hover { background:var(--ui-hover); }
         /* Floating corner controls — a top-left group (search) and a top-right
@@ -4438,6 +4506,10 @@ export class ChartPlotterApp extends HTMLElement {
         }
       </style>
       <div id="map"></div>
+      <!-- Off-screen installed-chart pointers ("chart radar"): edge chips pointing
+           toward enabled chart packs that aren't currently in view. Overlay is
+           click-through; only the chips themselves take pointer events. -->
+      <div id="chart-radar" aria-hidden="true"></div>
       <div id="load-bar" class="load-bar" aria-hidden="true"></div>
       <!-- The map is the UI. Chrome is reduced to four round buttons floating in
            the corners — search alone top-left; charts · scheme · settings top-right
@@ -4781,7 +4853,9 @@ export class ChartPlotterApp extends HTMLElement {
         ${toggle("showIsolatedDangersShallow", "Isolated dangers (shallow)", "Only flag isolated dangers in shallow water", !!m.showIsolatedDangersShallow)}
         ${toggle("dataQuality", "Data quality", "Survey zones-of-confidence overlay", !!m.dataQuality)}
         ${toggle("showMetaBounds", "Metadata boundaries", "Chart coverage & region indicator lines", !!m.showMetaBounds)}
-        ${toggle("showScaleBoundaries", "Scale boundaries", "Outline where more detailed charts exist", m.showScaleBoundaries !== false)}`,
+        ${toggle("showScaleBoundaries", "Scale boundaries", "Outline where more detailed charts exist", m.showScaleBoundaries !== false)}
+        <div class="set-row"><div class="lbl"><span class="t">Off-screen chart pointers</span><span class="d">Edge arrows to installed charts you can't currently see — tap one to fly there</span></div>
+          <label class="switch"><input type="checkbox" data-app-key="showChartRadar" ${this._showChartRadar ? "checked" : ""}><span class="sl"></span></label></div>`,
       text: `
         ${toggle("showLightDescriptions", "Light descriptions", "Light characteristics, e.g. Fl(2)R 10s", m.showLightDescriptions !== false)}
         ${toggle("textImportant", "Important text", "Bridge/cable clearances & route bearings", m.textImportant !== false)}
@@ -4846,6 +4920,7 @@ export class ChartPlotterApp extends HTMLElement {
     el.querySelectorAll("[data-app-key]").forEach((inp) => {
       inp.onchange = () => {
         if (inp.dataset.appKey === "showCellBounds") this._setCellBoundsVisible(inp.checked);
+        else if (inp.dataset.appKey === "showChartRadar") this._setChartRadarVisible(inp.checked);
       };
     });
   }
