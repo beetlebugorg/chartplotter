@@ -15,12 +15,16 @@
 // filenames. Methods throw on hard failure; pollJob resolves with the final
 // status object or rejects on error/timeout.
 
+// Job phase → [verb, noun] for the progress label, e.g. bake → "Generating … tiles".
+// The noun is what's being acted on at that phase (source charts while fetching /
+// reading; tiles while baking; nothing while finishing).
 const PHASE = {
-  download: "Downloading", fetch: "Downloading", dl: "Downloading", upload: "Uploading",
-  extract: "Extracting", unzip: "Extracting", expand: "Extracting",
-  parse: "Reading", read: "Reading", import: "Importing",
-  bake: "Baking", tiles: "Baking", render: "Baking",
-  register: "Finishing", finalize: "Finishing", index: "Finishing",
+  download: ["Downloading", "charts"], fetch: ["Downloading", "charts"], dl: ["Downloading", "charts"],
+  upload: ["Uploading", "charts"],
+  extract: ["Extracting", "charts"], unzip: ["Extracting", "charts"], expand: ["Extracting", "charts"],
+  parse: ["Reading", "charts"], read: ["Reading", "charts"], import: ["Reading", "charts"],
+  bake: ["Generating", "tiles"], tiles: ["Generating", "tiles"], render: ["Generating", "tiles"],
+  register: ["Finishing", ""], finalize: ["Finishing", ""], index: ["Finishing", ""],
 };
 
 // Bytes → compact "12 MB" / "1.4 KB" (local copy so this module is self-contained).
@@ -108,9 +112,11 @@ export class ChartService {
   // a verb from the phase + the region name ("Baking Mid-Atlantic charts…"); the
   // numeric detail (counts/bytes) becomes the sub-line.
   _formatStatus(s, name) {
-    const subject = name ? `${name} charts` : "charts";
-    const verb = s.phase ? (PHASE[s.phase] || s.phase[0].toUpperCase() + s.phase.slice(1)) : "Working on";
-    const label = `${verb} ${subject}…`;
+    const m = s.phase ? PHASE[s.phase] : null;
+    const verb = m ? m[0] : (s.phase ? s.phase[0].toUpperCase() + s.phase.slice(1) : "Working on");
+    const noun = m ? m[1] : "charts";
+    // e.g. "Generating NOAA · Northeast tiles…" / "Downloading NOAA · Northeast charts…"
+    const label = [verb, name, noun].filter(Boolean).join(" ") + "…";
     let sub = "";
     if (s.unit === "bytes") sub = s.total ? `${fmtBytes(s.done)} / ${fmtBytes(s.total)}` : fmtBytes(s.done);
     else if (s.total) {

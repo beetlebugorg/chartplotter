@@ -250,6 +250,11 @@ export class ChartLibrary extends HTMLElement {
   // Notify the shell that installed/enabled state changed (it reconciles the map).
   _changed() { this._emit("charts-changed"); }
 
+  // An onStatus handler for a job that drives a NotificationCenter task: the
+  // phase-aware label ("Generating NOAA · Northeast tiles…") AND the numeric
+  // sub-line both update as the server moves through download → bake → finish.
+  _jobStatus(t) { return (p) => { if (!t) return; if (p.label) t.label(p.label); t.progress(p.frac, p.sub); }; }
+
   // Refresh the installed/disabled/installed-cell snapshot from the server, so the
   // panel's pack badges + counts are current. Called before a (re-)render that
   // depends on it. Best-effort: a transient failure keeps the last snapshot.
@@ -689,12 +694,12 @@ export class ChartLibrary extends HTMLElement {
   // ienccloud.us and bakes them into the pack's set (ienc-<river>). Progress flows
   // through a NotificationCenter task; on success we dispatch charts-changed.
   async _runDownloadIenc(pk) {
-    const name = pk.title || pk.name || "river";
-    const t = this._notify ? this._notify.task("download:" + pk.key, { label: `Downloading ${name} charts…` }) : null;
+    const name = `Inland ENC · ${pk.title || pk.name || "river"}`;
+    const t = this._notify ? this._notify.task("download:" + pk.key, { label: `Preparing ${name}…` }) : null;
     if (this._active) this.render();
     try {
       const cells = pk.cells.map((c) => ({ name: c.name, url: c.url }));
-      await this._api.importAndWait({ set: pk.key, cells }, { name, onStatus: (p) => t && t.progress(p.frac, p.sub) });
+      await this._api.importAndWait({ set: pk.key, cells }, { name, onStatus: this._jobStatus(t) });
       if (t) t.done();
     } catch (e) {
       console.error(`[ienc] ${pk.key} download:`, e.message);
@@ -718,20 +723,20 @@ export class ChartLibrary extends HTMLElement {
 
     this._activeDistrict = cg;
     const set = "noaa-d" + cg;
-    const region = d ? d.region : "NOAA";
-    const t = this._notify ? this._notify.task("download:" + set, { label: `Downloading ${region} charts…` }) : null;
-    const onStatus = (p) => t && t.progress(p.frac, p.sub);
+    const name = d ? `NOAA · ${d.region}` : "NOAA";
+    const t = this._notify ? this._notify.task("download:" + set, { label: `Preparing ${name}…` }) : null;
+    const onStatus = this._jobStatus(t);
     if (this._active) this.render();
     let ok = false;
     try {
       // The district bundle holds the whole district; bake the FULL district into the
       // pack so it's a complete set (names=all, not just the not-yet-installed ones).
-      await this._api.importAndWait({ set, zipUrl: this._districtZipUrl(cg), names: all }, { name: region, onStatus });
+      await this._api.importAndWait({ set, zipUrl: this._districtZipUrl(cg), names: all }, { name, onStatus });
       ok = true;
     } catch (e) {
       console.warn(`[pack] ${label} server bundle failed — per-cell:`, e.message);
       const cells = all.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
-      try { await this._api.importAndWait({ set, cells }, { name: region, onStatus }); ok = true; }
+      try { await this._api.importAndWait({ set, cells }, { name, onStatus }); ok = true; }
       catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); if (t) t.fail(e2); }
     }
     if (t && ok) t.done();
@@ -804,8 +809,8 @@ export class ChartLibrary extends HTMLElement {
     if (this._uninstalling) return;
     if (!(this._installedSets && this._installedSets.has(set))) return;
     this._uninstalling = true;
-    const t = this._notify ? this._notify.task("uninstall:" + set, { label: "Removing charts…" }) : null;
-    if (t) t.progress(null, this._setLabel(set));
+    const t = this._notify ? this._notify.task("uninstall:" + set, { label: `Removing ${this._setLabel(set)}…` }) : null;
+    if (t) t.progress(null);
     if (this._active) this.render();
     try { await this._api.deleteSet(set); if (t) t.done(); }
     catch (e) { console.warn("[pack] remove", set, e); if (t) t.fail(e); }
@@ -930,7 +935,7 @@ export class ChartLibrary extends HTMLElement {
     try {
       const local = await this._store.list().catch(() => []);
       if (local.length) {
-        t = this._notify ? this._notify.task("import:user", { label: "Baking your charts…" }) : null;
+        t = this._notify ? this._notify.task("import:user", { label: "Preparing your charts…" }) : null;
         for (const name of local) {
           try {
             const bytes = await this._store.getBytes(name);
@@ -938,7 +943,7 @@ export class ChartLibrary extends HTMLElement {
           } catch (e) { console.warn("[charts] upload", name, e); }
         }
         const { job } = await this._api.importCells("import", local);
-        await this._api.pollJob(job, { name: "your", onStatus: (p) => t && t.progress(p.frac, p.sub) });
+        await this._api.pollJob(job, { name: "your", onStatus: this._jobStatus(t) });
         if (t) t.done();
       }
       await this._syncRegistry();
