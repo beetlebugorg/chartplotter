@@ -7,12 +7,11 @@
 // Self-contained: owns the `inst-bounds` source + its coverage layers (per-band
 // fill/line + the always-on outline) and a throttled `zoom` listener that re-grows
 // the boxes. The shell owns the DATA — it computes the footprint features (from
-// installed packs/cells) and pushes them in via setFeatures(); it also adds the
-// debug overlay on the SAME `inst-bounds` source (so addLayers must run first).
+// installed packs/cells) and pushes them in via setFeatures().
 //
 //   const cov = new CoverageBoxes({ map, visible });
 //   cov.addLayers();              // (re)create source+layers — call after each setStyle
-//   cov.setFeatures(rawFeats);    // [{properties:{name,band,status}, geometry:Polygon}]
+//   cov.setFeatures(rawFeats);    // [{properties:{name,band}, geometry:Polygon}]
 //   if (cov.tapFlyTo(point)) …    // in the map click handler, before the pick report
 
 import { BAND_COLOR, BAND_MINZOOM } from "../lib/bands.mjs";
@@ -33,8 +32,7 @@ export class CoverageBoxes {
   }
 
   // (Re)create the source + coverage layers. Idempotent — safe to call after every
-  // setStyle (which wipes them). The shell's debug overlay reuses this source, so
-  // this must run before the shell adds those layers.
+  // setStyle (which wipes them).
   addLayers() {
     const map = this.map;
     if (!map.getSource("inst-bounds")) map.addSource("inst-bounds", { type: "geojson", data: { type: "FeatureCollection", features: [] } });

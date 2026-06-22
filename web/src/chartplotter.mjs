@@ -406,11 +406,6 @@ export class ChartPlotter extends HTMLElement {
     plotter.addEventListener("ready", (e) => this.onReady(e.detail.map), { once: true });
   }
 
-  _hideContextMenu() {
-    const m = this.shadowRoot.getElementById("ctx-menu");
-    if (m && !m.hidden) m.hidden = true;
-  }
-
   // Background tile baking + lazy cell parsing (the constant on-pan work) is shown
   // only by the subtle hairline load bar at the top of the map — not the
   // notification pill, which is reserved for discrete jobs (download / import /
@@ -627,14 +622,11 @@ export class ChartPlotter extends HTMLElement {
       visible: this._showChartRadar,
     });
 
-    map.on("movestart", () => this._hideContextMenu());
-
     // Close any pinned band-pill popup when clicking elsewhere (pill/cell clicks
     // stopPropagation, so this only fires for clicks outside them). Also tuck the
     // on-map search back into its tab when clicking away while it's empty (map
     // clicks bubble out of the renderer's shadow root to here).
     this.shadowRoot.addEventListener("click", (e) => {
-      this._hideContextMenu(); // any click dismisses the debug context menu (item handlers run first)
       this.shadowRoot.querySelectorAll(".sb-band-wrap.open").forEach((w) => w.classList.remove("open"));
       const search = this.shadowRoot.getElementById("search");
       if (search && !search.hidden) {
@@ -1052,46 +1044,9 @@ export class ChartPlotter extends HTMLElement {
     // layers per band, auto-hidden at the band's native min zoom (maxzoom) — where
     // the real chart takes over.
     // Installed-chart coverage overlay (own controller — owns the inst-bounds source
-    // + its box/outline layers + the per-zoom min-size growth + click-to-fly). The
-    // debug overlay below reuses this source, so addLayers() must run first.
+    // + its box/outline layers + the per-zoom min-size growth + click-to-fly).
     this._coverage = this._coverage || new CoverageBoxes({ map, visible: this._showCellBounds });
     this._coverage.addLayers();
-    // Debug overlay (Settings → "Debug cell loading"): every installed cell's
-    // footprint at ALL zooms, coloured by lazy-load state — green=loaded,
-    // amber=loading, red=failed, grey=not loaded. Lets you see which cells are
-    // loaded vs missing and whether their (catalog-bbox) load region is where you
-    // expect, so "some cells of the same band don't render" is diagnosable.
-    const dbgColor = ["match", ["get", "status"], "ready", "#2e9b57", "loading", "#d9892b", "failed", "#cf3b3b", "#9aa7b4"];
-    const dbgVis = "none";
-    // Default debug overlay is just coloured outlines (green=loaded, amber=loading,
-    // red=failed, grey=not loaded). inst-dbg-fill is an invisible hit-target so a
-    // hover anywhere inside a box is detectable; the tint + name show only for the
-    // hovered cell, via the one-feature inst-dbg-hover source —
-    // so we never lay out a label per cell across the whole library.
-    map.addLayer({ id: "inst-dbg-fill", type: "fill", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0 } });
-    map.addLayer({ id: "inst-dbg-line", type: "line", source: "inst-bounds", layout: { visibility: dbgVis }, paint: { "line-color": dbgColor, "line-width": 1.6 } });
-    map.addSource("inst-dbg-hover", { type: "geojson", data: empty });
-    map.addLayer({ id: "inst-dbg-hover-fill", type: "fill", source: "inst-dbg-hover", layout: { visibility: dbgVis }, paint: { "fill-color": dbgColor, "fill-opacity": 0.25 } });
-    map.addLayer({ id: "inst-dbg-hover-label", type: "symbol", source: "inst-dbg-hover", layout: { visibility: dbgVis, "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-allow-overlap": true }, paint: { "text-color": dbgColor, "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.4 } });
-    // One-shot "ready" pulse: the whole cell flashes green (fill) with a bright
-    // border, ramping up fast then fading — obvious across the entire footprint.
-    map.addSource("inst-pulse", { type: "geojson", data: empty });
-    map.addLayer({ id: "inst-pulse-fill", type: "fill", source: "inst-pulse", paint: {
-      "fill-color": "#2e9b57",
-      "fill-opacity": ["interpolate", ["linear"], ["get", "prog"], 0, 0.0, 0.15, 0.45, 1, 0.0],
-    } });
-    map.addLayer({ id: "inst-pulse-line", type: "line", source: "inst-pulse", paint: {
-      "line-color": "#2e9b57",
-      "line-width": ["interpolate", ["linear"], ["get", "prog"], 0, 1, 0.15, 5, 1, 1],
-      "line-opacity": ["interpolate", ["linear"], ["get", "prog"], 0, 0.2, 0.15, 1, 1, 0],
-    } });
-    // Real M_COVR data-coverage of LOADED cells (vs the bbox rectangles above):
-    // chart data should fill these exactly. Nodata INSIDE a coverage polygon =
-    // a bug; nodata OUTSIDE every polygon (but inside a bbox) = an unloaded cell;
-    // nodata outside all = a genuine gap. Drawn as a green hatched fill + outline.
-    map.addSource("inst-cov", { type: "geojson", data: empty });
-    map.addLayer({ id: "inst-cov-fill", type: "fill", source: "inst-cov", layout: { visibility: dbgVis }, paint: { "fill-color": "#1f9d55", "fill-opacity": 0.16 } });
-    map.addLayer({ id: "inst-cov-line", type: "line", source: "inst-cov", layout: { visibility: dbgVis }, paint: { "line-color": "#136b3a", "line-width": 1.4, "line-dasharray": [3, 2] } });
     // ECDIS-style crosshair cursor over the chart so it's clear the pointer is a
     // pick point (a click runs the cursor pick / district preview). The dev feature
     // inspector (now in DevTools) sets its own cursor + owns the hover/click/
@@ -1475,7 +1430,7 @@ export class ChartPlotter extends HTMLElement {
         const [w, s, e, n] = bb;
         feats.push({
           type: "Feature",
-          properties: { name, band, status: "queued" },
+          properties: { name, band },
           geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
         });
       }
@@ -1832,14 +1787,11 @@ export class ChartPlotter extends HTMLElement {
     $("close").onclick = () => this.closeDrawer();
     $("scheme-toggle").onclick = () => this._cycleScheme();
     this._syncSchemeUI(); // paint the toggle's initial icon
-    // Esc dismisses the debug context menu, else exits the feature inspector.
     // Escape closes the topmost open dialog/overlay (one per press). The
     // cursor-pick report closes itself (its own captured handler runs first).
     window.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
       const root = this.shadowRoot;
-      const ctx = root.getElementById("ctx-menu");
-      if (ctx && !ctx.hidden) { this._hideContextMenu(); return; }
       // The NOAA agreement modal lives in <chart-library>; cancel it if open.
       if (this._chartLib && this._chartLib.agreementOpen) { this._chartLib._resolveAgreement(false); return; }
       const search = root.getElementById("search");

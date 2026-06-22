@@ -323,24 +323,6 @@ export const STYLE = `
         .row .name { font-weight:600; } .row .meta { color:var(--ui-text-dim); font-size:12px; }
         .grow { flex:1; }
         .muted { color:var(--ui-text-dim); }
-        /* Right-click context menu (debug cell picker). */
-        .ctx-menu { position:absolute; z-index:30; background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border);
-          border-radius:8px; box-shadow:0 6px 22px rgba(0,0,0,.28); padding:4px; min-width:180px; font:13px/1.4 system-ui,sans-serif; }
-        .ctx-menu[hidden] { display:none; }
-        .ctx-item { display:block; width:100%; text-align:left; padding:7px 10px; border:0; background:none; color:inherit; border-radius:6px; cursor:pointer; white-space:nowrap; }
-        .ctx-item:hover { background:var(--ui-hover); }
-        /* Debug overlay hover HUD: which cells are under the cursor and what each draws. */
-        .debug-hud { position:absolute; z-index:29; pointer-events:none; background:rgba(17,22,28,.94); color:#e6edf3;
-          border:1px solid #2b3742; border-radius:6px; padding:6px 8px; max-width:300px; font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;
-          box-shadow:0 4px 16px rgba(0,0,0,.4); }
-        .debug-hud[hidden] { display:none; }
-        .debug-hud .dh-cell { margin:0 0 4px; }
-        .debug-hud .dh-cell:last-child { margin-bottom:0; }
-        .debug-hud .dh-name { font-weight:700; }
-        .debug-hud .dh-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:baseline; }
-        .debug-hud .dh-none { opacity:.5; font-style:italic; }
-        .debug-hud .dh-draw { opacity:.85; padding-left:13px; }
-        .debug-hud .dh-lyr { color:#90caf9; }
         label.fld { display:block; margin:8px 0; }
         label.fld span { display:inline-block; min-width:135px; }
         input[type=number] { width:64px; }
@@ -490,8 +472,6 @@ export const CHROME = `
       <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
       <!-- The NOAA ENC User Agreement modal moved into <chart-library> (it owns the
            download flow); the "Terms" link reaches into it. -->
-      <div id="ctx-menu" class="ctx-menu" hidden></div>
-      <div id="debug-hud" class="debug-hud" hidden></div>
       <div id="empty" hidden><div class="card">
         <svg class="welcome-mark" viewBox="0 0 24 24" fill="none" stroke="#1565c0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 7v14M5 12a7 7 0 0 0 14 0M3 12h2m14 0h2M12 21a7 7 0 0 1-5-2m10 0a7 7 0 0 1-5 2"/></svg>
         <h2>Welcome aboard</h2>
