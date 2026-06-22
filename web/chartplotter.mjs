@@ -117,7 +117,11 @@ const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, h
 // track the display scale of the object it annotates — keyed on the SOURCE-LAYER,
 // not the style-layer id, because the text labels fan out into many style layers
 // (text-<halign>-<valign>, light-text) that all read the one `text` source-layer.
-const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text"]);
+// `sector_lines` is the LIGHTS06 sector figure (arcs/legs), baked into its own
+// source-layer (not the shared `lines`) precisely so it can be bucketed here
+// without fanning every coastline/contour into per-SCAMIN variants — the sector
+// then cuts at the same exact scale as its light's flare + characteristic text.
+const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines"]);
 
 // The display zoom at which a 1:N (scamin) feature first becomes visible at the
 // given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
@@ -1403,6 +1407,13 @@ export class ChartPlotter extends HTMLElement {
       { id: "lines-solid", type: "line", source: "chart", "source-layer": "lines", filter: ["==", ["coalesce", ["get", "dash"], "solid"], "solid"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] } },
       { id: "lines-dashed", type: "line", source: "chart", "source-layer": "lines", filter: ["==", ["get", "dash"], "dashed"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [4, 3] } },
       { id: "lines-dotted", type: "line", source: "chart", "source-layer": "lines", filter: ["all", ["==", ["get", "dash"], "dotted"], ["!", ["has", "danger_depth"]]], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [1, 2] } },
+      // LIGHTS06 sector figure (coloured arcs / OUTLW backing / dashed legs) — its
+      // OWN source-layer so it can be SCAMIN-bucketed (see SCAMIN_BUCKET_LAYERS)
+      // without dragging every coastline/contour into per-SCAMIN variants. Styling
+      // mirrors lines-solid/lines-dashed (the sector tessellation emits only solid
+      // and dashed runs); sleg/category/boundary gating rides combineFilters as before.
+      { id: "sector-lines-solid", type: "line", source: "chart", "source-layer": "sector_lines", filter: ["==", ["coalesce", ["get", "dash"], "solid"], "solid"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] } },
+      { id: "sector-lines-dashed", type: "line", source: "chart", "source-layer": "sector_lines", filter: ["==", ["get", "dash"], "dashed"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [4, 3] } },
       // OBSTRN/WRECKS dotted foul boundary (client-side): shown only when the
       // feature's VALSOU is ≤ the live safety contour. Filter updates on
       // safetyContour — no re-bake. Excluded from lines-dotted above.

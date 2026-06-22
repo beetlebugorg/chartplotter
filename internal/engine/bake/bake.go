@@ -262,6 +262,7 @@ type sectorPrim struct {
 	cat      int
 	zMin     uint32
 	natMax   uint32
+	scamin   uint32 // SCAMIN denominator of the parent LIGHTS (0 = none); emitted as `scamin` so the client's per-SCAMIN bucket layer gates the exact display cutoff, same as point symbols/text
 	// legNorm is the full-length leg reach (VALNMR nominal range) as a fraction
 	// of the normalized world — a fixed GROUND distance, so zoom-independent
 	// (unlike the 25 mm short legs / ring, which are screen-px). Drives the tile
@@ -878,6 +879,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		b.sectors = append(b.sectors, sectorPrim{
 			anchor: v.Anchor, params: v.Sector, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, zMin: zMin, natMax: zr.Max,
+			scamin:  b.curScamin,
 			legNorm: sectorLegFullNorm(v.Anchor.Lat, v.Sector.RadiusNM),
 		})
 	}
@@ -1098,10 +1100,11 @@ func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord
 			continue
 		}
 		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		// Like the flare prim (see lo := r.zMin above), a SCAMIN-bearing sector may
+		// sit BELOW bandMin — keep it AVAILABLE down to its SCAMIN scale so the
+		// client's per-SCAMIN bucket gates the exact cutoff. Non-SCAMIN sectors have
+		// zMin == bandMin (bandZMin floors them), so this is a no-op for them.
 		lo := sp.zMin
-		if lo < bandMin {
-			lo = bandMin
-		}
 		for z := lo; z <= b.clampZMax(sp.natMax); z++ {
 			r := math.Max(sectorRadiusNorm(z), sp.legNorm)
 			bb := geo.BoundingBox{
@@ -1490,7 +1493,14 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			if st.sleg >= 0 {
 				attrs = append(attrs, mvt.KeyValue{Key: "sleg", Value: mvt.IntVal(int64(st.sleg))})
 			}
-			tb.Layer("lines").AddLines(paths, attrs)
+			// SCAMIN of the parent LIGHTS — so the client's per-SCAMIN bucket layer
+			// gates the sector figure at the EXACT display scale, in both directions,
+			// matching the light's flare (point_symbols) and characteristic text. Its
+			// own `sector_lines` layer keeps the bucket fan-out off the shared `lines`.
+			if sp.scamin != 0 {
+				attrs = append(attrs, mvt.KeyValue{Key: "scamin", Value: mvt.IntVal(int64(sp.scamin))})
+			}
+			tb.Layer("sector_lines").AddLines(paths, attrs)
 		}
 	}
 
