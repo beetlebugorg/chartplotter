@@ -25,6 +25,8 @@ import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mj
 import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./units.mjs"; // configurable display units
 import { ChartRadar } from "./chart-radar.mjs"; // off-screen installed-chart edge pointers
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, BAND_MAXZOOM, OVERSCALE_MARGIN, DEV_BANDS, bandForScale, bandForZoom } from "./bands.mjs";
+import { esc, loadJSON, scaleDenom, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, fmtScale, fmtLatLon, isShareUrl, parseViewHash, copyText, flashBtn } from "./util.mjs";
+import { archivePut, archiveGet } from "./archive-store.mjs";
 
 const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
@@ -110,12 +112,6 @@ const DISTRICTS = [
   { cg: 17, name: "17th District", region: "Alaska", blurb: "All of Alaska" },
 ];
 
-
-// Escape text for safe innerHTML insertion (inspector panel renders feature
-// properties straight from the tiles).
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
 
 // Does a GeoJSON geometry intersect the lon/lat box [W,S,E,N]? Points test exactly;
 // lines/polygons use a bbox-overlap approximation (fine for the area inspector).
@@ -4908,157 +4904,6 @@ export class ChartPlotterApp extends HTMLElement {
   }
 }
 
-function loadJSON(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; }
-}
-
-// bandForScale / bandForZoom now live in bands.mjs (imported at the top).
-
-// Web-Mercator map scale denominator at zoom z / latitude lat (OGC 0.28mm pixel).
-function scaleDenom(z, lat) {
-  const mpp = 156543.03392804097 * Math.cos((lat * Math.PI) / 180) / Math.pow(2, z);
-  return mpp / 0.00028;
-}
-
-// Finest map scale we allow: don't let charts magnify past 1:MIN_DETAIL_SCALE,
-// even where berthing data exists (past this it's just blocky overzoom). Inverse
-// of scaleDenom — the (fractional) zoom whose scale at `lat` equals the floor.
-// Latitude-dependent because 1:4000 is a different zoom at each latitude.
-const MIN_DETAIL_SCALE = 4000;
-function maxZoomForScaleFloor(lat) {
-  const z = Math.log2(156543.03392804097 * Math.cos((lat * Math.PI) / 180) / (0.00028 * MIN_DETAIL_SCALE));
-  return Math.max(1, Math.min(18, z));
-}
-
-// NOAA ENC freshness from a cell's issue date `d` ("YYYY-MM-DD"). ENCs have no
-// hard expiry — this is an age signal (kept current via Notices to Mariners), so
-// we grade by how long ago the edition was issued rather than a fixed expiry.
-function freshness(d) {
-  const t = d ? Date.parse(d + "T00:00:00Z") : NaN;
-  if (!isFinite(t)) return { cls: "aging", label: "Age unknown" };
-  const months = (Date.now() - t) / (1000 * 60 * 60 * 24 * 30.44);
-  if (months < 6) return { cls: "current", label: "Current" };
-  if (months < 12) return { cls: "aging", label: "Aging" };
-  return { cls: "stale", label: "Out of date" };
-}
-
-// "2025-12-09" → "Dec 2025" (UTC, locale month). Falls back to the raw string.
-function fmtIssue(d) {
-  const t = d ? Date.parse(d + "T00:00:00Z") : NaN;
-  if (!isFinite(t)) return d || "unknown date";
-  return new Date(t).toLocaleDateString(undefined, { year: "numeric", month: "short", timeZone: "UTC" });
-}
-
-// Bytes → a compact "12 MB" / "1.4 MB" string (thin-space before the unit).
-function fmtMB(bytes) {
-  const mb = (bytes || 0) / (1024 * 1024);
-  return (mb < 10 ? mb.toFixed(1) : Math.round(mb)) + " MB";
-}
-
-// A scale denominator rounded to 3 significant figures and thousands-grouped.
-function fmtScale(d) {
-  if (!isFinite(d) || d <= 0) return "—";
-  const mag = Math.pow(10, Math.max(0, Math.floor(Math.log10(d)) - 2));
-  return (Math.round(d / mag) * mag).toLocaleString();
-}
-
-// Map-centre position as fixed-width degrees-decimal-minutes, e.g.
-// "39°27.6′N 104°39.6′W". Degrees are zero-padded (lat 2, lon 3) and minutes to
-// "MM.M", so the character count never changes — with tabular figures, the
-// centred status pill never reflows as you pan. Longitude is normalised to ±180.
-function fmtLatLon(lat, lng) {
-  const dm = (v, degDigits) => {
-    let a = Math.abs(v);
-    let d = Math.floor(a);
-    let m = (a - d) * 60;
-    if (m >= 59.95) { m = 0; d += 1; } // round-up carry: 59.95′ rolls to next degree
-    return String(d).padStart(degDigits, "0") + "°" + m.toFixed(1).padStart(4, "0") + "′";
-  };
-  const x = ((((lng + 180) % 360) + 360) % 360) - 180; // wrap to [-180, 180)
-  return dm(lat, 2) + (lat >= 0 ? "N" : "S") + " " + dm(x, 3) + (x >= 0 ? "E" : "W");
-}
-
-// True when the page was opened as a legacy snapshot link (<origin>/#share or
-// ?share) — boot() then reconstructs the publisher's scene from /api/share.
-function isShareUrl() {
-  const h = (location.hash || "").replace(/^#/, "");
-  return h === "share" || new URLSearchParams(location.search).has("share");
-}
-
-// A lightweight share link carries only the camera in the URL hash
-// (#v=lon,lat,zoom[,bearing,pitch]) — no cells, no server snapshot, no
-// re-download. Returns the camera ({center:[lon,lat],zoom,bearing,pitch}) or
-// null if the hash isn't a view link or is malformed.
-function parseViewHash() {
-  const h = (location.hash || "").replace(/^#/, "");
-  if (!h.startsWith("v=")) return null;
-  const p = h.slice(2).split(",").map(Number);
-  if (p.length < 3 || p.some((n) => !isFinite(n))) return null;
-  const [lon, lat, zoom, bearing = 0, pitch = 0] = p;
-  return { center: [lon, lat], zoom, bearing, pitch };
-}
-
-// Copy `text` to the clipboard, returning whether it worked. Prefers the async
-// Clipboard API but that needs a secure context (https/localhost) — on a plain
-// http LAN origin it's absent, so fall back to a hidden-textarea execCommand,
-// which still works there. Returns false only if both paths fail.
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
-  } catch (e) { /* fall through to the legacy path */ }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
-    document.body.appendChild(ta);
-    ta.focus(); ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    return ok;
-  } catch (e) { return false; }
-}
-
-// Briefly show `msg` on a button, then restore its original label.
-function flashBtn(btn, msg) {
-  if (!btn) return;
-  const prev = btn.textContent;
-  btn.textContent = msg;
-  setTimeout(() => { btn.textContent = prev; }, 1400);
-}
-
-// Persist the single current .pmtiles archive as a Blob in IndexedDB (works on
-// a plain-http LAN device — unlike OPFS, no secure context needed). One slot:
-// the most recently baked/uploaded archive, reloaded on boot.
-const ARCHIVE_DB = "chartplotter-archive";
-function archiveDB() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open(ARCHIVE_DB, 1);
-    r.onupgradeneeded = () => r.result.createObjectStore("archive");
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-}
-async function archivePut(blob) {
-  const db = await archiveDB();
-  try {
-    await new Promise((res, rej) => {
-      const tx = db.transaction("archive", "readwrite");
-      tx.objectStore("archive").put(blob, "current");
-      tx.oncomplete = res;
-      tx.onerror = () => rej(tx.error);
-    });
-  } finally { db.close(); }
-}
-async function archiveGet() {
-  const db = await archiveDB();
-  try {
-    return await new Promise((res, rej) => {
-      const tx = db.transaction("archive", "readonly");
-      const rq = tx.objectStore("archive").get("current");
-      rq.onsuccess = () => res(rq.result || null);
-      rq.onerror = () => rej(rq.error);
-    });
-  } finally { db.close(); }
-}
-
+// Pure formatters/util now live in util.mjs; the archive blob store in
+// archive-store.mjs; band maths in bands.mjs (all imported at the top).
 customElements.define("chart-plotter-app", ChartPlotterApp);
