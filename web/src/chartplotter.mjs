@@ -391,20 +391,6 @@ export class ChartPlotter extends HTMLElement {
     return null;
   }
 
-  // Fly the map to a cell's footprint — lets you find an uploaded chart you can't
-  // otherwise locate. Closes the drawer so the chart is visible.
-  _flyToCell(name) {
-    const bb = this._cellLocation(name);
-    if (!bb || !this._map) return;
-    this.closeDrawer();
-    // Zoom to the cell's detail level — a large-scale cell only renders at high
-    // zoom, so fitting its small footprint at ~z14 would still show only basemap.
-    const need = this._cellTargetZoom(name);
-    const cam = this._map.cameraForBounds([[bb[0], bb[1]], [bb[2], bb[3]]], { padding: 60 });
-    const zoom = Math.min(18, Math.max(cam ? cam.zoom : 13, need ? need + 0.5 : 0));
-    this._map.easeTo({ center: cam ? cam.center : [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2], zoom, duration: 800 });
-  }
-
 
   // Fly to a set of packs from a tapped chart-radar chip. A single pack lands at
   // its finest band's render zoom (so a berthing-only set actually draws); a
@@ -1483,16 +1469,6 @@ export class ChartPlotter extends HTMLElement {
     const fill = r.getElementById("db-prog-fill");
     fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
     fill.classList.toggle("indet", p.frac == null && !done); // sweeping bar when no fraction
-  }
-
-  // Frame the map to the combined extent of the given catalog cells.
-  // The minimum zoom at which a cell actually renders — its band's start zoom
-  // (large-scale harbour/berthing cells only bake at z13/16+, so fitting their
-  // small footprint at ~z14 would show nothing).
-  _cellTargetZoom(name) {
-    const c = this._byName.get(name);
-    const scale = (c && typeof c.s === "number" && c.s) || this._cellScale.get(name) || 0;
-    return scale ? (BAND_MINZOOM[bandForScale(scale)] || 0) : 0;
   }
 
   // For installed cells with no catalog footprint (foreign uploads), parse their
