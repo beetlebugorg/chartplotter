@@ -48,6 +48,17 @@ type ParseOptions struct {
 	// Default: true
 	ApplyUpdates bool
 
+	// MaskCoastlineCoincidentBoundaries: if true, DERIVE coastline-coincident edge
+	// masking for area features. S-57 Appendix B.1 Annex A §17 scenario 2 says area
+	// boundary edges that coincide with the coastline should be masked to avoid
+	// clutter, but the masking flag (FSPT MASK=1) is a producer choice that NOAA
+	// cells never set. When this option is on, any area feature's drawn boundary
+	// edge whose RCID is ALSO referenced by a COALNE feature is dropped from
+	// BoundaryLines (the drawn border), while the fill (Rings) and flat Coordinates
+	// are left intact. The coast-definer LNDARE is exempt, so the visible coast is
+	// still drawn (by COALNE and LNDARE's own boundary). Default: false.
+	MaskCoastlineCoincidentBoundaries bool
+
 	// Fs is the filesystem to use for reading files
 	// If nil, the OS filesystem is used
 	Fs fs.FS
@@ -174,23 +185,51 @@ func buildChart(data *chartData, metadata *datasetMetadata, params datasetParams
 	// Build geometries for all features
 	finalFeatures := []Feature{}
 
+	// Derived coastline-coincident edge masking (S-57 App. B.1 Annex A §17 scn 2).
+	// Build the set of edge RCIDs referenced by ANY COALNE feature once; area
+	// features (except the exempt coast-definers) then drop boundary edges that
+	// share these RCIDs. See ParseOptions.MaskCoastlineCoincidentBoundaries.
+	var coalneEdges map[int64]bool
+	if opts.MaskCoastlineCoincidentBoundaries {
+		coalneEdges = map[int64]bool{}
+		for _, fr := range data.features {
+			if objClass, _ := ObjectClassToString(fr.ObjectClass); objClass != "COALNE" {
+				continue
+			}
+			for _, ref := range fr.SpatialRefs {
+				// COALNE is a line feature; its spatial refs are edges. Accept refs
+				// that explicitly name an edge (RCNM=130) or carry no/unknown RCNM.
+				if ref.RCNM == 0 || ref.RCNM == int(spatialTypeEdge) {
+					coalneEdges[ref.RCID] = true
+				}
+			}
+		}
+	}
+
 	for _, featureRec := range data.features {
+		// Convert object class code to string once (needed for filter, masking, and
+		// the final Feature). Errors are deferred to the existing handling below.
+		objClass, objClassErr := ObjectClassToString(featureRec.ObjectClass)
+
 		// Check object class filter
 		if len(opts.ObjectClassFilter) > 0 {
-			objClass, _ := ObjectClassToString(featureRec.ObjectClass)
 			if !contains(opts.ObjectClassFilter, objClass) {
 				continue // Filtered out
 			}
 		}
 
+		// Derived coastline masking applies only to area features (GeomPrim=3) that
+		// are not coast-definers (LNDARE). Suppression touches only BoundaryLines.
+		maskCoast := opts.MaskCoastlineCoincidentBoundaries &&
+			featureRec.GeomPrim == 3 && !isCoastlineMaskExempt(objClass)
+
 		// Construct geometry from spatial records
-		geometry, err := constructGeometry(featureRec, data.spatialRecords)
+		geometry, err := constructGeometry(featureRec, data.spatialRecords, coalneEdges, maskCoast)
 		if err != nil {
 			if opts.SkipUnknownFeatures {
 				continue // Skip this feature
 			}
 			// Add context about which feature failed
-			objClass, _ := ObjectClassToString(featureRec.ObjectClass)
 			return nil, fmt.Errorf("feature ID=%d, ObjectClass=%s (OBJL=%d), GeomPrim=%d: %w",
 				featureRec.ID, objClass, featureRec.ObjectClass, featureRec.GeomPrim, err)
 		}
@@ -205,13 +244,12 @@ func buildChart(data *chartData, metadata *datasetMetadata, params datasetParams
 			}
 		}
 
-		// Convert object class code to string
-		objClass, err := ObjectClassToString(featureRec.ObjectClass)
-		if err != nil {
+		// Surface any object-class decode error (computed once above).
+		if objClassErr != nil {
 			if opts.SkipUnknownFeatures {
 				continue
 			}
-			return nil, err
+			return nil, objClassErr
 		}
 
 		// Create feature
@@ -401,6 +439,20 @@ func parseDSID(data []byte) *datasetMetadata {
 func (p *defaultParser) SupportedObjectClasses() []string {
 	// All object classes are supported - read dynamically from file
 	return []string{"All object classes supported - read dynamically from file"}
+}
+
+// coastlineMaskExempt is the set of area object classes that DEFINE the coast and
+// must keep their coastline-coincident boundary edges even when derived masking is
+// on. LNDARE is the coast-definer; keeping its boundary (alongside COALNE) draws
+// the visible coast. Add classes here to extend the exemption.
+var coastlineMaskExempt = map[string]bool{
+	"LNDARE": true,
+}
+
+// isCoastlineMaskExempt reports whether an area object class is exempt from derived
+// coastline-coincident boundary masking.
+func isCoastlineMaskExempt(objClass string) bool {
+	return coastlineMaskExempt[objClass]
 }
 
 // contains checks if a slice contains a string

@@ -37,6 +37,7 @@ func ParseCellBytes(name string, data []byte) (*s57.Chart, error) {
 	opts := s57.DefaultParseOptions()
 	opts.Fs = iso8211.MemFS{p: data}
 	opts.ApplyUpdates = false
+	opts.MaskCoastlineCoincidentBoundaries = true
 	return s57.ParseWithOptions(p, opts)
 }
 
@@ -131,6 +132,7 @@ func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (
 	opts := s57.DefaultParseOptions()
 	opts.Fs = fsys
 	opts.ApplyUpdates = true
+	opts.MaskCoastlineCoincidentBoundaries = true
 	return s57.ParseWithOptions(p, opts)
 }
 

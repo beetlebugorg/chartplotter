@@ -515,6 +515,14 @@ type Geometry struct {
 	// the fill keeps them (§8.6.3). Renderers stroke the border from these (one
 	// polyline per drawable edge); empty ⇒ stroke the Rings instead.
 	BoundaryLines [][][]float64
+
+	// Lines holds the DRAWABLE polylines of a LINE feature with masked (FSPT
+	// MASK={1}) and data-limit (USAG={3}) edges removed (S-52 PresLib §8.6.2).
+	// Multi-part: dropping a mid-line edge splits the line, so each element is one
+	// contiguous drawn polyline of [lon,lat] points. The flat Coordinates field
+	// keeps the full concatenation for backward compatibility. Empty/nil ⇒ no
+	// masking applied → stroke Coordinates.
+	Lines [][][]float64
 }
 
 // GeometryType represents the type of geometry.
@@ -590,6 +598,7 @@ func convertChart(internal *parser.Chart) *Chart {
 				Coordinates:   f.Geometry.Coordinates,
 				Rings:         rings,
 				BoundaryLines: f.Geometry.BoundaryLines,
+				Lines:         f.Geometry.Lines,
 			},
 			attributes: attributes,
 		}

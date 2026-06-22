@@ -34,6 +34,7 @@ type geom struct {
 	kind         geomKind
 	point        geo.LatLon
 	line         []geo.LatLon
+	lineParts    [][]geo.LatLon // drawable line parts (masked/data-limit edges removed, S-52 §8.6.2); nil ⇒ stroke `line`
 	area         [][]geo.LatLon
 	boundary     [][]geo.LatLon // drawable border polylines (masked/data-limit edges removed); nil ⇒ stroke `area`
 	currentDepth float64
@@ -391,7 +392,15 @@ func (w *walker) emitPatternFill(patternName string, g geom) {
 func (w *walker) emitStroke(colorToken string, dash Dash, widthPx float32, g geom) {
 	switch g.kind {
 	case geomLine:
-		w.emitStrokeOne(colorToken, dash, widthPx, g.line)
+		// S-52 §8.6.2: stroke the drawable line parts (masked / data-limit edges
+		// removed) when the parser provided them; otherwise the full flat line.
+		if g.lineParts != nil {
+			for _, part := range g.lineParts {
+				w.emitStrokeOne(colorToken, dash, widthPx, part)
+			}
+		} else {
+			w.emitStrokeOne(colorToken, dash, widthPx, g.line)
+		}
 	case geomArea:
 		// S-52 §8.6.2: stroke the drawable border (masked / data-limit edges
 		// removed) when the parser provided it; otherwise fall back to the full
@@ -416,7 +425,15 @@ func (w *walker) emitStrokeOne(colorToken string, dash Dash, widthPx float32, pt
 func (w *walker) emitLinePattern(linestyleName string, g geom) {
 	switch g.kind {
 	case geomLine:
-		w.emitLinePatternOne(linestyleName, g.line)
+		// S-52 §8.6.2: pattern-stroke the drawable line parts (masked / data-limit
+		// edges removed) when available; otherwise the full flat line.
+		if g.lineParts != nil {
+			for _, part := range g.lineParts {
+				w.emitLinePatternOne(linestyleName, part)
+			}
+		} else {
+			w.emitLinePatternOne(linestyleName, g.line)
+		}
 	case geomArea:
 		// S-52 §8.6.2: stroke the drawable border (masked / data-limit edges
 		// removed) when available; otherwise the full rings.
@@ -637,7 +654,20 @@ func geometryOf(g s57.Geometry) geom {
 		c := g.Coordinates[0]
 		return geom{kind: geomPoint, point: geo.LatLon{Lat: c[1], Lon: c[0]}}
 	case s57.GeometryTypeLineString:
-		return geom{kind: geomLine, line: coordsToLatLon(g.Coordinates)}
+		// Drawable line parts (masked / data-limit edges already removed by the
+		// parser, S-52 §8.6.2). A non-nil Lines means the parser computed the
+		// drawable line — stroke each part (empty ⇒ stroke nothing). Nil means no
+		// masking applied → stroke the full flat line, unchanged.
+		var lineParts [][]geo.LatLon
+		if g.Lines != nil {
+			lineParts = make([][]geo.LatLon, 0, len(g.Lines))
+			for _, lp := range g.Lines {
+				if pts := coordsToLatLon(lp); len(pts) >= 2 {
+					lineParts = append(lineParts, pts)
+				}
+			}
+		}
+		return geom{kind: geomLine, line: coordsToLatLon(g.Coordinates), lineParts: lineParts}
 	case s57.GeometryTypePolygon:
 		var rings [][]geo.LatLon
 		if len(g.Rings) > 0 {

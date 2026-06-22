@@ -89,11 +89,27 @@ type Geometry struct {
 	// Rings (complete) and the border stroke uses BoundaryLines (edges dropped).
 	// One polyline per drawable edge; empty/nil ⇒ fall back to stroking Rings.
 	BoundaryLines [][][]float64
+
+	// Lines holds the DRAWABLE polylines of a LINE feature: the same edge chain as
+	// Coordinates but with masked (FSPT MASK={1}) and data-limit/cell-boundary
+	// (USAG={3}) edges removed (S-52 PresLib §8.6.2 — those edges must not be
+	// drawn). Because dropping a mid-line edge splits the line, this is MULTI-PART:
+	// each element is one contiguous drawn polyline of [lon,lat] points. The flat
+	// Coordinates field still carries the FULL concatenation (all edges) for
+	// backward compatibility. Empty/nil ⇒ no masking applied (or topology didn't
+	// resolve) → fall back to stroking Coordinates.
+	Lines [][][]float64
 }
 
-// constructGeometry builds a Geometry from feature and spatial records
-// S-57 §2.1 (31Main.pdf p23): Features reference spatial records to build geometry
-func constructGeometry(featureRec *featureRecord, spatialRecords map[spatialKey]*spatialRecord) (Geometry, error) {
+// constructGeometry builds a Geometry from feature and spatial records.
+// S-57 §2.1 (31Main.pdf p23): Features reference spatial records to build geometry.
+//
+// coalneEdges and maskCoast drive DERIVED coastline-coincident boundary masking
+// (see ParseOptions.MaskCoastlineCoincidentBoundaries). They are consulted only for
+// polygon features; point and line constructors ignore them. When maskCoast is true,
+// any boundary edge whose RCID is in coalneEdges is dropped from the polygon's drawn
+// BoundaryLines (the fill Rings / flat Coordinates are unaffected).
+func constructGeometry(featureRec *featureRecord, spatialRecords map[spatialKey]*spatialRecord, coalneEdges map[int64]bool, maskCoast bool) (Geometry, error) {
 	// PRIM=255 means N/A (no geometry) - these are meta-features like C_AGGR, M_COVR, etc.
 	// Return empty point geometry for these
 	if featureRec.GeomPrim == 255 {
@@ -117,7 +133,7 @@ func constructGeometry(featureRec *featureRecord, spatialRecords map[spatialKey]
 
 	// For polygon features (PRIM=3), use VRPT topology resolver
 	if geomType == GeometryTypePolygon {
-		return constructPolygonGeometry(featureRec, spatialRecords)
+		return constructPolygonGeometry(featureRec, spatialRecords, coalneEdges, maskCoast)
 	}
 
 	// For Point features (PRIM=1), use only the FIRST spatial ref
@@ -138,6 +154,24 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 	allCoords := (*allCoordsPtr)[:0]
 	defer coordSlicePool.Put(allCoordsPtr)
 	resolver := newPolygonBuilder(spatialRecords)
+
+	// Drawable multi-part line geometry (S-52 PresLib §8.6.2): masked / data-limit
+	// edges are excluded from what is drawn, but still go into the flat allCoords
+	// (backward compat). lineParts accumulates contiguous drawn polylines: a new
+	// part is started whenever the chain is broken — either by a skipped (masked)
+	// edge, or by a drawable edge whose first point does not continue the previous
+	// part's last point. sawMask records whether ANY edge carried masking info, so
+	// that an unmasked line leaves Lines nil (callers then stroke allCoords).
+	var lineParts [][][]float64
+	var curPart [][]float64
+	chainBroken := true // force a new part on the first drawable edge
+	sawMask := false
+	flushPart := func() {
+		if len(curPart) >= 2 {
+			lineParts = append(lineParts, curPart)
+		}
+		curPart = nil
+	}
 
 	for _, spatialRef := range featureRec.SpatialRefs {
 		// Resolve the EXACT record the FSPT pointer names (RCNM + RCID). RCID is
@@ -181,6 +215,47 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 			for _, coord := range edgeCoords {
 				allCoords = append(allCoords, []float64{coord[0], coord[1]})
 			}
+
+			// Any edge carrying explicit MASK/USAG info means the producer encoded
+			// masking for this feature; expose the drawable Lines so the renderer
+			// honours §8.6.2. (Mask==0 / Usage==0 on every edge ⇒ no info ⇒ leave
+			// Lines nil and fall back to the flat Coordinates, unchanged behaviour.)
+			if spatialRef.Mask != 0 || spatialRef.Usage != 0 {
+				sawMask = true
+			}
+
+			// Drawable-part accounting (S-52 §8.6.2). A masked / data-limit edge is
+			// dropped from the drawn geometry: end the current part and mark the chain
+			// broken so the next drawable edge starts a fresh part.
+			if spatialRef.Mask == 1 || spatialRef.Usage == 3 {
+				flushPart()
+				chainBroken = true
+				continue
+			}
+			if len(edgeCoords) < 2 {
+				// Degenerate edge: nothing to draw, but it still interrupts continuity.
+				flushPart()
+				chainBroken = true
+				continue
+			}
+			first := []float64{edgeCoords[0][0], edgeCoords[0][1]}
+			// Start a new part if the chain was broken (masked gap) or this edge does
+			// not continue the previous part's last point.
+			if chainBroken || len(curPart) == 0 ||
+				curPart[len(curPart)-1][0] != first[0] || curPart[len(curPart)-1][1] != first[1] {
+				flushPart()
+				curPart = make([][]float64, 0, len(edgeCoords))
+				curPart = append(curPart, first)
+				for _, coord := range edgeCoords[1:] {
+					curPart = append(curPart, []float64{coord[0], coord[1]})
+				}
+			} else {
+				// Continues the current part: skip the duplicated shared node.
+				for _, coord := range edgeCoords[1:] {
+					curPart = append(curPart, []float64{coord[0], coord[1]})
+				}
+			}
+			chainBroken = false
 		} else if len(spatial.Coordinates) > 0 {
 			// Direct coordinates from node
 			for _, coord := range spatial.Coordinates {
@@ -202,12 +277,21 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 		}, nil
 	}
 
+	flushPart()
+
 	result := make([][]float64, len(allCoords))
 	copy(result, allCoords)
-	return Geometry{
+	geom := Geometry{
 		Type:        GeometryTypeLineString,
 		Coordinates: result,
-	}, nil
+	}
+	// Only expose drawable parts when masking actually applied. Without masking,
+	// leaving Lines nil keeps existing renderers stroking the flat Coordinates
+	// exactly as before (no behaviour change for the common, unmasked case).
+	if sawMask {
+		geom.Lines = lineParts
+	}
+	return geom, nil
 }
 
 // constructPointGeometry builds point geometry from spatial references
@@ -306,8 +390,12 @@ func collectRefCoords(refs []spatialRef, spatialRecords map[spatialKey]*spatialR
 }
 
 // constructPolygonGeometry builds polygon geometry using VRPT topology resolution
-// S-57 §7.3 (31Main.pdf p64): Area features use VRPT to reference edge topology
-func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spatialKey]*spatialRecord) (Geometry, error) {
+// S-57 §7.3 (31Main.pdf p64): Area features use VRPT to reference edge topology.
+//
+// coalneEdges/maskCoast drive derived coastline-coincident boundary masking: when
+// maskCoast is true, boundary edges whose RCID is in coalneEdges are excluded from
+// the drawn BoundaryLines (fill Rings / flat Coordinates remain complete).
+func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spatialKey]*spatialRecord, coalneEdges map[int64]bool, maskCoast bool) (Geometry, error) {
 	// Create polygon builder
 	resolver := newPolygonBuilder(spatialRecords)
 
@@ -451,7 +539,7 @@ func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spat
 			Type:          GeometryTypePolygon,
 			Coordinates:   allCoords, // Flattened for backward compatibility
 			Rings:         rings,     // Structured rings with usage indicators
-			BoundaryLines: resolver.drawableBoundaryLines(edgeRefs),
+			BoundaryLines: resolver.drawableBoundaryLines(edgeRefs, coalneEdges, maskCoast),
 		}, nil
 	}
 

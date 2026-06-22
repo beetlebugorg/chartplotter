@@ -97,13 +97,22 @@ func (r *polygonBuilder) getFullEdgeCoordinates(edge *edge, orientation int) [][
 // USAG subfield = {3} (cell-boundary / data-limit edges) must not be drawn — so
 // they are excluded here. They remain in the fill rings (§8.6.3). One polyline
 // per drawable edge (oriented per its FSPT orientation).
-func (r *polygonBuilder) drawableBoundaryLines(edgeRefs []spatialRef) [][][]float64 {
+//
+// DERIVED coastline-coincident masking (S-57 App. B.1 Annex A §17 scn 2): when
+// maskCoast is true, an edge whose RCID is in coalneEdges (i.e. the same edge
+// record a COALNE feature is built from) is ALSO suppressed. NOAA producers never
+// set FSPT MASK=1 for these, so we derive the suppression from the shared edge
+// RCID. This affects only the drawn boundary; the fill rings are untouched.
+func (r *polygonBuilder) drawableBoundaryLines(edgeRefs []spatialRef, coalneEdges map[int64]bool, maskCoast bool) [][][]float64 {
 	// Non-nil even when every edge is masked, so the renderer can tell "computed,
 	// all edges suppressed" (draw nothing) from "not computed" (stroke the rings).
 	lines := make([][][]float64, 0, len(edgeRefs))
 	for _, er := range edgeRefs {
 		if er.Mask == 1 || er.Usage == 3 {
 			continue // masked or data-limit edge — must not be drawn
+		}
+		if maskCoast && coalneEdges[er.RCID] {
+			continue // edge coincident with the coastline (derived) — must not be drawn
 		}
 		edge, err := r.loadEdge(er.RCID)
 		if err != nil || edge == nil {

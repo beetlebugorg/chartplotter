@@ -53,7 +53,10 @@ func (p *parserWrapper) ParseWithOptions(filename string, opts ParseOptions) (*C
 		ValidateGeometry:    opts.ValidateGeometry,
 		ObjectClassFilter:   opts.ObjectClassFilter,
 		ApplyUpdates:        opts.ApplyUpdates,
-		Fs:                  opts.Fs,
+
+		MaskCoastlineCoincidentBoundaries: opts.MaskCoastlineCoincidentBoundaries,
+
+		Fs: opts.Fs,
 	}
 	internalChart, err := p.internal.ParseWithOptions(filename, internalOpts)
 	if err != nil {
