@@ -47,6 +47,9 @@ export class SettingsDialog extends HTMLElement {
 
   refresh() { if (this._active) this.render(); }
 
+  // The currently-shown tab id (e.g. so the shell can reveal tab-specific chrome).
+  get activeTab() { return this._activeTab; }
+
   // Current items for a contribution (its `items` may be an array or a function),
   // each tagged with the owning contribution id so the view can route changes.
   _items(c) {
@@ -58,7 +61,7 @@ export class SettingsDialog extends HTMLElement {
     const body = this.shadowRoot && this.shadowRoot.getElementById("body");
     if (!body || !this._registry) return;
     const tabs = this._registry.tabs();
-    if (!tabs.length) { body.innerHTML = `<div class="set-empty">No settings available.</div>`; return; }
+    if (!tabs.length) { body.innerHTML = `<div class="set-empty">No settings available.</div>`; this._emitTab(); return; }
     if (!tabs.some((t) => t.id === this._activeTab)) this._activeTab = tabs[0].id;
 
     const contribs = this._registry.forTab(this._activeTab);
@@ -82,6 +85,15 @@ export class SettingsDialog extends HTMLElement {
       if (host) { try { c.render(host, { get: c.get, set: c.set }); } catch (e) { console.warn("[settings] render", c.id, e); } }
     }
     this._wire(body, contribs);
+    this._emitTab();
+  }
+
+  // Announce the active tab so the host can reveal tab-specific chrome (e.g. the
+  // shell's developer-tools region under the Advanced tab).
+  _emitTab() {
+    if (this._lastEmittedTab === this._activeTab) return;
+    this._lastEmittedTab = this._activeTab;
+    this.dispatchEvent(new CustomEvent("tab-change", { detail: { tab: this._activeTab } }));
   }
 
   _wire(body, contribs) {

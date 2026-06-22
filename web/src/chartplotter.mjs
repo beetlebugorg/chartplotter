@@ -19,13 +19,16 @@
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
 import "./components/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
 import "./components/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
+import "./components/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
+import { SettingsRegistry } from "./app/settings-registry.mjs"; // contribution registry for the settings panel
+import { coreSettingsContributions } from "./app/core-settings.mjs"; // the app's own display settings as contributions
 import { DISTRICTS, NOAA_ENC_URL } from "./components/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
 import { NotificationCenter } from "./app/notification-center.mjs"; // app-level task-progress + banner bus
 import { ChartService } from "./data/chart-service.mjs"; // server import/bake jobs + pack registry
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
-import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./lib/units.mjs"; // configurable display units
+import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (categories now in core-settings.mjs)
 import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
@@ -35,7 +38,6 @@ import { archivePut, archiveGet } from "./data/archive-store.mjs";
 
 const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
-const M_TO_FT = 3.280839895; // depth-setting display conversion (values stored in metres)
 const LS_SCHEME = "chartplotter:scheme";
 const LS_BASEMAP = "chartplotter:basemap"; // "coastline" (offline) | "osm" (online) | "osmvec" | "none" (disabled)
 const LS_MARINER = "chartplotter:mariner";
@@ -379,6 +381,22 @@ export class ChartPlotter extends HTMLElement {
       this._chartLib.addEventListener("charts-changed", () => { this._renderInstalledSets().catch(() => {}); });
       this._chartLib.addEventListener("chart-focus", (e) => this._flyToBounds(e.detail && e.detail.bounds));
       this._chartLib.addEventListener("chart-import-archive", (e) => this._importArchiveFile(e.detail && e.detail.file));
+    }
+
+    // The settings panel is a HOST (<settings-dialog>) fed by a registry of
+    // contributions. The app's own display settings are a set of "core"
+    // contributions (see core-settings.mjs); they call the existing apply*/
+    // persist methods, so persistence is unchanged. Plugins will register here
+    // too. The dev tools stay in the shell shadow (#dev-region) and are revealed
+    // when the dialog's active tab is Advanced (see _syncDevRegion).
+    this._settingsRegistry = new SettingsRegistry();
+    for (const c of coreSettingsContributions(this)) this._settingsRegistry.register(c);
+    this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
+    if (this._settingsDlg) {
+      this._settingsDlg.configure({ registry: this._settingsRegistry });
+      // The dev tools live in the shell shadow (#dev-region); reveal them when the
+      // dialog switches to the Advanced tab (option B).
+      this._settingsDlg.addEventListener("tab-change", () => this._syncDevRegion());
     }
 
     // Catalog drives the picker AND the lazy-load gating (cell bboxes). Kick it
@@ -2896,7 +2914,8 @@ export class ChartPlotter extends HTMLElement {
     if (svg) svg.innerHTML = this._schemeSvg(this._scheme);
     const tog = r.getElementById("scheme-toggle");
     if (tog) tog.title = `Colour scheme: ${SCHEME_LABEL[this._scheme]} — tap to cycle`;
-    r.querySelectorAll("#scheme-seg button").forEach((b) => b.classList.toggle("sel", b.dataset.scheme === this._scheme));
+    // The scheme picker moved into <settings-dialog>; reflect a tab-bar cycle there.
+    this._settingsDlg && this._settingsDlg.refresh();
   }
 
   applyMariner(patch) {
@@ -2908,8 +2927,8 @@ export class ChartPlotter extends HTMLElement {
     localStorage.setItem(LS_MARINER, JSON.stringify(this._mariner));
     this._persistSettings();
     // Switching units relabels + reconverts the depth fields (still in metres
-    // under the hood), so redraw the form.
-    if ("depthUnit" in patch) this.renderSettings();
+    // under the hood), so redraw the settings panel.
+    if ("depthUnit" in patch) this._settingsDlg && this._settingsDlg.refresh();
   }
 
   // -- chrome / panels -----------------------------------------------------
@@ -3103,32 +3122,8 @@ export class ChartPlotter extends HTMLElement {
         .pkr-empty { color:var(--ui-text-faint); font-size:13px; text-align:center; padding:14px 0; }
         /* NOAA data freshness footer */
         .data-fresh { color:var(--ui-text-faint); font-size:11.5px; text-align:center; line-height:1.5; padding:14px 0 4px; border-top:1px solid var(--ui-border-2); margin-top:4px; }
-        /* Control stays pinned right (flex:none); the label column flexes + its
-           description WRAPS instead of pushing the control onto a new line. */
-        .set-row { display:flex; align-items:center; gap:14px; padding:13px 2px; border-bottom:1px solid var(--ui-border-2); }
-        .set-row:last-child { border-bottom:none; }
-        .set-row .lbl { display:flex; flex-direction:column; min-width:0; flex:1 1 auto; }
-        .set-row .lbl .t { font-weight:600; font-size:13.5px; }
-        .set-row .lbl .d { font-size:12px; color:var(--ui-text-faint); margin-top:3px; line-height:1.45; }
-        .set-row .ctl { flex:none; margin-left:auto; display:flex; align-items:center; gap:6px; }
-        .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 7px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
-        .set-row .ctl .unit { color:var(--ui-text-faint); font-size:12px; width:14px; }
-        .set-row .ctl select { border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 8px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
-        /* toggle switch */
-        .switch { position:relative; width:38px; height:22px; display:inline-block; flex:none; }
-        .switch input { opacity:0; width:0; height:0; }
-        .switch .sl { position:absolute; inset:0; background:var(--ui-border-strong); border-radius:22px; cursor:pointer; transition:.15s; }
-        .switch .sl:before { content:""; position:absolute; width:16px; height:16px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; box-shadow:0 1px 2px rgba(0,0,0,.3); }
-        .switch input:checked + .sl { background:var(--ui-accent); }
-        .switch input:checked + .sl:before { transform:translateX(16px); }
-        /* segmented control */
-        .seg { display:inline-flex; border:1px solid var(--ui-border-strong); border-radius:7px; overflow:hidden; }
-        .seg button { border:none; background:var(--ui-surface); padding:6px 11px; font:inherit; font-size:13px; cursor:pointer; border-left:1px solid var(--ui-border-2); color:var(--ui-text); }
-        .seg button:first-child { border-left:none; }
-        .seg button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
-        .seg button:disabled { cursor:default; } /* e.g. Detail level "Base" — locked on */
-        .seg-multi { display:inline-flex; gap:12px; }
-        .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+        /* The settings-row + control look (.set-row/.switch/.seg/.unit) moved into
+           <settings-dialog>'s shadow (settings-dialog.view.mjs STYLE). */
         /* NOAA attribution + "not for navigation" — subtle one-line text tucked
            into the bottom-right corner (no box), kept legible over the chart with a
            soft halo in the current surface colour. */
@@ -3262,15 +3257,10 @@ export class ChartPlotter extends HTMLElement {
           width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
           border-bottom:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 -2px 1px rgba(0,0,0,.08)); }
         #search::after { border-bottom-color:var(--ui-surface); }
-        /* Settings: a tabbed two-pane shell (left rail of tabs + content), mirroring
-           the chart-library "miller" layout. */
-        #settings-body { padding-top:2px; }
-        .set-shell { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:11px; overflow:hidden; min-height:360px; max-height:min(66vh,620px); }
-        .set-rail { flex:0 0 124px; display:flex; flex-direction:column; gap:3px; padding:8px 7px; border-right:1px solid var(--ui-border-2); background:var(--ui-surface-2); }
-        .set-rail button { text-align:left; border:none; background:none; color:var(--ui-text-dim); font:inherit; font-size:13px; font-weight:600; padding:9px 11px; border-radius:8px; cursor:pointer; transition:background .1s,color .1s; }
-        .set-rail button:hover { background:var(--ui-surface); color:var(--ui-text); }
-        .set-rail button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
-        .set-pane { flex:1 1 0; min-width:0; overflow-y:auto; padding:4px 18px 10px; }
+        /* The settings panel + its control look (toggle/segmented/number/select)
+           now live in <settings-dialog> (settings-dialog.view.mjs STYLE). The shell
+           only keeps the developer-tools chrome below (dev panel + inspector),
+           which option B renders in the shell shadow's #dev-region. */
         /* Dev tools live behind a button at the very top of Settings (spans all
            columns). The Dev panel itself opens as the inspect section with a back
            link to Settings. */
@@ -3314,7 +3304,7 @@ export class ChartPlotter extends HTMLElement {
         .muted { color:var(--ui-text-dim); }
         /* Dev panel: clearly separated sections, most-used at top, roomy spacing. */
         .dev-tools { display:flex; flex-direction:column; }
-        .set-pane .dev-tools { border-top:1px solid var(--ui-border-2); margin-top:8px; }
+        #dev-region .dev-tools { border-top:1px solid var(--ui-border-2); margin-top:8px; }
         .dev-sec { display:flex; flex-direction:column; gap:8px; padding:16px 0; border-top:1px solid var(--ui-border); }
         .dev-sec:first-child { padding-top:14px; border-top:none; }
         .dev-h { font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--ui-text-faint); }
@@ -3439,14 +3429,11 @@ export class ChartPlotter extends HTMLElement {
           background:linear-gradient(90deg, transparent, #6aaef0 45%, #6aaef0 55%, transparent); box-shadow:0 0 8px rgba(106,174,240,.6); }
         @keyframes load-slide { 0% { left:-40%; } 100% { left:100%; } }
         /* ---- Phone (base): popover content reflow --------------------------
-           Chart packs go one-per-row and settings rows wrap their control under
-           the label so they fit the narrower popover. */
+           Chart packs go one-per-row. (Settings rows wrap their control inside
+           <settings-dialog>'s own responsive STYLE now.) */
         @media (max-width: 640px) {
           #empty .card { max-width:min(360px, calc(100vw - 48px)); }
           .pack-grid { grid-template-columns:1fr; }
-          .set-row { flex-wrap:wrap; gap:8px 14px; }
-          .set-row .lbl { flex:1 1 60%; }
-          .seg-multi { flex-wrap:wrap; gap:8px 14px; }
         }
         /* On a narrow phone, drop the zoom from the readout so the band·scale·
            position line never runs past the card edge (scale is what matters). */
@@ -3519,7 +3506,11 @@ export class ChartPlotter extends HTMLElement {
             <chart-library id="chart-lib"></chart-library>
           </div>
           <div class="panel" data-panel="settings">
-            <div id="settings-body"></div>
+            <settings-dialog id="settings-dlg"></settings-dialog>
+            <!-- Developer tools (option B): rendered in the SHELL shadow because
+                 _renderDevPanel / _renderInspect reach into it by id. Shown only
+                 when the dialog's active tab is Advanced (and not in prod). -->
+            <div id="dev-region" hidden></div>
           </div>
         </div>
       </div>`;
@@ -3566,8 +3557,9 @@ export class ChartPlotter extends HTMLElement {
       else if (e.key === "Escape") { si.value = ""; closeSearch(); }
     };
     si.onfocus = () => { if (si.value.trim().length >= 2) this.doSearch(si.value); };
-
-    this.renderSettings();
+    // The settings panel (<settings-dialog>) renders lazily when opened via
+    // toggleSection("settings") → dlg.show(); it's configured after the shadow DOM
+    // is built (see boot/init), so there's nothing to pre-render here.
   }
 
   // Rail-icon → drawer section. Clicking the icon of the already-open section
@@ -3587,20 +3579,12 @@ export class ChartPlotter extends HTMLElement {
     // Feature-inspect is NOT auto-armed; it's a button inside the Advanced (dev)
     // tab. Any section switch disarms it (and clears dev hole markers).
     this._setInspectMode(false);
-    if (name === "settings") { this._clearDevHoles(); this.renderSettings(); }
-    this.setDrawerOpen(true);
-  }
-
-  // Route a unified segmented-control pick (basemap / detail level / area
-  // boundaries / point symbols) to its setter. Detail level maps the cumulative
-  // S-52 display category onto the two display flags (Other ⊃ Standard ⊃ Base).
-  _applySettingSeg(kind, v) {
-    switch (kind) {
-      case "basemap": this.applyBasemap(v); break;
-      case "detail": this.applyMariner({ displayStandard: v !== "base", displayOther: v === "other" }); break;
-      case "boundaryStyle": this.applyMariner({ boundaryStyle: v }); break;
-      case "simplifiedPoints": this.applyMariner({ simplifiedPoints: v === "simplified" }); break;
+    if (name === "settings") {
+      this._clearDevHoles();
+      if (this._settingsDlg) this._settingsDlg.show(this._settingsDlg.activeTab || "general");
+      this._syncDevRegion(); // reveal dev tools if it reopened on the Advanced tab
     }
+    this.setDrawerOpen(true);
   }
 
   // The developer tools live inline in Settings → Advanced. They're "visible"
@@ -3608,7 +3592,29 @@ export class ChartPlotter extends HTMLElement {
   // open on the Advanced tab. _renderDevPanel/_renderInspect also no-op safely when
   // their containers are absent, so this is just an optimisation + correctness gate.
   _devVisible() {
-    return this._drawerOpen() && this._section === "settings" && (this._setTab || "general") === "advanced";
+    return this._drawerOpen() && this._section === "settings"
+      && !!(this._settingsDlg && this._settingsDlg.activeTab === "advanced");
+  }
+
+  // Reveal / tear down the developer-tools region (option B). The dev tools render
+  // in the SHELL shadow (#dev-region) — not the dialog's — because _renderDevPanel /
+  // _renderInspect reach into the shell shadow by id. We mount the #inspect-body +
+  // #dev-tools containers here when the dialog's active tab is Advanced (and not
+  // prod), then let the existing renderers fill them; otherwise the region is empty
+  // + hidden so its content doesn't linger under other tabs.
+  _syncDevRegion() {
+    const region = this.shadowRoot.getElementById("dev-region");
+    if (!region) return;
+    const show = !this._prod && this._devVisible();
+    region.hidden = !show;
+    if (!show) { region.innerHTML = ""; return; }
+    // Build the containers once; keep them across re-syncs so renderers can target
+    // them and so re-render hooks don't thrash the DOM.
+    if (!region.querySelector("#dev-tools")) {
+      region.innerHTML = `<div id="inspect-body" class="ins-body"></div><div id="dev-tools" class="dev-tools"></div>`;
+    }
+    this._renderInspect();
+    this._renderDevPanel();
   }
 
   // Home: the full-screen chart viewer — drop any selection overlay/section and
@@ -3700,133 +3706,10 @@ export class ChartPlotter extends HTMLElement {
   // The archive-list rendering + file-import wiring (renderArchiveList /
   // _wireImport) moved into <chart-library>, which owns the User-Charts import UI.
 
-  // The settings panel: appearance (colour scheme) + the mariner display
-  // settings, laid out as labelled rows / toggles / segmented controls.
-  renderSettings() {
-    const el = this.shadowRoot.getElementById("settings-body");
-    if (!el) return;
-    const m = this._mariner;
-    const ft = m.depthUnit === "ft";
-    // Depth settings are STORED in metres (the renderer's expressions are all
-    // metric); the row just displays/accepts feet when imperial, converting on
-    // edit (see the input handler below). `defM` is the metric default.
-    const depthRow = (key, label) => {
-      const defM = DEFAULT_MARINER[key];
-      const v = ft ? Math.round((m[key] ?? defM) * M_TO_FT) : (m[key] ?? defM);
-      return `<div class="set-row"><div class="lbl"><span class="t">${label}</span></div>
-        <div class="ctl"><input type="number" step="${ft ? "1" : "0.1"}" data-key="${key}" data-depth="1" value="${v}"><span class="unit">${ft ? "ft" : "m"}</span></div></div>`;
-    };
-    const toggle = (key, label, desc, on) =>
-      `<div class="set-row"><div class="lbl"><span class="t">${label}</span>${desc ? `<span class="d">${desc}</span>` : ""}</div>
-        <label class="switch"><input type="checkbox" data-key="${key}" ${on ? "checked" : ""}><span class="sl"></span></label></div>`;
-    // A segmented unit picker for one UNIT_CATEGORIES entry (depth + the 5 new ones).
-    const unitRow = (c) => {
-      const cur = m[c.key] || c.def;
-      return `<div class="set-row"><div class="lbl"><span class="t">${c.label}</span></div>
-        <div class="ctl"><div class="seg" data-unitseg="${c.key}">${c.opts.map(([v, lbl]) =>
-          `<button data-uval="${v}" class="${cur === v ? "sel" : ""}">${lbl}</button>`).join("")}</div></div></div>`;
-    };
-    // A generic segmented control (the basemap-style look) — `kind` routes the pick
-    // through _applySettingSeg; `opts` is [[value, text], …]. Used to give every
-    // multi-choice setting the same segmented-button-with-text appearance.
-    const segRow = (label, desc, kind, current, opts) =>
-      `<div class="set-row"><div class="lbl"><span class="t">${label}</span>${desc ? `<span class="d">${desc}</span>` : ""}</div>
-        <div class="ctl"><div class="seg" data-seg="${kind}">${opts.map(([v, t]) =>
-          `<button data-sv="${v}" class="${current === v ? "sel" : ""}">${t}</button>`).join("")}</div></div></div>`;
-    const basemapOpts = [["none", "Disabled"], ["coastline", "Offline"], ["osm", "OSM"], ...(this._osmVecUrl ? [["osmvec", "Vector"]] : [])];
-
-    const tab = this._setTab || "general";
-    const TABS = [["general", "General"], ["text", "Text"], ["units", "Units"], ["depths", "Depths"], ["advanced", "Advanced"]];
-    const panes = {
-      // Everything that isn't text, a unit, a depth contour, or a dev/advanced toggle.
-      general: `
-        ${segRow("Basemap", "Land drawn under the chart", "basemap", this._basemap, basemapOpts)}
-        <div class="set-row"><div class="lbl"><span class="t">Detail level</span><span class="d">How much chart detail to show — Base is always on</span></div>
-          <div class="ctl"><div class="seg" data-segmulti="1">
-            <button class="sel" disabled title="Minimum safe-navigation set — always on">Base</button>
-            <button data-mkey="displayStandard" class="${m.displayStandard !== false ? "sel" : ""}">Standard</button>
-            <button data-mkey="displayOther" class="${m.displayOther ? "sel" : ""}">Other</button></div></div></div>
-        ${segRow("Area boundaries", "Line style for area edges", "boundaryStyle", m.boundaryStyle || "symbolized", [["plain", "Plain"], ["symbolized", "Symbolized"]])}
-        ${segRow("Point symbols", "Buoy & beacon symbol style", "simplifiedPoints", m.simplifiedPoints ? "simplified" : "paper", [["paper", "Paper-chart"], ["simplified", "Simplified"]])}
-        ${toggle("fourShadeWater", "Four-shade water", "Use four depth shades instead of two", m.fourShadeWater !== false)}
-        ${toggle("showNoData", "No-data hatch", "Hatch areas that have no chart data", m.showNoData !== false)}
-        ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
-        ${toggle("showSoundings", "Spot soundings", "Individual depth soundings", m.showSoundings !== false)}
-        ${toggle("showFullSectorLines", "Full sector lines", "Draw light sectors to full range, not short stubs", !!m.showFullSectorLines)}
-        ${toggle("showIsolatedDangersShallow", "Isolated dangers (shallow)", "Only flag isolated dangers in shallow water", !!m.showIsolatedDangersShallow)}
-        ${toggle("dataQuality", "Data quality", "Survey zones-of-confidence overlay", !!m.dataQuality)}
-        ${toggle("showMetaBounds", "Metadata boundaries", "Chart coverage & region indicator lines", !!m.showMetaBounds)}
-        ${toggle("showScaleBoundaries", "Scale boundaries", "Outline where more detailed charts exist", m.showScaleBoundaries !== false)}
-        <div class="set-row"><div class="lbl"><span class="t">Off-screen chart pointers</span><span class="d">Edge arrows to installed charts you can't currently see — tap one to fly there</span></div>
-          <label class="switch"><input type="checkbox" data-app-key="showChartRadar" ${this._showChartRadar ? "checked" : ""}><span class="sl"></span></label></div>`,
-      text: `
-        ${toggle("showLightDescriptions", "Light descriptions", "Light characteristics, e.g. Fl(2)R 10s", m.showLightDescriptions !== false)}
-        ${toggle("textImportant", "Important text", "Bridge/cable clearances & route bearings", m.textImportant !== false)}
-        ${toggle("textNames", "Names", "Buoy, beacon & place names, berth numbers", m.textNames !== false)}
-        ${toggle("textOther", "Other text", "Notes, seabed, magnetic variation, heights", m.textOther !== false)}
-        ${toggle("showContourLabels", "Contour labels", "Depth values along contour lines", !!m.showContourLabels)}`,
-      // Every display-unit picker — depth (metric/imperial) plus the five categories.
-      units: UNIT_CATEGORIES.map(unitRow).join(""),
-      // Depth contour values, shown/edited in the chosen depth unit (see Units).
-      depths: `
-        ${depthRow("shallowContour", "Shallow contour")}
-        ${depthRow("safetyContour", "Safety contour")}
-        ${depthRow("deepContour", "Deep contour")}
-        ${depthRow("safetyDepth", "Safety depth")}`,
-      // Advanced == developer tools (rebuild, share, inspector, coverage, bands,
-      // diagnostics), filled inline by _renderDevPanel / _renderInspect below.
-      advanced: `
-        <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline installed charts when zoomed out — tap one to jump to it</span></div>
-          <label class="switch"><input type="checkbox" data-app-key="showCellBounds" ${this._showCellBounds ? "checked" : ""}><span class="sl"></span></label></div>
-        ${this._prod ? "" : `<div id="inspect-body" class="ins-body"></div><div id="dev-tools" class="dev-tools"></div>`}`,
-    };
-
-    el.innerHTML = `
-      <div class="set-shell">
-        <div class="set-rail">${TABS.map(([id, label]) =>
-          `<button data-settab="${id}" class="${tab === id ? "sel" : ""}">${label}</button>`).join("")}</div>
-        <div class="set-pane">${panes[tab] || ""}</div>
-      </div>`;
-
-    el.querySelectorAll("[data-settab]").forEach((b) =>
-      (b.onclick = () => { this._setTab = b.dataset.settab; this.renderSettings(); }));
-    // Advanced tab == developer tools: fill the inline dev panel + inspector body.
-    if (tab === "advanced" && !this._prod) { this._renderDevPanel(); this._renderInspect(); }
-    // Generic single-select segmented settings (basemap, area boundaries, point symbols).
-    el.querySelectorAll("[data-seg] button").forEach((b) =>
-      (b.onclick = () => { this._applySettingSeg(b.parentElement.dataset.seg, b.dataset.sv); this.renderSettings(); }));
-    // Multi-select segmented control (Detail level): each button toggles its own
-    // mariner flag independently; Base is locked on (disabled, no data-mkey).
-    el.querySelectorAll("[data-segmulti] button[data-mkey]").forEach((b) =>
-      (b.onclick = () => { this.applyMariner({ [b.dataset.mkey]: !b.classList.contains("sel") }); this.renderSettings(); }));
-    // Unit segmented controls (depth + the five new categories).
-    el.querySelectorAll("[data-unitseg] button").forEach((b) =>
-      (b.onclick = () => {
-        const key = b.parentElement.dataset.unitseg, val = b.dataset.uval;
-        if (m[key] !== val) this.applyMariner({ [key]: val });
-        this.renderSettings(); // reflect the new selection (and Depths' unit label)
-      }));
-    el.querySelectorAll("[data-key]").forEach((inp) => {
-      inp.onchange = () => {
-        const key = inp.dataset.key;
-        let val;
-        if (inp.type === "checkbox") val = inp.checked;
-        else if (inp.type === "number") {
-          val = parseFloat(inp.value);
-          // Depth fields are shown in feet when imperial; store back in metres.
-          if (inp.dataset.depth && this._mariner.depthUnit === "ft") val = val / M_TO_FT;
-        } else val = inp.value;
-        this.applyMariner({ [key]: val });
-      };
-    });
-    // App-level toggles (not S-52 mariner settings): cell-boundary overlay.
-    el.querySelectorAll("[data-app-key]").forEach((inp) => {
-      inp.onchange = () => {
-        if (inp.dataset.appKey === "showCellBounds") this._setCellBoundsVisible(inp.checked);
-        else if (inp.dataset.appKey === "showChartRadar") this._setChartRadarVisible(inp.checked);
-      };
-    });
-  }
+  // The settings panel is now the <settings-dialog> host fed by core-settings.mjs
+  // contributions (see the boot wiring + applyScheme/applyBasemap/applyMariner).
+  // The old inline renderSettings()/_applySettingSeg() builders + their local
+  // depthRow/toggle/unitRow/segRow helpers are gone.
 }
 
 // Pure formatters/util now live in util.mjs; the archive blob store in
