@@ -30,7 +30,7 @@ import { ChartService } from "./data/chart-service.mjs"; // server import/bake j
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
 import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (categories now in core-settings.mjs)
-import { ChartPointers } from "./map/chart-pointers.mjs"; // off-screen installed-chart edge pointers
+import { ChartFinder } from "./map/chart-finder.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { SearchBox } from "./map/search-box.mjs"; // offline catalog + chart-feature search
@@ -392,7 +392,7 @@ export class ChartPlotter extends HTMLElement {
   }
 
 
-  // Fly to a set of packs from a tapped chart-radar chip. A single pack lands at
+  // Fly to a set of packs from a tapped chart-finder chip. A single pack lands at
   // its finest band's render zoom (so a berthing-only set actually draws); a
   // cluster just fits all of them so they come into view (and split into their own
   // chips / coverage boxes from there).
@@ -423,7 +423,7 @@ export class ChartPlotter extends HTMLElement {
     this._showChartRadar = on;
     localStorage.setItem("cp-chart-radar", on ? "1" : "0");
     this._persistSettings();
-    if (this._chartPointers) this._chartPointers.setVisible(on);
+    if (this._chartFinder) this._chartFinder.setVisible(on);
   }
 
   // A deploy-time config value from an attribute, overridable per-load by the
@@ -549,8 +549,8 @@ export class ChartPlotter extends HTMLElement {
 
     // Off-screen chart pointers: edge pointers to installed charts not in view
     // (its own module; owns its overlay + map listener). Fed from pack metadata.
-    this._chartPointers = new ChartPointers({
-      host: this.shadowRoot.getElementById("chart-radar"),
+    this._chartFinder = new ChartFinder({
+      host: this.shadowRoot.getElementById("chart-finder"),
       map,
       getPacks: () => this._packsMeta || [],
       getUnits: () => this._mariner,
@@ -1296,7 +1296,7 @@ export class ChartPlotter extends HTMLElement {
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
-    if (this._chartPointers) this._chartPointers.update(); // packs changed → recompute off-screen pointers
+    if (this._chartFinder) this._chartFinder.update(); // packs changed → recompute off-screen pointers
     return active;
   }
 

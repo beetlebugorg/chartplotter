@@ -27,17 +27,17 @@ export const STYLE = `
         #map chart-canvas { width:100%; height:100%; }
         /* Chart radar: edge chips pointing at off-screen installed charts. The
            overlay is click-through; chips opt back into pointer events. */
-        #chart-radar { position:absolute; inset:0; z-index:5; pointer-events:none; overflow:hidden; }
-        .radar-chip { position:absolute; transform:translate(-50%,-50%); display:flex; align-items:center; gap:6px;
+        #chart-finder { position:absolute; inset:0; z-index:5; pointer-events:none; overflow:hidden; }
+        .finder-chip { position:absolute; transform:translate(-50%,-50%); display:flex; align-items:center; gap:6px;
           padding:5px 9px 5px 7px; border-radius:999px; background:var(--ui-surface); color:var(--ui-text);
           border:1px solid var(--ui-border-strong); box-shadow:0 2px 8px var(--ui-shadow); cursor:pointer;
           font:600 12px/1 system-ui,sans-serif; white-space:nowrap; pointer-events:auto; user-select:none;
           max-width:42vw; transition:background .1s; }
-        .radar-chip:hover { background:var(--ui-hover); }
-        .radar-chip .rc-arrow { flex:none; width:14px; height:14px; color:var(--ui-accent); }
-        .radar-chip .rc-band { flex:none; width:8px; height:8px; border-radius:50%; box-shadow:0 0 0 1.5px var(--ui-surface); }
-        .radar-chip .rc-name { overflow:hidden; text-overflow:ellipsis; }
-        .radar-chip .rc-dist { flex:none; color:var(--ui-text-dim); font-weight:500; }
+        .finder-chip:hover { background:var(--ui-hover); }
+        .finder-chip .fc-arrow { flex:none; width:14px; height:14px; color:var(--ui-accent); }
+        .finder-chip .fc-band { flex:none; width:8px; height:8px; border-radius:50%; box-shadow:0 0 0 1.5px var(--ui-surface); }
+        .finder-chip .fc-name { overflow:hidden; text-overflow:ellipsis; }
+        .finder-chip .fc-dist { flex:none; color:var(--ui-text-dim); font-weight:500; }
         .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
         .btn:hover { background:var(--ui-hover); }
         /* Floating corner controls — a top-left group (search) and a top-right
@@ -429,7 +429,7 @@ export const CHROME = `
       <!-- Off-screen installed-chart pointers ("chart radar"): edge chips pointing
            toward enabled chart packs that aren't currently in view. Overlay is
            click-through; only the chips themselves take pointer events. -->
-      <div id="chart-radar" aria-hidden="true"></div>
+      <div id="chart-finder" aria-hidden="true"></div>
       <div id="load-bar" class="load-bar" aria-hidden="true"></div>
       <!-- The map is the UI. Chrome is reduced to four round buttons floating in
            the corners — search alone top-left; charts · scheme · settings top-right

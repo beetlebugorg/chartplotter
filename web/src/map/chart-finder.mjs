@@ -1,4 +1,4 @@
-// chart-pointers.mjs — off-screen chart pointers: edge chips pointing toward
+// chart-finder.mjs — off-screen chart pointers: edge chips pointing toward
 // installed chart packs that aren't currently in view, so off-screen charts are
 // always findable (and one tap flies you there at the zoom where they render).
 //
@@ -8,7 +8,7 @@
 // caps the count, so the number of chips stays small whatever the install size.
 //
 // The shell wires it with accessors (no app internals leak in here):
-//   new ChartPointers({ host, map, getPacks, getUnits, labelFor, onPick, visible })
+//   new ChartFinder({ host, map, getPacks, getUnits, labelFor, onPick, visible })
 // where getPacks() → [{name, enabled, bands:[coarse→fine], bounds:[w,s,e,n]}].
 
 import { format as fmtUnit } from "../lib/units.mjs";
@@ -20,7 +20,7 @@ const MARGIN = 30;   // keep chips this far inside the map edge
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-export class ChartPointers {
+export class ChartFinder {
   constructor(opts) {
     this.host = opts.host;
     this.map = opts.map;
@@ -95,13 +95,13 @@ export class ChartPointers {
       const near = cl.items[0], multi = cl.items.length > 1;
       const finest = near.pack.bands && near.pack.bands[near.pack.bands.length - 1];
       const chip = document.createElement("div");
-      chip.className = "radar-chip";
+      chip.className = "finder-chip";
       chip.style.left = cl.pos.x + "px";
       chip.style.top = cl.pos.y + "px";
-      const dot = multi ? "" : `<span class="rc-band" style="background:${BAND_COLOR[finest] || "#888"}"></span>`;
+      const dot = multi ? "" : `<span class="fc-band" style="background:${BAND_COLOR[finest] || "#888"}"></span>`;
       const name = multi ? `${cl.items.length} charts` : this.labelFor(near.pack.name);
-      chip.innerHTML = `${arrowSvg(cl.bearing)}${dot}<span class="rc-name">${esc(name)}</span>` +
-        `<span class="rc-dist">${esc(fmtUnit("distance", near.distNm, units))}</span>`;
+      chip.innerHTML = `${arrowSvg(cl.bearing)}${dot}<span class="fc-name">${esc(name)}</span>` +
+        `<span class="fc-dist">${esc(fmtUnit("distance", near.distNm, units))}</span>`;
       chip.title = cl.items.map((i) => this.labelFor(i.pack.name)).join(", ");
       chip.onclick = () => this.onPick(cl.items.map((i) => i.pack));
       frag.appendChild(chip);
@@ -143,5 +143,5 @@ function edgePoint(cx, cy, brg, W, H, m) {
 
 // An up-pointing arrow rotated to the compass bearing (so it points at the chart).
 function arrowSvg(brg) {
-  return `<svg class="rc-arrow" viewBox="0 0 24 24" style="transform:rotate(${brg.toFixed(1)}deg)" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v15M12 4l-5 6M12 4l5 6"/></svg>`;
+  return `<svg class="fc-arrow" viewBox="0 0 24 24" style="transform:rotate(${brg.toFixed(1)}deg)" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v15M12 4l-5 6M12 4l5 6"/></svg>`;
 }
