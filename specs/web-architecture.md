@@ -90,12 +90,58 @@ Owns the chrome (corner round buttons, drawer, bottom data card, search, modals)
 base + components, forwarding events between them. Target: shrink it to
 orchestration once the downloader and plugins are extracted.
 
+## The Charts-library boundary (implemented)
+
+The "install + manage charts" domain is a self-contained custom element,
+`<chart-library>` (`web/src/components/chart-library.mjs`), mounted by the shell
+INSIDE the drawer's `#charts-body` (the charts section; the shell keeps the
+drawer/tab chrome). It owns the 3-pane browse UI, search, the detail-pane mini
+preview map, the agreement gate, the download QUEUE + EXECUTION, and the
+User-Charts local-file import. It is themed via inherited `--ui-*` custom
+properties (same pattern as `<pick-report>`).
+
+Decisions (locked):
+- **`<chart-canvas>` takes baked tilesets, not cells/parsed charts.** Its sole
+  render-reconcile entry is `setServerSets(activeBandNames)`; it knows nothing
+  about packs/providers/downloads. The shell's `_renderInstalledSets()` is the
+  reconcile loop (GET `/api/packs` → flatten enabled per-band → `setServerSets`).
+- **The server (`/api/packs`) is the installed-set source of truth.** No shared
+  in-memory installed-set state between library and shell.
+- **Download execution lives in `<chart-library>`** (queue + server fetch/bake),
+  via injected deps; the shell no longer owns `_runDownloadPack` etc.
+- **The main-map cell picker was deleted** (the mini preview map is the only
+  chart-picking surface now). `_chartsMode` and its readers went with it.
+
+Contracts:
+- Injected via `configure({ dl, api, notify, store, assets, prod })`:
+  `dl` = `ChartDownloader` (catalogue discovery), `api` = `ChartService`
+  (`web/src/data/chart-service.mjs` — import/bake jobs + pack registry + set
+  management + the SSE job-progress protocol), `notify` = `NotificationCenter`
+  (`web/src/app/notification-center.mjs` — `task()`/`info|warn|error`),
+  `store` = `ChartStore` (OPFS local import).
+- Public methods the shell calls: `show(provider)`, `refresh()`, `get busy`,
+  `teardownPreview()`, plus reach-ins for the agreement modal
+  (`_showAgreement`/`_resolveAgreement`/`agreementOpen`).
+- Events it dispatches (bubbles + composed): **`charts-changed`** (→ shell runs
+  `_renderInstalledSets()` to reconcile the canvas), **`chart-focus {bounds}`**
+  (→ shell flies the canvas), **`chart-import-archive {file}`** (→ shell does the
+  plotter-coupled `.pmtiles` client-side add).
+- All job progress is posted to `notify` (task handles); the library never
+  touches shell DOM. `ChartService` + `NotificationCenter` are also used by the
+  shell itself, so there is ONE job-poll/progress implementation, reusable by
+  future plugins (`<own-ship>`/`<ais-overlay>`).
+
+Result: the shell dropped ~850 lines (4688 → 3834); the domain is ~1026 lines in
+its own element. The shell now keeps the canvas reconcile, the drawer/tab chrome,
+the notification chrome, and the data-component instances.
+
 ## Staged migration
 
 1. ✅ Extract `<pick-report>`; establish the plugin pattern.
 2. ✅ Seal `<chart-plotter>`'s interface (`flushTiles`, overlay + camera API, this doc).
-3. ◑ Extract chart downloading into `ChartDownloader` — increment 1 (catalogue/
-   discovery core) done; download/import/agreement/task-polling to follow.
+3. ✅ Extract chart downloading: `ChartDownloader` (discovery) + `ChartService`
+   (server jobs/registry) + `NotificationCenter` (progress bus) + the
+   `<chart-library>` element (browse/download/import/agreement). Map picker removed.
 4. ☐ `MapOverlay` base + first `<own-ship>` plugin (proves the contract end-to-end).
 5. ☐ `<ais-overlay>`.
 6. ☐ Trim the shell to composition + chrome.
