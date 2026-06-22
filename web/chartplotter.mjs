@@ -109,11 +109,15 @@ const CHART_BANDS = [
 // LAYER minzoom (the baked source may serve lower) so it works without a re-bake.
 const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16, all: 0 };
 
-// Chart layers whose features carry SCAMIN and are split into per-SCAMIN bucket
-// layers (each with a native fractional minzoom) so SCAMIN is honored EXACTLY with
-// zero per-zoom work. Point symbols + soundings are the marks that "disappear too
-// soon / too late" at scale boundaries; their visibility must track display scale.
-const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings"]);
+// Vector SOURCE-LAYERS whose features carry SCAMIN and are split into per-SCAMIN
+// bucket layers (each with a native fractional minzoom) so SCAMIN is honored
+// EXACTLY with zero per-zoom work. Point symbols + soundings are the marks that
+// "disappear too soon / too late" at scale boundaries; `text` carries the labels
+// (incl. light characteristics) baked from the same features, so a label must
+// track the display scale of the object it annotates — keyed on the SOURCE-LAYER,
+// not the style-layer id, because the text labels fan out into many style layers
+// (text-<halign>-<valign>, light-text) that all read the one `text` source-layer.
+const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text"]);
 
 // The display zoom at which a 1:N (scamin) feature first becomes visible at the
 // given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
@@ -1508,7 +1512,7 @@ export class ChartPlotter extends HTMLElement {
           // natively (zero JS/frame). The per-band archive is FLOOR-GATED at bake, so
           // tile CONTENT controls appearance: client layers need no band minzoom.
           const scaminVals = set.scamin || [];
-          if (SCAMIN_BUCKET_LAYERS.has(L.id) && scaminVals.length) {
+          if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
             mk("#no", and(["!", ["has", "scamin"]]), undefined);
             for (const sc of scaminVals) {
               mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
@@ -1564,7 +1568,7 @@ export class ChartPlotter extends HTMLElement {
         // SCAMIN value (collected from the tiles). Out-of-zoom buckets are skipped by
         // MapLibre for free, so the extra layers cost nothing at runtime. Features
         // WITHOUT SCAMIN take the band-gated `#no` variant. Other layers: one variant.
-        if (SCAMIN_BUCKET_LAYERS.has(L.id) && this._scaminValues && this._scaminValues.length) {
+        if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && this._scaminValues && this._scaminValues.length) {
           mk("#no", and(["!", ["has", "scamin"]]), dmin || undefined);
           for (const sc of this._scaminValues) {
             mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
