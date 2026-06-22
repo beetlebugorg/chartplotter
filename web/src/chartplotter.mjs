@@ -22,6 +22,7 @@ import "./components/chart-library.mjs"; // defines <chart-library> (the "Charts
 import "./components/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./app/settings-registry.mjs"; // contribution registry for the settings panel
 import { coreSettingsContributions } from "./app/core-settings.mjs"; // the app's own display settings as contributions
+import { DevTools } from "./components/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { DISTRICTS, NOAA_ENC_URL } from "./components/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
 import { NotificationCenter } from "./app/notification-center.mjs"; // app-level task-progress + banner bus
@@ -100,12 +101,10 @@ const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000
 // bands.mjs — imported at the top of this file.
 // Chart packs = U.S. Coast Guard districts (the DISTRICTS table) now live in
 // <chart-library>; the shell imports DISTRICTS from there for the few places it
-// still needs the region labels (_reattachName, _rebuildAllPerBand).
+// still needs the region labels (_reattachName, _setLabel — used by DevTools' rebake).
 
-// Does a GeoJSON geometry intersect the lon/lat box [W,S,E,N]? Points test exactly;
-// lines/polygons use a bbox-overlap approximation (fine for the area inspector).
 // A chart vector source: the realtime path has one "chart" source; the legacy
-// pmtiles path had a "chart-<band>" source per band. (Used by the inspector.)
+// pmtiles path had a "chart-<band>" source per band. (Used by the cursor pick.)
 function isChartSource(s) {
   return typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
 }
@@ -146,24 +145,6 @@ function firstCoord(g) {
     case "MultiPolygon": return c[0] && c[0][0] && c[0][0][0];
     default: return null;
   }
-}
-
-function geomIntersectsBox(g, W, S, E, N) {
-  if (!g) return false;
-  if (g.type === "Point") {
-    const c = g.coordinates;
-    return c[0] >= W && c[0] <= E && c[1] >= S && c[1] <= N;
-  }
-  const bb = [Infinity, Infinity, -Infinity, -Infinity];
-  (function walk(c) {
-    if (typeof c[0] === "number") {
-      if (c[0] < bb[0]) bb[0] = c[0];
-      if (c[1] < bb[1]) bb[1] = c[1];
-      if (c[0] > bb[2]) bb[2] = c[0];
-      if (c[1] > bb[3]) bb[3] = c[1];
-    } else for (const x of c) walk(x);
-  })(g.coordinates || []);
-  return !(bb[2] < W || bb[0] > E || bb[3] < S || bb[1] > N);
 }
 
 // Lon/lat bbox area of a polygon ring — used to pick the smallest (most detailed)
@@ -258,14 +239,7 @@ export class ChartPlotter extends HTMLElement {
     this._debugCells = localStorage.getItem("cp-debug-cells") === "1"; // debug: all cell footprints coloured by load state
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
     this._renderSel = new Set();         // dev (debug mode): hand-picked cells — when non-empty, ONLY these render, at any zoom
-    this._tileDbgOn = false;             // dev: tile-debugger plugin overlay (lifecycle + delivery integrity + bake logging)
-    this._tileDbg = null;                // dev: the TileDebugger IControl instance (lazily imported)
-    this._inspectMode = false;          // feature-inspect mode (toggled from the statusbar)
-    this._inspectLocked = false;        // a feature is pinned (click-to-lock) — hover stops updating
-    this._inspectLastKey = "";          // last rendered hover/lock key, to skip redundant re-renders
-    this._inspectFeats = [];            // the stack of features under the cursor (cycler steps through them)
-    this._inspectIdx = 0;               // which one of the stack is shown
-    this._inspectMulti = false;         // true after a SHIFT+drag area capture (list all, no cycler)
+    // Feature-inspect + tile-debugger state now live in DevTools (Advanced tab).
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = { ...DEFAULT_MARINER, ...loadJSON(LS_MARINER, {}) };
     // Migrate the old single-value display category (base|standard|other) to
@@ -386,18 +360,13 @@ export class ChartPlotter extends HTMLElement {
     // The settings panel is a HOST (<settings-dialog>) fed by a registry of
     // contributions. The app's own display settings are a set of "core"
     // contributions (see core-settings.mjs); they call the existing apply*/
-    // persist methods, so persistence is unchanged. Plugins will register here
-    // too. The dev tools stay in the shell shadow (#dev-region) and are revealed
-    // when the dialog's active tab is Advanced (see _syncDevRegion).
+    // persist methods, so persistence is unchanged. The dev tools register
+    // themselves as the first NON-core contribution (a DevTools instance built in
+    // onReady, once the map exists — see below); plugins will register here too.
     this._settingsRegistry = new SettingsRegistry();
     for (const c of coreSettingsContributions(this)) this._settingsRegistry.register(c);
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
-    if (this._settingsDlg) {
-      this._settingsDlg.configure({ registry: this._settingsRegistry });
-      // The dev tools live in the shell shadow (#dev-region); reveal them when the
-      // dialog switches to the Advanced tab (option B).
-      this._settingsDlg.addEventListener("tab-change", () => this._syncDevRegion());
-    }
+    if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
     // Catalog drives the picker AND the lazy-load gating (cell bboxes). Kick it
     // off in parallel; ingestViewport awaits it.
@@ -497,22 +466,6 @@ export class ChartPlotter extends HTMLElement {
     this._pulseRAF = this._pulses.size ? requestAnimationFrame(() => this._pulseTick()) : 0;
   }
 
-  // Show/hide the debug cell-loading overlay (all installed footprints at every
-  // zoom, coloured by lazy-load state).
-  _setDebugCells(on) {
-    this._debugCells = on;
-    localStorage.setItem("cp-debug-cells", on ? "1" : "0");
-    const map = this._map; if (!map) return;
-    const vis = on ? "visible" : "none";
-    for (const id of ["inst-dbg-fill", "inst-dbg-line", "inst-dbg-hover-fill", "inst-dbg-hover-label", "inst-cov-fill", "inst-cov-line"]) {
-      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
-    }
-    if (on) { this._refreshInstalledBounds(); this._refreshCoverage(); } // status + real coverage
-    else { this._clearDebugHover(); this._hideContextMenu(); }
-    // Solo render applies only in debug mode, so toggling it with a render set
-    // active flips between "only selected" and normal — re-bake to reflect that.
-    if (this._renderSel.size) this._refreshCharts(false);
-  }
 
   // Pick the cell under `point` for the debug overlay. Prefers REAL data coverage
   // (M_COVR, the inst-cov layer) over the raw catalog bbox, so the result matches
@@ -676,7 +629,6 @@ export class ChartPlotter extends HTMLElement {
 
   async _applyRenderSel() {
     console.log(`[debug] render set: ${this._renderSel.size ? [...this._renderSel].join(", ") : "(all)"}`);
-    if (this._devVisible()) this._renderDevPanel();
     await this._refreshCharts(false); // keep the camera put
   }
 
@@ -985,15 +937,38 @@ export class ChartPlotter extends HTMLElement {
       noChartsEnabled: () => this._noChartsEnabled(),
     });
 
+    // Developer tools (Advanced tab) — the first NON-core contributor to the
+    // settings registry. A plain class (like the map controllers), built now that
+    // the map exists; it registers itself as the Advanced-tab contribution and owns
+    // the rebake + feature-inspector tools (and their map listeners). Dev-only.
+    if (!this._prod) {
+      this._devTools = new DevTools({
+        registry: this._settingsRegistry,
+        map,
+        plotter: this._plotter,
+        api: this._api,
+        notify: this._notify,
+        assets: this._assets,
+        isBusy: () => this._taskRunning() || (this._chartLib && this._chartLib.busy),
+        setProgress: (p) => this._setProgress(p),
+        setTask: (running) => { this._task = running ? { kind: "download", status: "running" } : null; },
+        pollImport: (job, onProg, label) => this._pollImport(job, onProg, label),
+        districtCellNames: (cg) => this._districtCellNames(cg),
+        setLabel: (name) => this._setLabel(name),
+        chartLib: () => this._chartLib,
+        renderInstalledSets: () => this._renderInstalledSets(),
+        s57Label: (acr) => S57_CLASS[acr],
+        layerLabel: (srcLayer) => INSPECT_LAYER_LABEL[srcLayer],
+        onInspectOn: () => { this._closePick(); this._cancelAreaSelect(); },
+      });
+    }
+
     // Persist the view so a refresh resumes where you were; refresh the coverage
     // panel's in-view cell list for the new viewport.
     map.on("moveend", () => {
       this.saveView();
       this._assessCoverage();
       this._hud.updateZoomCap(); // clamp zoom-in to the finest band covering the new view
-      // Dev tile inspector: refresh in-view band counts; a prior coverage measure
-      // is now stale (different viewport), so drop its hole overlay.
-      if (this._devVisible()) { this._clearDevHoles(); this._renderDevPanel(); }
     });
 
     // Chart radar: edge pointers to off-screen installed charts (its own module;
@@ -1473,9 +1448,6 @@ export class ChartPlotter extends HTMLElement {
     map.addLayer({ id: "pick-fill", type: "fill", source: "pick", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#ffb300", "fill-opacity": 0.18 } });
     map.addLayer({ id: "pick-line", type: "line", source: "pick", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": "#ff8f00", "line-width": 3 } });
     map.addLayer({ id: "pick-pt", type: "circle", source: "pick", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 12, "circle-color": "rgba(255,179,0,0.18)", "circle-stroke-color": "#ff8f00", "circle-stroke-width": 3 } });
-    // Dev tile inspector: sampled coverage-hole points (Inspect → Coverage → Measure).
-    map.addSource("tile-holes", { type: "geojson", data: empty });
-    map.addLayer({ id: "tile-holes", type: "circle", source: "tile-holes", paint: { "circle-radius": 4, "circle-color": "#ff1744", "circle-opacity": 0.75, "circle-stroke-color": "#fff", "circle-stroke-width": 1 } });
     // Installed-cell coverage: at zooms BELOW a cell's native band (where its
     // chart detail isn't baked yet) draw its footprint + name, so when zoomed out
     // you can tell WHAT coverage you have, not just that you have some. One set of
@@ -1522,55 +1494,17 @@ export class ChartPlotter extends HTMLElement {
     map.addSource("inst-cov", { type: "geojson", data: empty });
     map.addLayer({ id: "inst-cov-fill", type: "fill", source: "inst-cov", layout: { visibility: dbgVis }, paint: { "fill-color": "#1f9d55", "fill-opacity": 0.16 } });
     map.addLayer({ id: "inst-cov-line", type: "line", source: "inst-cov", layout: { visibility: dbgVis }, paint: { "line-color": "#136b3a", "line-width": 1.4, "line-dasharray": [3, 2] } });
-    // Inspect mode (toggled from the statusbar), CSS-devtools style: while ON,
-    // hovering highlights + previews the feature under the cursor; a click LOCKS
-    // it (freezes the panel) until you click again to release. SHIFT+drag boxes a
-    // region and captures every chart feature inside it. Skipped while the area
-    // (box-download) selector is armed (it owns pointer events).
     // ECDIS-style crosshair cursor over the chart so it's clear the pointer is a
-    // pick point (a click runs the cursor pick / district preview). Inspect mode and
-    // the box selectors set their own cursor and restore this on exit.
+    // pick point (a click runs the cursor pick / district preview). The dev feature
+    // inspector (now in DevTools) sets its own cursor + owns the hover/click/
+    // SHIFT+drag listeners; its click handler runs only while inspecting.
     map.getCanvas().style.cursor = "crosshair";
-    let boxStart = null, boxEl = null;
-    map.on("mousedown", (e) => {
-      if (!this._inspectMode || this._areaCleanup || !e.originalEvent.shiftKey) return;
-      e.preventDefault();
-      this._map.dragPan.disable();
-      boxStart = e.point;
-      boxEl = document.createElement("div");
-      boxEl.style.cssText = "position:absolute;z-index:1000;border:2px solid #ff5252;background:rgba(255,82,82,.12);pointer-events:none;box-sizing:border-box;border-radius:2px;";
-      map.getContainer().appendChild(boxEl);
-    });
-    map.on("mousemove", (e) => {
-      if (boxStart && boxEl) {
-        const p = e.point;
-        boxEl.style.left = Math.min(boxStart.x, p.x) + "px";
-        boxEl.style.top = Math.min(boxStart.y, p.y) + "px";
-        boxEl.style.width = Math.abs(p.x - boxStart.x) + "px";
-        boxEl.style.height = Math.abs(p.y - boxStart.y) + "px";
-        return;
-      }
-      if (!this._inspectMode || this._inspectLocked || this._areaCleanup) return;
-      this._inspectAt(e.point, false);
-    });
-    map.on("mouseup", (e) => {
-      if (!boxStart) return;
-      const a = boxStart, b = e.point;
-      if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
-      boxEl = null; boxStart = null;
-      this._map.dragPan.enable();
-      if (Math.abs(b.x - a.x) < 3 || Math.abs(b.y - a.y) < 3) return; // too small → ignore
-      this._showInspectArea(this._captureArea(a, b));
-    });
     map.on("click", (e) => {
+      // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
+      // it so a pick/coverage tap doesn't fire under an active inspect lock.
+      if (this._devTools && this._devTools.inspecting) return;
       // (The Charts cell-picker tap-to-preview-a-district branch was removed with
       // the main-map cell picker; the <chart-library> panel is the chart surface.)
-      if (this._inspectMode) { // dev feature inspector
-        if (this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
-        if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
-        this._inspectAt(e.point, true); // lock onto whatever's here
-        return;
-      }
       // Zoomed out over an installed-chart coverage marker → fly to that chart at
       // its detail zoom (so you can find + open installed charts without knowing
       // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
@@ -1578,179 +1512,6 @@ export class ChartPlotter extends HTMLElement {
       // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
       this._pickReportAt(e.point, e.originalEvent);
     });
-  }
-
-  // Arm/disarm feature-inspect interaction (crosshair, hover/click capture,
-  // SHIFT+drag area select). The Inspect drawer panel's visibility is owned by
-  // the drawer (toggleSection/setDrawerOpen) — this only manages the map-side
-  // interaction + the panel's content. Mutually exclusive with the box selector.
-  _setInspectMode(on) {
-    on = !!on;
-    if (on === this._inspectMode) return;
-    this._inspectMode = on;
-    if (on) this._closePick(); // dev inspector and the user pick report are mutually exclusive
-    this._inspectLocked = false;
-    this._inspectLastKey = "";
-    if (on) this._cancelAreaSelect();
-    const map = this._map;
-    if (map) {
-      map.getCanvas().style.cursor = "crosshair"; // chart default is also crosshair
-      // Free SHIFT+drag for area capture (MapLibre uses it for box-zoom by default).
-      if (on) map.boxZoom.disable(); else map.boxZoom.enable();
-    }
-    if (on) this._inspectHint("Hover to inspect · click to lock · SHIFT+drag to capture an area.");
-    else this._closeInspect();
-    // The rail button reflects dev-panel-open (setDrawerOpen); inspect on/off is
-    // shown by the in-panel "Inspect features" button — refresh it.
-    if (this._devVisible()) this._renderDevPanel();
-  }
-
-  // Inspect the chart features at a canvas point. `lock` freezes the panel on a
-  // hit (the click-to-lock action); a no-hit lock is a no-op (so clicking empty
-  // chart doesn't clear a useful hover), a no-hit hover shows the hint.
-  _inspectAt(point, lock) {
-    const map = this._map;
-    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
-    if (!feats.length) {
-      if (lock) return;
-      this._inspectLastKey = "";
-      this._inspectFeats = [];
-      const src = map.getSource("inspect");
-      if (src) src.setData({ type: "FeatureCollection", features: [] });
-      this._inspectHint("Hover to inspect · click to lock · SHIFT+drag to capture an area.");
-      return;
-    }
-    const seen = new Set(), uniq = [];
-    for (const f of feats) {
-      const key = (f.sourceLayer || "") + "|" + JSON.stringify(f.properties || {});
-      if (seen.has(key)) continue;
-      seen.add(key);
-      uniq.push(f);
-    }
-    const rank = { point_symbols: 0, soundings: 1, lines: 2, complex_lines: 3, areas: 4, area_patterns: 5, text: 6 };
-    uniq.sort((a, b) => (rank[a.sourceLayer] ?? 9) - (rank[b.sourceLayer] ?? 9));
-    if (lock) this._inspectLocked = true;
-    // Skip re-render when hovering the same feature set (cheap mousemove path).
-    const setKey = (lock ? "L:" : "") + uniq.map((f) => f.sourceLayer + "|" + JSON.stringify(f.properties)).join("~");
-    if (setKey === this._inspectLastKey) return;
-    this._inspectLastKey = setKey;
-    this._inspectFeats = uniq; // the stack under the cursor
-    this._inspectIdx = 0; // show the topmost; the cycler steps through the rest
-    this._inspectMulti = false; // single-point pick → cycler
-    this._renderInspect();
-  }
-
-  // Capture EVERY chart feature in the dragged pixel box (corners a,b). Reads the
-  // loaded vector tiles directly via querySourceFeatures — unlike
-  // queryRenderedFeatures it also returns collision-hidden symbols and features
-  // not currently painted — across every loaded chart band, deduped, geo-filtered
-  // to the box. So "capture everything" really means everything there.
-  _captureArea(a, b) {
-    const map = this._map;
-    const tl = map.unproject([Math.min(a.x, b.x), Math.min(a.y, b.y)]);
-    const br = map.unproject([Math.max(a.x, b.x), Math.max(a.y, b.y)]);
-    const W = Math.min(tl.lng, br.lng), E = Math.max(tl.lng, br.lng);
-    const S = Math.min(tl.lat, br.lat), N = Math.max(tl.lat, br.lat);
-    const inBox = (g) => geomIntersectsBox(g, W, S, E, N);
-    // The realtime path has one "chart" source; the legacy pmtiles path had a
-    // "chart-<band>" source per band. Use whichever the live style has.
-    const styleSrc = map.getStyle().sources || {};
-    const sources = Object.keys(styleSrc).filter(isChartSource);
-    const layers = ["point_symbols", "soundings", "areas", "area_patterns", "lines", "complex_lines", "text"];
-    const seen = new Set(), out = [];
-    for (const src of sources) {
-      for (const layer of layers) {
-        let feats;
-        try { feats = map.querySourceFeatures(src, { sourceLayer: layer }); } catch { continue; }
-        for (const f of feats) {
-          if (!inBox(f.geometry)) continue;
-          const key = layer + "|" + JSON.stringify(f.properties || {});
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push({ source: src, sourceLayer: layer, properties: f.properties, geometry: f.geometry });
-        }
-      }
-    }
-    return out;
-  }
-
-  // SHIFT+drag box capture: show EVERY chart feature inside the dragged region as
-  // a list (locked), highlighting them all. Answers "what's all here / what's
-  // overlapping?" in one shot.
-  _showInspectArea(feats) {
-    const seen = new Set(), uniq = [];
-    for (const f of feats) {
-      const key = (f.sourceLayer || "") + "|" + JSON.stringify(f.properties || {});
-      if (seen.has(key)) continue;
-      seen.add(key);
-      uniq.push(f);
-    }
-    const rank = { point_symbols: 0, soundings: 1, lines: 2, complex_lines: 3, areas: 4, area_patterns: 5, text: 6 };
-    uniq.sort((a, b) => (rank[a.sourceLayer] ?? 9) - (rank[b.sourceLayer] ?? 9));
-    this._inspectFeats = uniq;
-    this._inspectIdx = 0;
-    this._inspectMulti = true;
-    this._inspectLocked = true;
-    this._inspectLastKey = "AREA"; // distinct from any hover key
-    this._renderInspect();
-  }
-
-  // Render the inspected feature(s): a single card + cycler for a point pick, or
-  // the full list for a SHIFT+drag area capture. Highlights the shown feature(s).
-  _renderInspect() {
-    const feats = this._inspectFeats || [];
-    if (!feats.length) return;
-    const src = this._map.getSource("inspect");
-    const body = this.shadowRoot.getElementById("inspect-body");
-    if (!body) return; // the inspector panel only exists while Settings → Advanced is open
-    const lockNote = this._inspectLocked ? `<div class="ins-lock">🔒 Locked — click the map to release</div>` : "";
-    if (this._inspectMulti) {
-      const cap = 80;
-      const shown = feats.slice(0, cap);
-      if (src) src.setData({ type: "FeatureCollection", features: feats.map((f) => ({ type: "Feature", properties: {}, geometry: f.geometry })) });
-      this._clearInspectFocus();
-      const more = feats.length > cap ? `<div class="ins-empty">…and ${feats.length - cap} more</div>` : "";
-      const hint = `<div class="ins-cycler"><span>${feats.length} features in area · click one to isolate it</span></div>`;
-      body.innerHTML = lockNote + hint + shown.map((f, i) => this._renderFeatureCard(f, i)).join("") + more;
-      body.querySelectorAll(".ins-feat[data-fi]").forEach((el) => (el.onclick = () => this._focusInspectFeature(+el.dataset.fi)));
-      return;
-    }
-    const i = Math.min(this._inspectIdx, feats.length - 1);
-    const f = feats[i];
-    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: f.geometry }] });
-    const cycler = feats.length > 1
-      ? `<div class="ins-cycler"><button id="ins-prev" class="btn" title="Previous">◀</button><span>${i + 1} / ${feats.length} here</span><button id="ins-next" class="btn" title="Next">▶</button></div>`
-      : "";
-    body.innerHTML = lockNote + cycler + this._renderFeatureCard(f);
-    if (feats.length > 1) {
-      this.shadowRoot.getElementById("ins-prev").onclick = () => this._inspectStep(-1);
-      this.shadowRoot.getElementById("ins-next").onclick = () => this._inspectStep(1);
-    }
-  }
-
-  // --- Share my view -------------------------------------------------------
-  // Publish the current scene (camera + installed cells) to the server so anyone
-  // — including a headless browser used for debugging — reopens the same camera.
-  // The link carries ONLY the view (#v=lon,lat,zoom[,bearing,pitch]); the cells
-  // and tiles already live on the server (the hub), so there is nothing to
-  // upload or re-download — the opener just renders the same spot from what is
-  // already loaded. The link is copied to the clipboard. (Legacy #share snapshot
-  // links still restore via _loadSharedView for backward compatibility.)
-  _shareView(btn) {
-    const m = this._map;
-    if (!m) return;
-    try {
-      const c = m.getCenter();
-      const parts = [+c.lng.toFixed(6), +c.lat.toFixed(6), +m.getZoom().toFixed(3)];
-      const b = +m.getBearing().toFixed(1), p = +m.getPitch().toFixed(1);
-      if (b || p) { parts.push(b); if (p) parts.push(p); } // omit trailing zeros
-      const url = location.origin + location.pathname + "#v=" + parts.join(",");
-      console.log("[share] view link:", url);
-      copyText(url).then((ok) => { if (btn) flashBtn(btn, ok ? "✓ copied" : "✓"); });
-    } catch (e) {
-      console.warn("[share] link failed:", e);
-      if (btn) flashBtn(btn, "✗");
-    }
   }
 
   // Fetch the latest shared snapshot and install its cells locally, downloading
@@ -1784,386 +1545,12 @@ export class ChartPlotter extends HTMLElement {
     return view;
   }
 
-  // --- Dev panel (tile/band inspector) -------------------------------------
-  // Render the Developer block at the foot of the Inspect panel: share/debug
-  // actions, per-band baker toggles, and a tile-coverage inspector. Re-rendered
-  // on band changes, coverage measurements, and (for the in-view counts) map move.
-  _renderDevPanel() {
-    const el = this.shadowRoot.getElementById("dev-tools");
-    if (!el) return;
-    const cov = this._devCoverage;
-    let covLine = "not measured for this view";
-    if (cov) {
-      if (cov.holePct === 0) covLine = "✓ full coverage — no holes";
-      else if (cov.gated.length) covLine = `${cov.holePct}% holes · filled by ${cov.gated.slice(0, 6).join(", ")}${cov.gated.length > 6 ? `, +${cov.gated.length - 6}` : ""} (zoom in)`;
-      else covLine = `${cov.holePct}% holes · no installed cell covers them`;
-    }
-    const inspecting = this._inspectMode;
-    const dbgOn = this._debugCells;
-    const busy = this._taskRunning() || (this._chartLib && this._chartLib.busy);
-    el.innerHTML = `
-      <section class="dev-sec">
-        <div class="dev-h">Charts</div>
-        <button id="dev-rebuild" class="btn wide"${busy ? " disabled" : ""}>↻ Rebuild all charts</button>
-        <p class="dev-note">Re-bake every installed NOAA / IENC district into per-band tile sets from the cells already on the server — <b>no re-download</b>. Use after a baking change. Progress shows in the notification pill.</p>
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Share view</div>
-        <button id="dev-share" class="btn wide">Copy share link</button>
-        <p class="dev-note">Copies a link to <b>this exact camera</b> (center / zoom / bearing). Opens the same spot using the charts already on the server — <b>no upload, no re-download</b>.</p>
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Feature inspector</div>
-        <button id="dev-inspect" class="btn wide${inspecting ? " on" : ""}">${inspecting ? "● Inspecting — click to stop" : "Inspect features"}</button>
-        <button id="dev-feat" class="btn wide"${inspecting ? "" : " disabled"} title="Copy the selected feature's source/geometry/attributes to clipboard + server">Copy feature debug</button>
-        <p class="dev-note">Hover a feature to highlight it · click to lock · SHIFT+drag to capture an area.</p>
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Coverage</div>
-        <div class="dev-row"><span class="dev-cov">${covLine}</span><button id="dev-measure" class="btn sm">Measure</button></div>
-        <p class="dev-note">Grid-samples the view for holes (no chart data) and paints them red.</p>
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Chart bands</div>
-        ${DEV_BANDS.map((b) => `<label class="dev-row"><span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${BAND_COLOR[b]};margin-right:7px;vertical-align:-1px"></span>${BAND_LABEL[b]}</span><input class="dev-band" type="checkbox" data-band="${b}"${this._bandsOff.has(b) ? "" : " checked"}></label>`).join("")}
-        <p class="dev-note">Turn a usage band's charts off to declutter or compare what each band contributes. Hides that band's layers everywhere; persists across reloads.</p>
-      </section>
-
-      <section class="dev-sec">
-        <div class="dev-h">Diagnostics</div>
-        <label class="dev-row"><span>Cell footprints</span><input id="dev-debug-cells" type="checkbox"${dbgOn ? " checked" : ""}></label>
-        <p class="dev-note">Outline every installed cell (hover a box to name it).</p>
-        <label class="dev-row"><span>Tile debugger</span><input id="dev-tiledbg" type="checkbox"${this._tileDbgOn ? " checked" : ""}></label>
-        <p class="dev-note">Per-tile overlay: green=rendering, <b style="color:#e53935">red=delivered-but-empty</b>, amber=loading. Click a box for detail.</p>
-        <div class="dev-row"><span>Refresh tiles</span><button id="dev-flush" class="btn sm">Re-fetch</button></div>
-        <p class="dev-note">Drop MapLibre's loaded tiles and re-request them from the server (e.g. after a rebuild).</p>
-      </section>`;
-    const q = (id) => el.querySelector("#" + id);
-    const rebuild = q("dev-rebuild"); if (rebuild && !rebuild.disabled) rebuild.onclick = (e) => this._rebuildAllPerBand(e.currentTarget);
-    q("dev-share").onclick = (e) => this._shareView(e.currentTarget);
-    q("dev-inspect").onclick = () => this._setInspectMode(!this._inspectMode);
-    const feat = q("dev-feat"); if (!feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
-    el.querySelectorAll(".dev-band").forEach((cb) => { cb.onchange = () => this._setBandOff(cb.dataset.band, !cb.checked); });
-    const dbg = q("dev-debug-cells"); dbg.onchange = () => this._setDebugCells(dbg.checked);
-    q("dev-measure").onclick = (e) => this._measureCoverage(e.currentTarget);
-    const tiledbg = q("dev-tiledbg"); if (tiledbg) tiledbg.onchange = () => this._setTileDebugger(tiledbg.checked);
-    const flush = q("dev-flush"); if (flush) flush.onclick = (e) => this._flushTiles(e.currentTarget);
-  }
-
-  // Re-bake every installed NOAA/IENC district into per-band tile sets from the cells
-  // ALREADY on the server (no NOAA re-download). The CLIENT supplies each district's
-  // cell list (from its catalogue) since the server doesn't track membership. Runs
-  // the districts one at a time, surfacing progress through the notification pill.
-  // user/import/legacy packs are skipped (no client-known cell list).
-  async _rebuildAllPerBand(btn) {
-    if (this._taskRunning() || (this._chartLib && this._chartLib.busy)) { if (btn) flashBtn(btn, "busy"); return; }
-    let packs = [];
-    try { packs = ((await fetch(`${this._assets}api/packs`).then((r) => (r.ok ? r.json() : null))) || {}).packs || []; } catch (e) { /* offline */ }
-    // Load the IENC catalogue so we know each installed river pack's cells (the
-    // catalogue + ienc-pack grouping live in <chart-library> now).
-    if (packs.some((p) => p.name.startsWith("ienc-"))) { try { await (this._chartLib ? this._chartLib._iencCatalog() : Promise.resolve()); } catch (e) { /* skip ienc */ } }
-    const iencPacks = (this._chartLib ? this._chartLib._providerPacks("ienc") : null) || [];
-    const todo = [];
-    for (const p of packs) {
-      const m = /^noaa-d(\d+)$/.exec(p.name);
-      if (m) { const names = this._districtCellNames(+m[1]); if (names.length) todo.push({ set: p.name, label: this._setLabel(p.name), names }); continue; }
-      if (p.name.startsWith("ienc-")) {
-        const pk = iencPacks.find((x) => x.key === p.name);
-        const names = pk && pk.cells ? pk.cells.map((c) => c.name) : [];
-        if (names.length) todo.push({ set: p.name, label: this._setLabel(p.name), names });
-      }
-    }
-    if (!todo.length) { if (btn) flashBtn(btn, "nothing to rebuild"); return; }
-    this._task = { kind: "download", status: "running" };
-    this._renderDevPanel(); // disable the button while running
-    let done = 0;
-    for (const j of todo) {
-      this._setProgress({ label: "Rebuilding charts", pill: `Rebuilding ${j.label}`, sub: `${done + 1} of ${todo.length} · ${j.names.length} charts`, frac: done / todo.length });
-      try {
-        const res = await fetch(`${this._assets}api/import?set=${encodeURIComponent(j.set)}&cells=${encodeURIComponent(j.names.join(","))}`, { method: "POST" });
-        const job = await res.json().catch(() => ({}));
-        if (job.job) await this._pollImport(job.job, (p) => this._setProgress(p), j.label);
-      } catch (e) { console.warn("[rebuild]", j.set, e); }
-      done++;
-    }
-    this._task = null;
-    this._setProgress(null);
-    await this._renderInstalledSets();
-    if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } } // re-fetch the freshly-baked tiles
-    if (this._chartLib) this._chartLib.refresh();
-    this._renderDevPanel();
-    if (btn) flashBtn(btn, `✓ rebuilt ${todo.length}`);
-  }
-
-  // Toggle the tile-debugger plugin (per-tile lifecycle + delivery-integrity
-  // overlay). Lazily imported on first use — it's a dev-only diagnostic. Reuses
-  // one IControl instance; add/remove fully sets up / tears it down each time.
-  // Also turns on MapLibre's built-in tile-boundary grid (so the chart tiles are
-  // outlined in the map itself, not just the plugin's own boxes) and the wasm
-  // baker's per-tile bake logging (`eligible=… empty=…` → console).
-  async _setTileDebugger(on) {
-    this._tileDbgOn = !!on;
-    const map = this._map; if (!map) return;
-    map.showTileBoundaries = this._tileDbgOn;
-    if (this._plotter && this._plotter.setTileDiag) this._plotter.setTileDiag(this._tileDbgOn);
-    if (on) {
-      if (!this._tileDbg) {
-        const mod = await import("./components/tile-debugger.mjs");
-        this._tileDbg = new mod.TileDebugger({ source: "chart", inspectURL: (z, x, y) => this._tileInspectURL(z, x, y) });
-      }
-      if (this._tileDbgOn) map.addControl(this._tileDbg, "top-right"); // re-check: user may have toggled off during the import
-    } else if (this._tileDbg) {
-      try { map.removeControl(this._tileDbg); } catch (e) { /* not added */ }
-    }
-  }
-
-  // Build the hittable URL for the tile-debugger's "inspect this tile" button:
-  // GET /api/tile/{z}/{x}/{y}?cells=… — the server re-bakes that z/x/y from the
-  // cached cells (same baker) and returns the raw MVT, so it can be pulled with
-  // curl / fed to an MVT inspector. We scope ?cells to the installed cells whose
-  // footprint overlaps the tile (cells with no known footprint are always passed),
-  // so the server bakes the same set the app loaded. Absolute URL (clipboard-ready).
-  _tileInspectURL(z, x, y) {
-    const [W, S, E, N] = this._tileBBox(z, x, y);
-    const names = [];
-    for (const name of this._installed) {
-      const c = this._byName.get(name);
-      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) { names.push(name); continue; } // unknown footprint → always include
-      const [w, s, e, n] = c.bb;
-      if (e < W || w > E || n < S || s > N) continue; // no overlap
-      names.push(name);
-    }
-    const q = names.length ? `?cells=${encodeURIComponent(names.join(","))}` : "";
-    return new URL(`api/tile/${z}/${x}/${y}${q}`, location.href).href;
-  }
-
-  // Web-Mercator tile z/x/y → lon/lat bbox [W,S,E,N].
-  _tileBBox(z, x, y) {
-    const n = 2 ** z;
-    const lon = (xx) => (xx / n) * 360 - 180;
-    const lat = (yy) => { const r = Math.PI - (2 * Math.PI * yy) / n; return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(r) - Math.exp(-r))); };
-    return [lon(x), lat(y + 1), lon(x + 1), lat(y)];
-  }
-
-  // Flush the baked-tile caches and force every visible tile to re-bake: clears
-  // the in-browser cp TileCache (memory + IndexedDB), drops MapLibre's already-
-  // loaded tiles for the chart source, and bumps the tile version so it re-fetches.
-  // A debugging probe — if a stale/empty tile fills in after this, it was cached;
-  // if it stays blank, the emptiness is being regenerated (not a cache artifact).
-  async _flushTiles(btn) {
-    const pl = this._plotter;
-    if (!pl || !pl.flushTiles) return;
-    if (btn) flashBtn(btn, "…");
-    try {
-      await pl.flushTiles();
-      console.log("[flush] tile caches cleared, re-baking visible tiles");
-      if (btn) flashBtn(btn, "✓");
-    } catch (e) { console.warn("[flush]", e); if (btn) flashBtn(btn, "✗"); }
-  }
-
-  // Cells overlapping the current viewport, tallied per usage band:
-  // { band: { overlap, loaded } }. Drives the dev band rows.
-  _devInViewBands() {
-    const out = {};
-    if (!this._map) return out;
-    const b = this._map.getBounds();
-    const W = b.getWest(), S = b.getSouth(), E = b.getEast(), N = b.getNorth();
-    for (const name of this._installed) {
-      const c = this._byName.get(name);
-      if (!c || !Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      const [w, s, e, n] = c.bb;
-      if (e < W || w > E || n < S || s > N) continue; // no overlap
-      const band = typeof c.s === "number" ? bandForScale(c.s) : "overview";
-      const o = (out[band] ||= { overlap: 0, loaded: 0 });
-      o.overlap++;
-      if (this._cellStatus.get(name) === "ready") o.loaded++;
-    }
-    return out;
-  }
-
-  // Turn a usage band off/on. Hides that band's layers instantly (server +
-  // per-band pmtiles render one source per band) and persists the choice; the set
-  // also gates the realtime baker (minzoom 999) so a later in-browser re-bake skips
-  // those cells too. No re-bake needed just to hide.
-  _setBandOff(band, off) {
-    if (off) this._bandsOff.add(band); else this._bandsOff.delete(band);
-    try { localStorage.setItem(LS_BANDS_OFF, JSON.stringify([...this._bandsOff])); } catch {}
-    this._persistSettings();
-    if (this._plotter) this._plotter.setBandVisible(band, !off);
-    this._renderDevPanel();
-  }
-
   // Re-apply persisted band on/off to the plotter once its layers exist (on boot
   // and after any archive (re)load). Idempotent; also seeds the plotter's hidden
   // set so a later style rebuild keeps the bands off.
   _applyBandsOff() {
     if (!this._plotter) return;
     for (const band of DEV_BANDS) this._plotter.setBandVisible(band, !this._bandsOff.has(band));
-  }
-
-  // Sample a grid over the viewport: a point where no chart feature renders is a
-  // coverage hole. Paints the holes on the map and reports the hole %, plus which
-  // installed cells cover the holes but are gated out at the current zoom (so you
-  // can see "zoom in past z9 to load these coastal cells"). One-shot (button).
-  async _measureCoverage(btn) {
-    const map = this._map;
-    if (!map) return;
-    if (btn) flashBtn(btn, "…");
-    const layers = (map.getStyle()?.layers || []).filter((l) => l.source && isChartSource(l.source)).map((l) => l.id);
-    const W = map.getCanvas().clientWidth, H = map.getCanvas().clientHeight;
-    const cols = 32, rows = 20;
-    const holes = [];
-    let covered = 0, total = 0;
-    for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
-      const x = (i / cols) * W, y = (j / rows) * H;
-      total++;
-      if (map.queryRenderedFeatures([x, y], { layers }).length) covered++;
-      else holes.push(map.unproject([x, y]));
-    }
-    const holePct = total ? +(100 * (total - covered) / total).toFixed(1) : 0;
-    const z = map.getZoom();
-    const gated = new Set();
-    for (const ll of holes) {
-      for (const name of this._installed) {
-        const c = this._byName.get(name);
-        if (!c || !Array.isArray(c.bb)) continue;
-        const [w, s, e, n] = c.bb;
-        if (ll.lng < w || ll.lng > e || ll.lat < s || ll.lat > n) continue;
-        const band = typeof c.s === "number" ? bandForScale(c.s) : "overview";
-        if (!this._bandsOff.has(band) && z < (BAND_MINZOOM[band] || 0)) gated.add(name);
-      }
-    }
-    this._devCoverage = { holePct, gated: [...gated].sort() };
-    const src = map.getSource("tile-holes");
-    if (src) src.setData({ type: "FeatureCollection", features: holes.map((ll) => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [ll.lng, ll.lat] } })) });
-    this._renderDevPanel();
-    if (btn) flashBtn(btn, holePct ? `${holePct}%` : "✓");
-  }
-
-  _clearDevHoles() {
-    this._devCoverage = null;
-    const src = this._map && this._map.getSource("tile-holes");
-    if (src) src.setData({ type: "FeatureCollection", features: [] });
-  }
-
-  // Copy a debug snapshot of the current inspector selection — the picked
-  // feature's source/layer, baked properties, and GeoJSON geometry (the exact
-  // lon/lat MapLibre read from the tile, for diagnosing placement) plus the map
-  // view — to the clipboard AND POST it to /api/debug so it can be pulled
-  // server-side. Works on a plain-http LAN origin via copyText's fallback.
-  async _copyInspectDebug(btn) {
-    const m = this._map;
-    let view = null;
-    if (m) {
-      const c = m.getCenter();
-      view = { center: [+c.lng.toFixed(6), +c.lat.toFixed(6)], zoom: +m.getZoom().toFixed(3), bearing: +m.getBearing().toFixed(1) };
-    }
-    const feats = this._inspectFeats || [];
-    const pick = this._inspectMulti ? feats.slice(0, 80) : (feats.length ? [feats[Math.min(this._inspectIdx, feats.length - 1)]] : []);
-    // Render diagnostics: complex linestyles are tessellated in the baker — the
-    // dash "on" segments land in the complex-lines layer and the embedded marks
-    // in point_symbols. Report how many of each are in view. (Pins "lines blank /
-    // symbols missing" without a screenshot.)
-    let render = null;
-    if (m && m.getStyle) {
-      const cnt = (ids) => { try { return m.queryRenderedFeatures({ layers: ids }).length; } catch { return -1; } };
-      render = {
-        complexLineSegmentsInView: cnt(["complex-lines"]),
-        pointSymbolsInView: cnt(["point_symbols"]),
-      };
-    }
-    const snap = {
-      when: new Date().toISOString(),
-      view,
-      count: feats.length,
-      features: pick.map((f) => ({ source: f.source, sourceLayer: f.sourceLayer, geometry: f.geometry, properties: f.properties })),
-      render,
-    };
-    const text = JSON.stringify(snap, null, 2);
-    const ok = await copyText(text);
-    fetch("api/debug", { method: "POST", headers: { "content-type": "application/json" }, body: text }).catch(() => {});
-    flashBtn(btn, ok ? "✓" : "✗");
-  }
-
-  // Isolate one feature from the area list: paint it cyan over the dim red set
-  // and mark its card, so you can see its exact footprint and judge overlap.
-  _focusInspectFeature(i) {
-    const f = (this._inspectFeats || [])[i];
-    if (!f) return;
-    const src = this._map.getSource("inspect-focus");
-    if (src) src.setData({ type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: f.geometry }] });
-    this.shadowRoot.querySelectorAll(".ins-feat[data-fi]").forEach((el) => el.classList.toggle("active", +el.dataset.fi === i));
-  }
-
-  _clearInspectFocus() {
-    const src = this._map && this._map.getSource("inspect-focus");
-    if (src) src.setData({ type: "FeatureCollection", features: [] });
-  }
-
-  // Step the cycler through overlapping features (wraps).
-  _inspectStep(d) {
-    const n = (this._inspectFeats || []).length;
-    if (!n) return;
-    this._inspectIdx = (this._inspectIdx + d + n) % n;
-    this._renderInspect();
-  }
-
-  _inspectHint(msg) {
-    const body = this.shadowRoot.getElementById("inspect-body");
-    if (body) body.innerHTML = `<div class="ins-empty">${esc(msg)}</div>`;
-  }
-
-
-  // `idx` (when given) makes the card a clickable list item for the area view —
-  // clicking it isolates that feature's geometry on the map (see _focusInspectFeature).
-  _renderFeatureCard(f, idx) {
-    const p = f.properties || {};
-    const acr = p.class || "";
-    const named = S57_CLASS[acr];
-    const label = named || INSPECT_LAYER_LABEL[f.sourceLayer] || acr || f.sourceLayer || "Feature";
-    const name = p.objnam ? `<div class="ins-name">${esc(p.objnam)}</div>` : "";
-    const cellPill = p.cell ? `<span class="ins-cell" title="Source ENC cell">▦ ${esc(p.cell)}</span>` : "";
-    const lightPill = p.light ? `<span class="ins-light" title="Light characteristic">✦ ${esc(p.light)}</span>` : "";
-    const pills = cellPill || lightPill ? `<div class="ins-pills">${cellPill}${lightPill}</div>` : "";
-    // name/light/cell get their own prominent rows; class is in the title.
-    const keys = Object.keys(p).filter((k) => !["cell", "class", "objnam", "light"].includes(k)).sort();
-    const rows = keys.map((k) => `<div class="k">${esc(k)}</div><div class="v">${esc(this._fmtInspectVal(k, p[k]))}</div>`).join("")
-      || `<div class="k" style="grid-column:1/-1;color:var(--ui-text-faint)">no attributes</div>`;
-    const clickable = idx != null ? ` data-fi="${idx}" class="ins-feat ins-clickable"` : ` class="ins-feat"`;
-    return `<div${clickable}>
-      <div class="ins-title">${esc(label)}${named && acr ? `<span class="ins-acr">${esc(acr)}</span>` : ""}<span class="ins-layer">${esc(f.sourceLayer || "")}</span></div>
-      ${name}
-      ${pills}
-      <div class="ins-kv">${rows}</div>
-    </div>`;
-  }
-
-  // Friendlier rendering for a few baked enum/typed attributes.
-  _fmtInspectVal(k, v) {
-    if (k === "cat") return ["base", "standard", "other"][v] ?? String(v);
-    if (k === "bnd") return ["plain", "symbolized", "common"][v] ?? String(v);
-    if ((k === "depth" || k === "danger_depth" || k === "drval1" || k === "drval2") && v !== "" && v != null && !isNaN(v)) return `${v} m`;
-    return String(v);
-  }
-
-  _closeInspect() {
-    this._inspectLocked = false;
-    this._inspectLastKey = "";
-    this._inspectFeats = [];
-    this._inspectIdx = 0;
-    this._inspectMulti = false;
-    const body = this.shadowRoot.getElementById("inspect-body");
-    if (body) body.innerHTML = ""; // drop any feature cards so the dev tools sit at the top
-    if (this._map) {
-      this._map.getCanvas().style.cursor = "crosshair"; // back to the chart pick cursor
-      const src = this._map.getSource("inspect");
-      if (src) src.setData({ type: "FeatureCollection", features: [] });
-      this._clearInspectFocus();
-    }
   }
 
   // --- ECDIS cursor pick (S-52 PresLib §10.8) -------------------------------
@@ -3258,40 +2645,10 @@ export class ChartPlotter extends HTMLElement {
           border-bottom:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 -2px 1px rgba(0,0,0,.08)); }
         #search::after { border-bottom-color:var(--ui-surface); }
         /* The settings panel + its control look (toggle/segmented/number/select)
-           now live in <settings-dialog> (settings-dialog.view.mjs STYLE). The shell
-           only keeps the developer-tools chrome below (dev panel + inspector),
-           which option B renders in the shell shadow's #dev-region. */
-        /* Dev tools live behind a button at the very top of Settings (spans all
-           columns). The Dev panel itself opens as the inspect section with a back
-           link to Settings. */
-        .set-section.dev-entry { grid-column:1/-1; margin:0 0 14px; }
-        .dev-open { display:flex; align-items:center; gap:9px; font-weight:600; padding:10px 12px; }
-        .dev-open svg { width:17px; height:17px; flex:none; }
-        .dev-open .dev-open-chev { margin-left:auto; color:var(--ui-text-faint); }
-        .dev-back { display:inline-flex; align-items:center; gap:4px; margin:0 0 8px -4px; padding:4px 8px 4px 4px;
-          border:none; background:none; color:var(--ui-accent); cursor:pointer; font:600 13px system-ui,sans-serif; border-radius:7px; }
-        .dev-back:hover { background:var(--ui-hover); }
-        .dev-back svg { width:16px; height:16px; }
-        /* Feature inspector — slides in from the RIGHT (overlays the map). */
-        .ins-body { overflow:auto; padding:12px 0; }
-        .ins-empty { color:var(--ui-text-faint); text-align:center; padding:24px 10px; }
-        .ins-feat { margin:0 0 14px; border:1px solid var(--ui-border-2); border-radius:8px; overflow:hidden; }
-        .ins-feat .ins-title { padding:8px 10px; background:var(--ui-surface-2); font-weight:600; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
-        .ins-feat .ins-acr { color:var(--ui-text-dim); font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:500; }
-        .ins-feat .ins-layer { margin-left:auto; color:var(--ui-text-faint); font-size:11px; }
-        .ins-feat.ins-clickable { cursor:pointer; }
-        .ins-feat.ins-clickable:hover { border-color:#00b8d4; }
-        .ins-feat.active { border-color:#00b8d4; box-shadow:0 0 0 1px #00b8d4 inset; }
-        .ins-feat.active .ins-title { background:rgba(0,184,212,.14); }
-        .ins-pills { padding:6px 10px 0; }
-        .ins-cell { display:inline-flex; align-items:center; gap:4px; background:var(--ui-accent); color:var(--ui-accent-text);
-          border-radius:11px; padding:2px 9px; font:600 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.02em; }
-        .ins-name { padding:2px 10px 0; font-weight:600; }
-        .ins-light { display:inline-flex; align-items:center; gap:4px; background:#7e3ff2; color:#fff;
-          border-radius:11px; padding:2px 9px; font:600 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
-        .ins-kv { display:grid; grid-template-columns:minmax(80px,auto) 1fr; gap:3px 12px; padding:8px 10px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
-        .ins-kv .k { color:var(--ui-text-dim); }
-        .ins-kv .v { color:var(--ui-text); word-break:break-word; }
+           now live in <settings-dialog> (settings-dialog.view.mjs STYLE); the
+           Advanced-tab dev tools (rebake + feature inspector) carry their own CSS in
+           dev-tools.view.mjs and render into the dialog's shadow. Nothing dev-side
+           remains in the shell sheet. */
         .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
         .dhead strong { flex:1; font-size:14px; }
         .body { overflow:auto; padding:14px 16px; flex:1; }
@@ -3302,27 +2659,6 @@ export class ChartPlotter extends HTMLElement {
         .row .name { font-weight:600; } .row .meta { color:var(--ui-text-dim); font-size:12px; }
         .grow { flex:1; }
         .muted { color:var(--ui-text-dim); }
-        /* Dev panel: clearly separated sections, most-used at top, roomy spacing. */
-        .dev-tools { display:flex; flex-direction:column; }
-        #dev-region .dev-tools { border-top:1px solid var(--ui-border-2); margin-top:8px; }
-        .dev-sec { display:flex; flex-direction:column; gap:8px; padding:16px 0; border-top:1px solid var(--ui-border); }
-        .dev-sec:first-child { padding-top:14px; border-top:none; }
-        .dev-h { font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--ui-text-faint); }
-        .dev-h .bz { float:right; text-transform:none; letter-spacing:0; font-weight:500; color:var(--ui-text-dim); }
-        .dev-note { margin:0; color:var(--ui-text-dim); font-size:12px; line-height:1.45; }
-        .dev-row { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:24px; }
-        .btn.wide { width:100%; text-align:center; }
-        .btn.on { background:var(--ui-accent); color:#fff; border-color:var(--ui-accent); }
-        .btn[disabled] { opacity:.45; cursor:default; }
-        .btn.sm { padding:3px 10px; font-size:12px; white-space:nowrap; }
-        .dev-cov { font-size:12px; color:var(--ui-text); }
-        .dev-bands { display:flex; flex-direction:column; gap:3px; }
-        .dev-band { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:6px; cursor:pointer; }
-        .dev-band:hover { background:var(--ui-hover); }
-        .dev-band .bn { flex:1; text-transform:capitalize; font-weight:500; }
-        .dev-band .bs { color:var(--ui-text-dim); font-size:12px; }
-        .dev-band.off { opacity:.5; } .dev-band.off .bn { text-decoration:line-through; }
-        .dev-band.gated .bs { color:#d9892b; }
         /* Right-click context menu (debug cell picker). */
         .ctx-menu { position:absolute; z-index:30; background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border);
           border-radius:8px; box-shadow:0 6px 22px rgba(0,0,0,.28); padding:4px; min-width:180px; font:13px/1.4 system-ui,sans-serif; }
@@ -3506,11 +2842,10 @@ export class ChartPlotter extends HTMLElement {
             <chart-library id="chart-lib"></chart-library>
           </div>
           <div class="panel" data-panel="settings">
+            <!-- The settings panel is a HOST: it renders the registry's
+                 contributions, including the Advanced-tab dev tools (DevTools'
+                 render() escape hatch) — no shell-side dev region any more. -->
             <settings-dialog id="settings-dlg"></settings-dialog>
-            <!-- Developer tools (option B): rendered in the SHELL shadow because
-                 _renderDevPanel / _renderInspect reach into it by id. Shown only
-                 when the dialog's active tab is Advanced (and not in prod). -->
-            <div id="dev-region" hidden></div>
           </div>
         </div>
       </div>`;
@@ -3577,44 +2912,12 @@ export class ChartPlotter extends HTMLElement {
     // Charts = the <chart-library> panel; open it on its current provider.
     if (name === "charts" && this._chartLib) this._chartLib.show(this._chartLib._selProvider || "noaa");
     // Feature-inspect is NOT auto-armed; it's a button inside the Advanced (dev)
-    // tab. Any section switch disarms it (and clears dev hole markers).
-    this._setInspectMode(false);
-    if (name === "settings") {
-      this._clearDevHoles();
-      if (this._settingsDlg) this._settingsDlg.show(this._settingsDlg.activeTab || "general");
-      this._syncDevRegion(); // reveal dev tools if it reopened on the Advanced tab
+    // tab. Any section switch disarms it (DevTools owns the inspect state).
+    if (this._devTools) this._devTools.setInspectMode(false);
+    if (name === "settings" && this._settingsDlg) {
+      this._settingsDlg.show(this._settingsDlg.activeTab || "general");
     }
     this.setDrawerOpen(true);
-  }
-
-  // The developer tools live inline in Settings → Advanced. They're "visible"
-  // (and worth re-rendering on band/coverage/inspect changes) when that drawer is
-  // open on the Advanced tab. _renderDevPanel/_renderInspect also no-op safely when
-  // their containers are absent, so this is just an optimisation + correctness gate.
-  _devVisible() {
-    return this._drawerOpen() && this._section === "settings"
-      && !!(this._settingsDlg && this._settingsDlg.activeTab === "advanced");
-  }
-
-  // Reveal / tear down the developer-tools region (option B). The dev tools render
-  // in the SHELL shadow (#dev-region) — not the dialog's — because _renderDevPanel /
-  // _renderInspect reach into the shell shadow by id. We mount the #inspect-body +
-  // #dev-tools containers here when the dialog's active tab is Advanced (and not
-  // prod), then let the existing renderers fill them; otherwise the region is empty
-  // + hidden so its content doesn't linger under other tabs.
-  _syncDevRegion() {
-    const region = this.shadowRoot.getElementById("dev-region");
-    if (!region) return;
-    const show = !this._prod && this._devVisible();
-    region.hidden = !show;
-    if (!show) { region.innerHTML = ""; return; }
-    // Build the containers once; keep them across re-syncs so renderers can target
-    // them and so re-render hooks don't thrash the DOM.
-    if (!region.querySelector("#dev-tools")) {
-      region.innerHTML = `<div id="inspect-body" class="ins-body"></div><div id="dev-tools" class="dev-tools"></div>`;
-    }
-    this._renderInspect();
-    this._renderDevPanel();
   }
 
   // Home: the full-screen chart viewer — drop any selection overlay/section and
@@ -3674,7 +2977,7 @@ export class ChartPlotter extends HTMLElement {
     // Closing the drawer clears the region-focus highlight + any armed box drag,
     // and disarms feature-inspect (crosshair/box-zoom) so it doesn't linger over
     // the bare map. (The old cell-picker "charts mode" exit is gone with the picker.)
-    if (!open) { this._cancelAreaSelect(); this._clearFocus(); this._setInspectMode(false); }
+    if (!open) { this._cancelAreaSelect(); this._clearFocus(); if (this._devTools) this._devTools.setInspectMode(false); }
     this.updateEmptyState(); // the welcome card hides while the drawer is open
   }
 
