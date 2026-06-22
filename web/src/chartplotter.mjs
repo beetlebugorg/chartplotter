@@ -48,8 +48,8 @@
 //   • prebaked (pmtiles="<url>" / setArchive / loadRegions) — a hosted .pmtiles
 //     read by HTTP Range, the serverless static-CDN option. No tile server.
 // There is no in-browser baking; the wasm baker has been retired (server migration).
-import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
-import { convertDistance, unitSuffix } from "./units.mjs";
+import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./data/pmtiles-source.mjs";
+import { convertDistance, unitSuffix } from "./lib/units.mjs";
 
 const FALLBACK = "#ff00ff";
 const FEATURE_SCALE = 0.01 / 0.35278;

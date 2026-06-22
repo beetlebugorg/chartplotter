@@ -13,7 +13,7 @@
 //
 // Public API: setCatalogue(cat) · setUnits(prefs) · show(feats, anchor{x,y}) · hide().
 
-import { convertHeight, convertDistance, convertSpeed, unitSuffix, M_TO_FT } from "./units.mjs";
+import { convertHeight, convertDistance, convertSpeed, unitSuffix, M_TO_FT } from "../lib/units.mjs";
 
 // Attributes whose numeric value carries a physical unit we let the mariner pick.
 // Each maps to a category whose canonical source unit matches the ENC encoding:

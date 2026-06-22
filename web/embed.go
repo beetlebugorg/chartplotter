@@ -18,7 +18,7 @@ import "embed"
 // "glyphs/Noto Sans Regular/0-255.pbf").
 //
 //go:embed index.html
-//go:embed chartplotter.mjs chartplotter-app.mjs chart-store.mjs pmtiles-source.mjs zip-import.mjs
+//go:embed src
 //go:embed colortables.json linestyles.json patterns.json sprite.json catalog.json
 //go:embed patterns.png sprite.png
 //go:embed basemap/coastline.geojson

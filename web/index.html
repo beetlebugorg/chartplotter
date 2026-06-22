@@ -37,7 +37,7 @@
        colortables/sprite/linestyles/patterns + glyphs (`chartplotter --emit-assets web`),
        vendor/maplibre-gl.*, basemap/coastline.geojson (`scripts/fetch-basemap.sh`),
        and optionally catalog.json (`chartplotter --catalog-json …`). -->
-  <script type="module" src="./chartplotter-app.mjs"></script>
+  <script type="module" src="./src/chartplotter-app.mjs"></script>
 </head>
 <body>
   <!-- `pmtiles="charts.pmtiles"` renders the hosted default archive (baked by
@@ -66,7 +66,7 @@
 
   <!-- Embedding just the renderer (no management UI) stays a one-liner — point
        it at a prebaked archive:
-       <script type="module" src="./chartplotter.mjs"></script>
+       <script type="module" src="./src/chartplotter.mjs"></script>
        <chart-plotter pmtiles="charts.pmtiles"></chart-plotter> -->
 </body>
 </html>

@@ -17,17 +17,17 @@
 // listCharts/setScheme/setMariner and its `map` handle) plus the shared ChartStore.
 
 import "./chartplotter.mjs"; // defines <chart-plotter> (the renderer we wrap)
-import "./pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
-import { ChartDownloader } from "./chart-downloader.mjs"; // chart discovery + acquisition
-import { AuxStore } from "./aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
-import { ChartStore } from "./chart-store.mjs";
-import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
-import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./units.mjs"; // configurable display units
-import { ChartRadar } from "./chart-radar.mjs"; // off-screen installed-chart edge pointers
-import { HudController } from "./hud-controller.mjs"; // status readout + overscale zoom cap
-import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./bands.mjs";
-import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./util.mjs";
-import { archivePut, archiveGet } from "./archive-store.mjs";
+import "./components/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
+import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
+import { ChartStore } from "./data/chart-store.mjs";
+import { readCentralDirectory, cellEntries, extractEntry } from "./data/zip-import.mjs";
+import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./lib/units.mjs"; // configurable display units
+import { ChartRadar } from "./map/chart-radar.mjs"; // off-screen installed-chart edge pointers
+import { HudController } from "./map/hud-controller.mjs"; // status readout + overscale zoom cap
+import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
+import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
+import { archivePut, archiveGet } from "./data/archive-store.mjs";
 
 const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
@@ -2540,7 +2540,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (this._plotter && this._plotter.setTileDiag) this._plotter.setTileDiag(this._tileDbgOn);
     if (on) {
       if (!this._tileDbg) {
-        const mod = await import("./tile-debugger.mjs");
+        const mod = await import("./components/tile-debugger.mjs");
         this._tileDbg = new mod.TileDebugger({ source: "chart", inspectURL: (z, x, y) => this._tileInspectURL(z, x, y) });
       }
       if (this._tileDbgOn) map.addControl(this._tileDbg, "top-right"); // re-check: user may have toggled off during the import

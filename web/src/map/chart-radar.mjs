@@ -11,8 +11,8 @@
 //   new ChartRadar({ host, map, getPacks, getUnits, labelFor, onPick, visible })
 // where getPacks() → [{name, enabled, bands:[coarse→fine], bounds:[w,s,e,n]}].
 
-import { format as fmtUnit } from "./units.mjs";
-import { BAND_COLOR } from "./bands.mjs";
+import { format as fmtUnit } from "../lib/units.mjs";
+import { BAND_COLOR } from "../lib/bands.mjs";
 
 const MERGE_PX = 46; // chips closer than this on screen merge into one cluster
 const CAP = 8;       // max chips shown (nearest clusters win)
