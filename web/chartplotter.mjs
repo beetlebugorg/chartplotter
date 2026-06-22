@@ -239,7 +239,13 @@ export class ChartPlotter extends HTMLElement {
     // Shadow DOM: MapLibre CSS must live inside the shadow root, plus a sized
     // map container.
     const style = document.createElement("style");
-    style.textContent = ":host{display:block;position:relative}#map{position:absolute;inset:0;background:#93aebb}";
+    style.textContent =
+      ":host{display:block;position:relative}#map{position:absolute;inset:0;background:#93aebb}" +
+      // S-52 SCALEB-style scalebar (horizontal striped NM bar, bottom-left).
+      ".s52-scalebar{display:flex;flex-direction:column;align-items:flex-start;margin:0 0 8px 10px;pointer-events:none;user-select:none}" +
+      ".s52sb-label{font:700 11px/1.2 system-ui,sans-serif;color:#1a2026;background:rgba(255,255,255,.82);padding:1px 5px;border-radius:4px;margin-bottom:3px;box-shadow:0 1px 3px rgba(0,0,0,.2);font-variant-numeric:tabular-nums}" +
+      ".s52sb-bar{display:flex;flex-direction:row;height:8px;min-width:8px;border:1px solid #1a2026;box-sizing:border-box;box-shadow:0 1px 3px rgba(0,0,0,.3)}" +
+      ".s52sb-bar span{flex:1;display:block}";
     const css = document.createElement("link");
     css.rel = "stylesheet";
     css.href = assets + "vendor/maplibre-gl.css";
@@ -348,8 +354,15 @@ export class ChartPlotter extends HTMLElement {
     // Follows the mariner unit setting: metric (m/km) or imperial (ft/mi); MapLibre
     // auto-picks the small/large unit by distance. Kept on the instance so a later
     // unit change can switch it live (see setMariner).
-    this._scaleControl = new maplibregl.ScaleControl({ maxWidth: 140, unit: this._scaleUnit() });
-    map.addControl(this._scaleControl, "bottom-left");
+    // S-52 PresLib SCALEB-style nautical scalebar (latitude / nautical miles),
+    // replacing MapLibre's generic metric/imperial line. A vertical striped bar
+    // (SCALEB10 = 1 NM, SCALEB11 = 10 NM are the spec references) whose length is a
+    // round NM distance measured along latitude at the view centre — exact for NM
+    // since 1 NM ≡ 1 arcminute of latitude. Re-rendered on every move.
+    this._scaleEl = document.createElement("div");
+    this._scaleEl.className = "s52-scalebar maplibregl-ctrl";
+    map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
+    map.on("move", () => this._renderScalebar());
 
     map.on("styleimagemissing", (e) => {
       // Pattern images are requested under the `pat:` namespace (fill-pattern
@@ -363,6 +376,7 @@ export class ChartPlotter extends HTMLElement {
     // — never per zoom. Once converged, MapLibre gates the buckets natively for free.
     map.on("idle", () => this._refreshScaminBuckets());
     map.on("load", async () => {
+      this._renderScalebar(); // initial draw (the move hook only fires on movement)
       try {
         this.registerAllSymbols();
         this.registerAllPatterns();
@@ -493,6 +507,28 @@ export class ChartPlotter extends HTMLElement {
   // depths are in feet, otherwise metric (m/km). MapLibre picks the small vs large
   // unit by the current distance.
   _scaleUnit() { return this._mariner.depthUnit === "ft" ? "imperial" : "metric"; }
+
+  // Render the S-52 SCALEB-style scalebar: a vertical striped bar of a round NM
+  // distance. 1 NM ≡ 1 arcminute of latitude, so px-per-NM is measured along the
+  // meridian at the view centre (exact, no Mercator distortion). The distance is the
+  // largest "nice" step (… 0.5, 1, 2, 5 …) that stays under a target length; SCALEB
+  // colours (SCLBR / CHGRD) are scheme-aware via token().
+  _renderScalebar() {
+    const m = this._map, el = this._scaleEl;
+    if (!m || !el) return;
+    const c = m.getCenter();
+    const pxPerNM = Math.abs(m.project([c.lng, c.lat]).y - m.project([c.lng, c.lat + 1 / 60]).y);
+    if (!pxPerNM || !isFinite(pxPerNM) || pxPerNM < 0.01) { el.innerHTML = ""; return; }
+    const MAXPX = 150;
+    const STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500];
+    let nm = STEPS[0];
+    for (const v of STEPS) { if (v * pxPerNM <= MAXPX) nm = v; else break; }
+    const totalPx = Math.round(nm * pxPerNM);
+    const dark = this.token("SCLBR", "#e8820c"), light = this.token("CHGRD", "#dfe3e7");
+    let bar = "";
+    for (let i = 0; i < 4; i++) bar += `<span style="background:${i % 2 ? light : dark}"></span>`;
+    el.innerHTML = `<div class="s52sb-label">${nm} NM</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
+  }
 
   // SAFCON01 (S-52 §13.2.13): the depth-contour value label. Drawn client-side
   // along DEPCNT lines from the baked VALDCO (whole metres, or whole feet when
@@ -1101,7 +1137,7 @@ export class ChartPlotter extends HTMLElement {
       if (keys.includes("depthUnit")) {
         this._eachLayer("soundings", (id) => map.setLayoutProperty(id, "icon-image", this.soundingsIconImage()));
         this._eachLayer("contour-labels", (id) => map.setLayoutProperty(id, "text-field", this.contourLabelField()));
-        if (this._scaleControl) this._scaleControl.setUnit(this._scaleUnit()); // m/km ↔ ft/mi
+        // The S-52 scalebar is always nautical miles (no unit toggle), so nothing to do here.
       }
       // Shallow pattern: visibility on its toggle (a fill layer).
       if (keys.includes("shallowPattern")) {
