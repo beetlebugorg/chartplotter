@@ -27,7 +27,7 @@ import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
-import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
+import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, fmtBytes, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 
 const SCHEMES = ["day", "dusk", "night"];
@@ -756,13 +756,6 @@ export class ChartPlotter extends HTMLElement {
     this._store.usage().then((u) => { this._cellUsage = u; if (this._cellPopOpen) this._renderCellStatusPopup(); }).catch(() => {});
   }
 
-  _fmtBytes(n) {
-    if (!n) return "0 B";
-    const u = ["B", "KB", "MB", "GB"]; let i = 0;
-    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-    return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
-  }
-
   // Popup listing every installed cell with its band colour + load status. Opened
   // by clicking the centered statusbar indicator.
   _renderCellStatusPopup() {
@@ -804,10 +797,10 @@ export class ChartPlotter extends HTMLElement {
     const cu = this._cellUsage || { bytes: 0, count: 0 };
     const statsHtml = u ? `<div class="csp-stats">`
       + `<div><span>Cells</span><b>${loaded}/${this._installed.size} loaded</b></div>`
-      + `<div><span>Cell data</span><b>${this._fmtBytes(cu.bytes)} on disk</b></div>`
+      + `<div><span>Cell data</span><b>${fmtBytes(cu.bytes)} on disk</b></div>`
       + `<div><span>Tiles</span><b>${u.memTiles} mem · ${u.diskTiles} disk</b></div>`
-      + `<div><span>Tile memory</span><b>${this._fmtBytes(u.memBytes)} / ${this._fmtBytes(u.memCap)}</b></div>`
-      + `<div><span>Tile disk</span><b>${this._fmtBytes(u.diskBytes)} / ${this._fmtBytes(u.diskCap)}</b></div>`
+      + `<div><span>Tile memory</span><b>${fmtBytes(u.memBytes)} / ${fmtBytes(u.memCap)}</b></div>`
+      + `<div><span>Tile disk</span><b>${fmtBytes(u.diskBytes)} / ${fmtBytes(u.diskCap)}</b></div>`
       + `<div><span>Cache</span><b>${u.l1Hit + u.l2Hit} hit · ${u.miss} baked</b></div>`
       + `</div>` : "";
     // The popup re-renders on a timer (live stats); preserve the cell list's
@@ -3226,7 +3219,7 @@ export class ChartPlotter extends HTMLElement {
     // count). The percentage is shown separately in the drop-down, so it's not
     // repeated here.
     let sub = "";
-    if (s.unit === "bytes") sub = s.total ? `${this._fmtBytes(s.done)} / ${this._fmtBytes(s.total)}` : this._fmtBytes(s.done);
+    if (s.unit === "bytes") sub = s.total ? `${fmtBytes(s.done)} / ${fmtBytes(s.total)}` : fmtBytes(s.done);
     else if (s.total) {
       const u = s.unit === "cells" ? "charts" : s.unit === "tiles" ? "" : (s.unit || "");
       sub = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();

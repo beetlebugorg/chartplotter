@@ -52,6 +52,14 @@ export function fmtMB(bytes) {
   return (mb < 10 ? mb.toFixed(1) : Math.round(mb)) + " MB";
 }
 
+// Bytes → a compact "12 MB" / "1.4 KB" string, auto-scaling the unit (B/KB/MB/GB).
+export function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+
 // A scale denominator rounded to 3 significant figures and thousands-grouped.
 export function fmtScale(d) {
   if (!isFinite(d) || d <= 0) return "—";
