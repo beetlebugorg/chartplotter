@@ -1570,8 +1570,23 @@ export class ChartPlotter extends HTMLElement {
           // tile CONTENT controls appearance: client layers need no band minzoom.
           const scaminVals = set.scamin || [];
           if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
-            mk("#no", and(["!", ["has", "scamin"]]), undefined);
-            for (const sc of scaminVals) {
+            // Only materialize a per-value bucket where the SCAMIN cutoff zoom is
+            // ABOVE this set's source floor (set.min). The set's tiles don't load
+            // below set.min, so any SCAMIN whose cutoff is ≤ set.min shows from the
+            // floor regardless — fold those into the `#no` (always-from-floor) bucket
+            // with the no-SCAMIN features. Cuts the bucket count from "every distinct
+            // SCAMIN" to "only values that hide above the band's own start" — a large
+            // reduction for the fine bands (most of their SCAMIN sit at ~band scale,
+            // so they collapse) and especially `text` (9 anchor templates × set ×
+            // value). NOT quantized → SCAMIN is still honoured exactly.
+            const floor = set.min || 0;
+            const lowVals = [], hiVals = [];
+            for (const sc of scaminVals) (scaminDisplayZoom(sc, lat) <= floor + 1e-6 ? lowVals : hiVals).push(sc);
+            const noFilter = lowVals.length
+              ? ["any", ["!", ["has", "scamin"]], ["in", ["get", "scamin"], ["literal", lowVals]]]
+              : ["!", ["has", "scamin"]];
+            mk("#no", and(noFilter), undefined);
+            for (const sc of hiVals) {
               mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
             }
           } else {
@@ -1626,8 +1641,18 @@ export class ChartPlotter extends HTMLElement {
         // MapLibre for free, so the extra layers cost nothing at runtime. Features
         // WITHOUT SCAMIN take the band-gated `#no` variant. Other layers: one variant.
         if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && this._scaminValues && this._scaminValues.length) {
-          mk("#no", and(["!", ["has", "scamin"]]), dmin || undefined);
-          for (const sc of this._scaminValues) {
+          // Only bucket SCAMIN values whose cutoff is ABOVE this band's display floor
+          // (dmin) — values at/below dmin show from the floor anyway (the band isn't
+          // displayed below it), so fold them into the dmin-floored `#no` bucket. Cuts
+          // the layer count without quantizing (see the server path for the rationale).
+          const floor = dmin || 0;
+          const lowVals = [], hiVals = [];
+          for (const sc of this._scaminValues) (scaminDisplayZoom(sc, lat) <= floor + 1e-6 ? lowVals : hiVals).push(sc);
+          const noFilter = lowVals.length
+            ? ["any", ["!", ["has", "scamin"]], ["in", ["get", "scamin"], ["literal", lowVals]]]
+            : ["!", ["has", "scamin"]];
+          mk("#no", and(noFilter), dmin || undefined);
+          for (const sc of hiVals) {
             mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
           }
         } else {
