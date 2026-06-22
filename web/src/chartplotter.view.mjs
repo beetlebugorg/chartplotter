@@ -227,31 +227,6 @@ export const STYLE = `
         .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
         .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; font-size:12px; color:var(--ui-text-dim); }
         .ins-cycler .btn { padding:2px 9px; line-height:1.3; }
-        .csp-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
-          font:600 11px/1.2 system-ui,sans-serif; color:var(--ui-text-dim); text-transform:uppercase;
-          letter-spacing:.04em; padding:0 0 12px; }
-        .csp-clear { flex:none; border:1px solid #cf3b3b; color:#cf3b3b; background:transparent; cursor:pointer;
-          border-radius:9px; padding:4px 10px; font:600 10px/1 system-ui,sans-serif; text-transform:none; letter-spacing:0; }
-        .csp-clear:hover { background:#cf3b3b; color:#fff; }
-        .csp-stats { display:grid; grid-template-columns:1fr 1fr; gap:9px 16px; padding:0 0 14px; margin-bottom:12px; border-bottom:1px solid var(--ui-border); }
-        .csp-stats > div { display:flex; align-items:baseline; justify-content:space-between; gap:10px; font:500 12px/1.5 system-ui,sans-serif; white-space:nowrap; }
-        .csp-stats span { color:var(--ui-text-dim); text-transform:uppercase; letter-spacing:.03em; font-size:9.5px; white-space:nowrap; flex:none; }
-        .csp-stats b { color:var(--ui-text); font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; flex:none; }
-        /* The cell list scrolls within the popup; header + stats stay fixed. */
-        .csp-list { list-style:none; margin:0 -4px; padding:0 4px; flex:1 1 auto; min-height:60px; overflow-y:auto; }
-        .csp-row { display:flex; align-items:center; gap:10px; padding:8px 0; font:500 12.5px/1.3 system-ui,sans-serif; }
-        .csp-row + .csp-row { border-top:1px solid var(--ui-border); }
-        .csp-row.csp-loc { cursor:pointer; margin:0 -6px; padding-left:6px; padding-right:6px; border-radius:7px; }
-        .csp-row.csp-loc:hover { background:var(--ui-hover); }
-        .csp-row.is-fail { align-items:flex-start; }
-        .csp-dot { width:9px; height:9px; border-radius:50%; flex:none; margin-top:3px; box-shadow:0 0 0 1.5px rgba(255,255,255,.6); }
-        .csp-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; color:var(--ui-text); }
-        .csp-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .csp-code { font-size:11px; color:var(--ui-text-dim); font-variant-numeric:tabular-nums; letter-spacing:.02em; }
-        .csp-err { font:500 10.5px/1.35 system-ui,sans-serif; color:#cf3b3b; white-space:normal; word-break:break-word; }
-        .csp-stat { flex:none; font-weight:600; font-size:11px; }
-        .csp-queued { color:#9aa7b4; } .csp-loading { color:#d9892b; } .csp-ready { color:#2e9b57; } .csp-failed { color:#cf3b3b; }
-        .csp-empty { color:var(--ui-text-dim); font:500 12px/1.2 system-ui,sans-serif; padding:8px 0; }
         /* Bottom-centre DATA CARD — adopts the surface look of the old sidebar: a
            solid rounded card pinned to the bottom middle. Holds ONLY the live nav
            readout (band · scale · zoom · position). Purely presentational — no

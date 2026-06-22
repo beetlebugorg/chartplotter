@@ -34,7 +34,7 @@ import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
-import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, fmtBytes, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
+import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 import { STYLE, CHROME } from "./chartplotter.view.mjs"; // shell chrome (CSS + static markup)
 
@@ -224,11 +224,9 @@ export class ChartPlotter extends HTMLElement {
     // NOAA catalogue/discovery lives in this._dl (ChartDownloader, created in
     // boot); _catalog/_byName/_districts/_catalogDate are proxy getters onto it.
     this._installed = new Set();        // all stored cell names
-    this._cellStatus = new Map();       // name -> "queued"|"loading"|"ready"|"failed" (lazy wasm baker load)
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
     this._cellBounds = new Map();       // name -> [w,s,e,n] footprint (from the baker), to locate uploaded cells
     this._cellScale = new Map();        // name -> compilation scale (CSCL) of uploaded cells, for picking a detail zoom
-    this._cellUsage = { bytes: 0, count: 0 }; // raw cell store disk usage (refreshed on popup open / load)
     this._archive = new Map();          // name -> {blob, entry, meta} from opened zips
     this._selected = new Set();         // names ticked for import / NOAA download
     this._dlRegions = new Set();        // installed NOAA region numbers (from GET /api/charts)
@@ -413,25 +411,6 @@ export class ChartPlotter extends HTMLElement {
     if (m && !m.hidden) m.hidden = true;
   }
 
-  // Remove every cell that failed to parse from the browser store (and reset the
-  // baker registry without them) — the "clear them out" affordance.
-  async _removeFailedCells() {
-    const failed = [...this._cellStatus.entries()].filter(([, v]) => v === "failed").map(([k]) => k);
-    if (!failed.length) return;
-    for (const name of failed) {
-      try { await this._store.remove(name); } catch (e) { console.warn("[store] remove", name, e); }
-      this._installed.delete(name);
-      this._cellStatus.delete(name);
-      this._cellError.delete(name);
-    }
-    console.log("[charts] removed failed cells:", failed);
-    await this._refreshCharts();
-    if (this._chartLib) this._chartLib.refresh();
-    this._renderCellStatusPopup();
-  }
-
-  _countStatus(s) { let n = 0; for (const v of this._cellStatus.values()) if (v === s) n++; return n; }
-
   // Background tile baking + lazy cell parsing (the constant on-pan work) is shown
   // only by the subtle hairline load bar at the top of the map — not the
   // notification pill, which is reserved for discrete jobs (download / import /
@@ -446,8 +425,7 @@ export class ChartPlotter extends HTMLElement {
   // on screen (cold start keeps the louder pill/welcome). Debounced — delay-in
   // ~150ms so instant bakes don't flash it; linger ~300ms after idle.
   _updateLoadBar() {
-    const want = (this._bakeInflight > 0 || this._countStatus("loading") > 0)
-      && (this._hasArchive || this._countStatus("ready") > 0);
+    const want = this._bakeInflight > 0 && this._hasArchive;
     if (want === this._loadBarWant) return; // only act on a change of desired state
     this._loadBarWant = want;
     clearTimeout(this._loadBarTimer);
@@ -455,81 +433,6 @@ export class ChartPlotter extends HTMLElement {
       const bar = this.shadowRoot && this.shadowRoot.getElementById("load-bar");
       if (bar) bar.classList.toggle("on", want);
     }, want ? 100 : 300);
-  }
-
-  _toggleCellStatusPopup() {
-    this._cellPopOpen = !this._cellPopOpen;
-    // Keep cache stats (tiles/memory/disk) live while the popup is open.
-    clearInterval(this._cellPopTimer);
-    if (this._cellPopOpen) {
-      this._cellPopTimer = setInterval(() => this._renderCellStatusPopup(), 600);
-      this._refreshCellUsage(); // raw cell disk usage (changes only on download/remove)
-    }
-    this._renderCellStatusPopup();
-  }
-
-  // Refresh the cached raw-cell store disk usage, then re-render the popup.
-  _refreshCellUsage() {
-    this._store.usage().then((u) => { this._cellUsage = u; if (this._cellPopOpen) this._renderCellStatusPopup(); }).catch(() => {});
-  }
-
-  // Popup listing every installed cell with its band colour + load status. Opened
-  // by clicking the centered statusbar indicator.
-  _renderCellStatusPopup() {
-    const root = this.shadowRoot; if (!root) return;
-    const pop = root.getElementById("cell-status-pop"); if (!pop) return;
-    if (!this._cellPopOpen) { pop.hidden = true; return; }
-    const names = [...new Set([...this._installed, ...this._cellStatus.keys()])].sort();
-    const loaded = this._countStatus("ready"), loading = this._countStatus("loading"), failed = this._countStatus("failed");
-    const parts = [`${this._installed.size} installed`, `${loaded} loaded`];
-    if (loading) parts.push(`${loading} loading`);
-    if (failed) parts.push(`${failed} failed`);
-    const head = parts.join(" · ");
-    const STAT = { loading: ["loading…", "csp-loading"], ready: ["loaded", "csp-ready"], failed: ["failed", "csp-failed"] };
-    // Only list cells that are actually loaded (or loading / failed) — with lazy
-    // loading most installed cells are idle, which is just noise. Each row shows
-    // the chart name first, then the cell code.
-    const rows = names.map((n) => {
-      const st = this._cellStatus.get(n) || (this._installed.has(n) ? "queued" : "ready");
-      if (!STAT[st]) return ""; // skip idle/queued cells
-      const c = this._byName.get(n);
-      const band = c && typeof c.s === "number" ? bandForScale(c.s) : "harbor";
-      const [lbl, cls] = STAT[st];
-      const err = st === "failed" ? this._cellError.get(n) : "";
-      const title = (c && c.l) || n;
-      const loc = this._cellLocation(n); // clickable → fly to the cell when we know where it is
-      return `<li class="csp-row${err ? " is-fail" : ""}${loc ? " csp-loc" : ""}"${loc ? ` data-cell="${esc(n)}" title="Go to ${esc(title)}"` : ""}><span class="csp-dot" style="background:${BAND_COLOR[band]}"></span>`
-        + `<span class="csp-name">`
-        + `<span class="csp-title" title="${esc(title)}">${esc(title)}</span>`
-        + `<span class="csp-code">${esc(n)}</span>`
-        + (err ? `<span class="csp-err">${esc(err)}</span>` : "")
-        + `</span><span class="csp-stat ${cls}">${lbl}</span></li>`;
-    }).join("");
-    const emptyMsg = this._installed.size
-      ? "No charts loaded yet — pan or zoom to chart coverage"
-      : "No charts installed";
-    const clearBtn = failed
-      ? `<button id="csp-clear-failed" class="csp-clear" type="button">Remove ${failed} failed</button>` : "";
-    const u = this._plotter && this._plotter.realtimeStats && this._plotter.realtimeStats();
-    const cu = this._cellUsage || { bytes: 0, count: 0 };
-    const statsHtml = u ? `<div class="csp-stats">`
-      + `<div><span>Cells</span><b>${loaded}/${this._installed.size} loaded</b></div>`
-      + `<div><span>Cell data</span><b>${fmtBytes(cu.bytes)} on disk</b></div>`
-      + `<div><span>Tiles</span><b>${u.memTiles} mem · ${u.diskTiles} disk</b></div>`
-      + `<div><span>Tile memory</span><b>${fmtBytes(u.memBytes)} / ${fmtBytes(u.memCap)}</b></div>`
-      + `<div><span>Tile disk</span><b>${fmtBytes(u.diskBytes)} / ${fmtBytes(u.diskCap)}</b></div>`
-      + `<div><span>Cache</span><b>${u.l1Hit + u.l2Hit} hit · ${u.miss} baked</b></div>`
-      + `</div>` : "";
-    // The popup re-renders on a timer (live stats); preserve the cell list's
-    // scroll position so the user can actually scroll it without it snapping back.
-    const prevScroll = pop.querySelector(".csp-list")?.scrollTop || 0;
-    pop.innerHTML = `<div class="csp-head"><span>${esc(head)}</span>${clearBtn}</div>`
-      + statsHtml
-      + `<ul class="csp-list">${rows || `<li class="csp-empty">${esc(emptyMsg)}</li>`}</ul>`;
-    const list = pop.querySelector(".csp-list"); if (list && prevScroll) list.scrollTop = prevScroll;
-    pop.querySelector("#csp-clear-failed")?.addEventListener("click", (e) => { e.stopPropagation(); this._removeFailedCells(); });
-    pop.querySelectorAll(".csp-row[data-cell]").forEach((li) => li.addEventListener("click", (e) => { e.stopPropagation(); this._flyToCell(li.dataset.cell); }));
-    pop.hidden = false;
   }
 
   // [w,s,e,n] footprint of a cell: the baker's reported bounds (uploaded cells) or
@@ -543,11 +446,10 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // Fly the map to a cell's footprint — lets you find an uploaded chart you can't
-  // otherwise locate. Closes the popup + drawer so the chart is visible.
+  // otherwise locate. Closes the drawer so the chart is visible.
   _flyToCell(name) {
     const bb = this._cellLocation(name);
     if (!bb || !this._map) return;
-    this._cellPopOpen = false; clearInterval(this._cellPopTimer); this._renderCellStatusPopup();
     this.closeDrawer();
     // Zoom to the cell's detail level — a large-scale cell only renders at high
     // zoom, so fitting its small footprint at ~z14 would still show only basemap.
@@ -734,12 +636,6 @@ export class ChartPlotter extends HTMLElement {
     this.shadowRoot.addEventListener("click", (e) => {
       this._hideContextMenu(); // any click dismisses the debug context menu (item handlers run first)
       this.shadowRoot.querySelectorAll(".sb-band-wrap.open").forEach((w) => w.classList.remove("open"));
-      // Close the per-cell status popup when clicking outside it (the indicator
-      // button's own handler stopPropagation's, so this only fires for outside clicks).
-      if (this._cellPopOpen) {
-        const pop = this.shadowRoot.getElementById("cell-status-pop");
-        if (pop && !e.composedPath().some((n) => n === pop)) { this._cellPopOpen = false; clearInterval(this._cellPopTimer); this._renderCellStatusPopup(); }
-      }
       const search = this.shadowRoot.getElementById("search");
       if (search && !search.hidden) {
         const onSearch = e.composedPath().some((n) => n === search || (n.id === "search-tab"));
@@ -1509,7 +1405,6 @@ export class ChartPlotter extends HTMLElement {
     this.updateEmptyState();
     this._refreshInstalledBounds();
     if (this._radar) this._radar.update(); // packs changed → recompute off-screen pointers
-    this._refreshCellUsage();
     return active;
   }
 
@@ -1580,7 +1475,7 @@ export class ChartPlotter extends HTMLElement {
         const [w, s, e, n] = bb;
         feats.push({
           type: "Feature",
-          properties: { name, band, status: this._cellStatus.get(name) || "queued" },
+          properties: { name, band, status: "queued" },
           geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
         });
       }
@@ -1947,7 +1842,6 @@ export class ChartPlotter extends HTMLElement {
       if (ctx && !ctx.hidden) { this._hideContextMenu(); return; }
       // The NOAA agreement modal lives in <chart-library>; cancel it if open.
       if (this._chartLib && this._chartLib.agreementOpen) { this._chartLib._resolveAgreement(false); return; }
-      if (this._cellPopOpen) { this._toggleCellStatusPopup(); return; }
       const search = root.getElementById("search");
       if (search && !search.hidden) { search.hidden = true; root.getElementById("search-tab").classList.remove("on"); return; }
       if (this._drawerOpen()) { this.closeDrawer(); return; }
