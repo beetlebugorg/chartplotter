@@ -87,31 +87,39 @@ export class SettingsDialog extends HTMLElement {
   _wire(body, contribs) {
     const byId = new Map(contribs.map((c) => [c.id, c]));
     const itemOf = (c, key) => this._items(c).find((it) => it.key === key);
-    const apply = (c, key, value) => { if (c && c.set) { try { c.set(key, value); } catch (e) { console.warn("[settings] set", c.id, key, e); } } this.render(); };
+    // Resolve a control's raw view value back through the item's transform (if
+    // any) before handing it to the contribution, then re-render to reflect.
+    const apply = (cid, key, rawView) => {
+      const c = byId.get(cid);
+      if (c && c.set) {
+        const it = itemOf(c, key);
+        const value = it && it.transform ? it.transform.fromView(rawView) : rawView;
+        try { c.set(key, value); } catch (e) { console.warn("[settings] set", c.id, key, e); }
+      }
+      this.render();
+    };
 
     body.querySelectorAll("[data-tab]").forEach((b) =>
       (b.onclick = () => { this._activeTab = b.dataset.tab; this.render(); }));
 
     body.querySelectorAll('input[data-type="toggle"]').forEach((inp) =>
-      (inp.onchange = () => apply(byId.get(inp.dataset.contrib), inp.dataset.key, inp.checked)));
+      (inp.onchange = () => apply(inp.dataset.contrib, inp.dataset.key, inp.checked)));
 
     body.querySelectorAll('button[data-type="segmented"]').forEach((b) =>
-      (b.onclick = () => apply(byId.get(b.dataset.contrib), b.dataset.key, b.dataset.val)));
+      (b.onclick = () => apply(b.dataset.contrib, b.dataset.key, b.dataset.val)));
 
+    // A `multi` button is an independent boolean keyed by itself; toggle current.
     body.querySelectorAll('button[data-type="multi"]').forEach((b) =>
-      (b.onclick = () => { const c = byId.get(b.dataset.contrib); apply(c, b.dataset.key, !(c.get && c.get(b.dataset.key, false))); }));
+      (b.onclick = () => { const c = byId.get(b.dataset.contrib); apply(b.dataset.contrib, b.dataset.key, !(c && c.get && c.get(b.dataset.key, false))); }));
 
     body.querySelectorAll('select[data-type="select"]').forEach((s) =>
-      (s.onchange = () => apply(byId.get(s.dataset.contrib), s.dataset.key, s.value)));
+      (s.onchange = () => apply(s.dataset.contrib, s.dataset.key, s.value)));
 
     body.querySelectorAll('input[data-type="number"]').forEach((inp) =>
       (inp.onchange = () => {
-        const c = byId.get(inp.dataset.contrib);
-        const it = c && itemOf(c, inp.dataset.key);
-        let v = parseFloat(inp.value);
+        const v = parseFloat(inp.value);
         if (!isFinite(v)) { this.render(); return; }
-        if (it && it.transform) v = it.transform.fromView(v);
-        apply(c, inp.dataset.key, v);
+        apply(inp.dataset.contrib, inp.dataset.key, v);
       }));
   }
 }
