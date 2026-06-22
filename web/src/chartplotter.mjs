@@ -18,12 +18,13 @@
 
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
 import "./components/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import "./components/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
+import { DISTRICTS, NOAA_ENC_URL } from "./components/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
 import { NotificationCenter } from "./app/notification-center.mjs"; // app-level task-progress + banner bus
 import { ChartService } from "./data/chart-service.mjs"; // server import/bake jobs + pack registry
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
-import { readCentralDirectory, cellEntries, extractEntry } from "./data/zip-import.mjs";
 import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./lib/units.mjs"; // configurable display units
 import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
@@ -82,11 +83,9 @@ const DEFAULT_MARINER = {
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
 const LS_BANDS_OFF = "chartplotter:bands-off"; // usage bands the user turned off (array of slugs)
-const LS_AGREE = "chartplotter:enc-agreement"; // NOAA ENC User Agreement acceptance
-// NOAA's ENC distribution pages + the User Agreement that must be displayed and
-// accepted before downloading ENCs (charts.noaa.gov/ENCs/ENCs.shtml §3).
-const NOAA_ENC_URL = "https://www.charts.noaa.gov/ENCs/ENCs.shtml";
-const NOAA_AGREEMENT_URL = "https://www.charts.noaa.gov/ENCs/ENC_Agreement.shtml";
+// The NOAA ENC User Agreement gate (LS_AGREE) + agreement URLs now live in the
+// <chart-library> component, which owns the download flow; NOAA_ENC_URL is
+// imported above for the bottom-right attribution link the shell still renders.
 // NOTE: the installed-region list is NOT cached in localStorage — the server's
 // GET /api/charts manifest (one entry per baked region archive in its XDG cache)
 // is the single source of truth, so the UI can never show charts that aren't
@@ -97,25 +96,9 @@ const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000
 
 // Navigational-purpose bands (colours, zoom ranges, scale/zoom mappings) live in
 // bands.mjs — imported at the top of this file.
-// Chart packs = U.S. Coast Guard districts. NOAA publishes one ENC bundle per
-// district (NNCGD_ENCs.zip on charts.noaa.gov/ENCs/ENCs.shtml) and tags every
-// catalog cell with its district (the `cg` field), so a pack is exactly the set
-// of cells with a given `cg` — and downloading one is a single zip fetch. The
-// nine districts below are the ones NOAA actually ships (2/3/4/6/10/12/15/16
-// were disestablished long ago); `region`/`blurb` are friendly labels for the
-// card UI. Order is roughly east→Gulf→Lakes→west→Pacific→Alaska.
-const DISTRICTS = [
-  { cg: 1, name: "1st District", region: "Northeast", blurb: "Maine south to northern New Jersey" },
-  { cg: 5, name: "5th District", region: "Mid-Atlantic", blurb: "New Jersey to North Carolina · Chesapeake & Delaware bays" },
-  { cg: 7, name: "7th District", region: "Southeast", blurb: "South Carolina, Georgia, eastern Florida · Puerto Rico & USVI" },
-  { cg: 8, name: "8th District", region: "Gulf Coast", blurb: "Western Florida to Texas · the Western Rivers" },
-  { cg: 9, name: "9th District", region: "Great Lakes", blurb: "All five Great Lakes & the St. Lawrence Seaway" },
-  { cg: 11, name: "11th District", region: "California", blurb: "The California coast" },
-  { cg: 13, name: "13th District", region: "Pacific Northwest", blurb: "Oregon & Washington" },
-  { cg: 14, name: "14th District", region: "Pacific Islands", blurb: "Hawaii, Guam & American Samoa" },
-  { cg: 17, name: "17th District", region: "Alaska", blurb: "All of Alaska" },
-];
-
+// Chart packs = U.S. Coast Guard districts (the DISTRICTS table) now live in
+// <chart-library>; the shell imports DISTRICTS from there for the few places it
+// still needs the region labels (_reattachName, _rebuildAllPerBand).
 
 // Does a GeoJSON geometry intersect the lon/lat box [W,S,E,N]? Points test exactly;
 // lines/polygons use a bbox-overlap approximation (fine for the area inspector).
@@ -305,20 +288,14 @@ export class ChartPlotter extends HTMLElement {
     this._mariner.displayBase = true;
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
     if (!SCHEMES.includes(this._scheme)) this._scheme = "day"; // drop a retired scheme (e.g. bright)
-    this._agreed = localStorage.getItem(LS_AGREE) === "1"; // NOAA ENC agreement accepted
-    this._activeDistrict = null;        // Coast Guard district (cg) currently previewed on the map, or null
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
     // which verb) the server doesn't know. `_poll` is the polling interval handle.
+    // The NOAA agreement gate + the per-pack download queue moved into the
+    // <chart-library> component; the shell reads its `busy` for task gating.
     this._task = null;                  // mirror of the server's current task (or null)
     this._taskMeta = null;              // { name, verb, bytes, errMsg } — pill labelling
     this._poll = null;                  // setInterval handle while a task is observed
-    // Download queue: one pack downloads at a time; clicking Download on another
-    // pack while one runs enqueues it. `_activeDownloadKey` is the set key being
-    // baked now; `_dlQueue` holds the pack objects waiting their turn. Each pack's
-    // detail button reflects its state (Download / Downloading… / Queued).
-    this._activeDownloadKey = null;
-    this._dlQueue = [];
     // Resolves once the inner renderer's `ready` fires.
     this._readyPromise = new Promise((res) => (this._resolveReady = res));
   }
@@ -390,6 +367,19 @@ export class ChartPlotter extends HTMLElement {
       onProgress: (p) => this._setNotification(p),
       onMessage: (m) => this._toast(m),
     });
+
+    // The "Charts library" domain lives in <chart-library> (mounted in the chrome
+    // template inside #charts-body's slot). Inject its deps and listen for its
+    // events: "charts-changed" → reconcile the main map; "chart-focus" → fly the
+    // canvas to bounds; "chart-import-archive" → the shell-owned client-side
+    // .pmtiles archive path (the plotter is shell-owned).
+    this._chartLib = this.shadowRoot.getElementById("chart-lib");
+    if (this._chartLib) {
+      this._chartLib.configure({ dl: this._dl, api: this._api, notify: this._notify, store: this._store, assets: this._assets, prod: this._prod });
+      this._chartLib.addEventListener("charts-changed", () => { this._renderInstalledSets().catch(() => {}); });
+      this._chartLib.addEventListener("chart-focus", (e) => this._flyToBounds(e.detail && e.detail.bounds));
+      this._chartLib.addEventListener("chart-import-archive", (e) => this._importArchiveFile(e.detail && e.detail.file));
+    }
 
     // Catalog drives the picker AND the lazy-load gating (cell bboxes). Kick it
     // off in parallel; ingestViewport awaits it.
@@ -708,7 +698,7 @@ export class ChartPlotter extends HTMLElement {
     }
     console.log("[charts] removed failed cells:", failed);
     await this._refreshCharts();
-    this.renderCharts();
+    if (this._chartLib) this._chartLib.refresh();
     this._renderCellStatusPopup();
   }
 
@@ -953,13 +943,12 @@ export class ChartPlotter extends HTMLElement {
     }
     this._applyBandsOff(); // re-apply any persisted band on/off now that chart layers exist
     this.updateEmptyState();
-    this.renderCharts();
+    if (this._chartLib) this._chartLib.refresh();
     this._assessCoverage();
     // If the user opened Charts before the renderer was ready (the drawer's
-    // already on the charts panel), engage selection mode now that the map exists
-    // — otherwise they'd be left in a half state (panel open, cell overlay off).
+    // already on the charts panel), make sure the panel paints + the map sizes.
     if (this._section === "charts" && this._drawerOpen()) {
-      this._enterChartsMode();
+      if (this._chartLib) this._chartLib.show(this._chartLib._selProvider || "noaa");
       map.resize();
     }
     // Refresh-resume: if a provision job is still running on the server, re-attach
@@ -1083,7 +1072,8 @@ export class ChartPlotter extends HTMLElement {
   // overlap, so "contains the centre" can't pick THE district — but it reliably
   // answers "is the centre covered at all", which is all we need here.)
   _frameInitial() {
-    if (this._chartsMode || loadJSON(LS_VIEW, null) || !this._districts.length) return;
+    // (the cell-picker "charts mode" was removed — this is just the no-saved-view guard)
+    if (loadJSON(LS_VIEW, null) || !this._districts.length) return;
     const c = this._map.getCenter();
     const covered = (d) => d.bounds && c.lng >= d.bounds[0] && c.lng <= d.bounds[2] && c.lat >= d.bounds[1] && c.lat <= d.bounds[3];
     if (this._districts.some(covered)) return;
@@ -1176,15 +1166,35 @@ export class ChartPlotter extends HTMLElement {
     this.updateEmptyState();
   }
 
-  // -- Charts: the map selector + "on this device" coverage manager ---------
-  // Open the Charts drawer (and the all-cells map overlay).
-  openCharts() {
+  // -- Charts: open the drawer on the Charts library ------------------------
+  // Open the Charts drawer on the given provider ("noaa"|"ienc"|"user"); the
+  // <chart-library> component owns everything inside the panel.
+  openCharts(provider) {
     this._section = "charts";
     this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
     this.shadowRoot.getElementById("empty").hidden = true;
-    this.renderCharts();
-    this._enterChartsMode();
+    if (this._chartLib) this._chartLib.show(provider || "noaa");
     this.setDrawerOpen(true);
+  }
+
+  // Fly the main map to a [w,s,e,n] bounds (the <chart-library> chart-focus event).
+  _flyToBounds(b) {
+    if (!this._map || !Array.isArray(b) || b.length !== 4) return;
+    this._map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 60, maxZoom: 14, duration: 800 });
+  }
+
+  // Add a dropped .pmtiles to the loaded coverage (the client-side plotter path,
+  // shell-owned because <chart-library> has no plotter handle). Reads only the
+  // header + directory; tiles stream from the File. Persists in the background.
+  async _importArchiveFile(file) {
+    if (!file || !this._plotter) return;
+    try {
+      await this._plotter.addArchive(file);
+      this._importedArchives.push(file); // keep in memory so a coverage rebuild can re-add it
+      this._markArchive({ type: "blob" });
+      this.closeDrawer();
+      archivePut(file).catch((e) => console.warn("[archive] persist failed (too large for IndexedDB?)", e));
+    } catch (e) { console.error("[archive] import", e); }
   }
 
   // -- background provision task (server-owned, client-observed) -----------
@@ -1194,30 +1204,10 @@ export class ChartPlotter extends HTMLElement {
   // re-attach to whatever's running (see `_reattachTask`). The persistent pill +
   // drawer progress card both render from `_task`.
 
-  // Start (or no-op to) the background provision of `cells` (the full set to
-  // bake). `meta` = { name (region label), verb, bytes } for the pill. Once the
-  // POST is acked, progress comes from polling.
-  // NOAA ENC User Agreement gate: must be displayed + accepted before any chart
-  // download (charts.noaa.gov/ENCs §3). Resolves true once accepted (persisted).
-  _ensureAgreed() {
-    if (this._agreed) return Promise.resolve(true);
-    return this._showAgreement();
-  }
-  _showAgreement() {
-    return new Promise((resolve) => {
-      const m = this.shadowRoot.getElementById("agree");
-      if (!m) return resolve(this._agreed);
-      m.hidden = false;
-      this._agreeResolve = resolve;
-    });
-  }
-  _resolveAgreement(accepted) {
-    const m = this.shadowRoot.getElementById("agree");
-    if (m) m.hidden = true;
-    if (accepted) { this._agreed = true; try { localStorage.setItem(LS_AGREE, "1"); } catch {} }
-    const r = this._agreeResolve; this._agreeResolve = null;
-    if (r) r(accepted);
-  }
+  // The NOAA ENC User Agreement gate (shown before any download) moved into the
+  // <chart-library> component, which owns the download flow. The shell's bottom-
+  // right "Terms" link + Escape handler reach into it (_chartLib._showAgreement /
+  // ._resolveAgreement / .agreementOpen).
 
   // On boot, re-attach to a job that's still running on the server (refresh-
   // resume — no client-side job persistence). A finished/idle task is ignored so
@@ -1239,7 +1229,7 @@ export class ChartPlotter extends HTMLElement {
       this._setProgress(null);
       try { await this._renderInstalledSets(); } catch (e) { /* ignore */ }
       if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } }
-      if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+      if (this._chartLib) this._chartLib.refresh();
     });
   }
 
@@ -1281,7 +1271,7 @@ export class ChartPlotter extends HTMLElement {
     await this._applyArchives();
     this.updateEmptyState();
     this._assessCoverage();
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    if (this._chartLib) this._chartLib.refresh();
     // success flourish, then clear the pill.
     this._task = { status: "done", _flourish: true };
     this._renderTaskUI();
@@ -1343,376 +1333,29 @@ export class ChartPlotter extends HTMLElement {
     // fuller label + sub.
     this._setProgress(d ? { label: d.label, pill: d.pill, sub: d.sub, frac: d.frac, error: d.error } : null);
     // Keep the Charts panel's MUTATING buttons (Remove/Disable/Enable) disabled
-    // while a job runs, without a full re-render each poll tick (which would
-    // flicker / collapse the import panel). Download buttons are intentionally left
-    // alone — they're queue-managed (_downloadBtnHtml) so you can queue more while
-    // one runs. The completed-state re-render happens in _onTaskDone.
-    if (this._section === "charts" && this._drawerOpen()) {
+    // while a (shell-driven server) job runs, without a full re-render each poll
+    // tick (which would flicker / collapse the import panel). Download buttons are
+    // intentionally left alone — they're queue-managed (_downloadBtnHtml) so you
+    // can queue more while one runs. Those buttons live in <chart-library>'s shadow
+    // root now, so reach in. The completed-state re-render happens in _onTaskDone.
+    if (this._section === "charts" && this._drawerOpen() && this._chartLib && this._chartLib.shadowRoot) {
       const busy = this._taskRunning();
-      this.shadowRoot.querySelectorAll(".pk-btn:not([data-getpack])").forEach((b) => { b.disabled = busy; });
+      this._chartLib.shadowRoot.querySelectorAll(".pk-btn:not([data-getpack])").forEach((b) => { b.disabled = busy; });
     }
     // A running download means charts are inbound — don't show the empty-state
     // welcome over the map (and restore it if the task failed with no coverage).
     this.updateEmptyState();
   }
 
-  // The Charts drawer body: the region list, or (once one is picked) that
-  // region's detail. This is the ONE chart surface — browse, download, and view
-  // existing charts all live here, organised by region.
-  renderCharts() {
-    const el = this.shadowRoot.getElementById("charts-body");
-    if (!el) return;
-    this.shadowRoot.getElementById("dtitle").textContent = this._prod ? "Add charts" : "Chart library";
-    // Prod (prebaked) build: no NOAA download/region picker — the Library is just
-    // an importer for your own charts (baked in-browser, stored offline alongside
-    // the hosted prebaked charts).
-    if (this._prod) {
-      el.innerHTML = `
-        <p class="add-hint">Add your own charts — drop a NOAA <code>.zip</code> / <code>.000</code>, or a baked <code>.pmtiles</code>. They're baked right here in your browser and kept offline alongside the prebaked charts.</p>
-        <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
-        <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-        <div id="import-log" class="muted"></div>
-        <div id="archive-list"></div>`;
-      this._wireImport();
-      return;
-    }
-    el.innerHTML = `
-      ${this._renderPackSearch()}
-      <div class="miller">
-        ${this._renderProvidersCol()}
-        ${this._renderPacksCol()}
-        ${this._renderDetailCol()}
-      </div>
-      ${this._renderDataFreshness()}`;
-    this._wirePackSearch();
-    this._wirePacks();
-    this._wireImport();
-    this._renderPreview();
-  }
-
-  // Build (or tear down) the detail-pane preview map for the selected pack.
-  _renderPreview() {
-    const pk = this._selectedPack();
-    if (pk && pk.kind !== "user") this._buildPreviewMap(this._packCoverage(pk));
-    else if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
-  }
+  // The whole "Charts library" panel body (provider→pack→detail drill-down,
+  // search, preview, import, agreement) now lives in <chart-library>; the shell
+  // mounts that element inside #charts-body. The shell keeps only the few
+  // discovery delegators the dev tools still need (below).
 
   // -- chart packs (Coast Guard districts) ---------------------------------
-  // The cells in a district pack (every catalog cell tagged with that `cg`).
-  // Discovery helpers delegate to the downloader (this._dl).
+  // The cells in a district pack (every catalog cell tagged with that `cg`). Kept
+  // in the shell because the dev "rebuild all" tool (_rebuildAllPerBand) uses it.
   _districtCellNames(cg) { return this._dl.districtCellNames(cg); }
-  _districtStat(cg) { return this._dl.districtStat(cg); }
-  _districtZipUrl(cg) { return this._dl.districtZipUrl(cg); }
-
-  // The pack list: provider-grouped, one slim row per pack. NOAA districts are
-  // browsable rows (tap to preview, button to download/uninstall); a leading
-  // "Installed" group lists any non-NOAA packs you have (IENC, imports) so every
-  // installed set is manageable in one place. Built provider-by-provider so more
-  // providers (IENC waterways) slot in as their catalogues arrive.
-  // -- chart download: Finder-style 3-pane drill-down --------------------------
-  // Pane 1 providers → pane 2 that provider's packs → pane 3 the selected pack's
-  // detail (map + download/remove). Selection state: _selProvider, _selPack.
-
-  // The providers shown in pane 1.
-  _providers() {
-    return [
-      { id: "noaa", name: "NOAA", sub: "Coast Guard districts" },
-      { id: "ienc", name: "Inland ENC", sub: "USACE waterways" },
-      { id: "user", name: "User Charts", sub: "Import your own" },
-    ];
-  }
-
-  _providerName(id) { const p = this._providers().find((x) => x.id === id); return p ? p.name : id; }
-
-  // The packs for a provider: {key (set name), kind, title, sub, installed, …}.
-  _providerPacks(id) {
-    const sets = this._installedSets || new Set();
-    if (id === "noaa") {
-      return DISTRICTS.map((d) => {
-        const { total, bytes } = this._districtStat(d.cg);
-        if (!total) return null;
-        return { key: "noaa-d" + d.cg, kind: "noaa", cg: d.cg, title: d.region, sub: `${total.toLocaleString()} charts · ~${Math.round(bytes / 1e6)} MB`, installed: sets.has("noaa-d" + d.cg) };
-      }).filter(Boolean);
-    }
-    if (id === "ienc") return this._iencPacks() || [];
-    // user: locally-imported packs (anything not NOAA/IENC).
-    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, kind: "user", title: this._setLabel(n), sub: "installed", installed: true }));
-  }
-
-  // USACE Inland ENC catalogue: an array of cells, each {name, river, from, to,
-  // edition, url (s57 zip), bbox:[w,s,e,n]}. The SERVER fetches + parses it (the
-  // client only ever talks to our API); cached here once. Returns [] on failure.
-  async _iencCatalog() {
-    if (this._ienc !== undefined) return this._ienc;
-    if (!this._iencPromise) {
-      this._iencPromise = (async () => {
-        try {
-          const j = await fetch(`${this._assets}api/ienc/catalog`).then((r) => (r.ok ? r.json() : null));
-          return (j && Array.isArray(j.cells)) ? j.cells : [];
-        } catch (e) { console.warn("[ienc] catalogue:", e); return []; }
-      })();
-    }
-    this._ienc = await this._iencPromise;
-    return this._ienc;
-  }
-
-  // IENC packs = one per river (a group of cells), or null until the catalogue
-  // loads. Each: {key:"ienc-<river>", kind, title, sub, installed, cells, bbox}.
-  _iencPacks() {
-    const cells = this._ienc;
-    if (!cells) return null;
-    const sets = this._installedSets || new Set();
-    const byRiver = new Map();
-    for (const c of cells) { if (!byRiver.has(c.river)) byRiver.set(c.river, []); byRiver.get(c.river).push(c); }
-    return [...byRiver.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([river, cs]) => {
-      const key = "ienc-" + river.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-      let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
-      for (const c of cs) { const [cw, cse, ce, cn] = c.bbox; if ([cw, cse, ce, cn].every(Number.isFinite)) { w = Math.min(w, cw); s = Math.min(s, cse); e = Math.max(e, ce); n = Math.max(n, cn); } }
-      return { key, kind: "ienc", title: river, sub: `${cs.length} chart${cs.length > 1 ? "s" : ""}`, installed: sets.has(key), cells: cs.map((c) => ({ name: c.name, url: c.url, bbox: c.bbox })), bbox: w <= e ? [w, s, e, n] : null };
-    });
-  }
-
-  // Pane 1: providers. With an active search, providers that contain a match are
-  // highlighted and the rest dimmed.
-  _renderProvidersCol() {
-    const sel = this._selProvider || "noaa";
-    const hits = this._searchHits();
-    const rows = this._providers().map((p) => {
-      let cls = sel === p.id ? " sel" : "";
-      if (hits) cls += this._providerHasMatch(p.id, hits) ? " match" : " dim";
-      return `<div class="m-row${cls}" data-prov="${p.id}" role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(p.name)}</span><span class="m-sub">${esc(p.sub)}</span></span><span class="m-chev">›</span></div>`;
-    }).join("");
-    return `<div class="mcol"><div class="mcol-h">Source</div>${rows}</div>`;
-  }
-
-  // Does a provider contain a search match? NOAA → any matched district; others →
-  // a pack whose label matches the raw query.
-  _providerHasMatch(id, hits) {
-    if (id === "noaa") return hits.size > 0;
-    const q = (this._cellQuery || "").trim().toLowerCase();
-    return this._providerPacks(id).some((pk) => pk.title.toLowerCase().includes(q) || pk.key.toLowerCase().includes(q));
-  }
-
-  // Pane 2: the selected provider's packs.
-  _renderPacksCol() {
-    const prov = this._selProvider || "noaa";
-    const packs = this._providerPacks(prov);
-    const hits = this._searchHits();
-    const q = (this._cellQuery || "").trim().toLowerCase();
-    let rows;
-    if (prov === "ienc" && this._ienc === undefined) {
-      // Catalogue not loaded yet — fetch it, then refresh just this column.
-      if (!this._iencPromise) this._iencCatalog().then(() => { if (this._section === "charts" && (this._selProvider || "noaa") === "ienc") this._refreshPacksCol(); });
-      rows = `<div class="m-empty">Loading inland ENC catalogue…</div>`;
-    } else if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : `<div class="m-empty">No imported charts yet — open this to add some.</div>`;
-    else if (!packs.length) rows = `<div class="m-empty">${prov === "ienc" ? "No inland ENC packs available." : "Nothing installed."}</div>`;
-    else rows = packs.map((pk) => {
-      let cls = (this._selPack === pk.key ? " sel" : "") + (pk.installed ? " on" : "");
-      let sub = pk.sub;
-      if (hits) {
-        const hit = pk.cg != null ? (hits.has(pk.cg) ? hits.get(pk.cg) : undefined) : (pk.title.toLowerCase().includes(q) ? null : undefined);
-        if (hit === undefined) cls += " dim";
-        else { cls += " match"; if (hit) sub = `matches “${esc(hit.l || hit.n)}”`; }
-      }
-      return `<div class="m-row${cls}" data-pack="${esc(pk.key)}"${pk.cg ? ` data-cg="${pk.cg}"` : ""} role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${sub}</span></span>${this._packBadge(pk.key, pk.installed)}</div>`;
-    }).join("");
-    return `<div class="mcol">${this._packsHeader(prov)}${rows}</div>`;
-  }
-
-  // A user-imported pack row.
-  _userPackRow(pk) {
-    return `<div class="m-row on${this._selPack === pk.key ? " sel" : ""}" data-pack="${esc(pk.key)}" role="button" tabindex="0">
-      <span class="m-info"><span class="m-name">${esc(pk.title)}</span><span class="m-sub">${esc(pk.sub)}</span></span>${this._packBadge(pk.key, true)}</div>`;
-  }
-
-  // Status pill for a pack row. A pending/active download takes priority (so you
-  // can see at a glance which packs are downloading/queued); otherwise an installed
-  // pack shows "Active"/"Disabled", and a plain not-installed pack shows nothing.
-  _packBadge(key, installed) {
-    // A pack being downloaded is by definition not yet installed; once it lands,
-    // the installed badge wins (so there's no transient "Downloading" on a pack
-    // that just finished).
-    if (!installed) {
-      const dl = this._packDownloadState(key);
-      if (dl === "downloading") return '<span class="m-badge dl"><span class="pk-spin"></span>Downloading</span>';
-      if (dl === "queued") return '<span class="m-badge queued">Queued</span>';
-      return "";
-    }
-    return this._disabled.has(key)
-      ? '<span class="m-badge off">Disabled</span>'
-      : '<span class="m-badge on">Active</span>';
-  }
-
-  // Pane-2 header: the provider's name + a one-line description and when its source
-  // catalogue was last refreshed.
-  _packsHeader(prov) {
-    let line = "";
-    if (prov === "noaa") line = `U.S. Coast Guard districts${this._catalogDate ? ` · catalogue ${fmtIssue(this._catalogDate)}` : ""} · ${this._catalog.length.toLocaleString()} charts`;
-    else if (prov === "ienc") line = "USACE inland waterway ENC";
-    else line = "Charts you've imported from a file";
-    return `<div class="mcol-head"><div class="mcol-h">${esc(this._providerName(prov))}</div><div class="mcol-meta">${esc(line)}</div></div>`;
-  }
-
-  // Pane 3: the selected pack's detail — coverage map + download/remove.
-  _renderDetailCol() {
-    const key = this._selPack;
-    if (!key) {
-      if ((this._selProvider || "noaa") === "user") return this._renderImportDetail();
-      return `<div class="mcol mcol-detail"><div class="m-empty">Select a chart pack.</div></div>`;
-    }
-    const busy = this._taskRunning();
-    const installed = this._installedSets && this._installedSets.has(key);
-    const pk = this._selectedPack();
-    // An installed pack not in the current catalogue (e.g. an old set) → remove only.
-    if (!pk) {
-      return `<div class="mcol mcol-detail"><div class="m-detail-body">
-        <div class="m-detail-title">${esc(this._setLabel(key))}${installed ? ' <span class="pl-tick">✓</span>' : ""}</div>
-        <div class="m-detail-sub">${esc(key)}</div>
-        <div class="m-detail-act"><button class="pk-btn ghost" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button></div>
-      </div></div>`;
-    }
-    const disabled = this._disabled.has(key);
-    const tick = installed ? (disabled ? ' <span class="m-badge off">Disabled</span>' : ' <span class="m-badge on">Active</span>') : "";
-    const act = installed
-      ? `<button class="pk-btn ghost" data-${disabled ? "enable" : "disable"}="${esc(key)}"${busy ? " disabled" : ""}>${disabled ? "Enable" : "Disable"}</button>
-         <button class="pk-btn ghost danger" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button>`
-      : this._downloadBtnHtml(key);
-    let title, sub, meta;
-    if (pk.kind === "noaa") {
-      const d = DISTRICTS.find((x) => x.cg === pk.cg);
-      title = d ? d.region : pk.title;
-      sub = d ? `${esc(d.name)} · ${esc(d.blurb)}` : "";
-      meta = `${pk.sub} · outlined area below is the coverage`;
-    } else if (pk.kind === "user") {
-      // Imported / legacy local set — no catalogue coverage, just a Remove control.
-      title = pk.title || this._setLabel(key);
-      sub = "Imported charts — baked on the server, kept under User Charts.";
-      meta = "";
-    } else { // ienc
-      title = `${pk.title} River`;
-      sub = `USACE Inland ENC · ${pk.cells.length} chart${pk.cells.length > 1 ? "s" : ""}`;
-      meta = "outlined area below is the coverage";
-    }
-    // User packs have no coverage map; everything else shows the preview.
-    const previewMap = pk.kind === "user" ? "" : `<div id="preview-map" class="prev-map"></div>`;
-    return `<div class="mcol mcol-detail">
-      ${previewMap}
-      <div class="m-detail-body">
-        <div class="m-detail-title">${esc(title)}${tick}</div>
-        <div class="m-detail-sub">${sub}</div>
-        ${meta ? `<div class="m-detail-meta">${esc(meta)}</div>` : ""}
-        <div class="m-detail-act">${act}</div>
-      </div></div>`;
-  }
-
-  // The User-Charts detail: the import drop zone (baked server-side into the
-  // "import" pack). Shown when the User Charts provider is open with no pack picked.
-  _renderImportDetail() {
-    return `<div class="mcol mcol-detail"><div class="m-detail-body">
-      <div class="m-detail-title">Import your charts</div>
-      <div class="m-detail-sub">Add ENC you already have — a NOAA/IENC exchange-set <code>.zip</code>, individual <code>.000</code> cells, or a baked <code>.pmtiles</code>. They're baked on the server and kept under User Charts.</div>
-      <div id="drop" class="drop">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br><button id="pick" class="btn" style="margin-top:8px">Choose files…</button></div>
-      <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-      <div id="import-log" class="muted"></div>
-      <div id="archive-list"></div>
-    </div></div>`;
-  }
-
-  // The coverage GeoJSON for a district: one polygon per catalog cell (its bbox),
-  // so the preview map shows the ACTUAL covered area — every chart's footprint — not
-  // just one big box. Returns {fc, bounds:[w,s,e,n]} (bounds skip wrapped cells).
-  _districtCoverage(cg) {
-    const feats = [];
-    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
-    for (const c of this._catalog) {
-      if (c.cg !== cg || !Array.isArray(c.bb) || c.bb.length !== 4) continue;
-      const [cw, cs, ce, cn] = c.bb;
-      feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[cw, cs], [ce, cs], [ce, cn], [cw, cn], [cw, cs]]] } });
-      if (ce - cw < 90) { w = Math.min(w, cw); s = Math.min(s, cs); e = Math.max(e, ce); n = Math.max(n, cn); } // skip world-spanning for the fit
-    }
-    return { fc: { type: "FeatureCollection", features: feats }, bounds: feats.length && w <= e ? [w, s, e, n] : null };
-  }
-
-  // Coverage {fc, bounds} for any pack: NOAA cells (catalog bb) or IENC cells (their
-  // catalogue bbox), one outlined polygon each.
-  _packCoverage(pk) {
-    if (!pk) return { fc: { type: "FeatureCollection", features: [] }, bounds: null };
-    if (pk.kind === "noaa") return this._districtCoverage(pk.cg);
-    const feats = [];
-    for (const c of pk.cells || []) {
-      const [w, s, e, n] = c.bbox || [];
-      if ([w, s, e, n].every(Number.isFinite)) feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
-    }
-    return { fc: { type: "FeatureCollection", features: feats }, bounds: pk.bbox || null };
-  }
-
-  // Build the detail-pane preview: a real OSM map framed to the pack with every
-  // cell's coverage footprint outlined, so the user can clearly see whether the pack
-  // covers the area they care about. Rebuilt per selection (the old map is removed).
-  _buildPreviewMap(cov) {
-    const host = this.shadowRoot.getElementById("preview-map");
-    if (!host || !window.maplibregl) return;
-    if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
-    // MapLibre's stylesheet must live in THIS shadow root for the canvas to size.
-    if (!this.shadowRoot.querySelector("link[data-mlcss]")) {
-      const l = document.createElement("link");
-      l.rel = "stylesheet"; l.href = this._assets + "vendor/maplibre-gl.css"; l.setAttribute("data-mlcss", "");
-      this.shadowRoot.appendChild(l);
-    }
-    const accent = getComputedStyle(this).getPropertyValue("--ui-accent").trim() || "#1565c0";
-    const map = new window.maplibregl.Map({
-      container: host, attributionControl: false, cooperativeGestures: false,
-      style: {
-        version: 8,
-        sources: { osm: { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap" } },
-        layers: [{ id: "osm", type: "raster", source: "osm" }],
-      },
-      center: cov.bounds ? [(cov.bounds[0] + cov.bounds[2]) / 2, (cov.bounds[1] + cov.bounds[3]) / 2] : [-98, 39],
-      zoom: 3,
-    });
-    this._previewMap = map;
-    map.on("load", () => {
-      map.addSource("cov", { type: "geojson", data: cov.fc });
-      map.addLayer({ id: "cov-fill", type: "fill", source: "cov", paint: { "fill-color": accent, "fill-opacity": 0.18 } });
-      map.addLayer({ id: "cov-line", type: "line", source: "cov", paint: { "line-color": accent, "line-width": 1, "line-opacity": 0.9 } });
-      if (cov.bounds) map.fitBounds([[cov.bounds[0], cov.bounds[1]], [cov.bounds[2], cov.bounds[3]]], { padding: 16, duration: 0 });
-    });
-  }
-
-  // Pane 1 selection: choose a provider. Partial update — swap the packs + detail
-  // columns only (the list keeps its scroll position; no full re-render).
-  _selectProvider(id) {
-    this._selProvider = id;
-    this._selPack = null;
-    this._activeDistrict = null;
-    const r = this.shadowRoot;
-    r.querySelectorAll(".m-row[data-prov]").forEach((el) => el.classList.toggle("sel", el.dataset.prov === id));
-    const cols = r.querySelectorAll(".miller > .mcol");
-    if (cols[1]) { cols[1].outerHTML = this._renderPacksCol(); this._wireMillerRows(); }
-    this._updateDetail();
-  }
-
-  // Pane 2 selection: choose a pack. Partial update — just re-highlight the rows and
-  // rebuild the detail column, so clicking a pack DOESN'T scroll/jump the list.
-  _selectPack(key, cg) {
-    this._selPack = key;
-    this._activeDistrict = cg || null; // NOAA packs highlight on the detail map
-    this.shadowRoot.querySelectorAll(".m-row[data-pack]").forEach((el) => el.classList.toggle("sel", el.dataset.pack === key));
-    this._updateDetail();
-  }
-
-  // Rebuild only the detail column (+ its buttons + preview map), leaving the list
-  // columns and their scroll untouched.
-  _updateDetail() {
-    const col = this.shadowRoot.querySelector(".miller > .mcol-detail");
-    if (!col) return;
-    col.outerHTML = this._renderDetailCol();
-    this._wireDetailButtons();
-    this._wireImport(); // the User-Charts detail may render the drop zone
-    this._renderPreview();
-  }
 
   // Human label for a set name (provider · pack).
   _setLabel(name) {
@@ -1724,243 +1367,9 @@ export class ChartPlotter extends HTMLElement {
     return name;
   }
 
-  _wirePacks() { this._wireMillerRows(); this._wireDetailButtons(); }
-
-  // Wire the provider/pack rows (re-run after a column is swapped).
-  _wireMillerRows() {
-    const r = this.shadowRoot;
-    const onActivate = (el, fn) => {
-      el.addEventListener("click", fn);
-      el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } });
-    };
-    r.querySelectorAll(".m-row[data-prov]").forEach((row) => onActivate(row, () => this._selectProvider(row.dataset.prov)));
-    r.querySelectorAll(".m-row[data-pack]").forEach((row) => onActivate(row, () => this._selectPack(row.dataset.pack, row.dataset.cg ? +row.dataset.cg : null)));
-  }
-
-  // Wire the detail-pane action buttons (re-run after the detail column is swapped).
-  _wireDetailButtons() {
-    const r = this.shadowRoot;
-    r.querySelectorAll(".pk-btn[data-getpack]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadSelected(b.dataset.getpack); }));
-    r.querySelectorAll(".pk-btn[data-uninstall-set]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._uninstallSet(b.dataset.uninstallSet); }));
-    r.querySelectorAll(".pk-btn[data-disable]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.disable, true); }));
-    r.querySelectorAll(".pk-btn[data-enable]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.enable, false); }));
-  }
-
-  // Click Download on a pack: enqueue it (or start immediately if idle). Re-clicking
-  // an already-active/queued/installed pack is a no-op. The queue runs one job at a
-  // time so the server isn't hammered; each pack's button shows its state.
-  _downloadSelected(key) {
-    const pk = this._providerPacks(this._selProvider || "noaa").find((p) => p.key === key);
-    if (!pk) return;
-    if (this._activeDownloadKey === key) return;          // downloading now
-    if (this._dlQueue.some((j) => j.key === key)) return; // already queued
-    if (this._installedSets && this._installedSets.has(key)) return; // already have it
-    this._dlQueue.push(pk);
-    this._reflectDownloadState();
-    this._pumpDownloads();
-  }
-
-  // Run the next queued download, one at a time. Re-entrant-safe: returns early if a
-  // download is already in flight; called again when each finishes.
-  async _pumpDownloads() {
-    if (this._activeDownloadKey || !this._dlQueue.length) return;
-    const pk = this._dlQueue.shift();
-    this._activeDownloadKey = pk.key;
-    this._reflectDownloadState();
-    try {
-      if (pk.kind === "ienc") await this._runDownloadIenc(pk);
-      else if (pk.kind === "noaa") await this._runDownloadPack(pk.cg);
-    } catch (e) { console.error("[download]", pk.key, e); }
-    this._activeDownloadKey = null;
-    this._reflectDownloadState();
-    this._pumpDownloads(); // next in line
-  }
-
-  // Reflect queue state on the visible pack buttons (no full re-render → no map
-  // flicker): update each Download button in place, and refresh the pack list so
-  // its rows can badge "Downloading"/"Queued".
-  _reflectDownloadState() {
-    if (this._section !== "charts" || !this._drawerOpen()) return;
-    this._refreshDownloadButtons();
-    this._refreshPacksCol();
-  }
-
-  _refreshDownloadButtons() {
-    this.shadowRoot.querySelectorAll(".pk-btn[data-getpack]").forEach((b) => {
-      b.outerHTML = this._downloadBtnHtml(b.dataset.getpack);
-    });
-    this._wireDetailButtons(); // re-bind the swapped button(s)
-  }
-
-  // The Download button's HTML for a pack key, by queue state.
-  _downloadBtnHtml(key) {
-    if (this._activeDownloadKey === key)
-      return `<button class="pk-btn downloading" data-getpack="${esc(key)}" disabled><span class="pk-spin"></span>Downloading…</button>`;
-    if (this._dlQueue.some((j) => j.key === key))
-      return `<button class="pk-btn queued" data-getpack="${esc(key)}" disabled>Queued</button>`;
-    return `<button class="pk-btn" data-getpack="${esc(key)}">⬇ Download</button>`;
-  }
-
-  // Whether a pack key is downloading now / waiting in the queue (for list badges).
-  _packDownloadState(key) {
-    if (this._activeDownloadKey === key) return "downloading";
-    if (this._dlQueue.some((j) => j.key === key)) return "queued";
-    return null;
-  }
-
-  // Download an IENC river pack: the server fetches each cell's s57 zip from
-  // ienccloud.us and bakes them into the pack's set (ienc-<river>).
-  async _runDownloadIenc(pk) {
-    this._task = { kind: "download", status: "running" };
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-    const prog = (p) => this._setProgress(p);
-    try {
-      const cells = pk.cells.map((c) => ({ name: c.name, url: c.url }));
-      await this._serverFetch({ set: pk.key, cells }, prog, pk.title || pk.name || "river");
-    } catch (e) { console.error(`[ienc] ${pk.key} download:`, e.message); }
-    await this._renderInstalledSets();
-    this._task = null;
-    this._setProgress(null);
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-  }
-
-  // Find-a-chart search: typing a port/cell/region name HIGHLIGHTS the matching
-  // providers + packs in the columns (and shows which port matched on a pack), so
-  // the user can see at a glance which pack to grab. Packs are the download unit.
-  _renderPackSearch() {
-    const q = this._cellQuery || "";
-    return `<input id="pack-search" class="pack-search" type="search" placeholder="Find a chart, port, or region…" autocomplete="off" spellcheck="false" value="${esc(q)}">`;
-  }
-  _wirePackSearch() {
-    const i = this.shadowRoot.getElementById("pack-search");
-    if (!i) return;
-    i.oninput = () => { this._cellQuery = i.value; this._applySearch(); };
-  }
-
-  // Packs/regions matching the current query. Returns null when the query is too
-  // short, else a Map cg → matching cell object (or null for a region-name match).
-  _searchHits() {
-    const q = (this._cellQuery || "").trim().toLowerCase();
-    if (q.length < 2) return null;
-    const hits = new Map();
-    for (const c of this._catalog) {
-      if (typeof c.cg !== "number" || hits.has(c.cg)) continue;
-      if (c.n.toLowerCase().includes(q) || (c.l && c.l.toLowerCase().includes(q))) hits.set(c.cg, c);
-    }
-    for (const d of DISTRICTS) {
-      if (hits.has(d.cg)) continue;
-      if (d.region.toLowerCase().includes(q) || d.name.toLowerCase().includes(q) || (d.blurb && d.blurb.toLowerCase().includes(q))) hits.set(d.cg, null);
-    }
-    return hits;
-  }
-
-  // Re-render just the provider + pack columns (highlight + dim by the query),
-  // preserving the rest of the panel.
-  _applySearch() {
-    const cols = this.shadowRoot.querySelectorAll(".miller > .mcol");
-    if (cols.length < 2) return;
-    cols[0].outerHTML = this._renderProvidersCol();
-    cols[1].outerHTML = this._renderPacksCol();
-    this._wireMillerRows();
-  }
-
-  // Re-render just the packs column (e.g. when the IENC catalogue finishes loading).
-  _refreshPacksCol() {
-    const cols = this.shadowRoot.querySelectorAll(".miller > .mcol");
-    if (cols[1]) { cols[1].outerHTML = this._renderPacksCol(); this._wireMillerRows(); }
-  }
-
-  // The currently-selected pack object (for the current provider), or null.
-  _selectedPack() {
-    if (!this._selPack) return null;
-    return this._providerPacks(this._selProvider || "noaa").find((p) => p.key === this._selPack) || null;
-  }
-
-  // Preview a pack on the map: highlight that district's cells and frame to them.
-  // Re-renders the grid so the tapped card reads as active.
-  _showDistrictOnMap(cg) {
-    this._activeDistrict = cg;
-    if (!this._chartsMode) this._enterChartsMode();
-    this._setCellOverlay(true);
-    this._refreshCellSel();
-    this._frameCells(this._districtCellNames(cg));
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-  }
-
-  // NOAA data freshness footer (req: show when the catalog data is from).
-  _renderDataFreshness() {
-    if (!this._catalogDate) return "";
-    const total = this._catalog.length.toLocaleString();
-    return `<div class="data-fresh">NOAA chart data current as of <b>${fmtIssue(this._catalogDate)}</b> · ${total} charts available</div>`;
-  }
-
   // Tear down an armed/active box-drag (no-op now the drag-a-box selector is
   // gone, but still called on Charts-mode exit / section switch).
   _cancelAreaSelect() { if (this._areaCleanup) this._areaCleanup(); }
-
-  // Download a whole district pack: the SERVER fetches NOAA's per-district bundle
-  // into its XDG data store and bakes it into its OWN tile set (noaa-d<cg> →
-  // NOAA/D<cg>/), then we render every installed set. Falls back to per-cell server
-  // fetches if the district bundle can't be opened. No client-side download / OPFS.
-  async _runDownloadPack(cg) {
-    const d = DISTRICTS.find((x) => x.cg === cg);
-    const label = d ? `${d.region} pack` : `District ${cg}`;
-    const all = this._districtCellNames(cg);
-    if (!all.length) return;
-    if (all.every((n) => this._installed.has(n)) && this._installedSets.has("noaa-d" + cg)) return; // already installed
-    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
-
-    this._activeDistrict = cg;
-    this._task = { kind: "download", status: "running" };
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-
-    const set = "noaa-d" + cg;
-    const region = d ? d.region : "NOAA";
-    const prog = (p) => this._setProgress(p);
-    try {
-      // The district bundle holds the whole district; bake the FULL district into the
-      // pack so it's a complete set (names=all, not just the not-yet-installed ones).
-      await this._serverFetch({ set, zipUrl: this._districtZipUrl(cg), names: all }, prog, region);
-    } catch (e) {
-      console.warn(`[pack] ${label} server bundle failed — per-cell:`, e.message);
-      const cells = all.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
-      try { await this._serverFetch({ set, cells }, prog, region); }
-      catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); }
-    }
-
-    await this._renderInstalledSets(); // pick up the new pack + refresh installed state
-    // Deliberately DON'T frame the map to the new pack — yanking the camera when a
-    // background download finishes is distracting and fights wherever the user has
-    // navigated. They can preview a pack on the map via _showDistrictOnMap (a tap).
-    this._task = null;
-    this._setProgress(null);
-    this._refreshCellSel();
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-  }
-
-  // Uninstall a NOAA district pack (convenience over _uninstallSet).
-  _uninstallPack(cg) { return this._uninstallSet("noaa-d" + cg); }
-
-  // Uninstall any pack by set name: DELETE /api/set removes the baked pmtiles/aux
-  // from the cache (source cells in the data store are kept), then re-render.
-  async _uninstallSet(set) {
-    if (this._taskRunning()) return;
-    if (!(this._installedSets && this._installedSets.has(set))) return;
-    this._task = { kind: "download", status: "running" };
-    this._setProgress({ label: "Removing charts…", sub: this._setLabel(set), frac: null });
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-    try { await this._api.deleteSet(set); }
-    catch (e) { console.warn("[pack] remove", set, e); }
-    await this._renderInstalledSets();
-    this._task = null;
-    this._setProgress(null);
-    this._refreshCellSel();
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-  }
 
   // Remove ALL regions at once (DELETE /api/charts), then reflect empty by
   // re-applying the now-empty manifest — no reload needed.
@@ -1985,7 +1394,7 @@ export class ChartPlotter extends HTMLElement {
     await this._applyArchives();
     this.updateEmptyState();
     this._assessCoverage();
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    if (this._chartLib) this._chartLib.refresh();
     this._task = { status: "done", _flourish: true };
     this._renderTaskUI();
     this._clearTaskSoon(1200);
@@ -2002,10 +1411,8 @@ export class ChartPlotter extends HTMLElement {
   }
 
   saveView() {
-    // Don't persist the Charts-mode selection framing (the zoomed-out world view):
-    // a refresh should resume where the user was actually looking at charts, not
-    // on the picker. The pre-Charts position stays the last saved view.
-    if (this._chartsMode) return;
+    // The cell-picker "charts mode" (whose zoomed-out framing we used to skip
+    // persisting) was removed; the live view is always the one to save.
     const c = this._map.getCenter();
     try { localStorage.setItem(LS_VIEW, JSON.stringify({ center: [c.lng, c.lat], zoom: this._map.getZoom() })); } catch {}
   }
@@ -2138,10 +1545,8 @@ export class ChartPlotter extends HTMLElement {
       this._showInspectArea(this._captureArea(a, b));
     });
     map.on("click", (e) => {
-      // Charts selection map: a tap previews the pack (Coast Guard district) of
-      // the cell under it (drags pan, and MapLibre only emits "click" for
-      // non-pan gestures).
-      if (this._chartsMode) { this._pickDistrictAt(e.point.x, e.point.y); return; }
+      // (The Charts cell-picker tap-to-preview-a-district branch was removed with
+      // the main-map cell picker; the <chart-library> panel is the chart surface.)
       if (this._inspectMode) { // dev feature inspector
         if (this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
         if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
@@ -2377,7 +1782,7 @@ export class ChartPlotter extends HTMLElement {
     }
     const inspecting = this._inspectMode;
     const dbgOn = this._debugCells;
-    const busy = this._taskRunning() || !!this._activeDownloadKey || this._dlQueue.length > 0;
+    const busy = this._taskRunning() || (this._chartLib && this._chartLib.busy);
     el.innerHTML = `
       <section class="dev-sec">
         <div class="dev-h">Charts</div>
@@ -2437,12 +1842,13 @@ export class ChartPlotter extends HTMLElement {
   // the districts one at a time, surfacing progress through the notification pill.
   // user/import/legacy packs are skipped (no client-known cell list).
   async _rebuildAllPerBand(btn) {
-    if (this._taskRunning() || this._activeDownloadKey || this._dlQueue.length) { if (btn) flashBtn(btn, "busy"); return; }
+    if (this._taskRunning() || (this._chartLib && this._chartLib.busy)) { if (btn) flashBtn(btn, "busy"); return; }
     let packs = [];
     try { packs = ((await fetch(`${this._assets}api/packs`).then((r) => (r.ok ? r.json() : null))) || {}).packs || []; } catch (e) { /* offline */ }
-    // Load the IENC catalogue so we know each installed river pack's cells.
-    if (packs.some((p) => p.name.startsWith("ienc-"))) { try { await this._iencCatalog(); } catch (e) { /* skip ienc */ } }
-    const iencPacks = this._providerPacks("ienc");
+    // Load the IENC catalogue so we know each installed river pack's cells (the
+    // catalogue + ienc-pack grouping live in <chart-library> now).
+    if (packs.some((p) => p.name.startsWith("ienc-"))) { try { await (this._chartLib ? this._chartLib._iencCatalog() : Promise.resolve()); } catch (e) { /* skip ienc */ } }
+    const iencPacks = (this._chartLib ? this._chartLib._providerPacks("ienc") : null) || [];
     const todo = [];
     for (const p of packs) {
       const m = /^noaa-d(\d+)$/.exec(p.name);
@@ -2470,7 +1876,7 @@ export class ChartPlotter extends HTMLElement {
     this._setProgress(null);
     await this._renderInstalledSets();
     if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } } // re-fetch the freshly-baked tiles
-    if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
+    if (this._chartLib) this._chartLib.refresh();
     this._renderDevPanel();
     if (btn) flashBtn(btn, `✓ rebuilt ${todo.length}`);
   }
@@ -2809,41 +2215,10 @@ export class ChartPlotter extends HTMLElement {
     if (src) src.setData({ type: "FeatureCollection", features: [] });
   }
 
-  // Build a GeoJSON FeatureCollection of cell footprints. `cells` is an iterable
-  // of catalog entries; when `mark` is set, cells of the previewed pack (the
-  // active Coast Guard district) are tagged sel=1 so they highlight on the map.
-  _cellsFC(cells, mark) {
-    const f = [];
-    const active = this._activeDistrict;
-    for (const c of cells) {
-      const b = c.bb;
-      if (!Array.isArray(b) || b.length !== 4) continue;
-      f.push({
-        type: "Feature",
-        properties: { sel: mark && active && c.cg === active ? 1 : 0 },
-        geometry: { type: "Polygon", coordinates: [[[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]], [b[0], b[1]]]] },
-      });
-    }
-    return { type: "FeatureCollection", features: f };
-  }
-
-  // Show/hide the all-cells selection overlay (and refresh the previewed-pack fill).
-  _setCellOverlay(on) {
-    const map = this._map;
-    if (!map) return;
-    const vis = on ? "visible" : "none";
-    for (const id of ["selcells-line", "selcells-fill", "selcells-sel-line"]) {
-      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
-    }
-    const s = map.getSource("selcells");
-    if (s) s.setData(on ? this._cellsFC(this._catalog, true) : { type: "FeatureCollection", features: [] });
-  }
-
-  // Re-emit the all-cells layer so newly-selected cells pick up sel=1.
-  _refreshCellSel() {
-    const s = this._map && this._map.getSource("selcells");
-    if (s) s.setData(this._cellsFC(this._catalog, true));
-  }
+  // The all-cells selection overlay (_cellsFC/_setCellOverlay/_refreshCellSel) and
+  // the tap-to-preview cell picker were removed with the main-map cell picker. The
+  // selcells source/layers are still added by addCatalogOverlay (left hidden), so
+  // re-adding them is harmless; nothing drives them any more.
 
   // -- chart-select map mode ----------------------------------------------
   // Charts view turns the map into a dedicated selection surface: the rendered
@@ -2873,46 +2248,10 @@ export class ChartPlotter extends HTMLElement {
     }
   }
 
-  // Enter selection mode: overlay the catalog cell boxes on the LIVE chart, in
-  // place. Opening Charts must never move the map or hide the chart — you pick
-  // charts for wherever you're already looking, with the ENC render still beneath
-  // the selection boxes. Cells are picked by tapping them (see the map click
-  // handler) or via the region buttons / search / cell list.
-  _enterChartsMode() {
-    if (!this._map) return;
-    this._chartsMode = true;
-    this._closePick(); // the cursor-pick report is for the chart view only
-    this._setCellOverlay(true);
-  }
-  // Leave selection mode: disarm box-select, drop the cell overlay. The chart
-  // render and camera are untouched (Charts never hid or moved them).
-  _exitChartsMode() {
-    this._cancelAreaSelect();
-    this._activeDistrict = null; // clear the previewed-pack highlight so it doesn't persist across open/close
-    this._setCellOverlay(false);
-    this._clearFocus();
-    if (!this._chartsMode) return;
-    this._chartsMode = false;
-  }
-
-  // Click a cell on the selection map to preview its pack. Picks the finest
-  // (largest-scale) cell whose footprint contains the point and shows that
-  // cell's Coast Guard district. A plain MapLibre "click" only fires when the
-  // gesture wasn't a pan, so dragging still pans the map.
-  _pickDistrictAt(px, py) {
-    if (!this._map) return;
-    const ll = this._map.unproject([px, py]);
-    let best = null;
-    for (const c of this._catalog) {
-      const b = c.bb;
-      if (!Array.isArray(b) || b.length !== 4) continue;
-      if (ll.lng >= b[0] && ll.lng <= b[2] && ll.lat >= b[1] && ll.lat <= b[3]) {
-        if (!best || (c.s || 0) < (best.s || 0)) best = c; // finest = smallest scale denom
-      }
-    }
-    if (best && best.cg) this._showDistrictOnMap(best.cg);
-  }
-
+  // The main-map cell picker (cell-box overlay + tap-to-preview-a-district) was
+  // removed: the <chart-library> panel is the one chart surface now. Closing the
+  // drawer/leaving the charts section no longer toggles a map mode; _clearFocus()
+  // still clears the focus highlight via _clearFocus below.
 
   // A cell is "installed" when locally imported (OPFS) OR its NOAA region is
   // downloaded (one pmtiles per region — so region membership IS installed-ness).
@@ -3047,59 +2386,16 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // A not-downloaded in-view cell was tapped in the coverage HUD: open the Charts
-  // selector and preview the pack (Coast Guard district) that contains the cell,
-  // ready to download.
+  // library (on NOAA) so the user can find + download the pack. The old main-map
+  // district preview went away with the cell picker.
   _downloadCellRegion(name) {
-    const c = this._byName.get(name);
-    this.openCharts();
-    if (c && c.cg) this._showDistrictOnMap(c.cg);
+    this.openCharts("noaa");
   }
 
-  // -- import (drop a .zip / .000, unzip in-browser → OPFS) ----------------
-  async openFiles(fileList) {
-    const log = this.shadowRoot.getElementById("import-log");
-    const rawInstalled = [];
-    for (const file of fileList) {
-      const lower = file.name.toLowerCase();
-      try {
-        if (lower.endsWith(".zip")) {
-          const cells = cellEntries(await readCentralDirectory(file));
-          let added = 0;
-          for (const rec of cells) {
-            this._archive.set(rec.name, { blob: file, entry: rec.base, updates: rec.updateCount });
-            this._selected.add(rec.name);
-            added++;
-          }
-          log.textContent = `${file.name}: ${added} cell(s) found`;
-        } else if (lower.endsWith(".000")) {
-          // Raw cell: persist it; it gets baked into the archive below.
-          const name = file.name.replace(/\.000$/i, "");
-          await this.installCell(name, new Uint8Array(await file.arrayBuffer()));
-          rawInstalled.push(name);
-          log.textContent = `imported ${name}`;
-        } else if (lower.endsWith(".pmtiles")) {
-          // A prebaked archive — add it to the loaded coverage (reads only header
-          // + directory; tiles stream on demand from the File). Persist in the
-          // BACKGROUND so a multi-GB file doesn't block the map on the IndexedDB copy.
-          await this._plotter.addArchive(file);
-          this._importedArchives.push(file); // keep in memory so a coverage rebuild can re-add it
-          this._markArchive({ type: "blob" });
-          log.textContent = `loaded ${file.name}`;
-          this.closeDrawer();
-          archivePut(file).catch((e) => console.warn("[archive] persist failed (too large for IndexedDB?)", e));
-        } else {
-          log.textContent = `skipped ${file.name} (need .zip, .000 or .pmtiles)`;
-        }
-      } catch (err) {
-        console.error(err);
-        log.textContent = `${file.name}: ${err.message}`;
-      }
-    }
-    this.updateEmptyState();
-    this.renderArchiveList();
-    // Re-bake the in-browser wasm tiles from the now-larger stored cell set.
-    await this._refreshCharts();
-  }
+  // The User-Charts local-file import (openFiles + the OPFS upload/bake path) now
+  // lives in <chart-library>; a dropped .pmtiles is handed back to the shell via
+  // the "chart-import-archive" event (see _importArchiveFile). The shell's debug
+  // tools still re-bake the local store through the component's _refreshCharts.
 
   // Render every baked tile set the server has (GET /tiles/) — each a provider/pack
   // (noaa-d17, ienc-…, import). This is the single source of truth for what's
@@ -3134,41 +2430,11 @@ export class ChartPlotter extends HTMLElement {
     return active;
   }
 
-  // Show/hide an installed pack on the map. The state is SERVER-side (the data is
-  // kept; this only toggles rendering); we just call the API and re-render.
-  async _setPackDisabled(key, off) {
-    try { await this._api.setEnabled(key, !off); }
-    catch (e) { console.warn("[pack] toggle", key, e); }
-    await this._renderInstalledSets();
-    if (this._section === "charts" && this._drawerOpen()) { this._updateDetail(); this._refreshPacksCol(); }
-  }
-
-  // Bake the LOCALLY-imported cells (the OPFS store) into the "import" set and
-  // re-render. Downloads use their own per-district packs (see _runDownloadPack); this
-  // is only the drag-a-zip/.000 path. The wasm baker is gone — baking is server-side.
-  async _refreshCharts() {
-    if (!this._plotter) return;
-    if (this._charting) { this._chartingAgain = true; return; } // coalesce concurrent rebakes
-    this._charting = true;
-    try {
-      const local = await this._store.list().catch(() => []);
-      if (local.length) {
-        for (const name of local) {
-          try {
-            const bytes = await this._store.getBytes(name);
-            if (bytes && bytes.length) await this._api.uploadCell(name, bytes);
-          } catch (e) { console.warn("[charts] upload", name, e); }
-        }
-        const { job } = await this._api.importCells("import", local);
-        await this._pollImport(job, (p) => this._setProgress(p), "your");
-      }
-      await this._renderInstalledSets();
-    } catch (e) {
-      console.warn("[charts] import bake", e);
-    } finally {
-      this._charting = false;
-      if (this._chartingAgain) { this._chartingAgain = false; this._refreshCharts(); }
-    }
+  // Re-bake the local OPFS store on the server (the User-Charts import path). The
+  // <chart-library> component owns this; the shell's debug tools delegate to it.
+  // Returns a resolved promise when there's no component yet (boot/prod guards).
+  _refreshCharts() {
+    return this._chartLib ? this._chartLib._refreshCharts() : Promise.resolve();
   }
 
   // Wait for a server job (download/bake) to complete, surfacing progress through
@@ -3180,11 +2446,9 @@ export class ChartPlotter extends HTMLElement {
   // Delegates to ChartService (SSE stream + polling fallback + phase→verb mapping).
   _pollImport(job, prog = () => {}, name) { return this._api.pollJob(job, { name, onStatus: prog }); }
 
-  // Server-side download + bake of one pack: the SERVER fetches the cells from NOAA
-  // into its data store and bakes them into the named set. spec is {set, zipUrl,
-  // names} (one district bundle) or {set, cells:[{name,url}]} (per-cell). Resolves
-  // when the pack is baked + registered. Delegates to ChartService.
-  _serverFetch(spec, prog = () => {}, name) { return this._api.importAndWait(spec, { name, onStatus: prog }); }
+  // (The server download+bake helper (_serverFetch) moved into <chart-library>
+  // with the download flow; the shell uses _pollImport for its own re-attach +
+  // dev-rebuild paths.)
 
   // Footprint + render-start zoom for each installed cell, from the catalog —
   // drives lazy loading (which cells a tile needs) and the coverage outlines.
@@ -3322,13 +2586,6 @@ export class ChartPlotter extends HTMLElement {
     localStorage.setItem("cp-cell-bounds", on ? "1" : "0");
     this._persistSettings();
     if (this._coverage) this._coverage.setVisible(on);
-  }
-
-  toggleSelect(name) {
-    if (this._selected.has(name)) this._selected.delete(name);
-    else this._selected.add(name);
-    this.refreshBoxes();
-    this.renderArchiveList();
   }
 
   // -- search: catalog (places/charts) + loaded chart feature data ---------
@@ -3525,63 +2782,13 @@ export class ChartPlotter extends HTMLElement {
         W = Math.min(W, b[0]); S = Math.min(S, b[1]); E = Math.max(E, b[2]); N = Math.max(N, b[3]); any = true;
       }
     }
-    if (this._chartsMode) return; // user already opened the selection map — don't yank it
+    // (The cell-picker "charts mode" guard was removed with the picker.)
     if (any && this._map) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
   }
 
-  async importSelected() {
-    const names = [...this._selected].filter((n) => this._archive.has(n));
-    if (!names.length) return;
-    const imported = [];
-    let done = 0;
-    for (const name of names) {
-      this._setProgress({ label: "Importing charts", sub: `${name} · ${done + 1} of ${names.length}`, frac: done / names.length });
-      try {
-        const { blob, entry } = this._archive.get(name);
-        const bytes = await extractEntry(blob, entry);
-        await this.installCell(name, bytes); // persist only
-        this._archive.delete(name);
-        this._selected.delete(name);
-        imported.push(name);
-      } catch (err) {
-        console.error("[import]", name, err);
-        this._setProgress({ label: "Importing charts", sub: `${name}: ${err.message}`, frac: done / names.length });
-      }
-      done++;
-    }
-    this._setProgress({ label: `Imported ${imported.length} chart${imported.length > 1 ? "s" : ""}`, sub: "Ready", frac: 1 });
-    this.updateEmptyState();
-    this.renderCharts();
-    this.refreshBoxes();
-    this.renderArchiveList();
-    // New cells stored → the wasm baker renders them on demand (no pre-bake).
-    if (imported.length) await this._refreshCharts();
-    setTimeout(() => this._setProgress(null), 1200);
-  }
-
-  // Re-bake every installed cell into the server "user" set and render it. The
-  // bake now runs server-side (POST /api/import); see _refreshCharts.
-  async rebakeArchive() {
-    const names = [...this._installed];
-    if (!names.length) return;
-    this._setProgress({ label: "Baking charts…", sub: `${names.length} chart${names.length > 1 ? "s" : ""}`, frac: null });
-    try {
-      await this._refreshCharts();
-      this._setProgress({ label: `Baked ${names.length} chart${names.length > 1 ? "s" : ""}`, sub: "Ready", frac: 1 });
-    } catch (e) {
-      console.error("[bake]", e);
-      this._setProgress({ label: "Bake failed", sub: e.message, frac: null });
-    }
-    setTimeout(() => this._setProgress(null), 1500);
-  }
-
-  // Import = PERSIST ONLY. We just store the cell bytes; the worker bakes tiles
-  // from them on demand (and caches the tiles to disk). Nothing is held in RAM
-  // per installed cell, so installing the whole catalog is fine.
-  async installCell(name, bytes) {
-    await this._store.put(name, bytes);
-    this._installed.add(name);
-  }
+  // The archive import path (importSelected / rebakeArchive / installCell) moved
+  // into <chart-library>, which owns the OPFS store upload + server bake and
+  // dispatches "charts-changed" when it finishes.
 
   // Close the drawer and frame the map to the combined extent of `names` (their
   // catalog cell boxes). Tiles for the new view bake on demand.
@@ -3597,19 +2804,6 @@ export class ChartPlotter extends HTMLElement {
       }
     }
     if (any) this._map.fitBounds([[W, S], [E, N]], { padding: 60, maxZoom: 14, duration: 800 });
-  }
-
-  async removeChart(name) {
-    // NOAA-provisioned charts are removed a whole region at a time (one pmtiles
-    // per region), so this only handles locally-imported
-    // (OPFS) cells: drop it and re-bake the in-browser archive.
-    await this._store.remove(name);
-    this._installed.delete(name);
-    await this.rebakeArchive();
-    this.updateEmptyState();
-    this.renderCharts();
-    this.refreshBoxes();
-    this._assessCoverage();
   }
 
   // -- settings ------------------------------------------------------------
@@ -4305,24 +3499,8 @@ export class ChartPlotter extends HTMLElement {
       </div>
       <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
       <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
-      <div id="agree" class="modal" hidden>
-        <div class="modal-card">
-          <h2>NOAA ENC® — User Agreement</h2>
-          <div class="agree-body">
-            <p>NOAA Electronic Navigational Charts (NOAA ENC®) are downloaded directly from NOAA. By continuing you acknowledge that you have read, understood, and accepted NOAA's User Agreement.</p>
-            <ul>
-              <li><b>Not for navigation.</b> Charts downloaded and baked here are processed for display and are <b>not</b> the official NOAA ENC; they do not meet chart-carriage regulations. Use official, up-to-date charts for navigation.</li>
-              <li><b>Updates.</b> NOAA updates ENCs weekly on a best-efforts basis. You are responsible for ensuring you have the current edition and latest updates.</li>
-              <li><b>Origin.</b> Charts are sourced from <a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA Office of Coast Survey</a>. NOAA makes no warranty and assumes no liability for their use.</li>
-            </ul>
-            <p>Read the full terms: <a href="${NOAA_AGREEMENT_URL}" target="_blank" rel="noopener">NOAA ENC User Agreement</a>.</p>
-          </div>
-          <div class="agree-actions">
-            <button id="agree-decline" class="btn" type="button">Decline</button>
-            <button id="agree-accept" class="cta" type="button">Accept &amp; continue</button>
-          </div>
-        </div>
-      </div>
+      <!-- The NOAA ENC User Agreement modal moved into <chart-library> (it owns the
+           download flow); the "Terms" link reaches into it. -->
       <div id="ctx-menu" class="ctx-menu" hidden></div>
       <div id="debug-hud" class="debug-hud" hidden></div>
       <div id="empty" hidden><div class="card">
@@ -4337,8 +3515,8 @@ export class ChartPlotter extends HTMLElement {
         <div class="body">
           <div class="panel sel" data-panel="charts">
             <!-- Job progress lives in the bottom data card + top notification pill,
-                 not in the drawer. This panel is purely the region browser. -->
-            <div id="charts-body"></div>
+                 not in the drawer. The whole charts UI is <chart-library>. -->
+            <chart-library id="chart-lib"></chart-library>
           </div>
           <div class="panel" data-panel="settings">
             <div id="settings-body"></div>
@@ -4364,19 +3542,17 @@ export class ChartPlotter extends HTMLElement {
       const root = this.shadowRoot;
       const ctx = root.getElementById("ctx-menu");
       if (ctx && !ctx.hidden) { this._hideContextMenu(); return; }
-      const agree = root.getElementById("agree");
-      if (agree && !agree.hidden) { this._resolveAgreement(false); return; } // cancel
+      // The NOAA agreement modal lives in <chart-library>; cancel it if open.
+      if (this._chartLib && this._chartLib.agreementOpen) { this._chartLib._resolveAgreement(false); return; }
       if (this._cellPopOpen) { this._toggleCellStatusPopup(); return; }
       const search = root.getElementById("search");
       if (search && !search.hidden) { search.hidden = true; root.getElementById("search-tab").classList.remove("on"); return; }
       if (this._drawerOpen()) { this.closeDrawer(); return; }
     });
     $("empty-add").onclick = () => this.openCharts();
-    $("empty-import").onclick = () => { this._selProvider = "user"; this._selPack = null; this.openCharts(); };
-    // NOAA ENC user-agreement gate + attribution "Terms" link.
-    $("attr-terms").onclick = () => this._showAgreement();
-    $("agree-accept").onclick = () => this._resolveAgreement(true);
-    $("agree-decline").onclick = () => this._resolveAgreement(false);
+    $("empty-import").onclick = () => this.openCharts("user");
+    // Attribution "Terms" link → the agreement modal owned by <chart-library>.
+    $("attr-terms").onclick = () => { if (this._chartLib) this._chartLib._showAgreement(); };
 
     // Search (offline, over catalog titles + loaded chart feature data). The nav
     // button toggles a tiny flyout with the input + results.
@@ -4405,12 +3581,9 @@ export class ChartPlotter extends HTMLElement {
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
     r.getElementById("drawer").classList.toggle("wide", name === "charts"); // two-pane list+map
     r.getElementById("drawer").classList.toggle("set-wide", name === "settings"); // rail + content
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : "Chart library";
-    // Charts is the "get & see charts" mode: overlay every catalog cell on the
-    // map (selected ones highlighted) so you can see and box-select coverage.
-    // Any other section is just chrome over the live viewer — no overlay.
-    if (name === "charts") { this.renderCharts(); this._enterChartsMode(); }
-    else this._exitChartsMode();
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : (this._prod ? "Add charts" : "Chart library");
+    // Charts = the <chart-library> panel; open it on its current provider.
+    if (name === "charts" && this._chartLib) this._chartLib.show(this._chartLib._selProvider || "noaa");
     // Feature-inspect is NOT auto-armed; it's a button inside the Advanced (dev)
     // tab. Any section switch disarms it (and clears dev hole markers).
     this._setInspectMode(false);
@@ -4446,7 +3619,8 @@ export class ChartPlotter extends HTMLElement {
   }
 
   closeDrawer() {
-    if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
+    // Free the <chart-library> detail-pane OSM preview map (it owns it now).
+    if (this._chartLib) this._chartLib.teardownPreview();
     this.setDrawerOpen(false);
   }
 
@@ -4491,10 +3665,10 @@ export class ChartPlotter extends HTMLElement {
       const tabId = this._section === "charts" ? "charts-btn" : "settings-btn";
       this._positionCaret(drawer, r.getElementById(tabId));
     }
-    // Closing the drawer leaves Charts mode: restore the ENC render, clear the
-    // region highlight, and cancel any in-progress box drag. Also disarm
-    // feature-inspect (crosshair/box-zoom) so it doesn't linger over the bare map.
-    if (!open) { this._exitChartsMode(); this._setInspectMode(false); }
+    // Closing the drawer clears the region-focus highlight + any armed box drag,
+    // and disarms feature-inspect (crosshair/box-zoom) so it doesn't linger over
+    // the bare map. (The old cell-picker "charts mode" exit is gone with the picker.)
+    if (!open) { this._cancelAreaSelect(); this._clearFocus(); this._setInspectMode(false); }
     this.updateEmptyState(); // the welcome card hides while the drawer is open
   }
 
@@ -4523,36 +3697,8 @@ export class ChartPlotter extends HTMLElement {
   // Installed packs exist but none render (all disabled) → nothing on the map.
   _noChartsEnabled() { return !this._prod && this._hasInstalledPacks() && !this._hasArchive; }
 
-  renderArchiveList() {
-    const el = this.shadowRoot.getElementById("archive-list");
-    if (!el) return;
-    const names = [...this._archive.keys()].sort();
-    if (!names.length) { el.innerHTML = ""; return; }
-    const nSel = [...this._selected].filter((n) => this._archive.has(n)).length;
-    el.innerHTML = `<h4>From archive (${names.length})</h4>` + names.map((name) => {
-      const c = this._byName.get(name);
-      const checked = this._selected.has(name) ? "checked" : "";
-      return `<label class="row"><input type="checkbox" data-name="${name}" ${checked}>
-        <span class="grow"><span class="name">${name}</span> <span class="meta">${c?.l || ""}</span></span></label>`;
-    }).join("") +
-      `<div style="margin-top:8px"><button id="import-btn" class="btn">Import ${nSel} chart(s)</button></div>`;
-    el.querySelectorAll("input[type=checkbox]").forEach((cb) => (cb.onchange = () => this.toggleSelect(cb.dataset.name)));
-    const ib = this.shadowRoot.getElementById("import-btn");
-    if (ib) ib.onclick = () => this.importSelected();
-  }
-
-  // Wire the file-import controls (the import-more <details> is re-rendered with
-  // the region list, so its drop/pick handlers are bound here each render).
-  _wireImport() {
-    const r = this.shadowRoot;
-    const file = r.getElementById("file"), drop = r.getElementById("drop"), pick = r.getElementById("pick");
-    if (!file || !drop || !pick) return;
-    pick.onclick = () => file.click();
-    file.onchange = () => { if (file.files.length) this.openFiles(file.files); file.value = ""; };
-    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
-    drop.ondragleave = () => drop.classList.remove("over");
-    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files.length) this.openFiles(e.dataTransfer.files); };
-  }
+  // The archive-list rendering + file-import wiring (renderArchiveList /
+  // _wireImport) moved into <chart-library>, which owns the User-Charts import UI.
 
   // The settings panel: appearance (colour scheme) + the mariner display
   // settings, laid out as labelled rows / toggles / segmented controls.
