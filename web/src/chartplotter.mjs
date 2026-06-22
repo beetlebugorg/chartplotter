@@ -20,6 +20,7 @@ import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the rendere
 import "./components/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
 import { NotificationCenter } from "./app/notification-center.mjs"; // app-level task-progress + banner bus
+import { ChartService } from "./data/chart-service.mjs"; // server import/bake jobs + pack registry
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./data/chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./data/zip-import.mjs";
@@ -376,6 +377,11 @@ export class ChartPlotter extends HTMLElement {
       store: this._store,
       getInstalled: () => this._installed,
     });
+
+    // Server-side chart API (import/bake jobs + pack registry + set management):
+    // one definition of every endpoint + the SSE job-progress protocol, shared
+    // by the shell here and the <chart-library> component.
+    this._api = new ChartService({ assets: this._assets });
 
     // App-level notification bus: feature components (chart-library now, plugins
     // later) post task progress + banners here instead of touching shell DOM.
@@ -1947,9 +1953,8 @@ export class ChartPlotter extends HTMLElement {
     this._task = { kind: "download", status: "running" };
     this._setProgress({ label: "Removing charts…", sub: this._setLabel(set), frac: null });
     if (this._section === "charts" && this._drawerOpen()) this.renderCharts();
-    try {
-      await fetch(`${this._assets}api/set?set=${encodeURIComponent(set)}`, { method: "DELETE" });
-    } catch (e) { console.warn("[pack] remove", set, e); }
+    try { await this._api.deleteSet(set); }
+    catch (e) { console.warn("[pack] remove", set, e); }
     await this._renderInstalledSets();
     this._task = null;
     this._setProgress(null);
@@ -3105,15 +3110,12 @@ export class ChartPlotter extends HTMLElement {
     // /api/packs is the single source of truth: every baked pack + its enabled
     // state (server-side, in <data>/prefs.json). Render only the enabled ones;
     // disabled packs stay baked on disk but off the map.
-    let packs = [];
-    try { const j = await fetch(`${this._assets}api/packs`).then((r) => (r.ok ? r.json() : null)); packs = (j && j.packs) || []; } catch (e) { /* offline */ }
+    const packs = await this._api.packs();
     // Re-index aux content (server mode): a just-imported district's TXTDSC/PICREP
     // files become resolvable in the pick report without a page reload.
     if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
-    try {
-      const j = await fetch(`${this._assets}api/cells`).then((r) => (r.ok ? r.json() : null));
-      this._installed = new Set((j && j.cells) || []);
-    } catch (e) { /* keep current */ }
+    const cells = await this._api.cells();
+    if (cells) this._installed = cells; // null → keep current view
     // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
     // district and the server fans to its band-sets.
     this._installedSets = new Set(packs.map((p) => p.name));
@@ -3135,7 +3137,7 @@ export class ChartPlotter extends HTMLElement {
   // Show/hide an installed pack on the map. The state is SERVER-side (the data is
   // kept; this only toggles rendering); we just call the API and re-render.
   async _setPackDisabled(key, off) {
-    try { await fetch(`${this._assets}api/set/${off ? "disable" : "enable"}?set=${encodeURIComponent(key)}`, { method: "POST" }); }
+    try { await this._api.setEnabled(key, !off); }
     catch (e) { console.warn("[pack] toggle", key, e); }
     await this._renderInstalledSets();
     if (this._section === "charts" && this._drawerOpen()) { this._updateDetail(); this._refreshPacksCol(); }
@@ -3154,13 +3156,11 @@ export class ChartPlotter extends HTMLElement {
         for (const name of local) {
           try {
             const bytes = await this._store.getBytes(name);
-            if (bytes && bytes.length) await fetch(`${this._assets}api/cell/${encodeURIComponent(name)}`, { method: "PUT", body: bytes });
+            if (bytes && bytes.length) await this._api.uploadCell(name, bytes);
           } catch (e) { console.warn("[charts] upload", name, e); }
         }
-        const res = await fetch(`${this._assets}api/import?set=import&cells=${encodeURIComponent(local.join(","))}`, { method: "POST" });
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
-        await this._pollImport(j.job, (p) => this._setProgress(p), "your");
+        const { job } = await this._api.importCells("import", local);
+        await this._pollImport(job, (p) => this._setProgress(p), "your");
       }
       await this._renderInstalledSets();
     } catch (e) {
@@ -3176,81 +3176,15 @@ export class ChartPlotter extends HTMLElement {
   // connection, server pushes on change) and falls back to polling if EventSource
   // is unavailable or the stream drops. Resolves with the final status; throws on
   // error/timeout.
-  async _pollImport(job, prog = () => {}, name) {
-    if (typeof EventSource !== "undefined") {
-      try { return await this._streamJob(job, prog, name); }
-      catch (e) { console.warn("[job] event stream failed — polling:", e.message); }
-    }
-    for (let i = 0; i < 2400; i++) { // ~20 min ceiling at 500ms
-      const r = await fetch(`${this._assets}api/import/status?job=${encodeURIComponent(job)}`);
-      const s = await r.json().catch(() => ({}));
-      if (s.state === "done") return s;
-      if (s.state === "error") throw new Error(s.error || "job failed");
-      this._reportJob(s, prog, name);
-      await new Promise((res) => setTimeout(res, 500));
-    }
-    throw new Error("job timed out");
-  }
-
-  // Stream a job's progress over SSE (GET /api/import/events). One long-lived
-  // connection; the server pushes a status event whenever it changes.
-  _streamJob(job, prog, name) {
-    return new Promise((resolve, reject) => {
-      const es = new EventSource(`${this._assets}api/import/events?job=${encodeURIComponent(job)}`);
-      let settled = false;
-      const done = (fn, arg) => { if (!settled) { settled = true; es.close(); fn(arg); } };
-      es.onmessage = (ev) => {
-        let s; try { s = JSON.parse(ev.data); } catch { return; }
-        if (s.state === "done") return done(resolve, s);
-        if (s.state === "error") return done(reject, new Error(s.error || "job failed"));
-        this._reportJob(s, prog, name);
-      };
-      es.onerror = () => done(reject, new Error("event stream closed"));
-    });
-  }
-
-  // Map a job status into the progress UI. We build a friendly label from the
-  // phase + the region name ("Extracting Mid-Atlantic charts…") rather than echo
-  // the server's raw note (which carries filenames). The numeric detail (counts /
-  // bytes / percent) becomes the notification drop-down's sub-line.
-  _reportJob(s, prog, name) {
-    const PHASE = {
-      download: "Downloading", fetch: "Downloading", dl: "Downloading", upload: "Uploading",
-      extract: "Extracting", unzip: "Extracting", expand: "Extracting",
-      parse: "Reading", read: "Reading", import: "Importing",
-      bake: "Baking", tiles: "Baking", render: "Baking",
-      register: "Finishing", finalize: "Finishing", index: "Finishing",
-    };
-    const subject = name ? `${name} charts` : "charts";
-    const verb = s.phase ? (PHASE[s.phase] || s.phase[0].toUpperCase() + s.phase.slice(1)) : "Working on";
-    const label = `${verb} ${subject}…`;
-    // Numeric detail only — friendly unit (cells → charts; tiles → unitless
-    // count). The percentage is shown separately in the drop-down, so it's not
-    // repeated here.
-    let sub = "";
-    if (s.unit === "bytes") sub = s.total ? `${fmtBytes(s.done)} / ${fmtBytes(s.total)}` : fmtBytes(s.done);
-    else if (s.total) {
-      const u = s.unit === "cells" ? "charts" : s.unit === "tiles" ? "" : (s.unit || "");
-      sub = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
-    }
-    const frac = s.total ? s.done / s.total : (s.percent ? s.percent / 100 : null);
-    prog({ label, sub, frac });
-  }
+  // Wait for a server job, surfacing progress via prog({label,sub,frac}).
+  // Delegates to ChartService (SSE stream + polling fallback + phase→verb mapping).
+  _pollImport(job, prog = () => {}, name) { return this._api.pollJob(job, { name, onStatus: prog }); }
 
   // Server-side download + bake of one pack: the SERVER fetches the cells from NOAA
-  // into its XDG data store and bakes them into the named set (no client download /
-  // OPFS). spec is {set, zipUrl, names} (one district bundle) or {set, cells:
-  // [{name,url}]} (per-cell). Resolves when the pack is baked + registered.
-  async _serverFetch(spec, prog = () => {}, name) {
-    const res = await fetch(`${this._assets}api/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(spec),
-    });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok || !j.job) throw new Error(j.error || `download HTTP ${res.status}`);
-    return this._pollImport(j.job, prog, name);
-  }
+  // into its data store and bakes them into the named set. spec is {set, zipUrl,
+  // names} (one district bundle) or {set, cells:[{name,url}]} (per-cell). Resolves
+  // when the pack is baked + registered. Delegates to ChartService.
+  _serverFetch(spec, prog = () => {}, name) { return this._api.importAndWait(spec, { name, onStatus: prog }); }
 
   // Footprint + render-start zoom for each installed cell, from the catalog —
   // drives lazy loading (which cells a tile needs) and the coverage outlines.
