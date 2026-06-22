@@ -32,8 +32,9 @@ type Server struct {
 	cacheDir    string // XDG cache root: REGENERABLE baked tile sets (NOAA/<d>/*.pmtiles)
 	dataDir     string // XDG data root: SOURCE ENC (district zips, raw cells) — safe, not auto-deleted
 	allowRemote bool
-	share       shareStore // latest "share my view" snapshot (camera + cell list)
-	Version     string     // build version
+	share       shareStore    // latest "share my view" snapshot (camera + cell list)
+	settings    settingsStore // persisted client display settings (<data>/client-settings.json)
+	Version     string        // build version
 
 	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
 	imports *importJobs       // background server-side bake jobs (POST /api/import)
@@ -162,6 +163,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.URL.Path == "/api/share":
 		s.serveShare(w, r) // GET/POST the latest "share my view" snapshot
+	case r.URL.Path == "/api/settings":
+		s.serveSettings(w, r) // GET/POST persisted client display settings (shared across screens)
 	case strings.HasPrefix(r.URL.Path, "/api/tile/"):
 		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
 	case r.URL.Path == "/api/aux" || strings.HasPrefix(r.URL.Path, "/api/aux/"):

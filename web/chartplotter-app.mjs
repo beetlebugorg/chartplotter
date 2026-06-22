@@ -10,7 +10,8 @@
 //
 // Attributes (all optional, forwarded to the inner <chart-plotter>):
 //   center, zoom, assets, cell-url   — see chartplotter.mjs
-//   basemap   "coastline" | "osm" | "none"   default "coastline" (offline GSHHG)
+//   basemap   "coastline" | "osm" | "osmvec" | "none"   default "coastline"
+//             (offline GSHHG); "none" disables the underlay (test charts)
 //
 // Everything is driven through the renderer's public API (bakePmtiles/setArchive/
 // listCharts/setScheme/setMariner and its `map` handle) plus the shared ChartStore.
@@ -21,12 +22,13 @@ import { ChartDownloader } from "./chart-downloader.mjs"; // chart discovery + a
 import { AuxStore } from "./aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
 import { ChartStore } from "./chart-store.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "./zip-import.mjs";
+import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./units.mjs"; // configurable display units
 
 const SCHEMES = ["day", "dusk", "night"];
 const SCHEME_LABEL = { day: "Day", dusk: "Dusk", night: "Night" };
 const M_TO_FT = 3.280839895; // depth-setting display conversion (values stored in metres)
 const LS_SCHEME = "chartplotter:scheme";
-const LS_BASEMAP = "chartplotter:basemap"; // "coastline" (offline) | "osm" (online)
+const LS_BASEMAP = "chartplotter:basemap"; // "coastline" (offline) | "osm" (online) | "osmvec" | "none" (disabled)
 const LS_MARINER = "chartplotter:mariner";
 // Canonical mariner defaults — the single source of truth on the client, kept in
 // step with the engine's defaultMarinerSettings() (pkg/s52/mariner_settings.go).
@@ -65,6 +67,9 @@ const DEFAULT_MARINER = {
   showContourLabels: false,
   dataQuality: false,
   showMetaBounds: false,
+  // Display units for non-depth quantities (distance/height/speed/wind/temp).
+  // Depth has its own metric/imperial toggle (depthUnit, above). See units.mjs.
+  ...UNIT_DEFAULTS,
 };
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
@@ -358,6 +363,12 @@ export class ChartPlotterApp extends HTMLElement {
     // :host([prod]) styles apply either way.
     this._prod = this.hasAttribute("prod") || new URLSearchParams(location.search).has("prod");
     if (this._prod) this.setAttribute("prod", "");
+    // Display settings (scheme · basemap · mariner toggles · cell-boundary toggle ·
+    // bands-off) are persisted SERVER-side so every screen pointed at this boat's
+    // server shares them and they survive a restart. Adopt them BEFORE the renderer
+    // is configured below, overriding the localStorage values the constructor seeded
+    // (localStorage stays as the offline cache). Prod (offline pmtiles) has no server.
+    if (!this._prod) await this._loadServerSettings();
     this.renderChrome();
 
     // What's already stored? We do NOT eagerly load it (that's the slow part on
@@ -405,8 +416,8 @@ export class ChartPlotterApp extends HTMLElement {
     plotter.setAttribute("assets", this._assets);
     this._osmVecUrl = this._cfg("osm-pmtiles"); // hosted OSM vector basemap archive (enables the "Vector" option)
     if (this._osmVecUrl) plotter.setAttribute("osm-pmtiles", this._osmVecUrl);
-    this._basemap = localStorage.getItem(LS_BASEMAP) || this.getAttribute("basemap") || "coastline";
-    if (!["coastline", "osm", "osmvec"].includes(this._basemap)) this._basemap = "coastline";
+    this._basemap = this._serverBasemap || localStorage.getItem(LS_BASEMAP) || this.getAttribute("basemap") || "coastline";
+    if (!["coastline", "osm", "osmvec", "none"].includes(this._basemap)) this._basemap = "coastline";
     if (this._basemap === "osmvec" && !this._osmVecUrl) this._basemap = "coastline"; // vector not configured
     plotter.setAttribute("basemap", this._basemap);
     // Render source. Prod (hosted): prebaked per-region .pmtiles, loaded by
@@ -657,7 +668,7 @@ export class ChartPlotterApp extends HTMLElement {
 
   async _applyRenderSel() {
     console.log(`[debug] render set: ${this._renderSel.size ? [...this._renderSel].join(", ") : "(all)"}`);
-    if (this._section === "inspect" && this._drawerOpen()) this._renderDevPanel();
+    if (this._devVisible()) this._renderDevPanel();
     await this._refreshCharts(false); // keep the camera put
   }
 
@@ -851,6 +862,38 @@ export class ChartPlotterApp extends HTMLElement {
     this._map.easeTo({ center: cam ? cam.center : [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2], zoom, duration: 800 });
   }
 
+  // Is there an installed-coverage box under `point` that we're currently zoomed
+  // OUT of? (i.e. a marker for a chart whose detail hasn't kicked in.) If so return
+  // it, so a tap flies there instead of opening a pick report over empty sea. When
+  // already at the chart's detail zoom we return null and the normal pick runs.
+  _coverageBoxAt(point) {
+    const map = this._map;
+    if (!map || !this._showCellBounds) return null;
+    const ids = ["inst-outline", "inst-fill-general", "inst-fill-coastal", "inst-fill-approach", "inst-fill-harbor", "inst-fill-berthing"].filter((id) => map.getLayer(id));
+    const hit = map.queryRenderedFeatures(point, { layers: ids })[0];
+    if (!hit) return null;
+    const band = hit.properties && hit.properties.band;
+    if (map.getZoom() >= (BAND_MINZOOM[band] || 12)) return null; // already at detail → let the pick run
+    return hit;
+  }
+
+  // Fly to an installed-coverage box's chart at the zoom where its detail renders
+  // (the box itself may be the min-size marker, so frame the TRUE footprint from
+  // _instBoundsRaw and ensure we cross the band's render zoom — a tiny cell fitted
+  // to the viewport would otherwise stop short and still show no chart).
+  _flyToCoverage(f) {
+    const map = this._map;
+    const name = f.properties && f.properties.name;
+    const real = (this._instBoundsRaw || []).find((r) => r.properties && r.properties.name === name) || f;
+    const ring = real.geometry.coordinates[0];
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (const [x, y] of ring) { w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y); }
+    const need = (BAND_MINZOOM[(f.properties && f.properties.band)] || 12) + 1; // safely into detail
+    const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
+    const zoom = Math.min(18, Math.max(cam ? cam.zoom : need, need));
+    map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
+  }
+
   // A deploy-time config value from an attribute, overridable per-load by the
   // same-named query param (so a hosted build can be re-pointed without a rebuild,
   // e.g. ?pmtiles=… or ?catalog=…).
@@ -935,7 +978,7 @@ export class ChartPlotterApp extends HTMLElement {
       this._updateZoomCap(); // clamp zoom-in to the finest band covering the new view
       // Dev tile inspector: refresh in-view band counts; a prior coverage measure
       // is now stale (different viewport), so drop its hole overlay.
-      if (this._section === "inspect" && this._drawerOpen()) { this._clearDevHoles(); this._renderDevPanel(); }
+      if (this._devVisible()) { this._clearDevHoles(); this._renderDevPanel(); }
     });
     this._updateZoomCap(); // initial cap for the boot view
 
@@ -1001,12 +1044,15 @@ export class ChartPlotterApp extends HTMLElement {
     // is unmissable. _coverScale = finest covering chart's CSCL (set in _updateZoomCap).
     const warn = this.shadowRoot.getElementById("db-warn");
     if (warn) {
+      const warnIco = `<svg class="db-warn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>`;
       const f = this._coverScale && dispDenom < this._coverScale ? this._coverScale / dispDenom : 0;
-      if (f >= 1.15) {
+      // Charts installed but all disabled outranks overscale — nothing is drawing.
+      if (this._noChartsEnabled()) {
         warn.hidden = false;
-        warn.innerHTML =
-          `<svg class="db-warn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>` +
-          `<span>Overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)} — data magnified beyond survey scale</span>`;
+        warn.innerHTML = warnIco + `<span>No charts are enabled — turn one on in the Chart library</span>`;
+      } else if (f >= 1.15) {
+        warn.hidden = false;
+        warn.innerHTML = warnIco + `<span>Overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)} — data magnified beyond survey scale</span>`;
       } else {
         warn.hidden = true;
       }
@@ -2084,6 +2130,14 @@ export class ChartPlotterApp extends HTMLElement {
     // layers per band, auto-hidden at the band's native min zoom (maxzoom) — where
     // the real chart takes over.
     map.addSource("inst-bounds", { type: "geojson", data: empty });
+    // The coverage boxes have a per-zoom minimum on-screen size (_applyInstBounds),
+    // so recompute their geometry as the zoom changes. Hooked once per map (survives
+    // style rebuilds since the map object persists); rAF-throttled.
+    if (!this._instBoundsHooked) {
+      this._instBoundsHooked = true;
+      const rerun = () => { if (this._ibRaf) return; this._ibRaf = requestAnimationFrame(() => { this._ibRaf = 0; this._applyInstBounds(); }); };
+      map.on("zoom", rerun);
+    }
     const boundsVis = this._showCellBounds ? "visible" : "none";
     for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
       const mz = BAND_MINZOOM[band];
@@ -2092,6 +2146,21 @@ export class ChartPlotterApp extends HTMLElement {
       map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
       // (cell-name labels removed — the per-box text was too noisy; the outline alone marks coverage)
     }
+    // Always-on cell-footprint outline (NOT maxzoom-capped, unlike the per-band
+    // boxes above). When SCAMIN suppresses every feature in a cell at the current
+    // zoom the chart tiles render blank — so without this you'd see empty sea over
+    // a cell that's actually loaded. A thin dashed outline of each footprint stays
+    // visible at ALL zooms so you can always tell WHERE a (test) cell is even when
+    // its symbology is SCAMIN-hidden. Emphasis scales with zoom: BOLD when scaled
+    // out really far (the box is a tiny shape then — you'd lose a hairline) and
+    // subtle once you've zoomed in and the chart data is drawing, so it doesn't
+    // fight the symbology. Bright azure that reads on day sea, dusk, and night.
+    map.addLayer({ id: "inst-outline", type: "line", source: "inst-bounds", layout: { visibility: boundsVis }, paint: {
+      "line-color": "#3a9bdc",
+      "line-dasharray": [4, 3],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 2, 2.2, 8, 1.6, 13, 1, 16, 0.8],
+      "line-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.95, 8, 0.8, 13, 0.55, 16, 0.4],
+    } });
     // Debug overlay (Settings → "Debug cell loading"): every installed cell's
     // footprint at ALL zooms, coloured by lazy-load state — green=loaded,
     // amber=loading, red=failed, grey=not loaded. Lets you see which cells are
@@ -2179,6 +2248,11 @@ export class ChartPlotterApp extends HTMLElement {
         this._inspectAt(e.point, true); // lock onto whatever's here
         return;
       }
+      // Zoomed out over an installed-chart coverage marker → fly to that chart at
+      // its detail zoom (so you can find + open installed charts without knowing
+      // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
+      const box = this._coverageBoxAt(e.point);
+      if (box) { this._flyToCoverage(box); return; }
       // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
       this._pickReportAt(e.point, e.originalEvent);
     });
@@ -2206,7 +2280,7 @@ export class ChartPlotterApp extends HTMLElement {
     else this._closeInspect();
     // The rail button reflects dev-panel-open (setDrawerOpen); inspect on/off is
     // shown by the in-panel "Inspect features" button — refresh it.
-    if (this._section === "inspect" && this._drawerOpen()) this._renderDevPanel();
+    if (this._devVisible()) this._renderDevPanel();
   }
 
   // Inspect the chart features at a canvas point. `lock` freezes the panel on a
@@ -2306,6 +2380,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (!feats.length) return;
     const src = this._map.getSource("inspect");
     const body = this.shadowRoot.getElementById("inspect-body");
+    if (!body) return; // the inspector panel only exists while Settings → Advanced is open
     const lockNote = this._inspectLocked ? `<div class="ins-lock">🔒 Locked — click the map to release</div>` : "";
     if (this._inspectMulti) {
       const cap = 80;
@@ -2405,9 +2480,6 @@ export class ChartPlotterApp extends HTMLElement {
     const dbgOn = this._debugCells;
     const busy = this._taskRunning() || !!this._activeDownloadKey || this._dlQueue.length > 0;
     el.innerHTML = `
-      <button id="dev-back" class="dev-back" type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>Settings</button>
-
       <section class="dev-sec">
         <div class="dev-h">Charts</div>
         <button id="dev-rebuild" class="btn wide"${busy ? " disabled" : ""}>↻ Rebuild all charts</button>
@@ -2449,7 +2521,6 @@ export class ChartPlotterApp extends HTMLElement {
         <p class="dev-note">Drop MapLibre's loaded tiles and re-request them from the server (e.g. after a rebuild).</p>
       </section>`;
     const q = (id) => el.querySelector("#" + id);
-    q("dev-back").onclick = () => this.toggleSection("settings");
     const rebuild = q("dev-rebuild"); if (rebuild && !rebuild.disabled) rebuild.onclick = (e) => this._rebuildAllPerBand(e.currentTarget);
     q("dev-share").onclick = (e) => this._shareView(e.currentTarget);
     q("dev-inspect").onclick = () => this._setInspectMode(!this._inspectMode);
@@ -2598,6 +2669,7 @@ export class ChartPlotterApp extends HTMLElement {
   _setBandOff(band, off) {
     if (off) this._bandsOff.add(band); else this._bandsOff.delete(band);
     try { localStorage.setItem(LS_BANDS_OFF, JSON.stringify([...this._bandsOff])); } catch {}
+    this._persistSettings();
     if (this._plotter) this._plotter.setBandVisible(band, !off);
     this._renderDevPanel();
   }
@@ -2806,6 +2878,7 @@ export class ChartPlotterApp extends HTMLElement {
     if (!el) return; // <pick-report> module not loaded (degrade quietly)
     el.setCatalogue(this._s57cat);
     el.setAux(this._aux);
+    el.setUnits(this._mariner); // heights/ranges/speeds in the mariner's chosen units
     el.show(uniq, ev ? { x: ev.clientX, y: ev.clientY } : null);
   }
 
@@ -3151,6 +3224,7 @@ export class ChartPlotterApp extends HTMLElement {
     // district and the server fans to its band-sets.
     this._installedSets = new Set(packs.map((p) => p.name));
     this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
+    this._packsMeta = packs; // {name,enabled,bands,bounds} — drives the coverage boxes (incl. disabled packs)
     // Rendering needs each enabled district's PER-BAND tile sets (noaa-d5-general …),
     // listed in `bands` ("all" for a bandless/merged pack → the bare set name).
     const active = packs.filter((p) => p.enabled).flatMap((p) =>
@@ -3356,50 +3430,55 @@ export class ChartPlotterApp extends HTMLElement {
     if (!src) return;
     const feats = [];
     const missing = []; // foreign cells with no footprint yet → parse one once
-    for (const name of this._installed) {
-      const bb = this._cellLocation(name); // catalog bb OR a parsed foreign footprint
-      if (!bb) {
-        if (!this._byName.has(name) && !(this._foreignTried && this._foreignTried.has(name))) missing.push(name);
-        continue;
-      }
-      const c = this._byName.get(name);
-      const scale = (c && typeof c.s === "number" && c.s) || this._cellScale.get(name) || 0;
-      const band = scale ? bandForScale(scale) : "harbor"; // unknown scale → assume large-scale
-      const [w, s, e, n] = bb;
-      feats.push({
-        type: "Feature",
-        properties: { name, band, status: this._cellStatus.get(name) || "queued" },
-        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
-      });
-    }
-    // Server mode: the per-cell footprints above come from the (retired) wasm baker,
-    // so they're empty here. Add ONE coverage box per installed district from its
-    // tile-set bounds, tagged with the district's COARSEST band — so the box auto-
-    // hides (the layer's maxzoom == that band's display min) exactly when the chart's
-    // own data takes over. A full NOAA stack (overview/general band) hides at coarse
-    // zoom (no stray box); a standalone inland set (berthing only) keeps its box until
-    // you zoom in far enough to see it — "boxes when you've zoomed out too far".
-    if (this._plotter && this._plotter.serverSetMetas) {
-      const byDistrict = new Map();
-      for (const set of this._plotter.serverSetMetas()) {
-        const bb = set.bounds;
-        if (!Array.isArray(bb) || bb.length !== 4) continue;
-        const i = set.name.lastIndexOf("-");
-        const district = i > 0 && BANDS.includes(set.name.slice(i + 1)) ? set.name.slice(0, i) : set.name;
-        const rank = BANDS.indexOf(set.band);
-        const prev = byDistrict.get(district);
-        if (!prev || rank < prev.rank) byDistrict.set(district, { bb, band: set.band, rank });
-      }
-      for (const [district, d] of byDistrict) {
-        const [w, s, e, n] = d.bb;
+    // Per-CELL footprints are the prod (pmtiles) path only. In SERVER mode we draw
+    // one box per ENABLED pack (below) instead — a full NOAA install has thousands
+    // of cells, and a box per cell (re-projected to its min on-screen size on every
+    // zoom frame) would freeze the map. Per-cell boxes also ignore the enabled flag,
+    // so they'd keep showing a disabled district's coverage. Per-pack boxes fix both.
+    if (this._prod) {
+      for (const name of this._installed) {
+        const bb = this._cellLocation(name); // catalog bb OR a parsed foreign footprint
+        if (!bb) {
+          if (!this._byName.has(name) && !(this._foreignTried && this._foreignTried.has(name))) missing.push(name);
+          continue;
+        }
+        const c = this._byName.get(name);
+        const scale = (c && typeof c.s === "number" && c.s) || this._cellScale.get(name) || 0;
+        const band = scale ? bandForScale(scale) : "harbor"; // unknown scale → assume large-scale
+        const [w, s, e, n] = bb;
         feats.push({
           type: "Feature",
-          properties: { name: district, band: d.band, status: "ready" },
+          properties: { name, band, status: this._cellStatus.get(name) || "queued" },
           geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
         });
       }
     }
-    src.setData({ type: "FeatureCollection", features: feats });
+    // Server mode: the per-cell footprints above come from the (retired) wasm baker,
+    // so they're empty here. Add ONE coverage box per ENABLED pack from /api/packs
+    // (which carries each pack's union bounds + bands). Tag with the pack's COARSEST
+    // band (bands[0], coarse→fine from the server) for the click-to-fly zoom + the
+    // band-capped fill. DISABLED packs render nothing on the map, so they get no
+    // boundary either. An enabled full NOAA stack (overview/general band) hides its
+    // fill at coarse zoom (no stray box); a standalone set keeps its box until you
+    // zoom into its detail.
+    for (const p of this._packsMeta || []) {
+      if (!p.enabled) continue; // disabled packs aren't drawn → no coverage box
+      const bb = p.bounds;
+      if (!Array.isArray(bb) || bb.length !== 4) continue;
+      const coarsest = (p.bands && p.bands[0]) || "harbor";
+      const band = BANDS.includes(coarsest) ? coarsest : "harbor"; // "all"/unknown → large-scale
+      const [w, s, e, n] = bb;
+      feats.push({
+        type: "Feature",
+        properties: { name: p.name, band, status: "ready" },
+        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+      });
+    }
+    // Stash the TRUE footprints; _applyInstBounds() pushes them to the source with
+    // a per-zoom minimum on-screen size so a tiny cell never shrinks to an invisible
+    // speck when zoomed out (see below).
+    this._instBoundsRaw = feats;
+    this._applyInstBounds();
     // Foreign cells carry no catalog footprint, so they'd be invisible when zoomed
     // out. Parse each one's bounds ONCE (best-effort) then rebuild, so an uploaded
     // harbour shows a coverage outline at z0 you can see and zoom into.
@@ -3410,10 +3489,44 @@ export class ChartPlotterApp extends HTMLElement {
     }
   }
 
+  // Push the installed-coverage footprints to the map, GROWING any box that would
+  // render smaller than MIN_BOX_PX up to that size around its own centroid. A cell
+  // can be geographically tiny (an imported S-64 test cell is ~0.5° wide and sits
+  // alone in the ocean) — at a world zoom its true outline is a sub-pixel speck you
+  // can never find by scrolling. Clamping the on-screen size keeps every installed
+  // chart a visible, clickable marker no matter how far out you zoom; real (large)
+  // footprints pass through untouched. Recomputed on zoom because "small on screen"
+  // depends on the camera.
+  _applyInstBounds() {
+    const map = this._map, src = map && map.getSource("inst-bounds");
+    if (!src || !this._instBoundsRaw) return;
+    const MIN_BOX_PX = 26;
+    src.setData({ type: "FeatureCollection", features: this._instBoundsRaw.map((f) => this._minSizeBox(f, MIN_BOX_PX)) });
+  }
+
+  // Return f unchanged if its footprint is already ≥ minPx on screen; otherwise a
+  // copy whose polygon is a minPx box centred on the same point (built in screen
+  // space via project/unproject, so it's exactly minPx regardless of latitude/zoom).
+  _minSizeBox(f, minPx) {
+    const map = this._map;
+    const ring = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
+    if (!ring) return f;
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (const [x, y] of ring) { w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y); }
+    const tl = map.project([w, n]), br = map.project([e, s]);
+    if (Math.abs(br.x - tl.x) >= minPx && Math.abs(br.y - tl.y) >= minPx) return f;
+    const c = map.project([(w + e) / 2, (s + n) / 2]);
+    const hw = Math.max(minPx, Math.abs(br.x - tl.x)) / 2, hh = Math.max(minPx, Math.abs(br.y - tl.y)) / 2;
+    const a = map.unproject([c.x - hw, c.y - hh]); // W / N
+    const b = map.unproject([c.x + hw, c.y + hh]); // E / S
+    return { type: "Feature", properties: f.properties, geometry: { type: "Polygon", coordinates: [[[a.lng, a.lat], [b.lng, a.lat], [b.lng, b.lat], [a.lng, b.lat], [a.lng, a.lat]]] } };
+  }
+
   // Show/hide the installed-cell coverage outlines (the inst-* overlay layers).
   _setCellBoundsVisible(on) {
     this._showCellBounds = on;
     localStorage.setItem("cp-cell-bounds", on ? "1" : "0");
+    this._persistSettings();
     const map = this._map; if (!map) return;
     const vis = on ? "visible" : "none";
     for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
@@ -3421,6 +3534,7 @@ export class ChartPlotterApp extends HTMLElement {
         if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
       }
     }
+    if (map.getLayer("inst-outline")) map.setLayoutProperty("inst-outline", "visibility", vis);
   }
 
   toggleSelect(name) {
@@ -3696,20 +3810,69 @@ export class ChartPlotterApp extends HTMLElement {
   }
 
   // -- settings ------------------------------------------------------------
+
+  // The display-settings blob shared with the server. Scheme/basemap/cell-bounds
+  // toggle/bands-off plus the mariner (S-52) settings — everything that's a pure
+  // client-side restyle. View (camera) is per-screen, so it's NOT included.
+  _settingsBlob() {
+    return {
+      scheme: this._scheme,
+      basemap: this._basemap,
+      showCellBounds: this._showCellBounds,
+      bandsOff: [...this._bandsOff],
+      mariner: this._mariner,
+    };
+  }
+
+  // Fetch the server-persisted display settings at boot and adopt them over the
+  // localStorage values the constructor seeded. Best-effort: an older server, an
+  // offline/prod load, or a malformed blob just keeps the local values.
+  async _loadServerSettings() {
+    let s = null;
+    try {
+      const r = await fetch(`${this._assets}api/settings`, { cache: "no-store" });
+      if (r.ok) s = await r.json();
+    } catch (e) { /* offline / older server → keep local */ }
+    if (!s || typeof s !== "object") return;
+    if (typeof s.scheme === "string" && SCHEMES.includes(s.scheme)) this._scheme = s.scheme;
+    if (typeof s.basemap === "string" && ["coastline", "osm", "osmvec", "none"].includes(s.basemap)) this._serverBasemap = s.basemap;
+    if (typeof s.showCellBounds === "boolean") this._showCellBounds = s.showCellBounds;
+    if (Array.isArray(s.bandsOff)) this._bandsOff = new Set(s.bandsOff);
+    // Merge mariner over the (migrated) defaults; Display Base is always forced on.
+    if (s.mariner && typeof s.mariner === "object") this._mariner = { ...this._mariner, ...s.mariner, displayBase: true };
+  }
+
+  // Persist the display settings server-side (shared across screens). Debounced so
+  // a flurry of toggles coalesces into one POST. Server mode only — prod has no
+  // server, and localStorage already holds the per-screen copy.
+  _persistSettings() {
+    if (this._prod) return;
+    clearTimeout(this._settingsSaveT);
+    this._settingsSaveT = setTimeout(() => {
+      fetch(`${this._assets}api/settings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(this._settingsBlob()),
+      }).catch(() => { /* best-effort; localStorage is the offline fallback */ });
+    }, 400);
+  }
+
   applyScheme(name) {
     this._scheme = name;
     this._plotter.setScheme(name);
     this.setAttribute("data-scheme", name);
     localStorage.setItem(LS_SCHEME, name);
+    this._persistSettings();
     this._syncSchemeUI();
   }
 
   // Basemap under the chart: "coastline" (offline GSHHG land/lakes) or "osm"
   // (online OpenStreetMap raster).
   applyBasemap(mode) {
-    this._basemap = (mode === "osm" || mode === "osmvec") ? mode : "coastline";
+    this._basemap = (mode === "osm" || mode === "osmvec" || mode === "none") ? mode : "coastline";
     if (this._plotter) this._plotter.setBasemap(this._basemap);
     localStorage.setItem(LS_BASEMAP, this._basemap);
+    this._persistSettings();
   }
 
   // Cycle Day → Dusk → Night → Day from the tab-bar toggle.
@@ -3744,6 +3907,7 @@ export class ChartPlotterApp extends HTMLElement {
     try { this._plotter.setMariner(patch); }
     catch (e) { console.warn(e); }
     localStorage.setItem(LS_MARINER, JSON.stringify(this._mariner));
+    this._persistSettings();
     // Switching units relabels + reconverts the depth fields (still in metres
     // under the hood), so redraw the form.
     if ("depthUnit" in patch) this.renderSettings();
@@ -3927,12 +4091,14 @@ export class ChartPlotterApp extends HTMLElement {
         .pkr-empty { color:var(--ui-text-faint); font-size:13px; text-align:center; padding:14px 0; }
         /* NOAA data freshness footer */
         .data-fresh { color:var(--ui-text-faint); font-size:11.5px; text-align:center; line-height:1.5; padding:14px 0 4px; border-top:1px solid var(--ui-border-2); margin-top:4px; }
-        .set-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:12px 2px; border-bottom:1px solid var(--ui-border-2); }
+        /* Control stays pinned right (flex:none); the label column flexes + its
+           description WRAPS instead of pushing the control onto a new line. */
+        .set-row { display:flex; align-items:center; gap:14px; padding:13px 2px; border-bottom:1px solid var(--ui-border-2); }
         .set-row:last-child { border-bottom:none; }
-        .set-row .lbl { display:flex; flex-direction:column; min-width:0; }
-        .set-row .lbl .t { font-weight:500; }
-        .set-row .lbl .d { font-size:12px; color:var(--ui-text-faint); margin-top:1px; }
-        .set-row .ctl { flex:none; display:flex; align-items:center; gap:6px; }
+        .set-row .lbl { display:flex; flex-direction:column; min-width:0; flex:1 1 auto; }
+        .set-row .lbl .t { font-weight:600; font-size:13.5px; }
+        .set-row .lbl .d { font-size:12px; color:var(--ui-text-faint); margin-top:3px; line-height:1.45; }
+        .set-row .ctl { flex:none; margin-left:auto; display:flex; align-items:center; gap:6px; }
         .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 7px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
         .set-row .ctl .unit { color:var(--ui-text-faint); font-size:12px; width:14px; }
         .set-row .ctl select { border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 8px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
@@ -3948,6 +4114,7 @@ export class ChartPlotterApp extends HTMLElement {
         .seg button { border:none; background:var(--ui-surface); padding:6px 11px; font:inherit; font-size:13px; cursor:pointer; border-left:1px solid var(--ui-border-2); color:var(--ui-text); }
         .seg button:first-child { border-left:none; }
         .seg button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
+        .seg button:disabled { cursor:default; } /* e.g. Detail level "Base" — locked on */
         .seg-multi { display:inline-flex; gap:12px; }
         .seg-multi .chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
         /* NOAA attribution + "not for navigation" — subtle one-line text tucked
@@ -4075,6 +4242,7 @@ export class ChartPlotterApp extends HTMLElement {
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
+        #drawer.set-wide { width:min(520px, calc(100vw - 24px)); } /* settings: rail + content */
         #drawer.wide .miller { height:calc(100vh - var(--ctrl-top) - var(--panel-bottom) - 118px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
         /* caret on the TOP edge, pointing up at the button above */
@@ -4082,8 +4250,15 @@ export class ChartPlotterApp extends HTMLElement {
           width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
           border-bottom:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 -2px 1px rgba(0,0,0,.08)); }
         #search::after { border-bottom-color:var(--ui-surface); }
-        /* Settings lays its sections in responsive columns to use the panel width. */
-        #settings-body { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:8px 40px; align-items:start; padding-top:2px; }
+        /* Settings: a tabbed two-pane shell (left rail of tabs + content), mirroring
+           the chart-library "miller" layout. */
+        #settings-body { padding-top:2px; }
+        .set-shell { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:11px; overflow:hidden; min-height:360px; max-height:min(66vh,620px); }
+        .set-rail { flex:0 0 124px; display:flex; flex-direction:column; gap:3px; padding:8px 7px; border-right:1px solid var(--ui-border-2); background:var(--ui-surface-2); }
+        .set-rail button { text-align:left; border:none; background:none; color:var(--ui-text-dim); font:inherit; font-size:13px; font-weight:600; padding:9px 11px; border-radius:8px; cursor:pointer; transition:background .1s,color .1s; }
+        .set-rail button:hover { background:var(--ui-surface); color:var(--ui-text); }
+        .set-rail button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
+        .set-pane { flex:1 1 0; min-width:0; overflow-y:auto; padding:4px 18px 10px; }
         /* Dev tools live behind a button at the very top of Settings (spans all
            columns). The Dev panel itself opens as the inspect section with a back
            link to Settings. */
@@ -4127,8 +4302,9 @@ export class ChartPlotterApp extends HTMLElement {
         .muted { color:var(--ui-text-dim); }
         /* Dev panel: clearly separated sections, most-used at top, roomy spacing. */
         .dev-tools { display:flex; flex-direction:column; }
+        .set-pane .dev-tools { border-top:1px solid var(--ui-border-2); margin-top:8px; }
         .dev-sec { display:flex; flex-direction:column; gap:8px; padding:16px 0; border-top:1px solid var(--ui-border); }
-        .dev-sec:first-child { padding-top:4px; border-top:none; }
+        .dev-sec:first-child { padding-top:14px; border-top:none; }
         .dev-h { font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--ui-text-faint); }
         .dev-h .bz { float:right; text-transform:none; letter-spacing:0; font-weight:500; color:var(--ui-text-dim); }
         .dev-note { margin:0; color:var(--ui-text-dim); font-size:12px; line-height:1.45; }
@@ -4338,10 +4514,6 @@ export class ChartPlotterApp extends HTMLElement {
           <div class="panel" data-panel="settings">
             <div id="settings-body"></div>
           </div>
-          <div class="panel" data-panel="inspect">
-            <div id="inspect-body" class="ins-body"></div>
-            <div id="dev-tools" class="dev-tools"></div>
-          </div>
         </div>
       </div>`;
 
@@ -4355,7 +4527,6 @@ export class ChartPlotterApp extends HTMLElement {
     $("close").onclick = () => this.closeDrawer();
     $("scheme-toggle").onclick = () => this._cycleScheme();
     this._syncSchemeUI(); // paint the toggle's initial icon
-    this._renderDevPanel(); // fills #dev-tools (share, band toggles, tile inspector)
     // Esc dismisses the debug context menu, else exits the feature inspector.
     // Escape closes the topmost open dialog/overlay (one per press). The
     // cursor-pick report closes itself (its own captured handler runs first).
@@ -4404,17 +4575,38 @@ export class ChartPlotterApp extends HTMLElement {
     const r = this.shadowRoot;
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
     r.getElementById("drawer").classList.toggle("wide", name === "charts"); // two-pane list+map
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : name === "inspect" ? "Developer tools" : "Chart library";
+    r.getElementById("drawer").classList.toggle("set-wide", name === "settings"); // rail + content
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : "Chart library";
     // Charts is the "get & see charts" mode: overlay every catalog cell on the
     // map (selected ones highlighted) so you can see and box-select coverage.
     // Any other section is just chrome over the live viewer — no overlay.
     if (name === "charts") { this.renderCharts(); this._enterChartsMode(); }
     else this._exitChartsMode();
-    // Feature-inspect is NOT auto-armed; it's a button inside the Dev panel. Any
-    // section switch disarms it (and clears dev hole markers / refreshes the panel).
+    // Feature-inspect is NOT auto-armed; it's a button inside the Advanced (dev)
+    // tab. Any section switch disarms it (and clears dev hole markers).
     this._setInspectMode(false);
-    if (name === "inspect") { this._clearDevHoles(); this._renderDevPanel(); }
+    if (name === "settings") { this._clearDevHoles(); this.renderSettings(); }
     this.setDrawerOpen(true);
+  }
+
+  // Route a unified segmented-control pick (basemap / detail level / area
+  // boundaries / point symbols) to its setter. Detail level maps the cumulative
+  // S-52 display category onto the two display flags (Other ⊃ Standard ⊃ Base).
+  _applySettingSeg(kind, v) {
+    switch (kind) {
+      case "basemap": this.applyBasemap(v); break;
+      case "detail": this.applyMariner({ displayStandard: v !== "base", displayOther: v === "other" }); break;
+      case "boundaryStyle": this.applyMariner({ boundaryStyle: v }); break;
+      case "simplifiedPoints": this.applyMariner({ simplifiedPoints: v === "simplified" }); break;
+    }
+  }
+
+  // The developer tools live inline in Settings → Advanced. They're "visible"
+  // (and worth re-rendering on band/coverage/inspect changes) when that drawer is
+  // open on the Advanced tab. _renderDevPanel/_renderInspect also no-op safely when
+  // their containers are absent, so this is just an optimisation + correctness gate.
+  _devVisible() {
+    return this._drawerOpen() && this._section === "settings" && (this._setTab || "general") === "advanced";
   }
 
   // Home: the full-screen chart viewer — drop any selection overlay/section and
@@ -4465,7 +4657,7 @@ export class ChartPlotterApp extends HTMLElement {
     // Charts opens from its own button; Settings + its Dev sub-view both anchor on
     // (and light up) the Settings button.
     r.getElementById("charts-btn").classList.toggle("on", open && this._section === "charts");
-    r.getElementById("settings-btn").classList.toggle("on", open && (this._section === "settings" || this._section === "inspect"));
+    r.getElementById("settings-btn").classList.toggle("on", open && this._section === "settings");
     if (open) {
       const tabId = this._section === "charts" ? "charts-btn" : "settings-btn";
       this._positionCaret(drawer, r.getElementById(tabId));
@@ -4488,8 +4680,19 @@ export class ChartPlotterApp extends HTMLElement {
     const el = this.shadowRoot.getElementById("empty");
     // Also hide it whenever the drawer is open — the user is already in Charts/
     // Settings, so the centred "no charts yet" card would just float over them.
-    if (el) el.hidden = this._hasArchive || this._drawerOpen() || !!(this._task && this._task.status === "running");
+    // And DON'T show it when charts ARE installed but merely all disabled — that's
+    // not an empty library, it's a deliberate state (surfaced as a bottom-bar
+    // warning instead, see _updateHud / _noChartsEnabled).
+    if (el) el.hidden = this._hasArchive || this._hasInstalledPacks() || this._drawerOpen() || !!(this._task && this._task.status === "running");
+    this._updateHud(); // refresh the "no charts enabled" bottom-bar warning
   }
+
+  // Are any chart packs installed on the server (enabled OR disabled)? Distinguishes
+  // "empty library → Welcome aboard" from "library has charts, all turned off".
+  _hasInstalledPacks() { return !!(this._installedSets && this._installedSets.size); }
+
+  // Installed packs exist but none render (all disabled) → nothing on the map.
+  _noChartsEnabled() { return !this._prod && this._hasInstalledPacks() && !this._hasArchive; }
 
   renderArchiveList() {
     const el = this.shadowRoot.getElementById("archive-list");
@@ -4541,74 +4744,91 @@ export class ChartPlotterApp extends HTMLElement {
     const toggle = (key, label, desc, on) =>
       `<div class="set-row"><div class="lbl"><span class="t">${label}</span>${desc ? `<span class="d">${desc}</span>` : ""}</div>
         <label class="switch"><input type="checkbox" data-key="${key}" ${on ? "checked" : ""}><span class="sl"></span></label></div>`;
+    // A segmented unit picker for one UNIT_CATEGORIES entry (depth + the 5 new ones).
+    const unitRow = (c) => {
+      const cur = m[c.key] || c.def;
+      return `<div class="set-row"><div class="lbl"><span class="t">${c.label}</span></div>
+        <div class="ctl"><div class="seg" data-unitseg="${c.key}">${c.opts.map(([v, lbl]) =>
+          `<button data-uval="${v}" class="${cur === v ? "sel" : ""}">${lbl}</button>`).join("")}</div></div></div>`;
+    };
+    // A generic segmented control (the basemap-style look) — `kind` routes the pick
+    // through _applySettingSeg; `opts` is [[value, text], …]. Used to give every
+    // multi-choice setting the same segmented-button-with-text appearance.
+    const segRow = (label, desc, kind, current, opts) =>
+      `<div class="set-row"><div class="lbl"><span class="t">${label}</span>${desc ? `<span class="d">${desc}</span>` : ""}</div>
+        <div class="ctl"><div class="seg" data-seg="${kind}">${opts.map(([v, t]) =>
+          `<button data-sv="${v}" class="${current === v ? "sel" : ""}">${t}</button>`).join("")}</div></div></div>`;
+    const basemapOpts = [["none", "Disabled"], ["coastline", "Offline"], ["osm", "OSM"], ...(this._osmVecUrl ? [["osmvec", "Vector"]] : [])];
 
-    el.innerHTML = `
-      ${this._prod ? "" : `<div class="set-section dev-entry">
-        <button id="open-dev" class="btn wide dev-open" type="button">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3"/><path d="m16 9 4 3-4 3"/><path d="m13 6-2 12"/></svg>
-          Developer tools
-          <svg class="dev-open-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-        </button>
-      </div>`}
-      <div class="set-section">
-        <h3>Appearance</h3>
-        <div class="set-row"><div class="lbl"><span class="t">Colour scheme</span></div>
-          <div class="ctl"><div class="seg" id="scheme-seg">${SCHEMES.map((s) =>
-            `<button data-scheme="${s}" class="${this._scheme === s ? "sel" : ""}">${SCHEME_LABEL[s]}</button>`).join("")}</div></div></div>
-        <div class="set-row"><div class="lbl"><span class="t">Basemap</span><span class="d">Land under the chart — offline coastline, online OSM raster${this._osmVecUrl ? ", or hosted OSM vector" : ""}</span></div>
-          <div class="ctl"><div class="seg" id="basemap-seg">
-            <button data-basemap="coastline" class="${this._basemap === "coastline" ? "sel" : ""}">Offline</button>
-            <button data-basemap="osm" class="${this._basemap === "osm" ? "sel" : ""}">OSM</button>${this._osmVecUrl
-              ? `<button data-basemap="osmvec" class="${this._basemap === "osmvec" ? "sel" : ""}">Vector</button>` : ""}</div></div></div>
-      </div>
-      <div class="set-section">
-        <h3>Depths</h3>
-        <div class="set-row"><div class="lbl"><span class="t">Units</span></div>
-          <div class="ctl"><div class="seg" id="unit-seg">
-            <button data-unit="m" class="${ft ? "" : "sel"}">Metric</button>
-            <button data-unit="ft" class="${ft ? "sel" : ""}">Imperial</button></div></div></div>
+    const tab = this._setTab || "general";
+    const TABS = [["general", "General"], ["text", "Text"], ["units", "Units"], ["depths", "Depths"], ["advanced", "Advanced"]];
+    const panes = {
+      // Everything that isn't text, a unit, a depth contour, or a dev/advanced toggle.
+      general: `
+        ${segRow("Basemap", "Land drawn under the chart", "basemap", this._basemap, basemapOpts)}
+        <div class="set-row"><div class="lbl"><span class="t">Detail level</span><span class="d">How much chart detail to show — Base is always on</span></div>
+          <div class="ctl"><div class="seg" data-segmulti="1">
+            <button class="sel" disabled title="Minimum safe-navigation set — always on">Base</button>
+            <button data-mkey="displayStandard" class="${m.displayStandard !== false ? "sel" : ""}">Standard</button>
+            <button data-mkey="displayOther" class="${m.displayOther ? "sel" : ""}">Other</button></div></div></div>
+        ${segRow("Area boundaries", "Line style for area edges", "boundaryStyle", m.boundaryStyle || "symbolized", [["plain", "Plain"], ["symbolized", "Symbolized"]])}
+        ${segRow("Point symbols", "Buoy & beacon symbol style", "simplifiedPoints", m.simplifiedPoints ? "simplified" : "paper", [["paper", "Paper-chart"], ["simplified", "Simplified"]])}
+        ${toggle("fourShadeWater", "Four-shade water", "Use four depth shades instead of two", m.fourShadeWater !== false)}
+        ${toggle("showNoData", "No-data hatch", "Hatch areas that have no chart data", m.showNoData !== false)}
+        ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
+        ${toggle("showSoundings", "Spot soundings", "Individual depth soundings", m.showSoundings !== false)}
+        ${toggle("showFullSectorLines", "Full sector lines", "Draw light sectors to full range, not short stubs", !!m.showFullSectorLines)}
+        ${toggle("showIsolatedDangersShallow", "Isolated dangers (shallow)", "Only flag isolated dangers in shallow water", !!m.showIsolatedDangersShallow)}
+        ${toggle("dataQuality", "Data quality", "Survey zones-of-confidence overlay", !!m.dataQuality)}
+        ${toggle("showMetaBounds", "Metadata boundaries", "Chart coverage & region indicator lines", !!m.showMetaBounds)}
+        ${toggle("showScaleBoundaries", "Scale boundaries", "Outline where more detailed charts exist", m.showScaleBoundaries !== false)}`,
+      text: `
+        ${toggle("showLightDescriptions", "Light descriptions", "Light characteristics, e.g. Fl(2)R 10s", m.showLightDescriptions !== false)}
+        ${toggle("textImportant", "Important text", "Bridge/cable clearances & route bearings", m.textImportant !== false)}
+        ${toggle("textNames", "Names", "Buoy, beacon & place names, berth numbers", m.textNames !== false)}
+        ${toggle("textOther", "Other text", "Notes, seabed, magnetic variation, heights", m.textOther !== false)}
+        ${toggle("showContourLabels", "Contour labels", "Depth values along contour lines", !!m.showContourLabels)}`,
+      // Every display-unit picker — depth (metric/imperial) plus the five categories.
+      units: UNIT_CATEGORIES.map(unitRow).join(""),
+      // Depth contour values, shown/edited in the chosen depth unit (see Units).
+      depths: `
         ${depthRow("shallowContour", "Shallow contour")}
         ${depthRow("safetyContour", "Safety contour")}
         ${depthRow("deepContour", "Deep contour")}
-        ${depthRow("safetyDepth", "Safety depth")}
-      </div>
-      <div class="set-section">
-        <h3>Display</h3>
-        <div class="set-row"><div class="lbl"><span class="t">Detail level</span><span class="d">Which feature categories are drawn — Base is always on (S-52)</span></div>
-          <div class="ctl"><div class="seg-multi">
-            <label class="chk" title="Display Base is the minimum safe-navigation set and cannot be turned off (S-52 §10.2)"><input type="checkbox" checked disabled>Base</label>
-            <label class="chk"><input type="checkbox" data-key="displayStandard" ${m.displayStandard === false ? "" : "checked"}>Standard</label>
-            <label class="chk"><input type="checkbox" data-key="displayOther" ${m.displayOther ? "checked" : ""}>Other</label></div></div></div>
-        <div class="set-row"><div class="lbl"><span class="t">Area boundaries</span></div>
-          <div class="ctl"><select data-key="boundaryStyle">${["plain", "symbolized"].map((v) =>
-            `<option ${(m.boundaryStyle || "symbolized") === v ? "selected" : ""}>${v}</option>`).join("")}</select></div></div>
-        ${toggle("simplifiedPoints", "Simplified symbols", "Simplified point symbols instead of paper-chart shapes (buoys, beacons)", !!m.simplifiedPoints)}
-        ${toggle("fourShadeWater", "Four-shade water", "Four depth shades instead of two", m.fourShadeWater !== false)}
-        ${toggle("showNoData", "No-data hatch", "Mark areas with no chart data (off shows the plain basemap)", m.showNoData !== false)}
-        <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline + name of installed cells when zoomed out past their detail</span></div>
+        ${depthRow("safetyDepth", "Safety depth")}`,
+      // Advanced == developer tools (rebuild, share, inspector, coverage, bands,
+      // diagnostics), filled inline by _renderDevPanel / _renderInspect below.
+      advanced: `
+        <div class="set-row"><div class="lbl"><span class="t">Cell boundaries</span><span class="d">Outline installed charts when zoomed out — tap one to jump to it</span></div>
           <label class="switch"><input type="checkbox" data-app-key="showCellBounds" ${this._showCellBounds ? "checked" : ""}><span class="sl"></span></label></div>
-        ${toggle("shallowPattern", "Shallow pattern", "Diagonal fill in shallow water", !!m.shallowPattern)}
-        ${toggle("showSoundings", "Spot soundings", "Individual depth soundings", m.showSoundings !== false)}
-        ${toggle("showLightDescriptions", "Light descriptions", "Light characteristics text (e.g. Fl(2)R 10s)", m.showLightDescriptions !== false)}
-        ${toggle("showFullSectorLines", "Full sector lines", "Extend light sector legs to their nominal range instead of short 25mm stubs", !!m.showFullSectorLines)}
-        ${toggle("showIsolatedDangersShallow", "Isolated dangers (shallow)", "Show isolated-danger symbols only at Standard detail instead of always (S-52 UDWHAZ05)", !!m.showIsolatedDangersShallow)}
-        ${toggle("textImportant", "Important text", "Clearances (bridges/cables/pipelines) and route/track bearings (S-52 text group 11)", m.textImportant !== false)}
-        ${toggle("textNames", "Names", "Buoy/beacon/geographic names and berth numbers (S-52 text groups 21/26/29)", m.textNames !== false)}
-        ${toggle("textOther", "Other text", "Notes, nature of seabed, magnetic variation, heights (remaining S-52 text groups)", m.textOther !== false)}
-        ${toggle("showContourLabels", "Contour labels", "Show depth values on contours", !!m.showContourLabels)}
-        ${toggle("dataQuality", "Data quality", "CATZOC zones-of-confidence overlay (M_QUAL)", !!m.dataQuality)}
-        ${toggle("showMetaBounds", "Metadata boundaries", "Coverage/region indicator lines (nautical-publication, nav-system, coverage)", !!m.showMetaBounds)}
-        ${toggle("showScaleBoundaries", "Scale boundaries", "Lines where the chart's navigational purpose changes — larger-scale (more detailed) data is available inside (S-52 DATCVR §10.1.9.1)", m.showScaleBoundaries !== false)}
+        ${this._prod ? "" : `<div id="inspect-body" class="ins-body"></div><div id="dev-tools" class="dev-tools"></div>`}`,
+    };
+
+    el.innerHTML = `
+      <div class="set-shell">
+        <div class="set-rail">${TABS.map(([id, label]) =>
+          `<button data-settab="${id}" class="${tab === id ? "sel" : ""}">${label}</button>`).join("")}</div>
+        <div class="set-pane">${panes[tab] || ""}</div>
       </div>`;
 
-    const devBtn = el.querySelector("#open-dev");
-    if (devBtn) devBtn.onclick = () => this.toggleSection("inspect");
-    el.querySelectorAll("#scheme-seg button").forEach((b) =>
-      (b.onclick = () => { this.applyScheme(b.dataset.scheme); this.renderSettings(); }));
-    el.querySelectorAll("#basemap-seg button").forEach((b) =>
-      (b.onclick = () => { this.applyBasemap(b.dataset.basemap); this.renderSettings(); }));
-    el.querySelectorAll("#unit-seg button").forEach((b) =>
-      (b.onclick = () => { if (b.dataset.unit !== (ft ? "ft" : "m")) this.applyMariner({ depthUnit: b.dataset.unit }); }));
+    el.querySelectorAll("[data-settab]").forEach((b) =>
+      (b.onclick = () => { this._setTab = b.dataset.settab; this.renderSettings(); }));
+    // Advanced tab == developer tools: fill the inline dev panel + inspector body.
+    if (tab === "advanced" && !this._prod) { this._renderDevPanel(); this._renderInspect(); }
+    // Generic single-select segmented settings (basemap, area boundaries, point symbols).
+    el.querySelectorAll("[data-seg] button").forEach((b) =>
+      (b.onclick = () => { this._applySettingSeg(b.parentElement.dataset.seg, b.dataset.sv); this.renderSettings(); }));
+    // Multi-select segmented control (Detail level): each button toggles its own
+    // mariner flag independently; Base is locked on (disabled, no data-mkey).
+    el.querySelectorAll("[data-segmulti] button[data-mkey]").forEach((b) =>
+      (b.onclick = () => { this.applyMariner({ [b.dataset.mkey]: !b.classList.contains("sel") }); this.renderSettings(); }));
+    // Unit segmented controls (depth + the five new categories).
+    el.querySelectorAll("[data-unitseg] button").forEach((b) =>
+      (b.onclick = () => {
+        const key = b.parentElement.dataset.unitseg, val = b.dataset.uval;
+        if (m[key] !== val) this.applyMariner({ [key]: val });
+        this.renderSettings(); // reflect the new selection (and Depths' unit label)
+      }));
     el.querySelectorAll("[data-key]").forEach((inp) => {
       inp.onchange = () => {
         const key = inp.dataset.key;

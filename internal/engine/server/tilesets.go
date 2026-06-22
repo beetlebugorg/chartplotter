@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -186,8 +187,10 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 	// Group registered band-sets by district, collecting each district's bands and
 	// whether any band is enabled (not disabled).
 	type pack struct {
-		bands   []string
-		enabled bool
+		bands      []string
+		enabled    bool
+		w, s, e, n float64
+		hasBounds  bool
 	}
 	byDistrict := map[string]*pack{}
 	var order []string // first-seen district order, then re-sorted below
@@ -203,6 +206,22 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 		if !s.prefs.isDisabled(name) {
 			p.enabled = true
 		}
+		// Union each band-set's geographic bounds so the client can outline a pack's
+		// coverage even while it's DISABLED (its tiles aren't served, but the boundary
+		// still marks "you have this chart here, currently off"). Read straight from
+		// the archive on disk — disabled packs aren't in the live set registry.
+		if path, ok := s.packPath(name); ok {
+			if src, err := tilesource.Open(path); err == nil {
+				m := src.Meta()
+				_ = tilesource.Close(src)
+				if !p.hasBounds {
+					p.w, p.s, p.e, p.n, p.hasBounds = m.W, m.S, m.E, m.N, true
+				} else {
+					p.w, p.s = math.Min(p.w, m.W), math.Min(p.s, m.S)
+					p.e, p.n = math.Max(p.e, m.E), math.Max(p.n, m.N)
+				}
+			}
+		}
 	}
 	sort.Strings(order)
 	w.Header().Set("Content-Type", jsonCT)
@@ -213,7 +232,11 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 		}
 		p := byDistrict[d]
 		sort.Slice(p.bands, func(a, b int) bool { return bandOrder(p.bands[a]) < bandOrder(p.bands[b]) })
-		fmt.Fprintf(w, `{"name":%q,"enabled":%t,"bands":[`, d, p.enabled)
+		fmt.Fprintf(w, `{"name":%q,"enabled":%t`, d, p.enabled)
+		if p.hasBounds {
+			fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, p.w, p.s, p.e, p.n)
+		}
+		fmt.Fprint(w, `,"bands":[`)
 		for j, band := range p.bands {
 			if j > 0 {
 				fmt.Fprint(w, ",")

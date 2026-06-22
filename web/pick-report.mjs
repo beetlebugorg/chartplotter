@@ -11,7 +11,28 @@
 //   • emits "pick-feature" (the displayed feature, for the map highlight) and
 //     "pick-close" so the shell can sync the map.
 //
-// Public API: setCatalogue(cat) · show(feats, anchor{x,y}) · hide().
+// Public API: setCatalogue(cat) · setUnits(prefs) · show(feats, anchor{x,y}) · hide().
+
+import { convertHeight, convertDistance, convertSpeed, unitSuffix, M_TO_FT } from "./units.mjs";
+
+// Attributes whose numeric value carries a physical unit we let the mariner pick.
+// Each maps to a category whose canonical source unit matches the ENC encoding:
+// heights/clearances are metres, VALNMR is nautical miles, CURVEL is knots, and
+// the depth attributes are metres (shown in the depth unit). Everything else keeps
+// the catalogue's own unit string.
+const PICK_HEIGHT_ATTRS = new Set(["HEIGHT", "ELEVAT", "VERCLR", "VERCCL", "VERCOP", "VERCSA"]);
+const PICK_DEPTH_ATTRS = new Set(["VALSOU", "VALDCO", "DRVAL1", "DRVAL2"]);
+const PICK_DIST_ATTRS = new Set(["VALNMR"]);
+const PICK_SPEED_ATTRS = new Set(["CURVEL"]);
+
+// Format a converted number compactly + its unit suffix.
+function fmtUnitNum(v, unit) {
+  if (!isFinite(v)) return "";
+  const dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  let s = v.toFixed(dec);
+  if (s.includes(".")) s = s.replace(/\.?0+$/, "");
+  return s + " " + unitSuffix(unit);
+}
 
 // S-57 date attributes; rendered "DD-MMM-YYYY" (PresLib §10.8 rule 6).
 const PICK_DATE_ATTRS = new Set(["SORDAT", "RECDAT", "DATSTA", "DATEND", "PERSTA", "PEREND", "SURSTA", "SUREND"]);
@@ -143,6 +164,21 @@ export class PickReport extends HTMLElement {
   }
 
   setCatalogue(cat) { if (cat) this._cat = cat; }
+  // Mariner display-unit preferences (depthUnit/heightUnit/distanceUnit/…), so
+  // height/depth/range/speed attributes render in the chosen unit. See units.mjs.
+  setUnits(prefs) { this._units = prefs || null; }
+
+  // If `acr` is a unit-bearing attribute, return {to, fn} to convert its canonical
+  // numeric value into the mariner's chosen unit; else null (keep catalogue unit).
+  _unitConv(acr) {
+    const u = this._units;
+    if (!u) return null;
+    if (PICK_HEIGHT_ATTRS.has(acr)) return { to: u.heightUnit || "m", fn: convertHeight };
+    if (PICK_DEPTH_ATTRS.has(acr)) return { to: u.depthUnit || "ft", fn: (v, unit) => (unit === "ft" ? v * M_TO_FT : v) };
+    if (PICK_DIST_ATTRS.has(acr)) return { to: u.distanceUnit || "NM", fn: convertDistance };
+    if (PICK_SPEED_ATTRS.has(acr)) return { to: u.speedUnit || "kn", fn: convertSpeed };
+    return null;
+  }
 
   // Provide the AuxStore so TXTDSC/PICREP filenames resolve to inline text/picture.
   // Optional: without it (or for a feature whose file isn't in the set) the report
@@ -248,8 +284,17 @@ export class PickReport extends HTMLElement {
     } else if (meta && meta.values) {
       val = String(raw).split(",").map((s) => { const id = s.trim(); return meta.values[id] || id; }).join("; ");
     } else {
-      val = String(raw).trim();
-      if (meta && meta.unit) val += " " + meta.unit;
+      const conv = this._unitConv(acr);
+      if (conv) {
+        // Convert each (possibly comma-listed) numeric into the mariner's unit.
+        val = String(raw).split(",").map((s) => {
+          const n = parseFloat(s);
+          return isFinite(n) ? fmtUnitNum(conv.fn(n, conv.to), conv.to) : s.trim();
+        }).join("; ");
+      } else {
+        val = String(raw).trim();
+        if (meta && meta.unit) val += " " + meta.unit;
+      }
     }
     return `<div class="row"><div class="k">${name}<span class="acr">${esc(acr)}</span></div><div class="v">${esc(val)}</div></div>`;
   }

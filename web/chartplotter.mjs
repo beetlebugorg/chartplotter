@@ -16,7 +16,8 @@
 //   assets   base URL             where the generated assets live (default "./":
 //                                 colortables.json, sprite.*, linestyles.json,
 //                                 patterns.*, glyphs/, and the /tiles base)
-//   basemap  "osm" | "none"       street raster under the chart (default none)
+//   basemap  "coastline" | "osm" | "osmvec" | "none"   underlay (default none;
+//                                 "none" renders nothing — useful for test charts)
 //
 // The full S-52 style (areas, patterns, lines, complex lines, point symbols,
 // soundings, text) is assembled client-side from the baker's JSON assets, the
@@ -48,6 +49,7 @@
 //     read by HTTP Range, the serverless static-CDN option. No tile server.
 // There is no in-browser baking; the wasm baker has been retired (server migration).
 import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
+import { convertDistance, unitSuffix } from "./units.mjs";
 
 const FALLBACK = "#ff00ff";
 const FEATURE_SCALE = 0.01 / 0.35278;
@@ -295,15 +297,7 @@ export class ChartPlotter extends HTMLElement {
     // (coastline.pmtiles: sharper, loads by viewport, overzooms crisply); fall
     // back to the flat coastline.geojson blob when the tileset isn't present.
     const basemap = this.getAttribute("basemap") || "none";
-    if (basemap === "coastline" || basemap === "gshhg") {
-      this._coastlineArchive = await new PMTilesArchive(assets + "basemap/coastline.pmtiles").init().catch(() => null);
-      if (!this._coastlineArchive) {
-        this._coastline = await fetch(assets + "basemap/coastline.geojson")
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null);
-        if (!this._coastline) console.warn("[chartplotter] no offline coastline basemap (basemap/coastline.pmtiles or .geojson)");
-      }
-    }
+    if (basemap === "coastline" || basemap === "gshhg") await this._ensureCoastline();
     // Serve the coastline tileset over its own protocol (separate archive from
     // the chart tiles, so it never collides with the chart:// source).
     registerPmtilesProtocol(maplibregl, "coastline", () => this._coastlineArchive);
@@ -518,26 +512,29 @@ export class ChartPlotter extends HTMLElement {
   // unit by the current distance.
   _scaleUnit() { return this._mariner.depthUnit === "ft" ? "imperial" : "metric"; }
 
-  // Render the S-52 SCALEB-style scalebar: a vertical striped bar of a round NM
-  // distance. 1 NM ≡ 1 arcminute of latitude, so px-per-NM is measured along the
-  // meridian at the view centre (exact, no Mercator distortion). The distance is the
-  // largest "nice" step (… 0.5, 1, 2, 5 …) that stays under a target length; SCALEB
-  // colours (SCLBR / CHGRD) are scheme-aware via token().
+  // Render the S-52 SCALEB-style scalebar: a vertical striped bar of a round
+  // distance in the mariner's chosen distance unit (NM / km / mi). 1 NM ≡ 1
+  // arcminute of latitude, so px-per-NM is measured along the meridian at the view
+  // centre (exact, no Mercator distortion), then scaled into the chosen unit. The
+  // distance is the largest "nice" step (… 0.5, 1, 2, 5 …) that stays under a target
+  // length; SCALEB colours (SCLBR / CHGRD) are scheme-aware via token().
   _renderScalebar() {
     const m = this._map, el = this._scaleEl;
     if (!m || !el) return;
     const c = m.getCenter();
     const pxPerNM = Math.abs(m.project([c.lng, c.lat]).y - m.project([c.lng, c.lat + 1 / 60]).y);
     if (!pxPerNM || !isFinite(pxPerNM) || pxPerNM < 0.01) { el.innerHTML = ""; return; }
+    const unit = this._mariner.distanceUnit || "NM";
+    const pxPerU = pxPerNM / convertDistance(1, unit); // px per chosen unit (units-per-NM)
     const MAXPX = 150;
     const STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500];
-    let nm = STEPS[0];
-    for (const v of STEPS) { if (v * pxPerNM <= MAXPX) nm = v; else break; }
-    const totalPx = Math.round(nm * pxPerNM);
+    let dist = STEPS[0];
+    for (const v of STEPS) { if (v * pxPerU <= MAXPX) dist = v; else break; }
+    const totalPx = Math.round(dist * pxPerU);
     const dark = this.token("SCLBR", "#e8820c"), light = this.token("CHGRD", "#dfe3e7");
     let bar = "";
     for (let i = 0; i < 4; i++) bar += `<span style="background:${i % 2 ? light : dark}"></span>`;
-    el.innerHTML = `<div class="s52sb-label">${nm} NM</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
+    el.innerHTML = `<div class="s52sb-label">${dist} ${unitSuffix(unit)}</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
   }
 
   // SAFCON01 (S-52 §13.2.13): the depth-contour value label. Drawn client-side
@@ -710,8 +707,13 @@ export class ChartPlotter extends HTMLElement {
   applyFeatureFilters() {
     const map = this._map;
     if (!map || !this._layerBase) return;
+    // `{ validate: false }` skips MapLibre's per-call filter validation — the
+    // dominant cost when a full install has THOUSANDS of (SCAMIN-bucket) chart
+    // layers (a category/boundary toggle re-filters them all). The filters are
+    // generated here, not user input, so validation is pure overhead. This turns a
+    // multi-second main-thread freeze on every display toggle into a snappy update.
     for (const id in this._layerBase) {
-      if (map.getLayer(id)) map.setFilter(id, this.combineFilters(this._layerBase[id]));
+      if (map.getLayer(id)) map.setFilter(id, this.combineFilters(this._layerBase[id]), { validate: false });
     }
   }
 
@@ -722,7 +724,7 @@ export class ChartPlotter extends HTMLElement {
     const map = this._map;
     for (const lid of this._variantIds(id)) {
       if (this._layerBase) this._layerBase[lid] = base;
-      if (map && map.getLayer(lid)) map.setFilter(lid, this.combineFilters(base));
+      if (map && map.getLayer(lid)) map.setFilter(lid, this.combineFilters(base), { validate: false });
     }
   }
 
@@ -751,6 +753,9 @@ export class ChartPlotter extends HTMLElement {
     setIf("coast-land", "fill-color", this.landColor());
     setIf("coast-lake", "fill-color", this.seaColor());
     setIf("coast-line", "line-color", this.coastColor());
+    // OSM raster underlay dims for dusk/night (and restores for day).
+    const osmPaint = this._osmRasterPaint();
+    for (const k in osmPaint) setIf("osm", k, osmPaint[k]);
   }
 
   // Switch the basemap live: "coastline" (offline GSHHG land/lakes), "osm"
@@ -758,13 +763,32 @@ export class ChartPlotter extends HTMLElement {
   // Rebuilds the style from buildStyle() so the basemap sources/layers swap
   // cleanly; chart sources, loaded archives and the tile protocols persist.
   async setBasemap(mode) {
-    const m = mode === "osm" || mode === "osmvec" ? mode : "coastline";
+    const m = mode === "osm" || mode === "osmvec" || mode === "none" ? mode : "coastline";
     if ((this.getAttribute("basemap") || "coastline") === m) return;
     if (m === "osmvec" && !this._osmvecArchive && this._osmvecUrl) {
       this._osmvecArchive = await new PMTilesArchive(this._osmvecUrl).init().catch(() => null);
     }
+    // The offline coastline archive is fetched lazily — if you started on OSM/none
+    // and only now switch to "offline" it was never loaded at connect, so load it
+    // here. Otherwise buildStyle adds no coastline layers and the map goes blank
+    // (the "toggling offline after OSM doesn't reload" case).
+    if (m === "coastline") await this._ensureCoastline();
     this.setAttribute("basemap", m);
     if (this._map) this._map.setStyle(this.buildStyle());
+  }
+
+  // Load the offline GSHHG coastline basemap once (best-effort): the tiled vector
+  // archive (coastline.pmtiles) preferred, else the flat coastline.geojson blob.
+  // Idempotent — returns immediately if either is already loaded.
+  async _ensureCoastline() {
+    if (this._coastlineArchive || this._coastline) return;
+    this._coastlineArchive = await new PMTilesArchive(this._assets + "basemap/coastline.pmtiles").init().catch(() => null);
+    if (!this._coastlineArchive) {
+      this._coastline = await fetch(this._assets + "basemap/coastline.geojson")
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      if (!this._coastline) console.warn("[chartplotter] no offline coastline basemap (basemap/coastline.pmtiles or .geojson)");
+    }
   }
 
   // Open a prebaked source for the hybrid fallback: a single .pmtiles, or a
@@ -813,6 +837,17 @@ export class ChartPlotter extends HTMLElement {
   _osmBasemap() {
     const b = this.getAttribute("basemap") || "none";
     return b === "osm" || b === "osmvec";
+  }
+
+  // Raster-paint adjustment for the OSM basemap per active colour scheme. The
+  // public OSM tiles are a bright daytime street map; at dusk/night we dim and
+  // desaturate them (marine night-vision) so the underlay doesn't blow out the
+  // dark S-52 palette. Day = identity. All four keys are always returned so
+  // setScheme can restore defaults when switching back to day.
+  _osmRasterPaint() {
+    if (this._active === "night") return { "raster-brightness-max": 0.32, "raster-saturation": -0.55, "raster-contrast": 0.08, "raster-opacity": 0.9 };
+    if (this._active === "dusk") return { "raster-brightness-max": 0.66, "raster-saturation": -0.3, "raster-contrast": 0, "raster-opacity": 1 };
+    return { "raster-brightness-max": 1, "raster-saturation": 0, "raster-contrast": 0, "raster-opacity": 1 };
   }
 
   // -- runtime chart & settings API (driven by the <chart-plotter-app> shell) --
@@ -1157,8 +1192,9 @@ export class ChartPlotter extends HTMLElement {
       if (keys.includes("depthUnit")) {
         this._eachLayer("soundings", (id) => map.setLayoutProperty(id, "icon-image", this.soundingsIconImage()));
         this._eachLayer("contour-labels", (id) => map.setLayoutProperty(id, "text-field", this.contourLabelField()));
-        // The S-52 scalebar is always nautical miles (no unit toggle), so nothing to do here.
       }
+      // Distance unit: the S-52 scalebar reads in NM / km / mi — redraw it.
+      if (keys.includes("distanceUnit")) this._renderScalebar();
       // Shallow pattern: visibility on its toggle (a fill layer).
       if (keys.includes("shallowPattern")) {
         this._eachLayer("shallow-pattern", (id) => this._setVis(id, this._mariner.shallowPattern ? "visible" : "none"));
@@ -1743,7 +1779,7 @@ export class ChartPlotter extends HTMLElement {
     const basemap = this.getAttribute("basemap") || "none";
     if (basemap === "osm") {
       sources.osm = { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap contributors" };
-      layers.push({ id: "osm", type: "raster", source: "osm" });
+      layers.push({ id: "osm", type: "raster", source: "osm", paint: this._osmRasterPaint() });
     } else if (basemap === "osmvec" && this._osmvecArchive) {
       // Hosted OSM vector (Protomaps schema). Styled per source-layer (no kind
       // filters) so it works across Protomaps schema versions, tinted to the
