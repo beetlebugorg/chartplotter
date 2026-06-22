@@ -25,6 +25,7 @@ import { readCentralDirectory, cellEntries, extractEntry } from "./data/zip-impo
 import { UNIT_DEFAULTS, UNIT_CATEGORIES } from "./lib/units.mjs"; // configurable display units
 import { ChartRadar } from "./map/radar.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./map/hud.mjs"; // status readout + overscale zoom cap
+import { CoverageBoxes } from "./map/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
 import { esc, loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
@@ -846,38 +847,6 @@ export class ChartPlotter extends HTMLElement {
     this._map.easeTo({ center: cam ? cam.center : [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2], zoom, duration: 800 });
   }
 
-  // Is there an installed-coverage box under `point` that we're currently zoomed
-  // OUT of? (i.e. a marker for a chart whose detail hasn't kicked in.) If so return
-  // it, so a tap flies there instead of opening a pick report over empty sea. When
-  // already at the chart's detail zoom we return null and the normal pick runs.
-  _coverageBoxAt(point) {
-    const map = this._map;
-    if (!map || !this._showCellBounds) return null;
-    const ids = ["inst-outline", "inst-fill-general", "inst-fill-coastal", "inst-fill-approach", "inst-fill-harbor", "inst-fill-berthing"].filter((id) => map.getLayer(id));
-    const hit = map.queryRenderedFeatures(point, { layers: ids })[0];
-    if (!hit) return null;
-    const band = hit.properties && hit.properties.band;
-    if (map.getZoom() >= (BAND_MINZOOM[band] || 12)) return null; // already at detail → let the pick run
-    return hit;
-  }
-
-  // Fly to an installed-coverage box's chart at the zoom where its detail renders
-  // (the box itself may be the min-size marker, so frame the TRUE footprint from
-  // _instBoundsRaw and ensure we cross the band's render zoom — a tiny cell fitted
-  // to the viewport would otherwise stop short and still show no chart).
-  _flyToCoverage(f) {
-    const map = this._map;
-    const name = f.properties && f.properties.name;
-    const real = (this._instBoundsRaw || []).find((r) => r.properties && r.properties.name === name) || f;
-    const ring = real.geometry.coordinates[0];
-    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
-    for (const [x, y] of ring) { w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y); }
-    const need = (BAND_MINZOOM[(f.properties && f.properties.band)] || 12) + 1; // safely into detail
-    const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
-    const zoom = Math.min(18, Math.max(cam ? cam.zoom : need, need));
-    if (map.getMaxZoom() < zoom) map.setMaxZoom(zoom); // don't let the departure cap clamp the fly short
-    map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
-  }
 
   // Fly to a set of packs from a tapped chart-radar chip. A single pack lands at
   // its finest band's render zoom (so a berthing-only set actually draws); a
@@ -2080,38 +2049,11 @@ export class ChartPlotter extends HTMLElement {
     // you can tell WHAT coverage you have, not just that you have some. One set of
     // layers per band, auto-hidden at the band's native min zoom (maxzoom) — where
     // the real chart takes over.
-    map.addSource("inst-bounds", { type: "geojson", data: empty });
-    // The coverage boxes have a per-zoom minimum on-screen size (_applyInstBounds),
-    // so recompute their geometry as the zoom changes. Hooked once per map (survives
-    // style rebuilds since the map object persists); rAF-throttled.
-    if (!this._instBoundsHooked) {
-      this._instBoundsHooked = true;
-      const rerun = () => { if (this._ibRaf) return; this._ibRaf = requestAnimationFrame(() => { this._ibRaf = 0; this._applyInstBounds(); }); };
-      map.on("zoom", rerun);
-    }
-    const boundsVis = this._showCellBounds ? "visible" : "none";
-    for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
-      const mz = BAND_MINZOOM[band];
-      const f = ["==", ["get", "band"], band];
-      map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
-      map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: boundsVis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
-      // (cell-name labels removed — the per-box text was too noisy; the outline alone marks coverage)
-    }
-    // Always-on cell-footprint outline (NOT maxzoom-capped, unlike the per-band
-    // boxes above). When SCAMIN suppresses every feature in a cell at the current
-    // zoom the chart tiles render blank — so without this you'd see empty sea over
-    // a cell that's actually loaded. A thin dashed outline of each footprint stays
-    // visible at ALL zooms so you can always tell WHERE a (test) cell is even when
-    // its symbology is SCAMIN-hidden. Emphasis scales with zoom: BOLD when scaled
-    // out really far (the box is a tiny shape then — you'd lose a hairline) and
-    // subtle once you've zoomed in and the chart data is drawing, so it doesn't
-    // fight the symbology. Bright azure that reads on day sea, dusk, and night.
-    map.addLayer({ id: "inst-outline", type: "line", source: "inst-bounds", layout: { visibility: boundsVis }, paint: {
-      "line-color": "#3a9bdc",
-      "line-dasharray": [4, 3],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 2, 2.2, 8, 1.6, 13, 1, 16, 0.8],
-      "line-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.95, 8, 0.8, 13, 0.55, 16, 0.4],
-    } });
+    // Installed-chart coverage overlay (own controller — owns the inst-bounds source
+    // + its box/outline layers + the per-zoom min-size growth + click-to-fly). The
+    // debug overlay below reuses this source, so addLayers() must run first.
+    this._coverage = this._coverage || new CoverageBoxes({ map, visible: this._showCellBounds });
+    this._coverage.addLayers();
     // Debug overlay (Settings → "Debug cell loading"): every installed cell's
     // footprint at ALL zooms, coloured by lazy-load state — green=loaded,
     // amber=loading, red=failed, grey=not loaded. Lets you see which cells are
@@ -2202,8 +2144,7 @@ export class ChartPlotter extends HTMLElement {
       // Zoomed out over an installed-chart coverage marker → fly to that chart at
       // its detail zoom (so you can find + open installed charts without knowing
       // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
-      const box = this._coverageBoxAt(e.point);
-      if (box) { this._flyToCoverage(box); return; }
+      if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
       // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
       this._pickReportAt(e.point, e.originalEvent);
     });
@@ -3378,8 +3319,7 @@ export class ChartPlotter extends HTMLElement {
   // Rebuild the installed-cell coverage outlines (shown when zoomed out past a
   // cell's detail zoom) from the browser store + catalog footprints.
   _refreshInstalledBounds() {
-    const src = this._map && this._map.getSource("inst-bounds");
-    if (!src) return;
+    if (!this._coverage) return; // coverage overlay not set up yet
     const feats = [];
     const missing = []; // foreign cells with no footprint yet → parse one once
     // Per-CELL footprints are the prod (pmtiles) path only. In SERVER mode we draw
@@ -3426,11 +3366,10 @@ export class ChartPlotter extends HTMLElement {
         geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
       });
     }
-    // Stash the TRUE footprints; _applyInstBounds() pushes them to the source with
-    // a per-zoom minimum on-screen size so a tiny cell never shrinks to an invisible
-    // speck when zoomed out (see below).
-    this._instBoundsRaw = feats;
-    this._applyInstBounds();
+    // Hand the TRUE footprints to the coverage controller, which pushes them with a
+    // per-zoom minimum on-screen size so a tiny cell never shrinks to an invisible
+    // speck when zoomed out.
+    if (this._coverage) this._coverage.setFeatures(feats);
     // Foreign cells carry no catalog footprint, so they'd be invisible when zoomed
     // out. Parse each one's bounds ONCE (best-effort) then rebuild, so an uploaded
     // harbour shows a coverage outline at z0 you can see and zoom into.
@@ -3441,52 +3380,12 @@ export class ChartPlotter extends HTMLElement {
     }
   }
 
-  // Push the installed-coverage footprints to the map, GROWING any box that would
-  // render smaller than MIN_BOX_PX up to that size around its own centroid. A cell
-  // can be geographically tiny (an imported S-64 test cell is ~0.5° wide and sits
-  // alone in the ocean) — at a world zoom its true outline is a sub-pixel speck you
-  // can never find by scrolling. Clamping the on-screen size keeps every installed
-  // chart a visible, clickable marker no matter how far out you zoom; real (large)
-  // footprints pass through untouched. Recomputed on zoom because "small on screen"
-  // depends on the camera.
-  _applyInstBounds() {
-    const map = this._map, src = map && map.getSource("inst-bounds");
-    if (!src || !this._instBoundsRaw) return;
-    const MIN_BOX_PX = 26;
-    src.setData({ type: "FeatureCollection", features: this._instBoundsRaw.map((f) => this._minSizeBox(f, MIN_BOX_PX)) });
-  }
-
-  // Return f unchanged if its footprint is already ≥ minPx on screen; otherwise a
-  // copy whose polygon is a minPx box centred on the same point (built in screen
-  // space via project/unproject, so it's exactly minPx regardless of latitude/zoom).
-  _minSizeBox(f, minPx) {
-    const map = this._map;
-    const ring = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
-    if (!ring) return f;
-    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
-    for (const [x, y] of ring) { w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y); }
-    const tl = map.project([w, n]), br = map.project([e, s]);
-    if (Math.abs(br.x - tl.x) >= minPx && Math.abs(br.y - tl.y) >= minPx) return f;
-    const c = map.project([(w + e) / 2, (s + n) / 2]);
-    const hw = Math.max(minPx, Math.abs(br.x - tl.x)) / 2, hh = Math.max(minPx, Math.abs(br.y - tl.y)) / 2;
-    const a = map.unproject([c.x - hw, c.y - hh]); // W / N
-    const b = map.unproject([c.x + hw, c.y + hh]); // E / S
-    return { type: "Feature", properties: f.properties, geometry: { type: "Polygon", coordinates: [[[a.lng, a.lat], [b.lng, a.lat], [b.lng, b.lat], [a.lng, b.lat], [a.lng, a.lat]]] } };
-  }
-
-  // Show/hide the installed-cell coverage outlines (the inst-* overlay layers).
+  // Show/hide the installed-chart coverage overlay.
   _setCellBoundsVisible(on) {
     this._showCellBounds = on;
     localStorage.setItem("cp-cell-bounds", on ? "1" : "0");
     this._persistSettings();
-    const map = this._map; if (!map) return;
-    const vis = on ? "visible" : "none";
-    for (const band of ["general", "coastal", "approach", "harbor", "berthing"]) {
-      for (const pre of ["inst-fill-", "inst-line-", "inst-label-"]) {
-        if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
-      }
-    }
-    if (map.getLayer("inst-outline")) map.setLayoutProperty("inst-outline", "visibility", vis);
+    if (this._coverage) this._coverage.setVisible(on);
   }
 
   toggleSelect(name) {
