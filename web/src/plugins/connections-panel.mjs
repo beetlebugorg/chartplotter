@@ -58,7 +58,7 @@ const BADGE = {
   stale: ["#d29922", "stale"],
   error: ["#f85149", "error"],
   connecting: ["#58a6ff", "connecting"],
-  disabled: ["#6e7681", "off"],
+  disabled: ["#6e7681", "paused"],
 };
 
 const MAX_SNIFF_LINES = 200;
@@ -138,6 +138,7 @@ export class ConnectionsPanel extends HTMLElement {
           <div class="meta" id="meta-${id}">${esc(where)}</div>
         </div>
         <div class="actions">
+          <button class="icon" data-act="toggle" data-id="${id}" title="${source.enabled ? "Pause (stop connecting/retrying)" : "Resume"}">${source.enabled ? "⏸" : "▶"}</button>
           <button class="icon" data-act="sniff" data-id="${id}" title="Raw sentences">≋</button>
           <button data-act="edit" data-id="${id}">Edit</button>
           <button class="icon" data-act="del" data-id="${id}" title="Delete">✕</button>
@@ -187,19 +188,24 @@ export class ConnectionsPanel extends HTMLElement {
     badge.textContent = label;
     const src = (this._conns.find((c) => c.source.id === id) || {}).source || {};
     const where = `${src.host}:${src.port}`;
+    // Error/paused/connecting take priority over stale sentence lists so a
+    // connection that drops shows WHY, not its last-good data.
     let line = where;
     if (status.state === "disabled") {
-      line += " · disabled";
+      line += " · paused";
+    } else if (status.state === "error") {
+      line += " · " + (status.lastError || "connection error");
+    } else if (status.state === "connecting") {
+      line += " · connecting…";
     } else if (status.lastRx && (status.sentences || []).length) {
       const rate = status.rateHz ? status.rateHz.toFixed(1) + " Hz" : "";
       const errs = status.errors ? ` · ${status.errors} err` : "";
       line += ` · ${status.sentences.join(" ")}${rate ? " · " + rate : ""}${errs}`;
     } else if (status.state === "connected") {
       line += " · waiting for data";
-    } else if (status.state === "error") {
-      line += " · " + (status.lastError || "error");
     }
     meta.textContent = line;
+    meta.title = status.lastError ? `${where} — ${status.lastError}` : line; // full text on hover (meta clips)
   }
 
   // --- sniffer --------------------------------------------------------------
@@ -274,6 +280,23 @@ export class ConnectionsPanel extends HTMLElement {
       case "sniff":
         this._toggleSniff(id);
         break;
+      case "toggle":
+        this._togglePause(id);
+        break;
+    }
+  }
+
+  // Pause/resume a connection (enabled flag). Pausing stops the runner so it
+  // doesn't keep retrying a dead/wrong endpoint.
+  async _togglePause(id) {
+    const c = this._conns.find((x) => x.source.id === id);
+    if (!c) return;
+    if (this._sniffId === id) this._stopSniff();
+    try {
+      await this._service.update(id, { ...c.source, enabled: !c.source.enabled });
+      await this.refresh();
+    } catch (e) {
+      if (this._notify) this._notify.error("Connection: " + (e.message || e));
     }
   }
 
