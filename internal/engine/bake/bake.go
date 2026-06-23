@@ -284,13 +284,18 @@ type Baker struct {
 	// the full scan (the EmitTile convenience path / tests). Read-only after build.
 	emitIndex  map[uint64][]int32
 	linestyles map[string]*lsInfo // complex-linestyle period geometry, built once (lazily) from the PresLib
-	bbox       geo.BoundingBox
-	curCell    string // dataset name of the cell currently being added (stamped on each feature)
-	curCscl    uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
-	curScamin  uint32 // SCAMIN (1:N min display scale) of the feature currently being expanded; 0 = none
-	curObjnam  string // OBJNAM of the feature currently being expanded (for the inspector)
-	curLight   string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
-	curAttrs   string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
+	// portrayer, when set, replaces the S-52 lookup+CSP portrayal (BuildFeaturePasses)
+	// with an alternative — the S-101 path (specs/s101-portrayal-backport.md). This is
+	// the replace-then-delete seam: the S-52 branch below is removed once S-101 is the
+	// only renderer. Internal (not a user-facing toggle).
+	portrayer Portrayer
+	bbox      geo.BoundingBox
+	curCell   string // dataset name of the cell currently being added (stamped on each feature)
+	curCscl   uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
+	curScamin uint32 // SCAMIN (1:N min display scale) of the feature currently being expanded; 0 = none
+	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
+	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
+	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
 	// position, the first is "primary" (one flare + a merged multi-line label);
 	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
@@ -589,7 +594,13 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
 		// style live; everything else is one pass tagged bnd=2.
-		for _, pass := range portrayal.BuildFeaturePasses(lib, mariner, f, cellIdx.spatialFor(f)) {
+		var passes []portrayal.FeatureBuildPass
+		if b.portrayer != nil {
+			passes = b.portrayer.Passes(f)
+		} else {
+			passes = portrayal.BuildFeaturePasses(lib, mariner, f, cellIdx.spatialFor(f))
+		}
+		for _, pass := range passes {
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
 			pts := int64(pass.Pts)

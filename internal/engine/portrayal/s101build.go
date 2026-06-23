@@ -2,14 +2,37 @@ package portrayal
 
 import (
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/s101"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/catalog"
+	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
+
+// NewS101Builder assembles a builder from an S-101 PortrayalCatalog directory
+// and a FeatureCatalogue.xml path: it loads the feature catalogue (the S-57↔
+// S-101 bridge + Lua introspection), the drawing catalogue (line styles / area
+// fills / colours), and the Lua portrayal engine. (When the catalogue is
+// embedded, swap fc.Load/catalog.Load/s101.NewEngine for their *FS variants.)
+func NewS101Builder(portrayalCatalogDir, featureCataloguePath string) (*S101Builder, error) {
+	cat, err := fc.Load(featureCataloguePath)
+	if err != nil {
+		return nil, err
+	}
+	draw, err := catalog.Load(portrayalCatalogDir)
+	if err != nil {
+		return nil, err
+	}
+	eng, err := s101.NewEngine(filepath.Join(portrayalCatalogDir, "Rules"), cat)
+	if err != nil {
+		return nil, err
+	}
+	return &S101Builder{Engine: eng, Catalog: draw}, nil
+}
 
 // S101Builder is the S-101 replacement for the S-52 BuildFeature seam: it runs
 // the S-101 portrayal rules (via the fc-backed Lua engine) for one feature,
