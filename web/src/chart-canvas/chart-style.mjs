@@ -272,6 +272,19 @@ export function buildChartLayers({
   const layerBase = {}, variants = {}, layerVis = {};
   const tmpl = buildLayers(mariner, palette, atlasPpu, osm);
   const out = [];
+  // Group each base template layer with the *_scamin clone that _withScamin placed
+  // immediately after it (tagged _baseId), so the pair expands TOGETHER per band
+  // below — both fill paths iterate group-outer, band-mid, member-inner. Expanding
+  // them as two independent template entries (every band's plain `areas`, THEN every
+  // band's `areas_scamin`) let a COARSE band's SCAMIN area — e.g. a coastal BUAARE —
+  // stack ABOVE a FINER band's plain fill (a harbor DEPARE), so coastal docks painted
+  // over harbor water and read as land. Grouping keeps cross-band coarse→fine intact
+  // within each fill tier while still drawing all fills below lines/symbols/text.
+  const groups = [];
+  for (const L of tmpl) {
+    if (L._baseId && groups.length) groups[groups.length - 1].push(L);
+    else groups.push([L]);
+  }
   // Server mode: one source per active per-band set (chart-<district>-<band>).
   // Iterate template-outer, set-inner — and serverSets is ordered coarse→fine —
   // so the global draw order is by S-52 class (all fills, then lines, then symbols,
@@ -283,9 +296,10 @@ export function buildChartLayers({
   // "<id>@<set>" so scheme/mariner updates by base id hit every set's copy.
   if (server) {
     const lat = scaminLat;
-    for (const L of tmpl) {
-      const base = L.filter ?? null;
+    for (const group of groups) {
       for (const set of serverSets) {
+        for (const L of group) {
+        const base = L.filter ?? null;
         const dmin = BAND_DISPLAY_MIN[set.band];
         const capped = (set.band === "overview" || set.band === "general") && _capsAtBand(L);
         // mk pushes one variant of L for this set — same shape as the pmtiles path's
@@ -344,6 +358,7 @@ export function buildChartLayers({
         // data exists — the hatch is left only on the coarse-only (overscale) patches
         // such as open water shown enlarged. S-52 §10.1.10.2.
         if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, undefined, bandsHidden);
+        }
       }
     }
     _pushScaminProbes(out, server);
@@ -358,8 +373,9 @@ export function buildChartLayers({
   // WITHIN each class preserves best-available (finer fill covers coarser fill),
   // while symbols/text now always sit above every band's fills.
   const lat = scaminLat;
-  for (const L of tmpl) {
+  for (const group of groups) {
     for (const band of CHART_BANDS) {
+      for (const L of group) {
       const base = L.filter ?? null;
       const dmin = BAND_DISPLAY_MIN[band.slug];
       const capped = (band.slug === "overview" || band.slug === "general") && _capsAtBand(L);
@@ -406,6 +422,7 @@ export function buildChartLayers({
         mk("", base, dmin || undefined);
       }
       if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, undefined, bandsHidden);
+    }
     }
   }
   _pushScaminProbes(out, server);

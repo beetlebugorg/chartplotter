@@ -157,6 +157,17 @@ function pickCmp(a, b) {
   return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
 }
 
+// S-57 cell names encode the usage band as the 3rd character (e.g. US[1-6]…):
+// 1 overview, 2 general, 3 coastal, 4 approach, 5 harbor, 6 berthing — a higher
+// digit is a larger-scale (finer) chart. Returns 0 when the name doesn't follow
+// the pattern (imported/non-NOAA cells), which the overlap filter treats as
+// "unknown band" and never suppresses.
+function cellBand(f) {
+  const c = f.properties && f.properties.cell;
+  const m = c && /^[A-Za-z]{2}([1-6])/.exec(c);
+  return m ? +m[1] : 0;
+}
+
 // Richness of a feature's geometry for *highlighting*: an area outlines better
 // than a line, which outlines better than a centred symbol's anchor point. Used
 // to pick which of an object's co-located representations the pick circle/outline
@@ -590,9 +601,13 @@ export class ChartPlotter extends HTMLElement {
       // Pinned scale-band pills (pill/cell clicks land inside their wrap).
       root.querySelectorAll(".sb-band-wrap.open").forEach((w) => { if (!inside(w)) w.classList.remove("open"); });
       // Charts/Settings drawer — but not while the NOAA agreement gate is up (it
-      // owns the interaction; Escape or its buttons resolve it), and not on its
-      // own rail buttons (those toggle it via toggleSection()).
+      // owns the interaction; Escape or its buttons resolve it), not on its own
+      // rail buttons (those toggle it via toggleSection()), and NOT while the dev
+      // feature-inspector is armed: it lives in the drawer but its interaction is
+      // clicking/dragging the MAP, so dismissing the drawer here would disarm it
+      // (closeDrawer → setInspectMode(false)) and hand the click to the cursor-pick.
       if (this._drawerOpen() && !(this._chartLib && this._chartLib.agreementOpen)
+          && !(this._devTools && this._devTools.inspecting)
           && !inside(root.getElementById("drawer"))
           && !inside(root.getElementById("charts-btn"))
           && !inside(root.getElementById("settings-btn"))) {
@@ -1094,8 +1109,18 @@ export class ChartPlotter extends HTMLElement {
     // ordering is unchanged) plus the richest geometry under the cursor
     // (area > line > point) on `_hiGeom`, so the highlight traces an area's
     // extent instead of dropping a dot on a centred symbol's anchor.
+    // S-52 PresLib §10.1.3 (data overlaps): where cells of different navigational
+    // purpose overlap, only ONE cell is displayed for the overlap area — the
+    // largest-scale (finest usage band) cell whose coverage applies. query-
+    // RenderedFeatures returns every band stacked at the point (a finer cell's
+    // opaque fill paints over a coarser one), so a coarser cell's now-hidden
+    // objects — e.g. a coastal BUAARE beneath a harbor LNDARE — would otherwise
+    // pollute the pick. Keep only the finest band present; coarser bands are
+    // suppressed there (unknown-band imports are always kept).
+    const finestBand = feats.reduce((m, f) => Math.max(m, cellBand(f)), 0);
+    const picked = finestBand ? feats.filter((f) => { const b = cellBand(f); return b === 0 || b >= finestBand; }) : feats;
     const groups = new Map();
-    for (const f of feats) {
+    for (const f of picked) {
       const p = f.properties || {};
       const key = (p.class || "") + "|" + (p.cell || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
       const g = groups.get(key);
