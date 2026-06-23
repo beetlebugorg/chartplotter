@@ -179,6 +179,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveVessel(w, r) // GET: latest NMEA0183 vessel-state snapshot
 	case r.URL.Path == "/api/vessel/stream":
 		s.serveVesselStream(w, r) // SSE: coalesced vessel-state deltas
+	case r.URL.Path == "/api/ais":
+		s.serveAIS(w, r) // GET: current AIS target list
+	case r.URL.Path == "/api/ais/stream":
+		s.serveAISStream(w, r) // SSE: AIS targets, pushed on change
 	case r.URL.Path == "/api/connections":
 		s.serveConnections(w, r) // GET list (+status) / POST create a connection
 	case r.URL.Path == "/api/connections/stream":

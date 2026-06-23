@@ -73,6 +73,7 @@ type runner struct {
 	parser     *Parser
 	dial       DialFunc
 	onRaw      func(id, line string) // optional raw-sentence tap (for the sniffer)
+	aisFeed    func(line string)     // optional AIS sink: raw VDM/VDO lines → AISStore
 	staleAfter time.Duration
 	backoff    time.Duration
 	maxBackoff time.Duration
@@ -169,7 +170,11 @@ func (r *runner) readLoop(ctx context.Context, rc io.Reader) {
 			continue
 		}
 		r.recordRx(s)
-		r.store.Apply(r.parser, s)
+		if (s.Type == "VDM" || s.Type == "VDO") && r.aisFeed != nil {
+			r.aisFeed(line) // AIS payload decode happens off the instrument path
+		} else {
+			r.store.Apply(r.parser, s)
+		}
 	}
 	if err := sc.Err(); err != nil {
 		r.recordError(err)

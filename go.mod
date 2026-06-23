@@ -3,6 +3,7 @@ module github.com/beetlebugorg/chartplotter
 go 1.25.11
 
 require (
+	github.com/BertoldVdb/go-ais v0.4.0
 	github.com/alecthomas/kong v1.12.1
 	github.com/dhconnelly/rtreego v1.2.0
 	github.com/stretchr/testify v1.11.1
@@ -12,6 +13,7 @@ require (
 )
 
 require (
+	github.com/adrianmo/go-nmea v1.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

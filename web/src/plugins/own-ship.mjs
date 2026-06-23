@@ -15,6 +15,7 @@
 // before the style is loaded throws, so layer creation is deferred to style.load.
 
 import { OWN_SHIP_MARKER, CENTER_ICON } from "../lib/openbridge-icons.mjs";
+import { fmtLatLon } from "./target-info.mjs";
 
 const SRC = "ownship-predictor";
 const CASING = "ownship-predictor-casing";
@@ -41,10 +42,11 @@ const CHIP_STYLE = `
 const EMPTY = { type: "FeatureCollection", features: [] };
 
 export class OwnShip {
-  constructor({ map, plotter, vessel, host, predictMin = 6 } = {}) {
+  constructor({ map, plotter, vessel, host, onSelect, predictMin = 6 } = {}) {
     this._map = map;
     this._plotter = plotter;
     this._vessel = vessel;
+    this._onSelect = onSelect; // tap → info picker
     this._predictMin = predictMin;
     this._marker = null;
     this._added = false;
@@ -55,8 +57,12 @@ export class OwnShip {
     this._last = null; // last predictor GeoJSON (to restore after style reload)
 
     this._el = document.createElement("div");
-    this._el.style.cssText = "pointer-events:none;will-change:transform";
+    this._el.style.cssText = "pointer-events:auto;cursor:pointer;will-change:transform";
     this._el.innerHTML = OWN_SHIP_MARKER;
+    this._el.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't let the map's click handler dismiss the picker we're opening
+      this._select(e);
+    });
 
     this._chip = this._makeChip(host);
 
@@ -215,11 +221,31 @@ export class OwnShip {
       const z = this._map.getZoom();
       this._map.easeTo({ center: [lng, lat], zoom: z < 10 ? 13 : z, duration: 700 });
     } else if (this._follow) {
-      // Keep centred (a no-op in the renderer's "free" mode).
-      this._plotter.updateFollow(this._fix);
+      // Keep centred (a no-op in the renderer's "free" mode). Throttle so bursts
+      // of fixes don't stack camera eases (which makes MapLibre throw "already
+      // running"); the recentre ease is short and 1 Hz fixes pass straight through.
+      const t = Date.now();
+      if (t - (this._lastFollow || 0) > 250) {
+        this._lastFollow = t;
+        this._plotter.updateFollow(this._fix);
+      }
     }
     this._applyFollowZoom(); // now that we have a fix, take over the wheel if following
     this._syncChip();
+  }
+
+  // Tap → info picker with the vessel's live nav data.
+  _select(e) {
+    if (!this._onSelect || !this._fix) return;
+    const nav = (this._vessel.state || {}).navigation || {};
+    const rows = [["Position", fmtLatLon(this._fix.lat, this._fix.lng)]];
+    const hdg = num(nav.headingTrue) ??
+      (num(nav.headingMagnetic) != null ? num(nav.headingMagnetic) + (num(nav.magneticVariation) ?? 0) : null);
+    if (hdg != null) rows.push(["Heading", Math.round(hdg) + "°T"]);
+    if (num(nav.cogTrue) != null) rows.push(["COG", Math.round(nav.cogTrue) + "°T"]);
+    if (num(nav.sog) != null) rows.push(["SOG", nav.sog.toFixed(1) + " kn"]);
+    if (num(nav.speedThroughWater) != null) rows.push(["STW", nav.speedThroughWater.toFixed(1) + " kn"]);
+    this._onSelect({ title: "Own ship", rows, x: e.clientX, y: e.clientY });
   }
 
   _hide() {

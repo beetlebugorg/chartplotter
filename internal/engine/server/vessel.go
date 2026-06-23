@@ -51,6 +51,43 @@ func (s *Server) serveVesselStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// serveAIS returns the current AIS target list as JSON.
+func (s *Server) serveAIS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		apiErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "targets": s.nmeaMgr.AIS().Snapshot()})
+}
+
+// serveAISStream streams the AIS target list over SSE, emitting on connect and
+// whenever the target set changes (cheap version-counter check on a ~1 Hz tick).
+func (s *Server) serveAISStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := sseStart(w)
+	if !ok {
+		return
+	}
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	ais := s.nmeaMgr.AIS()
+	var lastVer uint64
+	first := true
+	for {
+		if v := ais.Version(); first || v != lastVer {
+			first = false
+			lastVer = v
+			b, _ := json.Marshal(map[string]any{"targets": ais.Snapshot()})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			flusher.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // sseStart writes the standard text/event-stream headers and returns the
 // Flusher, or reports an error and returns ok=false if streaming is unsupported.
 func sseStart(w http.ResponseWriter) (http.Flusher, bool) {

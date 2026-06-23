@@ -19,13 +19,16 @@ export const STYLE = `
              centre. Panels drop down from their corner button as caret popovers. */
           --botbar-h:env(safe-area-inset-bottom,0px);
           --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2);
-          --ownship-fill:#1f5fa0; --ownship-edge:#0a2c47; --ownship-halo:#fff; }
+          --ownship-fill:#1f5fa0; --ownship-edge:#0a2c47; --ownship-halo:#fff;
+          --ais-fill:#0a7d55; --ais-halo:#fff; }
         :host([data-scheme="dusk"]) {
           --ui-bg:#20262b; --ui-surface:#2a3137; --ui-surface-2:#333b42; --ui-text:#cdd6dc; --ui-text-dim:#9aa6ae; --ui-text-faint:#7d8990; --ui-border:#3a434a; --ui-border-2:#333b42; --ui-border-strong:#4a555d; --ui-hover:#353f47; --ui-accent:#4f9be6; --ui-accent-hover:#69abe9; --ui-accent-text:#0c1318; --ui-shadow:rgba(0,0,0,.5);
-          --ownship-fill:#3a7ba6; --ownship-edge:#0a2230; --ownship-halo:#dde6ec; }
+          --ownship-fill:#3a7ba6; --ownship-edge:#0a2230; --ownship-halo:#dde6ec;
+          --ais-fill:#2f9f78; --ais-halo:#e8f0ec; }
         :host([data-scheme="night"]) {
           --ui-bg:#14181b; --ui-surface:#1b2024; --ui-surface-2:#232a2f; --ui-text:#aeb8be; --ui-text-dim:#7e898f; --ui-text-faint:#626c72; --ui-border:#2a3137; --ui-border-2:#232a2f; --ui-border-strong:#38424a; --ui-hover:#232a30; --ui-accent:#3f7fb5; --ui-accent-hover:#4d8cc2; --ui-accent-text:#0a0e11; --ui-shadow:rgba(0,0,0,.6);
-          --ownship-fill:#b04632; --ownship-edge:#3a120c; --ownship-halo:#e6c6a0; }
+          --ownship-fill:#b04632; --ownship-edge:#3a120c; --ownship-halo:#e6c6a0;
+          --ais-fill:#3fae84; --ais-halo:#d9ece3; }
         /* Full-bleed map; everything else floats over it. */
         #map { position:absolute; inset:0; }
         #map chart-canvas { width:100%; height:100%; }

@@ -23,6 +23,7 @@ type ManagerOpts struct {
 	Backoff    time.Duration
 	MaxBackoff time.Duration
 	StaleAfter time.Duration
+	AISStale   time.Duration // AIS target eviction window (default 6m)
 }
 
 // Manager owns the live runners for the configured Sources and writes every
@@ -32,6 +33,8 @@ type Manager struct {
 	store *Store
 	opts  ManagerOpts
 	ctx   context.Context
+
+	ais *AISStore
 
 	mu      sync.Mutex
 	sources map[string]Source
@@ -60,6 +63,7 @@ func NewManager(ctx context.Context, store *Store, opts ManagerOpts) *Manager {
 		store:   store,
 		opts:    opts,
 		ctx:     ctx,
+		ais:     NewAISStore(opts.AISStale),
 		sources: map[string]Source{},
 		runners: map[string]*runner{},
 	}
@@ -67,6 +71,9 @@ func NewManager(ctx context.Context, store *Store, opts ManagerOpts) *Manager {
 
 // Store returns the shared vessel-state store the Manager feeds.
 func (m *Manager) Store() *Store { return m.store }
+
+// AIS returns the shared AIS target store the Manager feeds.
+func (m *Manager) AIS() *AISStore { return m.ais }
 
 // Apply adds or updates a Source: any existing runner for the id is stopped and,
 // if the source is enabled and its transport is supported, a fresh runner is
@@ -88,6 +95,7 @@ func (m *Manager) Apply(src Source) {
 			parser:     m.opts.Parser,
 			dial:       m.opts.Dial,
 			onRaw:      m.opts.OnRaw,
+			aisFeed:    m.ais.feeder(),
 			staleAfter: m.opts.StaleAfter,
 			backoff:    m.opts.Backoff,
 			maxBackoff: m.opts.MaxBackoff,

@@ -4,9 +4,9 @@
 // the openbridge-webcomponents CODE is separately Apache-2.0. Attribution: "Icons
 // from the OpenBridge Icon Pack by the Ocean Industries Concept Lab, CC BY 4.0."
 // Modifications: extracted from the package's generated Lit components to plain
-// inline SVG, set to currentColor; the own-ship glyph is haloed and themed via
-// CSS vars (--ownship-*) so it honours the day/dusk/night scheme. Vendored (this
-// app has no bundler). Glyphs from @oicl/openbridge-webcomponents v1.0.1.
+// inline SVG (currentColor); own-ship is haloed + themed via --ownship-* vars, AIS
+// targets are coloured + haloed in ais-overlay.mjs. Vendored (no bundler). Glyphs
+// from @oicl/openbridge-webcomponents v1.0.1.
 
 
 // icon-search
@@ -68,10 +68,20 @@ export const NORTH_ARROW_ICON = `<svg width="24" height="24" viewBox="0 0 24 24"
 <path fill-rule="evenodd" clip-rule="evenodd" d="M13 20L13 7.83L18.59 13.42L20 12L12 4L4 12L5.41 13.41L11 7.83L11 20L13 20Z" fill="currentColor"/>
 </svg>`;
 
+// icon-ais-target-activated-iec
+export const AIS_TARGET_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+<path d="M18.767 19.3352C18.8807 19.6603 18.6395 20.0004 18.295 20.0004H5.70451C5.36009 20.0004 5.1188 19.6603 5.23258 19.3352L11.5278 1.34874C11.6841 0.902307 12.3154 0.902308 12.4717 1.34874L18.767 19.3352ZM7.81911 18.0004H16.1814L11.9998 6.05408L7.81911 18.0004Z" fill="currentColor"/>
+</svg>`;
 
-// Own-ship marker from icon-own-ship-iec: a halo under the hull, both themed via
-// --ownship-* CSS vars (set per scheme on the app host) so it honours day/dusk/
-// night. Bow points up (north) at rotation 0.
+// icon-ais-target-activated-nohdgcog-iec
+export const AIS_TARGET_NODIR_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+<path fill-rule="evenodd" clip-rule="evenodd" d="M2.96973 6.50012L1.96973 8.23217L8.20793 11.8338L4.99976 21H18.9998L17.7121 17.321L21.0223 19.2322L22.0223 17.5001L2.96973 6.50012ZM7.81872 19L9.97068 12.8515L15.0565 15.7878L16.1808 19H7.81872Z" fill="currentColor"/>
+<path d="M13.0306 9.99934L11.9998 7.05418L11.3155 9.00916L9.55276 7.99143L11.9998 1L15.6861 11.5325L13.0306 9.99934Z" fill="currentColor"/>
+</svg>`;
+
+
+// Own-ship marker from icon-own-ship-iec: halo under hull, themed via --ownship-*
+// CSS vars (set per scheme on the app host). Bow points up (north) at rotation 0.
 const OWN_SHIP_D = "M12 2C12 2 6 5.49999 6 13.2667V18.8C6 19.9201 6 20.4802 6.21799 20.908C6.40973 21.2843 6.71569 21.5903 7.09202 21.782C7.51984 22 8.0799 22 9.2 22H14.8C15.9201 22 16.4802 22 16.908 21.782C17.2843 21.5903 17.5903 21.2843 17.782 20.908C18 20.4802 18 19.9201 18 18.8V13.2667C18 5.49999 12 2 12 2ZM16 20V13.2667C16 9.93912 14.7254 7.55423 13.4479 5.98215C12.9365 5.35281 12.4257 4.85623 12 4.48903C11.5743 4.85623 11.0635 5.35281 10.5521 5.98215C9.27458 7.55423 8 9.93912 8 13.2667V20H16Z";
 export const OWN_SHIP_MARKER = `
 <svg width="30" height="30" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">

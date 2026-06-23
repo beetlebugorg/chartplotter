@@ -26,6 +26,8 @@ import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Adva
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { OwnShip } from "./plugins/own-ship.mjs"; // own-ship marker + course predictor + follow camera
+import { AISOverlay } from "./plugins/ais-overlay.mjs"; // AIS targets (other vessels) from the live feed
+import "./plugins/target-info.mjs"; // defines <target-info> (own-ship / AIS tap-info picker)
 import { PALETTE_DAY_ICON, PALETTE_DUSK_ICON, PALETTE_NIGHT_ICON } from "./lib/openbridge-icons.mjs"; // OpenBridge scheme glyphs
 import { DISTRICTS, NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
@@ -576,9 +578,17 @@ export class ChartPlotter extends HTMLElement {
         assets: this._assets,
         notify: this._notify,
       });
+      // Tap-info picker for own-ship / AIS targets; dismissed on a map grab or tap.
+      const tinfo = document.createElement("target-info");
+      this.shadowRoot.appendChild(tinfo);
+      const showInfo = (info) => tinfo.show(info);
+      map.on("dragstart", () => tinfo.hide());
+      map.on("click", () => tinfo.hide());
       // Own-ship marker + course predictor; follows the vessel (break-out + a
       // re-centre chip mounted in the shell chrome) and streams fixes to the camera.
-      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot });
+      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo });
+      // AIS targets (other vessels) from the live feed.
+      this._ais = new AISOverlay({ map, assets: this._assets, prod: this._prod, onSelect: showInfo });
     }
 
     // Persist the view so a refresh resumes where you were; refresh the coverage
