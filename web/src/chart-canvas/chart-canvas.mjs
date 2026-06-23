@@ -67,6 +67,15 @@ import {
 import { buildChartLayers, PAT_PREFIX, TEXT_VARIANTS } from "./chart-style.mjs";
 
 const FEATURE_SCALE = 0.01 / 0.35278;
+// Linear (constant-velocity) easing for the follow camera — see updateFollow. The
+// default ease-in/out would stall at each fix boundary, reading as a step.
+const LINEAR = (t) => t;
+// Return a `to` bearing rewritten relative to `from` so the difference is in
+// (-180,180], i.e. the camera rotates the SHORT way (no 359°→0° backspin).
+function shortestBearing(from, to) {
+  let d = (((to - from) % 360) + 540) % 360 - 180;
+  return from + d;
+}
 // Web-Mercator zoom that renders a paper scale of 1:`scale` at `lat` — the
 // inverse of the HUD's scaleDenom (mpp = 156543.034·cos φ / 2^z; scale = mpp/
 // 0.00028). Latitude-dependent because a given scale is a different zoom at each
@@ -171,12 +180,22 @@ export class ChartCanvas extends HTMLElement {
     // map container.
     const style = document.createElement("style");
     style.textContent =
-      ":host{display:block;position:relative}#map{position:absolute;inset:0;background:#93aebb}" +
-      // S-52 SCALEB-style scalebar (horizontal striped NM bar, bottom-left).
-      ".s52-scalebar{display:flex;flex-direction:column;align-items:flex-start;margin:0 0 8px 10px;pointer-events:none;user-select:none}" +
+      // Defensive: a mis-sized parent host shouldn't collapse the map to 0 height.
+      // The #map inset:0 fill is correct; dvh full-screen sizing lives in global-shell.
+      // #map is the MAP CANVAS, not chrome (Convention F): touch-action:none so iOS
+      // doesn't pre-empt MapLibre's gestures with page double-tap-zoom — and suppress
+      // the long-press selection/callout over the chart.
+      ":host{display:block;position:relative;min-height:100%}" +
+      "#map{position:absolute;inset:0;background:#93aebb;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}" +
+      // S-52 SCALEB-style scalebar (horizontal striped NM bar, bottom-left). Bottom/
+      // left margins clear the iOS home indicator + rounded corners (Convention G).
+      ".s52-scalebar{display:flex;flex-direction:column;align-items:flex-start;margin:0 0 max(8px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));pointer-events:none;user-select:none}" +
       ".s52sb-label{font:700 11px/1.2 system-ui,sans-serif;color:#1a2026;background:rgba(255,255,255,.82);padding:1px 5px;border-radius:4px;margin-bottom:3px;box-shadow:0 1px 3px rgba(0,0,0,.2);font-variant-numeric:tabular-nums}" +
       ".s52sb-bar{display:flex;flex-direction:row;height:8px;min-width:8px;border:1px solid #1a2026;box-sizing:border-box;box-shadow:0 1px 3px rgba(0,0,0,.3)}" +
-      ".s52sb-bar span{flex:1;display:block}";
+      ".s52sb-bar span{flex:1;display:block}" +
+      // Bottom-left control container (attribution lives here): nudge in from the
+      // home indicator / rounded corners so it isn't occluded (Convention G).
+      ".maplibregl-ctrl-bottom-left{padding-bottom:env(safe-area-inset-bottom);padding-left:env(safe-area-inset-left)}";
     const css = document.createElement("link");
     css.rel = "stylesheet";
     css.href = assets + "vendor/maplibre-gl.css";
@@ -284,6 +303,15 @@ export class ChartCanvas extends HTMLElement {
     });
     this._map = map;
     this.map = map; // public handle
+
+    // Touch gestures: keep pinch-zoom but DROP two-finger rotate (and drag-rotate)
+    // so a pinch can't tilt/spin the chart out from under the north-up/course-up/
+    // head-up follow modes (setCameraMode/updateFollow). MapLibre's default
+    // touchZoomRotate couples zoom+rotate on the same two-finger gesture, which on
+    // iOS/iPad constantly fought the orientation lock. If free rotation is wanted
+    // later, gate this on the camera mode instead of disabling outright.
+    if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
+    if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
 
     // Graphical bar scale, complementing the numeric 1:N readout in the app HUD.
     // Follows the mariner unit setting: metric (m/km) or imperial (ft/mi); MapLibre
@@ -648,20 +676,41 @@ export class ChartCanvas extends HTMLElement {
     return this._cameraMode;
   }
 
-  // Push the latest target fix {lng, lat, courseDeg?} from a tracking plugin; the
-  // camera recentres (and, in course-up, rotates) per the active mode. A no-op in
-  // "free" mode, so a plugin can stream fixes regardless of the chosen mode.
+  // Push the latest target fix {lng, lat, courseDeg?, headingDeg?} from a tracking
+  // plugin; the camera recentres (and, in course-/head-up, rotates) per the active
+  // mode. A no-op in "free" mode, so a plugin can stream fixes regardless of mode.
+  //
+  // Smoothing: each fix eases (not jumps) to the new pose over a duration sized to
+  // the gap since the previous fix — so the segment finishes about when the next
+  // fix lands and the motion is continuous instead of stepping. The easing is
+  // LINEAR (constant velocity), not the default ease-in/out, which would stutter at
+  // every segment boundary. A new fix's easeTo cancels any in-flight one. Reduced-
+  // motion (or the very first fix) collapses the duration to a near-instant snap.
   updateFollow(fix) {
     this._followFix = fix || null;
     const map = this._map;
     if (!map || !fix || (this._cameraMode || "free") === "free") return;
-    const cam = { center: [fix.lng, fix.lat], duration: 250 };
+
+    // Duration ≈ the interval between fixes, clamped sane, so one ease runs into the
+    // next. First fix (no prior timestamp) snaps; prefers-reduced-motion snaps too.
+    const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const gap = this._lastFollowTs ? now - this._lastFollowTs : 0;
+    this._lastFollowTs = now;
+    const reduce = this._reduceMotion || (this._reduceMotion = window.matchMedia
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const duration = (!gap || reduce) ? 0 : Math.max(200, Math.min(1200, gap));
+
+    const cam = { center: [fix.lng, fix.lat], duration, easing: LINEAR };
+
     // Hold the mode's bearing on every fix; otherwise this centre-only ease would
     // cancel the one-shot bearing reset from setCameraMode (north-up gets stuck at
-    // the previous course-up heading).
-    if (this._cameraMode === "course-up" && typeof fix.courseDeg === "number") cam.bearing = fix.courseDeg;
-    else if (this._cameraMode === "head-up" && typeof fix.headingDeg === "number") cam.bearing = fix.headingDeg;
-    else if (this._cameraMode === "north-up") cam.bearing = 0;
+    // the previous course-up heading). Feed an UNWRAPPED target relative to the
+    // current bearing so MapLibre always rotates the short way (no 359°→0° spin).
+    let target = null;
+    if (this._cameraMode === "course-up" && typeof fix.courseDeg === "number") target = fix.courseDeg;
+    else if (this._cameraMode === "head-up" && typeof fix.headingDeg === "number") target = fix.headingDeg;
+    else if (this._cameraMode === "north-up") target = 0;
+    if (target != null) cam.bearing = shortestBearing(map.getBearing(), target);
     map.easeTo(cam);
   }
 

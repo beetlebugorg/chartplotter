@@ -55,6 +55,12 @@ export class OwnShip {
     this._fix = null; // latest {lng, lat, courseDeg}
     this._zoomTakeover = false; // whether we've taken over the wheel from native scroll-zoom
     this._last = null; // last predictor GeoJSON (to restore after style reload)
+    // Smooth display: the rendered pose is interpolated fix→fix (in step with the
+    // camera ease in <chart-canvas>) so the boat glides instead of hopping each fix.
+    this._renderLng = null; this._renderLat = null; this._renderRot = 0; // current drawn pose
+    this._predict = null;   // {course, sog} for the predictor, from the latest fix
+    this._poseRAF = 0;      // in-flight pose tween
+    this._lastFixTs = 0;    // ms of the previous fix (to size the tween to the gap)
 
     this._el = document.createElement("div");
     this._el.style.cssText = "pointer-events:auto;cursor:pointer;will-change:transform";
@@ -192,28 +198,25 @@ export class OwnShip {
     const sog = num(nav.sog) ?? 0;
     this._fix = { lng, lat, courseDeg: typeof course === "number" ? course : heading, headingDeg: heading };
 
-    // Marker (heading-rotated, screen-fixed).
-    if (!this._marker) {
-      this._marker = new window.maplibregl.Marker({ element: this._el, rotationAlignment: "map", anchor: "center" });
-    }
-    this._marker.setLngLat([lng, lat]).setRotation(heading);
-    if (!this._added) {
-      this._marker.addTo(this._map);
-      this._added = true;
-    }
+    // Predictor params for this fix; the dashed line geometry is rebuilt from the
+    // *interpolated* position each tween frame (in _renderPose) so it tracks too.
+    this._predict = (sog > 0.2 && typeof course === "number") ? { course, sog } : null;
 
-    // Course/speed predictor (geographic). Drawn only when actually moving.
-    if (sog > 0.2 && typeof course === "number") {
-      const end = destination(lat, lng, course, sog * (this._predictMin / 60));
-      this._last = {
-        type: "FeatureCollection",
-        features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [[lng, lat], end] } }],
-      };
-    } else {
-      this._last = EMPTY;
+    // Tween the drawn pose (position + heading + predictor) from where it is now to
+    // this fix, sized to the gap since the last fix (linear) so it finishes about
+    // when the next fix arrives — gliding in step with the camera ease in
+    // <chart-canvas> rather than hopping. First fix / teleport / reduced-motion → snap.
+    const now = Date.now();
+    const gap = this._lastFixTs ? now - this._lastFixTs : 0;
+    this._lastFixTs = now;
+    let dur = 0;
+    if (this._renderLng != null && gap > 0 && gap < 2500 && !reduceMotion()) {
+      dur = clamp(gap, 200, 1200);
+      const a = this._map.project([this._renderLng, this._renderLat]);
+      const b = this._map.project([lng, lat]);
+      if (Math.hypot(b.x - a.x, b.y - a.y) > 400) dur = 0; // big jump → snap, don't crawl
     }
-    const src = this._map.getSource(SRC);
-    if (src) src.setData(this._last);
+    this._animatePose(lng, lat, heading, dur);
 
     // Bring the boat on-screen on the first fix regardless of camera mode.
     if (!this._centered) {
@@ -234,6 +237,44 @@ export class OwnShip {
     this._syncChip();
   }
 
+  // Draw the vessel at an exact pose: the heading-rotated Marker plus the
+  // course/speed predictor rebuilt from THIS (possibly interpolated) position so
+  // the dashed line's origin tracks the boat. Records the drawn pose so the next
+  // fix can tween from it.
+  _renderPose(lng, lat, rot) {
+    if (!this._marker) {
+      this._marker = new window.maplibregl.Marker({ element: this._el, rotationAlignment: "map", anchor: "center" });
+    }
+    this._marker.setLngLat([lng, lat]).setRotation(rot);
+    if (!this._added) { this._marker.addTo(this._map); this._added = true; }
+    let data = EMPTY;
+    if (this._predict) {
+      const end = destination(lat, lng, this._predict.course, this._predict.sog * (this._predictMin / 60));
+      data = { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [[lng, lat], end] } }] };
+    }
+    this._last = data;
+    const src = this._map.getSource(SRC);
+    if (src) src.setData(data);
+    this._renderLng = lng; this._renderLat = lat; this._renderRot = rot;
+  }
+
+  // Tween the drawn pose to the new fix over `dur` ms (linear). Bearing takes the
+  // shortest angular path. dur<=0 (or no prior pose) snaps. A new fix mid-tween
+  // cancels and re-tweens from the current interpolated pose.
+  _animatePose(toLng, toLat, toRot, dur) {
+    if (this._poseRAF) { cancelAnimationFrame(this._poseRAF); this._poseRAF = 0; }
+    const fromLng = this._renderLng, fromLat = this._renderLat, fromRot = this._renderRot;
+    if (dur <= 0 || fromLng == null) { this._renderPose(toLng, toLat, toRot); return; }
+    const dRot = ((toRot - fromRot + 540) % 360) - 180; // shortest path, no 360° backspin
+    const start = Date.now();
+    const step = () => {
+      const t = Math.min(1, (Date.now() - start) / dur);
+      this._renderPose(fromLng + (toLng - fromLng) * t, fromLat + (toLat - fromLat) * t, fromRot + dRot * t);
+      this._poseRAF = t < 1 ? requestAnimationFrame(step) : 0;
+    };
+    this._poseRAF = requestAnimationFrame(step);
+  }
+
   // Tap → info picker with the vessel's live nav data.
   _select(e) {
     if (!this._onSelect || !this._fix) return;
@@ -249,6 +290,8 @@ export class OwnShip {
   }
 
   _hide() {
+    if (this._poseRAF) { cancelAnimationFrame(this._poseRAF); this._poseRAF = 0; }
+    this._renderLng = null; this._renderLat = null; // next fix snaps, not crawls from a stale pose
     if (this._marker && this._added) {
       this._marker.remove();
       this._added = false;
@@ -262,6 +305,7 @@ export class OwnShip {
   }
 
   destroy() {
+    if (this._poseRAF) cancelAnimationFrame(this._poseRAF);
     if (this._off) this._off();
     if (this._onStyle) this._map.off("style.load", this._onStyle);
     if (this._onDrag) this._map.off("dragstart", this._onDrag);
@@ -280,6 +324,11 @@ function num(v) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+// Honour the OS "reduce motion" setting: callers snap instead of tweening.
+function reduceMotion() {
+  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 // destination computes the lat/lon reached from (lat,lon) along bearingDeg for
