@@ -43,6 +43,18 @@ Status: data/renderer boundary is **sealed** — the former reach-ins
 overlay + camera APIs are added. The `map` handle is intentionally public:
 overlays legitimately add their own sources/layers through it.
 
+`<chart-canvas>` (the renderer, 1952 → ~1030 lines) is now decomposed into
+collaborator modules under `chart-canvas/`, with the public API unchanged
+(thin delegators): `s52-style.mjs` (pure palette/filter/symbol-image
+expressions), `sprite-builder.mjs` (glyph/symbol ImageData synthesis),
+`chart-sources.mjs` (PMTiles/server source + archive + SCAMIN-discovery
+state), and `chart-style.mjs` — a **pure** `buildChartLayers(...)` that
+RETURNS `{layers, layerBase, variants, layerVis}`; the element assigns the
+bookkeeping and the live-updaters read it (so the SCAMIN/variant spine has no
+hidden in-place mutation). The element keeps lifecycle, the live restyle/
+filter/visibility updaters, the camera/overlay API, basemap, and the
+`buildStyle()` orchestrator.
+
 ## Layer 2 — feature components & plugins
 
 Each is its own module with its own shadow DOM, themed via the inherited

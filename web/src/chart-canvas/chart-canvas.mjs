@@ -48,13 +48,25 @@
 //   • prebaked (pmtiles="<url>" / setArchive / loadRegions) — a hosted .pmtiles
 //     read by HTTP Range, the serverless static-CDN option. No tile server.
 // There is no in-browser baking; the wasm baker has been retired (server migration).
-import { PMTilesArchive, MultiArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
+import { PMTilesArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 import { convertDistance, unitSuffix } from "../lib/units.mjs";
+import * as S52 from "./s52-style.mjs";
+import { SpriteBuilder } from "./sprite-builder.mjs";
+// Chart SOURCE / ARCHIVE management lives in its own stateful collaborator now (the
+// server-tiles mode, per-band prebaked archives, cache-bust token + SCAMIN-bucket
+// discovery, and the public chart-source API). The element delegates to it and
+// re-imports the band/SCAMIN consts it still needs (expandChartLayers / buildStyle).
+import {
+  ChartSources, CHART_BANDS, BAND_SLUGS, bandOfSet,
+} from "./chart-sources.mjs";
+// The MapLibre chart layer/style BUILDING is a PURE function in its own module now
+// (chart-style.mjs): buildChartLayers(state) returns the expanded layers plus the
+// three bookkeeping maps (_layerBase/_variants/_layerVis) the live updaters below
+// read. PAT_PREFIX (the fill-pattern image namespace) is homed there too — used by
+// the layer builder AND this element's registerPattern — and imported back here.
+import { buildChartLayers, PAT_PREFIX, TEXT_VARIANTS } from "./chart-style.mjs";
 
-const FALLBACK = "#ff00ff";
 const FEATURE_SCALE = 0.01 / 0.35278;
-const FONT = ["Noto Sans Regular"];
-const M_TO_FT = 3.280839895; // depth-unit conversion (metric ↔ imperial)
 // Web-Mercator zoom that renders a paper scale of 1:`scale` at `lat` — the
 // inverse of the HUD's scaleDenom (mpp = 156543.034·cos φ / 2^z; scale = mpp/
 // 0.00028). Latitude-dependent because a given scale is a different zoom at each
@@ -64,13 +76,6 @@ function zoomForScale(scale, lat) {
   const z = Math.log2(156543.03392804097 * Math.cos((lat * Math.PI) / 180) / (0.00028 * scale));
   return Math.max(0, Math.min(24, z));
 }
-// S-57 meta objects whose boundary draws as a region/coverage line (nautical
-// publication, nav-system, coverage, compilation scale). These are administrative
-// indicators (S-52 PresLib gives M_NPUB a line only as a pick-report hint); they
-// read as "cell boundaries", so they get their own gate (mariner.showMetaBounds),
-// off by default, rather than riding the "Other" display category. M_QUAL is NOT
-// here — it has its own "Data quality" (CATZOC) toggle.
-const META_BOUND_CLASSES = ["M_NPUB", "M_NSYS", "M_COVR", "M_CSCL"];
 // Fill-pattern (AP) images live under this id prefix so they never collide with
 // point-symbol (SY) images of the SAME PresLib name. Several names are BOTH a
 // point symbol and an area fill pattern (QUESMRK1, AIRARE02, FSHFAC03, MARCUL02):
@@ -79,7 +84,8 @@ const META_BOUND_CLASSES = ["M_NPUB", "M_NSYS", "M_COVR", "M_CSCL"];
 // single id, so without this prefix the pattern atlas cell hijacked the symbol
 // (styleimagemissing fires before registerAllSymbols → pattern won, first-wins),
 // rendering the point "?" as a stretched fragment. Symbols keep their bare names.
-const PAT_PREFIX = "pat:";
+// PAT_PREFIX lives in chart-style.mjs now (imported above) — the layer builder and
+// this element's registerPattern share it.
 
 // NOAA ENC navigational-purpose bands (the rescheming standard) → one vector
 // source each, baked over [min,max] and overzoomed above max (see bake.zig
@@ -92,70 +98,10 @@ const PAT_PREFIX = "pat:";
 // suppression cut vs the next finer band; harbor stops at its native max (z17/18
 // would be pure buffer) and the client overzooms it to fill berth level. MUST
 // match the baker's bandBakeCeil (internal/engine/bake/bake.go).
-const CHART_BANDS = [
-  { slug: "overview", min: 0, max: 8, bake: 8 },
-  { slug: "general", min: 8, max: 10, bake: 10 },
-  { slug: "coastal", min: 10, max: 12, bake: 14 },
-  { slug: "approach", min: 12, max: 14, bake: 14 },
-  { slug: "harbor", min: 14, max: 16, bake: 16 },
-  { slug: "berthing", min: 16, max: 18, bake: 18 },
-  { slug: "all", min: 0, max: 18, bake: 18 },
-];
-
-// Lowest display zoom each band's chart layers actually DRAW at — the scale where
-// that band becomes the best-available chart, per the NOAA ENC scheme (ENC Design
-// Handbook Table 1: two standard scales per usage band ≈ two web-Mercator zooms;
-// e.g. Approach 1:90k/1:45k ⇒ shows ~z12–14 ≈ 1:130k–1:32k at mid-US latitudes).
-// Overview/general draw from z0 so they gap-fill on zoom-out; the finer bands start
-// at their band so they don't appear a full zoom (≈½ band) too coarse. Applied as a
-// LAYER minzoom (the baked source may serve lower) so it works without a re-bake.
-const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16, all: 0 };
-
-// Vector SOURCE-LAYERS whose features carry SCAMIN and are split into per-SCAMIN
-// bucket layers (each with a native fractional minzoom) so SCAMIN is honored
-// EXACTLY with zero per-zoom work. Point symbols + soundings are the marks that
-// "disappear too soon / too late" at scale boundaries; `text` carries the labels
-// (incl. light characteristics) baked from the same features, so a label must
-// track the display scale of the object it annotates — keyed on the SOURCE-LAYER,
-// not the style-layer id, because the text labels fan out into many style layers
-// (text-<halign>-<valign>, light-text) that all read the one `text` source-layer.
-// `sector_lines` is the LIGHTS06 sector figure (arcs/legs), baked into its own
-// source-layer (not the shared `lines`) precisely so it can be bucketed here
-// without fanning every coastline/contour into per-SCAMIN variants — the sector
-// then cuts at the same exact scale as its light's flare + characteristic text.
-// The four area/line *_scamin source-layers carry SCAMIN-bearing AREA/LINE
-// primitives (DEPCNT contours, PIPARE, etc.), routed there by the baker's
-// scaminLayer() so they bucket exactly like the point/text marks above. Their
-// no-SCAMIN counterparts stay in the original (areas/area_patterns/lines/
-// complex_lines) layers — single, always-in-band, NOT bucketed.
-const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines",
-  "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin"]);
-
-// The display zoom at which a 1:N (scamin) feature first becomes visible at the
-// given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
-// — used directly as a MapLibre layer minzoom, which gives the exact S-52 §8.4
-// cutoff (display scale ≤ SCAMIN ⇒ shown) with no client-side per-zoom computation.
-function scaminDisplayZoom(scamin, lat) {
-  if (!scamin) return 0;
-  const denomZ0 = 559082264.029 * Math.cos((lat * Math.PI) / 180);
-  if (denomZ0 <= scamin) return 0;
-  return Math.max(0, Math.min(24, Math.log2(denomZ0 / scamin)));
-}
-
-// Server sets are baked PER BAND, named "<district>-<band>" (e.g. noaa-d5-general).
-// bandOfSet recovers the band slug from a set name ("all" for a bandless/merged set
-// — a user upload or a legacy pack). BAND_RANK orders sets coarse→fine so a finer
-// band's fill draws over a coarser one (the same stacking the per-band pmtiles path
-// gets for free). Both let server mode do per-band overzoom + suppression, so a
-// coarse-only spot (open water) is filled by the general/overview source overzooming
-// instead of blanking to the S-52 no-data hatch.
-const BAND_SLUGS = CHART_BANDS.map((b) => b.slug).filter((s) => s !== "all");
-const BAND_RANK = Object.fromEntries(CHART_BANDS.map((b, i) => [b.slug, i]));
-function bandOfSet(name) {
-  const i = name.lastIndexOf("-");
-  if (i > 0) { const s = name.slice(i + 1); if (BAND_SLUGS.includes(s)) return s; }
-  return "all";
-}
+// CHART_BANDS, BAND_DISPLAY_MIN, SCAMIN_BUCKET_LAYERS, scaminDisplayZoom, BAND_SLUGS,
+// BAND_RANK and bandOfSet now live in chart-sources.mjs (imported above) — they are
+// the source/band vocabulary the chart-source manager owns; the element re-imports
+// the ones expandChartLayers / buildStyle / band-on-off still reference.
 
 // Ensure the vendored MapLibre UMD global is loaded (the component injects it if
 // the host page hasn't), resolving to window.maplibregl.
@@ -182,58 +128,15 @@ export class ChartCanvas extends HTMLElement {
     this._active = "day";
     this._spriteImg = null;
     this._patternsImg = null;
-    this._ver = 0;          // chart-tile cache-bust token (see refresh)
     this._coastline = null; // offline GSHHG basemap GeoJSON fallback, if available
     this._coastlineArchive = null; // offline GSHHG coastline PMTiles (preferred vector basemap)
     this._mariner = {};      // current mariner settings (engine-side)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
-    this._bands = {};        // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
-    this._scaminValues = []; // distinct SCAMIN denominators seen in tiles → per-SCAMIN bucket layers
-    this._scaminLat = null;  // latitude the bucket minzooms were computed at (rebuild on big change)
-    this._server = false;    // server-tiles mode (tiles="server"): chart sources are /tiles/{set}
-    this._serverSets = [];   // active server packs: [{name, min, max}] — one vector source each
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
     this._layerVis = {};     // chart layer id → intended (mariner) visibility, so band on/off restores it
-  }
-
-  // Absolute tile-URL template for a server set. MUST be absolute: MapLibre fetches
-  // tiles in a Web Worker that has no document base, so a relative "/tiles/…" URL
-  // throws "Failed to parse URL".
-  _serverTilesUrl(name) {
-    const base = new URL(this._assets, location.href).href; // absolute, trailing "/"
-    return `${base}tiles/${name}/{z}/{x}/{y}.mvt`;
-  }
-
-  // Fetch a set's real zoom range from its TileJSON → {name, min, max}. The source
-  // maxzoom MUST be the set's actual deepest baked zoom: if it claims more (e.g. a
-  // fixed 18 when a harbor cell only bakes to z16), MapLibre requests tiles past the
-  // bake (empty → no-data holes) instead of overzooming the deepest real tile.
-  async _fetchSetMeta(name) {
-    // `tiles` is the server's TileJSON tile-URL template, which carries the bake
-    // GENERATION (?g=<mtime>) — re-fetching this JSON (it's no-cache) after a re-bake
-    // yields a new URL, so pointing the source at it bypasses every tile cache by
-    // content. Falls back to the plain URL if the server omits it.
-    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name) };
-    try {
-      const base = new URL(this._assets, location.href).href;
-      const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
-      if (tj) {
-        if (Number.isFinite(tj.minzoom)) meta.min = tj.minzoom;
-        if (Number.isFinite(tj.maxzoom)) meta.max = tj.maxzoom;
-        if (Array.isArray(tj.bounds) && tj.bounds.length === 4) meta.bounds = tj.bounds; // [w,s,e,n] — host zoom-cap
-        if (Array.isArray(tj.scamin)) meta.scamin = tj.scamin; // SCAMIN manifest → per-set bucket layers (no runtime collect)
-        if (Array.isArray(tj.tiles) && tj.tiles[0]) meta.tiles = tj.tiles[0];
-      }
-    } catch (e) { /* keep defaults */ }
-    return meta;
-  }
-
-  // Fetch every set's zoom range + band, ordered coarse→fine so the per-band fills
-  // stack correctly in expandChartLayers (template-outer, set-inner draw order).
-  async _loadSetMetas(names) {
-    const metas = await Promise.all(names.map((n) => this._fetchSetMeta(n)));
-    metas.sort((a, b) => (BAND_RANK[a.band] ?? 99) - (BAND_RANK[b.band] ?? 99));
-    return metas;
+    // Chart SOURCE / ARCHIVE state + API (server sets, per-band archives, cache-bust
+    // token, SCAMIN-bucket discovery). Constructed in boot() once `assets` resolves.
+    this._sources = null;
   }
 
   connectedCallback() {
@@ -253,6 +156,16 @@ export class ChartCanvas extends HTMLElement {
   async boot() {
     const assets = this._assets;
     const maplibregl = await ensureMapLibre(assets);
+
+    // Chart SOURCE / ARCHIVE manager — constructed EARLY (before the first buildStyle
+    // and the source-mode init below both touch its state). It owns `_server`,
+    // `_serverSets`, `_bands`, `_ver`, and the SCAMIN-bucket discovery; the element's
+    // chart-source methods delegate to it. `rebuild` re-applies the full style.
+    this._sources = new ChartSources({
+      assets,
+      getMap: () => this._map,
+      rebuild: () => this._map && this._map.setStyle(this.buildStyle(), { diff: false, validate: false }),
+    });
 
     // Shadow DOM: MapLibre CSS must live inside the shadow root, plus a sized
     // map container.
@@ -297,6 +210,14 @@ export class ChartCanvas extends HTMLElement {
       this._spriteImg.decode().catch(() => {}),
       this._patternsImg.decode().catch(() => {}),
     ]);
+    // Sprite/glyph image SYNTHESIS collaborator (centred symbols, composited
+    // sounding glyphs, raw pattern cells). Constructed here — after the atlas
+    // metadata + decoded images are all set — so it exists before any
+    // registerImage/registerAll* fires (the map "load" handler, below).
+    this._sprites = new SpriteBuilder({
+      sprite: this._sprite, spriteImg: this._spriteImg,
+      patterns: this._patterns, patternsImg: this._patternsImg, atlasPpu: this._atlasPpu,
+    });
 
     // Offline basemap: load the GSHHG-derived coastline if this map uses it
     // (best-effort — absent → plain sea bg). Prefer the tiled vector basemap
@@ -321,13 +242,12 @@ export class ChartCanvas extends HTMLElement {
     // (/tiles/{set}), each a baked provider/pack (noaa-d17, ienc-…). The packs are
     // chosen by the `sets`/`set` attribute or setServerSets(). Otherwise the prebaked
     // per-band pmtiles:// path (setArchive/loadRegions/pmtiles=), a static-CDN archive.
-    this._server = this.getAttribute("tiles") === "server";
-    if (this._server) {
+    // The manager learns each declared set's real zoom range before the first
+    // buildStyle so the source maxzoom is truthful (overzoom, not empty-tile holes).
+    {
       const names = (this.getAttribute("sets") || this.getAttribute("set") || "")
         .split(",").map((s) => s.trim()).filter(Boolean);
-      // Learn each set's real zoom range before the first buildStyle so the source
-      // maxzoom is truthful (overzoom, not empty-tile holes).
-      this._serverSets = await this._loadSetMetas(names);
+      await this._sources.initServerMode(this.getAttribute("tiles") === "server", names);
     }
 
     // Per-band prebaked sources (chart-<slug>), one PMTiles protocol each. Each
@@ -336,7 +256,7 @@ export class ChartCanvas extends HTMLElement {
     // harmless (blank) in server mode.
     for (const band of CHART_BANDS) {
       const slug = band.slug;
-      registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._bands[slug]);
+      registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._sources.bandArchive(slug));
     }
 
     // -- map ----------------------------------------------------------------
@@ -389,7 +309,7 @@ export class ChartCanvas extends HTMLElement {
     // layers. Only on idle (tiles settled), and it rebuilds the style ONLY when the
     // value set grows or the centre latitude shifts enough to move a bucket minzoom
     // — never per zoom. Once converged, MapLibre gates the buckets natively for free.
-    map.on("idle", () => this._refreshScaminBuckets());
+    map.on("idle", () => this._sources._refreshScaminBuckets());
     map.on("load", async () => {
       this._renderScalebar(); // initial draw (the move hook only fires on movement)
       try {
@@ -417,30 +337,22 @@ export class ChartCanvas extends HTMLElement {
     });
   }
 
+  // The active scheme's colour table (token → rgb); the palette every S52.*
+  // colour helper takes. Empty object when no colortables are loaded yet.
+  _palette() { return this._colortables[this._active] || {}; }
+
   // -- colour --------------------------------------------------------------
   // Resolve a single S-52 colour token for the active scheme (concrete value,
   // not an expression) — used for basemap layers whose colour is fixed.
-  token(name, fallback) {
-    const t = this._colortables[this._active] || {};
-    return t[name] || fallback;
-  }
-  seaColor() { return this.token("DEPDW", "#93aebb"); }   // deep water / sea backdrop
-  landColor() { return this.token("LANDA", "#e0d9b8"); }  // S-52 land area
-  coastColor() { return this.token("CSTLN", "#5a5a44"); } // coastline stroke
+  token(name, fallback) { return S52.token(name, fallback, this._palette()); }
+  seaColor() { return S52.seaColor(this._palette()); }   // deep water / sea backdrop
+  landColor() { return S52.landColor(this._palette()); }  // S-52 land area
+  coastColor() { return S52.coastColor(this._palette()); } // coastline stroke
 
-  colorExpr(prop, fallback) {
-    return this.colorMatch(["coalesce", ["get", prop], ""], fallback);
-  }
+  colorExpr(prop, fallback) { return S52.colorExpr(prop, fallback, this._palette()); }
 
   // Resolve a colour-token-valued expression to an RGB for the active scheme.
-  colorMatch(tokenExpr, fallback) {
-    const t = this._colortables[this._active] || {};
-    const m = ["match", tokenExpr];
-    let n = 0;
-    for (const tok in t) { m.push(tok, t[tok]); n++; }
-    m.push(fallback || FALLBACK);
-    return n ? m : (fallback || FALLBACK);
-  }
+  colorMatch(tokenExpr, fallback) { return S52.colorMatch(tokenExpr, fallback, this._palette()); }
 
   // Legible chart-text colour. S-52's dusk/night palettes dim the text inks
   // (CHBLK/CHGRD) to near-black, which is unreadable on the equally dark scheme
@@ -449,74 +361,36 @@ export class ChartCanvas extends HTMLElement {
   // night-vision dimming, per user request) and pair it with a dark halo
   // (textHaloColor). Day keeps the per-feature S-52 ink (so coloured labels
   // stay semantic) over a light halo.
-  textColor() {
-    if (this._active === "day") return this.colorExpr("color_token", "#000000");
-    return this._active === "night" ? "#aab7bf" : "#dde7ec";
-  }
+  textColor() { return S52.textColor(this._active, this._palette()); }
   // Backing that contrasts with textColor: light under day's dark inks, dark
   // under the bright dusk/night ink. Applied to ALL text — the old bake gated
   // the halo to ≥10 px glyphs, leaving small labels bare.
-  textHaloColor() {
-    return this._active === "day" ? "rgba(255,255,255,0.9)" : "rgba(0,0,0,0.85)";
-  }
+  textHaloColor() { return S52.textHaloColor(this._active); }
   // Contour (depth) labels: S-52 CHGRD by day, bright neutral at dusk/night so
   // they stay legible like the rest of the chart text.
-  contourLabelColor() {
-    if (this._active === "day") return this.token("CHGRD", "#5a5a44");
-    return this._active === "night" ? "#aab7bf" : "#dde7ec";
-  }
+  contourLabelColor() { return S52.contourLabelColor(this._active, this._palette()); }
 
   // SEABED01 (S-52 §13.2.15) as a data-driven expression: a depth area's
   // DRVAL1/DRVAL2 vs the mariner's shallow/safety/deep contours → a depth
   // colour token. Done client-side so dragging the contours is an instant
   // restyle, not a re-bake. Deepest band first (the spec cascade's last match
   // wins → first match in a `case`). `>= X && > X` on both bounds per the spec.
-  seabedTokenExpr() {
-    const m = this._mariner;
-    const shc = m.shallowContour ?? 2, sfc = m.safetyContour ?? 10, dpc = m.deepContour ?? 30;
-    const d1 = ["coalesce", ["get", "drval1"], -1];
-    const d2 = ["coalesce", ["get", "drval2"], 0];
-    const band = (x) => ["all", [">=", d1, x], [">", d2, x]];
-    if (m.fourShadeWater === false) {
-      return ["case", band(sfc), "DEPDW", band(0), "DEPVS", "DEPIT"];
-    }
-    return ["case",
-      band(dpc), "DEPDW",
-      band(sfc), "DEPMD",
-      band(shc), "DEPMS",
-      band(0), "DEPVS",
-      "DEPIT"];
-  }
+  seabedTokenExpr() { return S52.seabedTokenExpr(this._mariner); }
 
   // Fill colour for the `areas` layer: depth areas (carry drval1) shade live via
   // SEABED01; everything else uses its baked colour token.
-  areasFillColor() {
-    return ["case",
-      ["has", "drval1"], this.colorMatch(this.seabedTokenExpr()),
-      this.colorExpr("color_token")];
-  }
+  areasFillColor() { return S52.areasFillColor(this._palette(), this._mariner); }
 
   // SHALLOW_PATTERN filter: depth areas on the shallow side of the live safety
   // contour — SEABED01's SHALLOW flag, i.e. NOT (drval1 ≥ SFC && drval2 > SFC).
-  shallowPatternFilter() {
-    const sfc = this._mariner.safetyContour ?? 10;
-    return ["all",
-      ["has", "drval1"],
-      ["!", ["all", [">=", ["get", "drval1"], sfc], [">", ["coalesce", ["get", "drval2"], ["get", "drval1"]], sfc]]]];
-  }
+  shallowPatternFilter() { return S52.shallowPatternFilter(this._mariner); }
 
   // Safety-contour line (DEPARE03, client-side): the DEPSC-emphasised edge is
   // approximated by the outline of any depth area whose [DRVAL1, DRVAL2) range
   // straddles the live safety contour (drval1 < SFC ≤ drval2) — the same
   // area-level approximation the engine used to bake, now a filter so moving
   // the safety contour restyles instantly with no re-bake.
-  safetyContourFilter() {
-    const sfc = this._mariner.safetyContour ?? 10;
-    return ["all",
-      ["has", "drval1"],
-      ["<", ["get", "drval1"], sfc],
-      [">=", ["coalesce", ["get", "drval2"], ["get", "drval1"]], sfc]];
-  }
+  safetyContourFilter() { return S52.safetyContourFilter(this._mariner); }
 
   // Bar-scale unit following the mariner depth-unit setting: imperial (ft/mi) when
   // depths are in feet, otherwise metric (m/km). MapLibre picks the small vs large
@@ -551,12 +425,7 @@ export class ChartCanvas extends HTMLElement {
   // SAFCON01 (S-52 §13.2.13): the depth-contour value label. Drawn client-side
   // along DEPCNT lines from the baked VALDCO (whole metres, or whole feet when
   // the mariner picks imperial units), shown only when "contour labels" is on.
-  contourLabelField() {
-    const v = this._mariner.depthUnit === "ft"
-      ? ["round", ["*", ["get", "valdco"], M_TO_FT]]
-      : ["round", ["get", "valdco"]];
-    return ["case", ["has", "valdco"], ["to-string", v], ""];
-  }
+  contourLabelField() { return S52.contourLabelField(this._mariner); }
 
   // SNDFRM04 (S-52 §13.2.16): a sounding ≤ the live safety depth uses the bold
   // SOUNDS glyphs, else the faint SOUNDG glyphs — picked client-side from the
@@ -564,69 +433,24 @@ export class ChartCanvas extends HTMLElement {
   // predates the variants. In imperial mode the metres glyphs can't be reused
   // (the number changes), so synthesize a `snd:` image name from the numeric
   // depth + palette; `registerImage` builds the converted glyph composite.
-  soundingsIconImage() {
-    const sd = this._mariner.safetyDepth ?? 10;
-    if (this._mariner.depthUnit === "ft") {
-      const pal = ["case", ["<=", ["coalesce", ["get", "depth"], 0], sd], "S", "G"];
-      // Key by deci-metres (a stable integer) so MapLibre caches one image per
-      // distinct depth/palette rather than per float-string.
-      const dm = ["to-string", ["round", ["*", ["coalesce", ["get", "depth"], 0], 10]]];
-      return ["case", ["has", "depth"], ["concat", "snd:ft:", pal, ":", dm], ["get", "symbol_names"]];
-    }
-    return ["case",
-      ["has", "sym_s"],
-      ["case", ["<=", ["coalesce", ["get", "depth"], 0], sd], ["get", "sym_s"], ["get", "sym_g"]],
-      ["get", "symbol_names"]];
-  }
+  soundingsIconImage() { return S52.soundingsIconImage(this._mariner); }
 
   // OBSTRN06/WRECKS05 (S-52 §13.2.6/§13.2.20): a danger symbol carries its
   // VALSOU + the deep-water variant. The baked `symbol_name` is the dangerous
   // (DANGER01) variant; when the depth is DEEPER than the live safety contour
   // swap to the less-prominent `sym_deep` (DANGER02). Picked client-side so the
   // safety contour no longer re-bakes. Non-danger symbols use `symbol_name`.
-  pointSymbolImage() {
-    const sfc = this._mariner.safetyContour ?? 10;
-    return ["case",
-      ["all", ["has", "sym_deep"], [">", ["coalesce", ["get", "danger_depth"], 0], sfc]],
-      ["get", "sym_deep"],
-      ["get", "symbol_name"]];
-  }
+  pointSymbolImage() { return S52.pointSymbolImage(this._mariner); }
 
   // The dotted CHBLK foul boundary (OBSTRN/WRECKS) is shown only where the
   // feature's VALSOU is at/above the live safety contour — a danger.
-  dangerBoundaryFilter() {
-    const sfc = this._mariner.safetyContour ?? 10;
-    return ["all", ["has", "danger_depth"], ["<=", ["get", "danger_depth"], sfc]];
-  }
+  dangerBoundaryFilter() { return S52.dangerBoundaryFilter(this._mariner); }
 
   // Display category (S-52 §10.3.4), client-side + MULTI-SELECT: every feature
   // is baked with its category rank `cat` (0=base,1=standard,2=other); the
   // mariner independently toggles each, so this is a membership test, not a
   // cumulative level. Missing `cat` (stale tile) defaults to standard.
-  categoryFilter() {
-    const m = this._mariner;
-    const en = [];
-    if (m.displayBase !== false) en.push(0);
-    if (m.displayStandard !== false) en.push(1);
-    if (m.displayOther === true) en.push(2);
-    // Isolated dangers (ISODGR01, S-52 UDWHAZ05): the mariner picks their display
-    // category — DisplayBase (0, always shown; the default) or, when "isolated
-    // dangers in shallow water" is on, Standard (1). The symbol is the marker;
-    // VALSOU dangers became DANGER01 (live danger_depth swap), so ISODGR01 here
-    // is exactly the isolated-danger set. Every other feature uses its baked cat.
-    const isoCat = m.showIsolatedDangersShallow ? 1 : 0;
-    const cat = ["case", ["==", ["get", "symbol_name"], "ISODGR01"], isoCat, ["coalesce", ["get", "cat"], 1]];
-    const inCat = ["in", cat, ["literal", en]];
-    // The M_QUAL data-quality overlay (CATZOC DQUAL* area patterns + boundary)
-    // is baked display-category Other, so enabling Other dumped it on top of
-    // everything — too cluttered. Decouple it into its own `dataQuality` toggle:
-    // quality features show IFF dataQuality (independent of Other), and are
-    // excluded from the normal category membership so Other no longer carries it.
-    const isQual = ["==", ["get", "class"], "M_QUAL"];
-    return m.dataQuality
-      ? ["any", isQual, ["all", inCat, ["!", isQual]]]
-      : ["all", inCat, ["!", isQual]];
-  }
+  categoryFilter() { return S52.categoryFilter(this._mariner); }
 
   // Boundary symbolization (S-52 §8.6.1), client-side: each primitive is baked
   // with a `bnd` tag — 2 = style-independent (always shown), 0 = plain-boundary
@@ -636,10 +460,7 @@ export class ChartCanvas extends HTMLElement {
   // SymbolizedBoundaries=true by default); plain only when explicitly chosen.
   // Symbolized is the variant that carries the embedded LC line symbols (e.g.
   // RESARE's EMAREMG1), so a plain default hid every complex-line symbol.
-  boundaryFilter() {
-    const rank = this._mariner.boundaryStyle === "plain" ? 0 : 1;
-    return ["in", ["coalesce", ["get", "bnd"], 2], ["literal", [2, rank]]];
-  }
+  boundaryFilter() { return S52.boundaryFilter(this._mariner); }
 
   // Point-symbol style (S-52 §11.2.2), client-side: point features that resolve
   // differently under the simplified vs paper-chart LUP tables are baked twice,
@@ -647,71 +468,22 @@ export class ChartCanvas extends HTMLElement {
   // simplified. Show common (2) + the active style. Missing `pts` (non-point /
   // identical-in-both / stale tile) defaults to common. Default PAPER (rank 0)
   // per the engine default (SimplifiedPoints=false).
-  pointStyleFilter() {
-    const rank = this._mariner.simplifiedPoints ? 1 : 0;
-    return ["in", ["coalesce", ["get", "pts"], 2], ["literal", [2, rank]]];
-  }
+  pointStyleFilter() { return S52.pointStyleFilter(this._mariner); }
 
   // Light sector leg length (S-52 LIGHTS06 note 1), client-side: each sector
   // light's legs are baked twice, tagged `sleg` — 0 = the 25 mm short leg
   // (default, avoids clutter), 1 = the full VALNMR nominal-range leg. Arcs/rings
   // are untagged (coalesce 2 → always shown). Show common (2) + the active
   // length. Default SHORT (rank 0) per the engine (ShowFullLengthSectorLines=false).
-  sectorLegFilter() {
-    const rank = this._mariner.showFullSectorLines ? 1 : 0;
-    return ["in", ["coalesce", ["get", "sleg"], 2], ["literal", [2, rank]]];
-  }
+  sectorLegFilter() { return S52.sectorLegFilter(this._mariner); }
 
-  // Collect the distinct SCAMIN denominators present in the loaded chart tiles and,
-  // when that set grows (or the centre latitude shifts enough to move the bucket
-  // minzooms), rebuild the style so buildLayers regenerates the per-SCAMIN bucket
-  // layers (each gated by a native fractional minzoom). Runs on idle only; the
-  // rebuild converges (no new values ⇒ no rebuild), and steady-state SCAMIN gating
-  // is then 100% native — zero per-zoom JS.
-  _refreshScaminBuckets() {
-    const m = this._map;
-    if (!m) return;
-    // Server mode publishes the SCAMIN manifest in each set's TileJSON (set.scamin),
-    // so buckets are built at load — no runtime collection, no setStyle churn (this
-    // idle loop + the probe layers were the per-frame cost). Only the prebaked
-    // (pmtiles) path, which has no manifest, still discovers values from tiles.
-    if (this._server) return;
-    const seen = new Set(this._scaminValues);
-    const before = seen.size;
-    const srcs = this._server ? (this._serverSets || []).map((s) => "chart-" + s.name) : CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
-    for (const src of srcs) {
-      if (!m.getSource(src)) continue;
-      for (const sl of SCAMIN_BUCKET_LAYERS) {
-        let fs;
-        try { fs = m.querySourceFeatures(src, { sourceLayer: sl }); } catch (e) { continue; }
-        for (const f of fs) { const s = f.properties && f.properties.scamin; if (s) seen.add(+s); }
-      }
-    }
-    const grew = seen.size !== before;
-    const lat = m.getCenter().lat;
-    const latShift = this._scaminLat == null || Math.abs(lat - this._scaminLat) > 5;
-    if (!grew && !latShift) return;
-    this._scaminValues = [...seen].sort((a, b) => a - b);
-    this._scaminLat = lat;
-    // Debounce the (heavy) style rebuild so a burst of values loaded across several
-    // tiles coalesces into ONE rebuild. Converges: once every value in view is known,
-    // no further growth ⇒ no rebuild, and SCAMIN gating is then fully native.
-    clearTimeout(this._scaminRebuildT);
-    this._scaminRebuildT = setTimeout(() => { if (this._map) this._map.setStyle(this.buildStyle(), { diff: false, validate: false }); }, 450);
-  }
+  // SCAMIN-bucket discovery (the prebaked path's idle loop) lives on the chart-source
+  // manager now — the map's "idle" handler calls this._sources._refreshScaminBuckets().
 
   // Combine a layer's intrinsic (base) filter with the live category +
   // boundary-style filters (the two client-side portrayal axes baked as
   // per-feature `cat`/`bnd`).
-  combineFilters(base) {
-    const parts = ["all", this.categoryFilter(), this.boundaryFilter(), this.pointStyleFilter(), this.sectorLegFilter()];
-    // Meta-object coverage/region boundary lines are gated separately from the
-    // "Other" display category (mariner.showMetaBounds, off by default), since
-    // they read as cell boundaries and aren't useful alongside other "Other" data.
-    if (!this._mariner.showMetaBounds) parts.push(["!", ["in", ["get", "class"], ["literal", META_BOUND_CLASSES]]]);
-    if (base) parts.push(base);
-    return parts;
-  }
+  combineFilters(base) { return S52.combineFilters(base, this._mariner); }
 
   // Re-apply the combined feature filter to every chart layer (on a category
   // or boundary-style toggle), preserving each layer's recorded base filter.
@@ -802,47 +574,6 @@ export class ChartCanvas extends HTMLElement {
     }
   }
 
-  // Open a prebaked source for the hybrid fallback: a single .pmtiles, or a
-  // charts-index.json manifest whose district files are opened into one
-  // MultiArchive (each file URL resolved relative to the manifest).
-  async _openPrebaked(url) {
-    if (!url.endsWith(".json")) {
-      // A single .pmtiles → the merged "all" band source (no per-band overzoom).
-      if (!this._bands.all) this._bands.all = new MultiArchive();
-      return this._bands.all.add(url);
-    }
-    const j = await fetch(url).then((r) => (r.ok ? r.json() : null));
-    const districts = (j && j.districts) || [];
-    const base = new URL(url, location.href);
-
-    // Open every archive CONCURRENTLY. Each open is two range round-trips (header
-    // + root directory); doing ~50 districts serially was the slow initial load.
-    // Each unique file is opened ONCE — a bandless ("all") pack FANS across every
-    // per-band source (each overzooms its own [min,max]) so a coarse-only spot
-    // shows the coarser chart overscale instead of a high-zoom hole, but the
-    // underlying archive handle is shared, not re-fetched six times.
-    const opened = new Map(); // url → Promise<PMTilesArchive>
-    const openOnce = (u) => {
-      let p = opened.get(u);
-      if (!p) { p = new PMTilesArchive(u).init(); opened.set(u, p); }
-      return p;
-    };
-    const tasks = [];
-    for (const d of districts) {
-      if (!d.file) continue;
-      const u = new URL(d.file, base).href;
-      for (const slug of this._fanBands(d.band || "all")) {
-        if (!this._bands[slug]) this._bands[slug] = new MultiArchive();
-        const band = this._bands[slug];
-        tasks.push(openOnce(u)
-          .then((a) => band.addOpened(a))
-          .catch((e) => { console.warn("[chartplotter] prebaked district", d.file, e); return null; }));
-      }
-    }
-    const results = await Promise.all(tasks);
-    return results.find(Boolean) || null;
-  }
-
   // Is the active basemap any OSM variant (raster or vector)? Used to let the OSM
   // land show through (drop the chart's land fill + no-data hatch).
   _osmBasemap() {
@@ -855,63 +586,18 @@ export class ChartCanvas extends HTMLElement {
   // desaturate them (marine night-vision) so the underlay doesn't blow out the
   // dark S-52 palette. Day = identity. All four keys are always returned so
   // setScheme can restore defaults when switching back to day.
-  _osmRasterPaint() {
-    if (this._active === "night") return { "raster-brightness-max": 0.32, "raster-saturation": -0.55, "raster-contrast": 0.08, "raster-opacity": 0.9 };
-    if (this._active === "dusk") return { "raster-brightness-max": 0.66, "raster-saturation": -0.3, "raster-contrast": 0, "raster-opacity": 1 };
-    return { "raster-brightness-max": 1, "raster-saturation": 0, "raster-contrast": 0, "raster-opacity": 1 };
-  }
+  _osmRasterPaint() { return S52.osmRasterPaint(this._active); }
 
   // -- runtime chart & settings API (driven by the <chart-plotter-app> shell) --
 
   // Force the chart source to re-request its tiles (after the loaded archive
-  // changes). Bumps the version token so the tile URL changes → cache miss →
-  // refetch through the chart:// (PMTiles) protocol. Cleaner than rebuilding the
-  // whole style (which would re-register sprites/patterns).
-  refresh() {
-    this._ver++;
-    const map = this._map;
-    if (!map) return;
-    if (this._server) {
-      // Server URLs carry the bake generation (?g) from the TileJSON; re-apply the
-      // current one. A genuine data change comes through flushTiles (re-fetches the
-      // generation); this is just a repaint/re-request for the same data.
-      for (const set of this._serverSets) {
-        const src = map.getSource("chart-" + set.name);
-        if (src && set.tiles) src.setTiles([set.tiles]);
-      }
-    } else {
-      for (const band of CHART_BANDS) {
-        const src = map.getSource("chart-" + band.slug);
-        if (src) src.setTiles([`chart-${band.slug}://${this._ver}/{z}/{x}/{y}`]);
-      }
-    }
-    map.triggerRepaint();
-  }
+  // changes). Delegates to the chart-source manager (it owns the cache-bust token).
+  refresh() { return this._sources.refresh(); }
 
-  // Re-request tiles after the SERVER re-bakes a set. Re-fetches each set's TileJSON
-  // (no-cache) to pick up the server's fresh bake-generation token, then points the
-  // source at the new tile URL — so MapLibre drops the stale tiles and the browser
-  // cache misses by content. No client-side counter, no reaching into MapLibre's
-  // internal tile caches. Public; the shell calls it when a re-bake completes.
-  async flushTiles() {
-    const map = this._map;
-    if (!map) return;
-    if (this._server) {
-      const names = this._serverSets.map((s) => s.name);
-      this._serverSets = await this._loadSetMetas(names); // new ?g generation per set
-      for (const set of this._serverSets) {
-        const src = map.getSource("chart-" + set.name);
-        if (src) src.setTiles([set.tiles]); // new URL → reload + cache bypass
-      }
-    } else {
-      this._ver++;
-      for (const band of CHART_BANDS) {
-        const src = map.getSource("chart-" + band.slug);
-        if (src) src.setTiles([`chart-${band.slug}://${this._ver}/{z}/{x}/{y}`]);
-      }
-    }
-    map.triggerRepaint();
-  }
+  // Re-request tiles after the SERVER re-bakes a set. Delegates to the chart-source
+  // manager (re-fetches each set's TileJSON for the fresh bake-generation token).
+  // Public; the shell calls it when a re-bake completes.
+  flushTiles() { return this._sources.flushTiles(); }
 
   // -- overlay & camera API (for plugins: own-ship, AIS, …) ----------------
   // Overlay plugins (own-ship marker, AIS targets, the pick highlight) live in
@@ -1003,183 +689,51 @@ export class ChartCanvas extends HTMLElement {
     return { center: [lo, la], zoom: z };
   }
 
-  // Every MapLibre SourceCache backing the chart source(s). v4 had one at
-  // map.style.sourceCaches[id]; v5 renamed that property and can hold a separate
-  // paint + symbol cache, so duck-type any cache-shaped dict keyed by a chart
-  // source rather than hardcoding the name. (See [[wasm-z7-tile-hole]].)
-  _chartSourceCaches() {
-    const style = this._map && this._map.style;
-    if (!style) return [];
-    const out = [];
-    const consider = (c) => { if (c && (c._tiles || typeof c.clearTiles === "function") && !out.includes(c)) out.push(c); };
-    const keys = this._server ? this._serverSets.map((s) => "chart-" + s.name) : CHART_BANDS.map((b) => "chart-" + b.slug);
-    const fromDict = (d) => {
-      if (!d || typeof d !== "object") return;
-      for (const k of keys) {
-        if (d instanceof Map) consider(d.get(k));
-        else if (Object.prototype.hasOwnProperty.call(d, k)) consider(d[k]);
-      }
-    };
-    // MapLibre 5.x renamed style.sourceCaches → style.tileManagers; try both (plus a
-    // last-ditch scan of every style dict) so a tile flush works across versions.
-    fromDict(style.tileManagers);
-    fromDict(style.sourceCaches);
-    for (const k of Object.keys(style)) { const v = style[k]; if (v && typeof v === "object") fromDict(v); }
-    return out;
-  }
+  // -- chart-source API (thin delegators to the ChartSources manager) ------
+  // The chart SOURCE / ARCHIVE state + logic lives in chart-sources.mjs; the element
+  // keeps the SAME public method names/signatures so external callers (the shell) are
+  // unchanged, forwarding (and returning the awaited value) to `this._sources`.
 
-  // -- server tiles --------------------------------------------------------
   // Render exactly these server tile sets (provider/pack names, the {set} in
-  // /tiles/{set}/…), baked + registered by the Go server (POST /api/import). Each
-  // becomes its own vector source + S-52 layer set; geographically-disjoint packs
-  // (NOAA districts, IENC waterways) sit side-by-side. Switches the renderer into
-  // server mode, (re)builds the style so the sources + layers exist, and re-requests
-  // tiles. Pass [] to clear. Returns the active set names.
-  async setServerSets(names) {
-    const want = (names || []).filter(Boolean);
-    const prevKey = this._serverSets.map((s) => s.name).sort().join(",");
-    const wasServer = this._server;
-    this._server = true;
-    this._serverSets = await this._loadSetMetas(want);
-    const map = this._map;
-    // Rebuild the style when the set OF sets changes (sources must be created/
-    // recreated). A same-set rebake (same names) just bumps the tile version.
-    const changed = !wasServer || this._serverSets.map((s) => s.name).sort().join(",") !== prevKey;
-    // diff:false → full _load (build layers directly, validate once + skip). A
-    // server install has THOUSANDS of SCAMIN-bucket layers; setStyle's default DIFF
-    // applies them via per-op addLayer calls that re-validate + re-serialize the
-    // whole style (~28s in a startup profile) — and {validate:false} doesn't reach
-    // those internal calls. A full load bypasses all of it.
-    if (map && changed) map.setStyle(this.buildStyle(), { diff: false, validate: false });
-    else if (map) this.refresh();
-    return this._serverSets.map((s) => s.name);
-  }
+  // /tiles/{set}/…), baked + registered by the Go server. Switches into server mode,
+  // (re)builds the style, and re-requests tiles. Pass [] to clear. Returns the
+  // active set names.
+  setServerSets(names) { return this._sources.setServerSets(names); }
 
   // Convenience: render a single server set (or none). See setServerSets.
-  setServerSet(name) { return this.setServerSets(name ? [name] : []); }
+  setServerSet(name) { return this._sources.setServerSet(name); }
 
   // The active server tile-set names ([] when not in server mode).
-  serverSets() { return this._server ? this._serverSets.map((s) => s.name) : []; }
+  serverSets() { return this._sources.serverSets(); }
 
   // The active server sets' metadata ({name,band,min,max,bounds}) — so the host's
-  // zoom-cap can tell which finest band covers the view centre for imported/inland
-  // sets that aren't in the NOAA catalogue. [] when not in server mode.
-  serverSetMetas() { return this._server ? this._serverSets.map((s) => ({ ...s })) : []; }
+  // zoom-cap can tell which finest band covers the view centre. [] when not in
+  // server mode.
+  serverSetMetas() { return this._sources.serverSetMetas(); }
 
-  // Resolve an archive source: a Blob/File is passed through; a URL string is
-  // made absolute (relative to the page) for the HTTP-Range reader.
-  _resolveSrc(src) {
-    return typeof src === "string" ? new URL(src, location.href).href : src;
-  }
-
-  // REPLACE the loaded chart coverage with a single archive (a Blob/File or URL
-  // string) — used for an uploaded `.pmtiles`. Only the header + directory are
-  // read up front (tiles stream on demand), so a multi-GB archive loads instantly.
+  // REPLACE the loaded chart coverage with a single archive (a Blob/File or URL).
   // Returns the opened archive (read `.bounds` to frame). Re-requests tiles.
-  async setArchive(src) {
-    if (this._server) return null; // server mode renders from /tiles, not pmtiles archives
-    this._bands = {};
-    return this.addArchive(src);
-  }
+  setArchive(src) { return this._sources.setArchive(src); }
 
-  // The NOAA bands a full-range ("all") archive fans out to. A single full-range
-  // source can only overzoom above the archive's GLOBAL max, so a coarse-only
-  // spot in a mixed archive (e.g. a region's open water, baked only to the
-  // coastal band) would blank to S-52 no-data above that band instead of showing
-  // the coarser chart overscale. Serving the one archive through every per-band
-  // source — each fixed to its band's [min,max] and overzooming above its own max
-  // — gives the spec's overscale (the finest band present shows; coarser fills
-  // the rest), exactly like the per-band district path. Explicit bands pass through.
-  _fanBands(band) {
-    return band === "all" ? CHART_BANDS.filter((b) => b.slug !== "all").map((b) => b.slug) : [band];
-  }
+  // ADD an archive to the loaded coverage into its NOAA band (or fanned across every
+  // band for a bandless merged archive). Returns the opened archive.
+  addArchive(src, band) { return this._sources.addArchive(src, band); }
 
-  // ADD an archive to the loaded coverage (does not unload the others), into its
-  // NOAA band (`overview`…`berthing`), or — for a bandless merged archive (an
-  // upload / `--emit-pmtiles` / the provisioned `charts-user.pmtiles`) — fanned
-  // across every band so it overzooms correctly (see `_fanBands`). Tiles still
-  // stream by viewport.
-  async addArchive(src, band = "all") {
-    if (this._server) return null; // server mode renders from /tiles, not pmtiles archives
-    const resolved = this._resolveSrc(src);
-    let a = null;
-    for (const b of this._fanBands(band)) {
-      if (!this._bands[b]) this._bands[b] = new MultiArchive();
-      a = await this._bands[b].add(resolved);
-    }
-    this._updateSourceZoom();
-    this.refresh();
-    return a;
-  }
+  // Replace ALL loaded chart coverage with exactly these region-archive URLs. An
+  // empty list clears the map.
+  loadRegions(urls) { return this._sources.loadRegions(urls); }
 
-  // Replace ALL loaded chart coverage with exactly these region-archive URLs,
-  // each fanned across the per-band sources (the per-region provision model:
-  // add/remove a region just reloads the manifest's set — no re-bake). An empty
-  // list clears the map.
-  async loadRegions(urls) {
-    if (this._server) return; // server mode renders from /tiles, not pmtiles archives
-    this._bands = {};
-    for (const u of urls) {
-      try { await this.addArchive(u, "all"); } catch (e) { console.warn("[chartplotter] region", u, e); }
-    }
-    if (!urls.length) this.refresh();
-  }
+  // REPLACE every archive in ONE band with `src` (a URL or Blob/File). Returns the
+  // opened archive.
+  replaceBand(band, src) { return this._sources.replaceBand(band, src); }
 
-  // REPLACE every archive in ONE band with `src` (a URL or Blob/File) — used to
-  // reload the server-provisioned `all` band after a re-bake without disturbing
-  // the other bands (e.g. hosted per-band districts). Re-reads the new header +
-  // directory and re-requests tiles. A cache-busted URL avoids a stale 304.
-  async replaceBand(band, src) {
-    const resolved = this._resolveSrc(src);
-    let a = null;
-    for (const b of this._fanBands(band)) {
-      this._bands[b] = new MultiArchive();
-      a = await this._bands[b].add(resolved);
-    }
-    this._updateSourceZoom();
-    this.refresh();
-    return a;
-  }
+  // ADD several archives at once, then re-request tiles ONCE. Returns the opened
+  // archives.
+  addArchives(entries) { return this._sources.addArchives(entries); }
 
-  // ADD several archives at once (opening each reads only its header + directory,
-  // in parallel), then re-request tiles ONCE — far cheaper than adding them one
-  // at a time, which would re-request every tile per add. Each entry is a source
-  // string or `{src, band}`; bad sources are skipped (logged). Returns the
-  // opened archives.
-  async addArchives(entries) {
-    if (this._server) return []; // server mode renders from /tiles, not pmtiles archives
-    const norm = entries.map((e) => (typeof e === "object" && e && e.src !== undefined ? e : { src: e, band: "all" }));
-    const arcs = await Promise.all(norm.map((e) => {
-      const band = e.band || "all";
-      if (!this._bands[band]) this._bands[band] = new MultiArchive();
-      return this._bands[band].add(this._resolveSrc(e.src)).catch((err) => { console.warn("[chartplotter] archive", e.src, err); return null; });
-    }));
-    this._updateSourceZoom();
-    this.refresh();
-    return arcs.filter(Boolean);
-  }
-
-  // NOAA-band sources have fixed zoom ranges (from CHART_BANDS), so only the
-  // merged-upload `all` source needs its max synced to the loaded archive (an
-  // upload may bake to <18; requesting above its max would read blank).
-  _updateSourceZoom() {
-    const map = this._map, all = this._bands.all;
-    const src = map && map.getSource("chart-all");
-    if (src && all && src.maxzoom !== undefined) {
-      src.minzoom = all.minZoom;
-      src.maxzoom = all.maxZoom;
-    }
-  }
-
-  // Render a hosted `.pmtiles` by URL — read incrementally via HTTP Range (NOT
-  // fetched whole). Resolves to the opened archive (read `.bounds` to frame).
-  // Used by the `pmtiles=` attribute and the shell's hosted-default fallback.
-  // The host must support byte-range requests (206); most static hosts do, and
-  // `chartplotter --serve` does. REPLACES the current coverage (use addArchive to
-  // combine).
-  loadArchiveUrl(url) {
-    return this.setArchive(url);
-  }
+  // Render a hosted `.pmtiles` by URL — read incrementally via HTTP Range. Resolves
+  // to the opened archive (read `.bounds` to frame). REPLACES the current coverage.
+  loadArchiveUrl(url) { return this._sources.loadArchiveUrl(url); }
 
   // Update S-52 mariner settings. EVERY setting is applied CLIENT-SIDE from
   // baked per-feature attributes — an INSTANT restyle/filter, never a re-bake:
@@ -1271,72 +825,37 @@ export class ChartCanvas extends HTMLElement {
     try { this._map.addImage(id, imgData, { pixelRatio: 1 }); } catch (e) { console.warn("addImage", id, e); }
   }
   registerImage(id) {
-    if (!this._spriteImg || this._map.hasImage(id)) return;
+    if (!this._sprites || this._map.hasImage(id)) return;
     let img = null;
+    // Image CONSTRUCTION is delegated to SpriteBuilder; the element keeps only
+    // the MapLibre registration (hasImage guard + addImageData side effect).
     try {
-      img = id.startsWith("snd:") ? this.synthSounding(id)
-        : id.indexOf(",") >= 0 ? this.compositeSounding(id)
-        : this.centredSymbol(id);
+      img = this._sprites.imageFor(id);
     } catch (e) { console.warn("registerImage", id, e); }
     // NEVER leave a referenced icon-image unresolved — MapLibre's symbol
     // renderer can crash on a missing image (the `getx` atlas-lookup crash).
     // A failed/unknown symbol falls back to a blank 1×1 so the layer is inert.
     this.addImageData(id, img || new ImageData(1, 1));
   }
-
-  // Build a sounding number in non-metric units from a synthesized name
-  // `snd:<unit>:<palette>:<deci-metres>` (see soundingsIconImage). Converts the
-  // baked metres depth, formats it as S-52 SNDFRM04 column glyphs, and reuses
-  // the metres compositor. Quality/drying markers (QUASOU) aren't carried in the
-  // numeric depth, so imperial soundings are the plain number (+ drying marker).
-  synthSounding(id) {
-    const [, unit, pal, dm] = id.split(":");           // ["snd","ft","S","123"]
-    const meters = (parseInt(dm, 10) || 0) / 10;
-    const value = unit === "ft" ? Math.abs(meters) * M_TO_FT : Math.abs(meters);
-    let names = this.soundingGlyphs(Math.round(value), pal === "G" ? "G" : "S");
-    if (meters < 0) names = "SOUNDSA1," + names;        // drying-height marker (always bold)
-    return this.compositeSounding(names);
-  }
-
-  // S-52 SNDFRM04 whole-number column classes → a comma-joined glyph list. Each
-  // glyph `SOUND<pal><class><digit>` self-positions into its column (the art
-  // carries the shift), mirroring soundg03.zig's emitDigits without the metric
-  // decimal subscript (imperial soundings are whole units).
-  soundingGlyphs(n, pal) {
-    const g = (cls, d) => `SOUND${pal}${cls}${d}`;
-    n = Math.max(0, n);
-    if (n < 10) return g(1, n);
-    if (n < 100) return [g(1, (n / 10) | 0), g(0, n % 10)].join(",");
-    if (n < 1000) return [g(2, (n / 100) | 0), g(1, ((n / 10) | 0) % 10), g(0, n % 10)].join(",");
-    if (n < 10000) return [g(2, (n / 1000) | 0), g(1, ((n / 100) | 0) % 10), g(0, ((n / 10) | 0) % 10), g(4, n % 10)].join(",");
-    return [g(3, (n / 10000) | 0), g(2, ((n / 1000) | 0) % 10), g(1, ((n / 100) | 0) % 10), g(0, ((n / 10) | 0) % 10), g(4, n % 10)].join(",");
-  }
   registerAllSymbols() {
-    if (!this._spriteImg) return;
+    if (!this._sprites) return;
     for (const name in this._sprite) {
       if (name === "_meta" || this._map.hasImage(name)) continue;
       try {
-        const img = this.centredSymbol(name);
+        const img = this._sprites.centredSymbol(name);
         if (img) this._map.addImage(name, img, { pixelRatio: 1 });
       } catch (e) { /* skip one bad symbol */ }
     }
   }
-  rawCell(img, cell) {
-    const cv = document.createElement("canvas");
-    cv.width = cell.w; cv.height = cell.h;
-    const ctx = cv.getContext("2d");
-    ctx.drawImage(img, cell.x, cell.y, cell.w, cell.h, 0, 0, cell.w, cell.h);
-    return ctx.getImageData(0, 0, cell.w, cell.h);
-  }
   // `name` is the bare PresLib pattern name; the image is registered under the
   // `pat:` namespace so it can't clash with a same-named point symbol.
   registerPattern(name) {
-    if (!this._patternsImg) return;
+    if (!this._sprites) return;
     const id = PAT_PREFIX + name;
     if (this._map.hasImage(id)) return;
     const cell = this._patterns[name];
     if (!cell || cell.w === undefined) return;
-    try { this._map.addImage(id, this.rawCell(this._patternsImg, cell), { pixelRatio: this._patternPixelRatio }); }
+    try { this._map.addImage(id, this._sprites.rawCell(this._patternsImg, cell), { pixelRatio: this._patternPixelRatio }); }
     catch (e) { console.warn("registerPattern", id, e); }
   }
   registerAllPatterns() {
@@ -1346,411 +865,19 @@ export class ChartCanvas extends HTMLElement {
       this.registerPattern(name);
     }
   }
-  centredSymbol(name) {
-    const c = this._sprite[name];
-    if (!c) return null;
-    const halfW = Math.max(c.pivot_x, c.w - c.pivot_x);
-    const halfH = Math.max(c.pivot_y, c.h - c.pivot_y);
-    const w = Math.max(1, Math.ceil(2 * halfW));
-    const h = Math.max(1, Math.ceil(2 * halfH));
-    const cv = document.createElement("canvas");
-    cv.width = w; cv.height = h;
-    const ctx = cv.getContext("2d");
-    ctx.drawImage(this._spriteImg, c.x, c.y, c.w, c.h, w / 2 - c.pivot_x, h / 2 - c.pivot_y, c.w, c.h);
-    return ctx.getImageData(0, 0, w, h);
-  }
-  compositeSounding(namesStr) {
-    const cells = [];
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const name of namesStr.split(",")) {
-      const c = this._sprite[name];
-      if (!c) continue;
-      const left = -c.pivot_x, top = -c.pivot_y;
-      cells.push({ c, left, top });
-      minX = Math.min(minX, left); minY = Math.min(minY, top);
-      maxX = Math.max(maxX, left + c.w); maxY = Math.max(maxY, top + c.h);
-    }
-    if (!cells.length) return null;
-    const halfW = Math.max(-minX, maxX), halfH = Math.max(-minY, maxY);
-    const w = Math.max(1, Math.ceil(2 * halfW)), h = Math.max(1, Math.ceil(2 * halfH));
-    const cv = document.createElement("canvas");
-    cv.width = w; cv.height = h;
-    const ctx = cv.getContext("2d");
-    for (const { c, left, top } of cells) {
-      ctx.drawImage(this._spriteImg, c.x, c.y, c.w, c.h, w / 2 + left, h / 2 + top, c.w, c.h);
-    }
-    return ctx.getImageData(0, 0, w, h);
-  }
 
-  // -- layers --------------------------------------------------------------
-  iconSizeForScale() {
-    return ["/", ["coalesce", ["get", "scale"], this._atlasPpu], this._atlasPpu];
-  }
-  // Complex (symbolised) linestyles are tessellated in the BAKER per zoom: the
-  // baked complex_lines layer carries the dash "on" segments as real geometry
-  // (so they're crisp and phase-locked at every zoom — no pattern stretch), and
-  // the embedded marks (chevron/anchor/"!") ride the normal point_symbols layer.
-  // So here the dashes are just a plain solid stroke coloured by color_token
-  // (which restyles live for Day/Dusk/Night).
-  complexLineLayers() {
-    return [{
-      id: "complex-lines", type: "line", source: "chart", "source-layer": "complex_lines",
-      paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] },
-    }];
-  }
   // S-52 PresLib §14.5 text-group selection. Each text feature carries the baked
   // `tgrp` tag (the DISPLAY param of its TX/TE, §14.4); the mariner toggles which
   // groups are visible, independent of display category. Returns a MapLibre filter
   // expression selecting the enabled groups (false = hide all). Light descriptions
   // (group 23) are the LIGHTS layer's own toggle (showLightDescriptions); a stray
-  // non-light group-23 label is folded in here too.
-  textGroupFilter() {
-    const m = this._mariner;
-    const g = ["coalesce", ["get", "tgrp"], -1];
-    const named = ["match", g, [21, 26, 29], true, false]; // §14.5 Names
-    const clauses = [];
-    if (m.textImportant !== false) clauses.push(["==", g, 11]);     // §14.5 Important text
-    if (m.textNames !== false) clauses.push(named);
-    if (m.showLightDescriptions !== false) clauses.push(["==", g, 23]); // Light description
-    // Other: everything not already claimed above (incl. missing tgrp = -1, so
-    // text in tiles baked before tgrp existed stays visible when "Other" is on).
-    if (m.textOther !== false) clauses.push(["all", ["!=", g, 11], ["!=", g, 23], ["match", g, [21, 26, 29], false, true]]);
-    return clauses.length ? ["any", ...clauses] : false;
-  }
-  textLayers() {
-    // LIGHTS characteristic text is drawn by its OWN always-on layer (see the
-    // "light-text" layer in buildLayers) so it can't be decluttered behind a
-    // verbose name label — exclude it from the general (collidable) text layers.
-    const notLight = ["!=", ["get", "class"], "LIGHTS"];
-    return TEXT_VARIANTS.map((v) => ({
-      id: v.id, type: "symbol", source: "chart", "source-layer": "text",
-      filter: ["all", notLight, v.filter, this.textGroupFilter()],
-      layout: {
-        "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
-        "text-size": ["coalesce", ["get", "font_size_px"], 11], "text-anchor": v.anchor,
-        "text-allow-overlap": false, "text-optional": true,
-        visibility: "visible",
-      },
-      paint: {
-        // Legible at dusk/night (bright ink + dark halo) — see textColor.
-        "text-color": this.textColor(),
-        "text-halo-color": this.textHaloColor(),
-        "text-halo-width": 1.4,
-        "text-halo-blur": 0.5,
-      },
-    }));
-  }
-  buildLayers() {
-    // Over an OSM basemap (raster or vector), let its detailed land show through:
-    // drop the chart's own land fills so OSM land isn't painted over. Filter by
-    // colour token, not class, so it catches LNDARE (LANDA) AND built-up land
-    // BUAARE (CHBRN) and any other land-coloured area. (No-data hatch hidden too —
-    // see buildStyle.)
-    const osm = this._osmBasemap();
-    const notLand = ["match", ["get", "color_token"], ["LANDA", "CHBRN"], false, true];
-    const base = [
-      { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}), paint: { "fill-color": this.areasFillColor() } },
-      { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
-      // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
-      // the shallow side of the live safety contour, shown only when the
-      // mariner toggle is on. Filter/visibility update on safetyContour /
-      // shallowPattern — no re-bake.
-      { id: "shallow-pattern", type: "fill", source: "chart", "source-layer": "areas", filter: this.shallowPatternFilter(), layout: { visibility: this._mariner.shallowPattern ? "visible" : "none" }, paint: { "fill-pattern": PAT_PREFIX + "DIAMOND1" } },
-      { id: "lines-solid", type: "line", source: "chart", "source-layer": "lines", filter: ["==", ["coalesce", ["get", "dash"], "solid"], "solid"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] } },
-      { id: "lines-dashed", type: "line", source: "chart", "source-layer": "lines", filter: ["==", ["get", "dash"], "dashed"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [4, 3] } },
-      { id: "lines-dotted", type: "line", source: "chart", "source-layer": "lines", filter: ["all", ["==", ["get", "dash"], "dotted"], ["!", ["has", "danger_depth"]]], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [1, 2] } },
-      // LIGHTS06 sector figure (coloured arcs / OUTLW backing / dashed legs) — its
-      // OWN source-layer so it can be SCAMIN-bucketed (see SCAMIN_BUCKET_LAYERS)
-      // without dragging every coastline/contour into per-SCAMIN variants. Styling
-      // mirrors lines-solid/lines-dashed (the sector tessellation emits only solid
-      // and dashed runs); sleg/category/boundary gating rides combineFilters as before.
-      { id: "sector-lines-solid", type: "line", source: "chart", "source-layer": "sector_lines", filter: ["==", ["coalesce", ["get", "dash"], "solid"], "solid"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1] } },
-      { id: "sector-lines-dashed", type: "line", source: "chart", "source-layer": "sector_lines", filter: ["==", ["get", "dash"], "dashed"], paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1], "line-dasharray": [4, 3] } },
-      // OBSTRN/WRECKS dotted foul boundary (client-side): shown only when the
-      // feature's VALSOU is ≤ the live safety contour. Filter updates on
-      // safetyContour — no re-bake. Excluded from lines-dotted above.
-      { id: "danger-boundary", type: "line", source: "chart", "source-layer": "lines", filter: this.dangerBoundaryFilter(), paint: { "line-color": this.token("CHBLK", "#000000"), "line-width": 2, "line-dasharray": [1, 2] } },
-      // Safety-contour line (DEPARE03, client-side): a heavier DEPSC outline of
-      // depth areas straddling the live safety contour, drawn over the plain
-      // DEPCN contour lines. Filter updates on safetyContour — no re-bake.
-      { id: "safety-contour", type: "line", source: "chart", "source-layer": "areas", filter: this.safetyContourFilter(), paint: { "line-color": this.token("DEPSC", "#3a6a8a"), "line-width": 2 } },
-      // Chart scale boundaries (DATCVR §10.1.9.1): a CHGRD line where the
-      // navigational purpose changes, baked into the scale_boundaries layer.
-      // Standard display, on by default; toggled via mariner.showScaleBoundaries.
-      { id: "scale-boundaries", type: "line", source: "chart", "source-layer": "scale_boundaries", layout: { visibility: this._mariner.showScaleBoundaries === false ? "none" : "visible" }, paint: { "line-color": this.colorExpr("color_token"), "line-width": ["coalesce", ["get", "width_px"], 1.5] } },
-    ];
-    const top = [
-      { id: "point_symbols", type: "symbol", source: "chart", "source-layer": "point_symbols", layout: { "icon-image": this.pointSymbolImage(), "icon-size": this.iconSizeForScale(), "icon-rotate": ["coalesce", ["get", "rotation_deg"], 0], "icon-rotation-alignment": "map", "icon-allow-overlap": true, "icon-ignore-placement": true, "symbol-z-order": "source" } },
-      // Spot soundings — an individually-selectable "Other" item per S-52/IMO
-      // (default on). A plain visibility toggle on showSoundings.
-      { id: "soundings", type: "symbol", source: "chart", "source-layer": "soundings", layout: { "icon-image": this.soundingsIconImage(), "icon-size": this.iconSizeForScale(), "icon-allow-overlap": false, visibility: this._mariner.showSoundings === false ? "none" : "visible" } },
-      // Contour labels (SAFCON01, client-side): VALDCO along DEPCNT lines,
-      // toggled by the mariner's "contour labels" setting — no re-bake.
-      { id: "contour-labels", type: "symbol", source: "chart", "source-layer": "lines",
-        filter: ["all", ["==", ["get", "class"], "DEPCNT"], ["has", "valdco"]],
-        layout: { "symbol-placement": "line", "text-field": this.contourLabelField(), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "symbol-spacing": 300, "text-allow-overlap": false, "text-optional": true, visibility: this._mariner.showContourLabels ? "visible" : "none" },
-        paint: { "text-color": this.contourLabelColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.2 } },
-      // Light characteristics (LIGHTS06 TX, e.g. "Fl(1)R 3s 4.2m") — their own
-      // layer, always drawn (allow/ignore-overlap) so the important nav data is
-      // never decluttered behind a name label. Placed below the light flare.
-      { id: "light-text", type: "symbol", source: "chart", "source-layer": "text",
-        filter: ["==", ["get", "class"], "LIGHTS"],
-        layout: { "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
-          "text-size": ["coalesce", ["get", "font_size_px"], 10], "text-anchor": "top", "text-offset": [0, 0.4],
-          // Left-justify so a merged multi-line light label's lines align on their
-          // left edge (e.g. stacked "Mo(U)W 20s 50m 17M" / "Mo(U)R 20s 50m 15M").
-          "text-justify": "left",
-          "text-allow-overlap": true, "text-ignore-placement": true,
-          // Light descriptions (LIGHTS06 characteristics) — individually
-          // selectable per S-52 (default on); toggled by showLightDescriptions.
-          visibility: this._mariner.showLightDescriptions === false ? "none" : "visible" },
-        paint: { "text-color": this.textColor(), "text-halo-color": this.textHaloColor(), "text-halo-width": 1.4, "text-halo-blur": 0.5 } },
-    ];
-    // Template chart layers (source "chart" is a placeholder rewritten per band
-    // by expandChartLayers). Their `filter` is the intrinsic (base) filter.
-    const tmpl = base.concat(this.complexLineLayers(), top, this.textLayers());
-    // SCAMIN AREA/LINE split: each template layer reading one of the four area/line
-    // source-layers is IMMEDIATELY FOLLOWED BY a clone reading the matching
-    // "<sl>_scamin" source-layer (id "<id>-scamin"). The original now only ever
-    // carries no-SCAMIN features (its source-layer is NOT in SCAMIN_BUCKET_LAYERS,
-    // so expandChartLayers leaves it single, always-in-band). The clone's _scamin
-    // source-layer IS in the set, so expandChartLayers buckets it into per-SCAMIN
-    // fractional-minzoom variants — that's what makes a SCAMIN area/line disappear
-    // past its 1:N scale. Adjacency preserves draw order. The clone tags _baseId =
-    // the original id so its band/bucket variants register in _variants under the
-    // ORIGINAL base id — every live restyle/visibility/filter update (setScheme's
-    // setIf, _eachLayer, setBaseFilter) that targets the original id automatically
-    // also hits the clone, so SCAMIN features restyle/toggle identically. (e.g.
-    // contour-labels for DEPCNT, which now live in lines_scamin; safety-contour /
-    // shallow-pattern reading areas_scamin; danger-boundary reading lines_scamin.)
-    const SCAMIN_SRC = new Set(["areas", "area_patterns", "lines", "complex_lines"]);
-    const withScamin = [];
-    for (const L of tmpl) {
-      withScamin.push(L);
-      const sl = L["source-layer"];
-      if (SCAMIN_SRC.has(sl)) {
-        withScamin.push({ ...L, id: L.id + "-scamin", "source-layer": sl + "_scamin", _baseId: L.id });
-      }
-    }
-    return withScamin;
-  }
+  // non-light group-23 label is folded in here too. Used by setMariner's text-group
+  // re-derive; the layer builder calls S52.textGroupFilter directly.
+  textGroupFilter() { return S52.textGroupFilter(this._mariner); }
 
-  // Expand the chart layer templates into one stacked set per band source
-  // (CHART_BANDS order = bottom→top, coarse→fine). Each variant gets id
-  // "<baseId>@<band>" and source "chart-<band>". Records every variant's base
-  // filter in `_layerBase` (so a category/boundary toggle re-applies
-  // combineFilters per layer) and a baseId→[variantId…] map in `_variants` (so
-  // mariner/colour updates that target a layer by name hit all its band copies).
-  // What's capped to a coarse band's max (so it isn't drawn at a finer zoom): LINES
-  // and pattern (hatch) FILLS — the marks that visibly duplicate a finer band's
-  // coast/contour/boundary as offset strokes — PLUS `point_symbols`, because the
-  // chevron/anchor/"!" marks embedded in complex line styles ride that layer: cap
-  // them WITH their line, or (where a coarse band overzooms a finer band's gap, e.g.
-  // open water at the approach band) the line is cut but the chevrons float on their
-  // own. Base area fills (solid depth/land colour), SOUNDINGS and TEXT keep
-  // overzooming: the base fill is the continuous gap-fill (a finer fill draws over
-  // it), and soundings/text are their own layers that read fine overscale. Where a
-  // finer band exists it supplies its own symbols at the band boundary, so capping
-  // the coarse copies there is seamless.
-  _capsAtBand(L) {
-    return L.type === "line" || L.id === "point_symbols" || (L.type === "fill" && L.paint && L.paint["fill-pattern"] !== undefined);
-  }
-
-  expandChartLayers() {
-    const tmpl = this.buildLayers();
-    this._layerBase = {};
-    this._variants = {};
-    const out = [];
-    // Server mode: one source per active per-band set (chart-<district>-<band>).
-    // Iterate template-outer, set-inner — and _serverSets is ordered coarse→fine —
-    // so the global draw order is by S-52 class (all fills, then lines, then symbols,
-    // then text), with finer bands' fills over coarser ones. Each band's source
-    // overzooms above its own max (from its TileJSON), so a coarse-only spot (open
-    // water) is filled by the general/overview source instead of blanking. As in the
-    // pmtiles path, overview/general LINE + pattern layers are capped at their band
-    // max so the coarse marks don't bleed into a finer band's zooms. Variant id is
-    // "<id>@<set>" so scheme/mariner updates by base id hit every set's copy.
-    if (this._server) {
-      const lat = this._scaminLat != null ? this._scaminLat : this._map ? this._map.getCenter().lat : 0;
-      for (const L of tmpl) {
-        const base = L.filter ?? null;
-        for (const set of this._serverSets) {
-          const dmin = BAND_DISPLAY_MIN[set.band];
-          const capped = (set.band === "overview" || set.band === "general") && this._capsAtBand(L);
-          // mk pushes one variant of L for this set — same shape as the pmtiles path's
-          // mk, keyed by set name. Stores its base filter (for live re-combine) and a
-          // native minzoom, and mirrors the coarse-band maxzoom cap.
-          const mk = (suffix, baseFilter, minzoom) => {
-            const id = L.id + "@" + set.name + suffix;
-            this._layerBase[id] = baseFilter;
-            // Register under the ORIGINAL base id for a *_scamin clone (L._baseId),
-            // so every restyle/toggle keyed on the original id reaches the clone too.
-            (this._variants[L._baseId || L.id] ||= []).push(id);
-            const { _baseId, ...tmplL } = L; // _baseId is internal — keep it out of the MapLibre layer
-            const v = { ...tmplL, id, source: "chart-" + set.name, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, set.band, id) };
-            if (minzoom != null) v.minzoom = minzoom; // band appears at its scale, not the baked floor
-            if (capped) v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
-            out.push(v);
-          };
-          const and = (extra) => (base ? ["all", base, extra] : extra);
-          // SCAMIN buckets, BAKED MANIFEST: one native fractional-minzoom layer per
-          // distinct SCAMIN value (from the set's TileJSON `scamin`, published by the
-          // baker), so a feature shows exactly from its 1:N scale in both directions;
-          // features lacking SCAMIN take the `#no` variant. The values are known at
-          // load — NO runtime probe / querySourceFeatures / setStyle (the per-frame
-          // cost the manifest removes). MapLibre flips each bucket on its zoom crossing
-          // natively (zero JS/frame). The per-band archive is FLOOR-GATED at bake, so
-          // tile CONTENT controls appearance: client layers need no band minzoom.
-          const scaminVals = set.scamin || [];
-          if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
-            // Only materialize a per-value bucket where the SCAMIN cutoff zoom is
-            // ABOVE this set's source floor (set.min). The set's tiles don't load
-            // below set.min, so any SCAMIN whose cutoff is ≤ set.min shows from the
-            // floor regardless — fold those into the `#no` (always-from-floor) bucket
-            // with the no-SCAMIN features. Cuts the bucket count from "every distinct
-            // SCAMIN" to "only values that hide above the band's own start" — a large
-            // reduction for the fine bands (most of their SCAMIN sit at ~band scale,
-            // so they collapse) and especially `text` (9 anchor templates × set ×
-            // value). NOT quantized → SCAMIN is still honoured exactly.
-            const floor = set.min || 0;
-            const lowVals = [], hiVals = [];
-            for (const sc of scaminVals) (scaminDisplayZoom(sc, lat) <= floor + 1e-6 ? lowVals : hiVals).push(sc);
-            const noFilter = lowVals.length
-              ? ["any", ["!", ["has", "scamin"]], ["in", ["get", "scamin"], ["literal", lowVals]]]
-              : ["!", ["has", "scamin"]];
-            mk("#no", and(noFilter), undefined);
-            for (const sc of hiVals) {
-              mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
-            }
-          } else {
-            mk("", base, undefined);
-          }
-          void dmin; // band display-min superseded by bake floor-gating (kept for ref)
-          // Right after this band's base depth/land fill, drop the S-52 overscale
-          // pattern AP(OVERSC01) for the zooms where the band is GROSSLY overscale
-          // (display scale ≥ ~×2 its compilation scale → above its native max). It's
-          // interleaved per band, so a finer band's opaque fill covers it where finer
-          // data exists — the hatch is left only on the coarse-only (overscale) patches
-          // such as open water shown enlarged. S-52 §10.1.10.2.
-          if (L.id === "areas") this._pushOverscale(out, "chart-" + set.name, set.band);
-        }
-      }
-      this._pushScaminProbes(out);
-      return out;
-    }
-    // Iterate TEMPLATE-outer, band-inner so the global draw order is by S-52
-    // class (all bands' fills, then all bands' lines, then all symbols, then all
-    // text) rather than per-band stacks. Band-outer order put a finer band's area
-    // FILLS above a coarser band's point SYMBOLS, so a coarse-scale light/beacon
-    // that overzoomed past its band got buried under the finer chart's depth-area
-    // fill the moment you zoomed in — it "disappeared". Keeping bands coarse→fine
-    // WITHIN each class preserves best-available (finer fill covers coarser fill),
-    // while symbols/text now always sit above every band's fills.
-    const lat = this._scaminLat != null ? this._scaminLat : this._map ? this._map.getCenter().lat : 0;
-    for (const L of tmpl) {
-      for (const band of CHART_BANDS) {
-        const base = L.filter ?? null;
-        const dmin = BAND_DISPLAY_MIN[band.slug];
-        const capped = (band.slug === "overview" || band.slug === "general") && this._capsAtBand(L);
-        // mk pushes one variant: id, the per-layer base filter it should re-combine
-        // from (stored in _layerBase so category/boundary toggles re-apply), and a
-        // native minzoom. The maxzoom cap (coarse band can't bleed into fine zoom)
-        // is mirrored from the unbucketed path.
-        const mk = (suffix, baseFilter, minzoom) => {
-          const id = L.id + "@" + band.slug + suffix;
-          this._layerBase[id] = baseFilter;
-          // Register under the ORIGINAL base id for a *_scamin clone (L._baseId),
-          // so every restyle/toggle keyed on the original id reaches the clone too.
-          (this._variants[L._baseId || L.id] ||= []).push(id);
-          const { _baseId, ...tmplL } = L; // _baseId is internal — keep it out of the MapLibre layer
-          const v = { ...tmplL, id, source: "chart-" + band.slug, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, band.slug, id) };
-          if (minzoom != null) v.minzoom = minzoom;
-          if (capped) v.maxzoom = band.max;
-          out.push(v);
-        };
-        const and = (extra) => (base ? ["all", base, extra] : extra);
-        // SCAMIN buckets (point symbols / soundings): MapLibre's native fractional
-        // layer minzoom does the exact-scale gating with ZERO per-zoom work — a
-        // feature with SCAMIN 1:N shows precisely from display scale 1:N, in BOTH
-        // directions, crossing bands down to that scale. One bucket per distinct
-        // SCAMIN value (collected from the tiles). Out-of-zoom buckets are skipped by
-        // MapLibre for free, so the extra layers cost nothing at runtime. Features
-        // WITHOUT SCAMIN take the band-gated `#no` variant. Other layers: one variant.
-        if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && this._scaminValues && this._scaminValues.length) {
-          // Only bucket SCAMIN values whose cutoff is ABOVE this band's display floor
-          // (dmin) — values at/below dmin show from the floor anyway (the band isn't
-          // displayed below it), so fold them into the dmin-floored `#no` bucket. Cuts
-          // the layer count without quantizing (see the server path for the rationale).
-          const floor = dmin || 0;
-          const lowVals = [], hiVals = [];
-          for (const sc of this._scaminValues) (scaminDisplayZoom(sc, lat) <= floor + 1e-6 ? lowVals : hiVals).push(sc);
-          const noFilter = lowVals.length
-            ? ["any", ["!", ["has", "scamin"]], ["in", ["get", "scamin"], ["literal", lowVals]]]
-            : ["!", ["has", "scamin"]];
-          mk("#no", and(noFilter), dmin || undefined);
-          for (const sc of hiVals) {
-            mk("#sm" + sc, and(["==", ["get", "scamin"], sc]), scaminDisplayZoom(sc, lat));
-          }
-        } else {
-          mk("", base, dmin || undefined);
-        }
-        if (L.id === "areas") this._pushOverscale(out, "chart-" + band.slug, band.slug);
-      }
-    }
-    this._pushScaminProbes(out);
-    return out;
-  }
-
-  // Invisible "probe" layers that force the SPARSE sub-band tiles (where SCAMIN
-  // features float below their band min) to load at all zooms, so the per-SCAMIN
-  // value set can be collected (querySourceFeatures only sees LOADED tiles, and a
-  // tile loads only if some visible layer needs it). They render nothing. Without
-  // them, the bucket layers can't exist until their tiles load, but those tiles
-  // won't load until the buckets exist — a deadlock at sub-band zooms.
-  _pushScaminProbes(out) {
-    // Server mode gets its SCAMIN values from the baked manifest, so it needs no
-    // probes (these were the per-frame cost: minzoom-0 layers processed at every
-    // zoom to force sub-band tiles to load for runtime collection). Only the prebaked
-    // (pmtiles) path, which still discovers values from tiles, needs them.
-    if (this._server) return;
-    const srcs = CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
-    for (const src of srcs) {
-      for (const sl of SCAMIN_BUCKET_LAYERS) {
-        out.push({ id: "scaminprobe-" + src + "-" + sl, source: src, "source-layer": sl, type: "circle", minzoom: 0, filter: ["has", "scamin"], paint: { "circle-radius": 0, "circle-opacity": 0, "circle-stroke-width": 0 } });
-      }
-    }
-  }
-
-  // Append the S-52 overscale pattern AP(OVERSC01) for a band's source, shown only
-  // above the band's native max (where the chart is grossly enlarged, ≥ ~×2 its
-  // compilation scale). Inserted right after the band's base fill so a finer band's
-  // opaque fill covers it — the hatch survives only on coarse-only overscale patches.
-  // No-op for the finest band / merged "all" set (nothing coarser to enlarge). S-52
-  // §10.1.10.2; display priority 3, viewing group 21030.
-  _pushOverscale(out, source, band) {
-    // DISABLED: the old "hatch wherever a band overzooms past its native max"
-    // heuristic over-triggers — it paints AP(OVERSC01) on plain zoom-in of the
-    // best-available chart, which S-52 §10.1.10.1 says must show ONLY the "×N"
-    // indication, never the pattern. Real ECDIS show the area pattern only at a
-    // genuine scale boundary (a coarser cell enlarged ≥×2 in a finer cell's hole,
-    // §10.1.10.2) — that wants a baked overscale_areas layer (task #3). Until then,
-    // no auto-hatch (the HUD still shows the ×N overscale indication).
-    return; // eslint-disable-line no-unreachable
-    const nm = CHART_BANDS.find((b) => b.slug === band);
-    if (!nm || band === "all" || nm.max >= 18) return;
-    const id = "overscale@" + source;
-    const vis = this._showOverscale === false ? "none" : "visible";
-    this._layerVis[id] = vis;
-    out.push({
-      id,
-      type: "fill",
-      source,
-      "source-layer": "areas",
-      minzoom: nm.max + 1,
-      layout: { visibility: this._bandsHidden.has(band) ? "none" : vis },
-      paint: { "fill-pattern": PAT_PREFIX + "OVERSC01" },
-    });
-  }
+  // The MapLibre chart layer/style BUILDING (layer templates, per-band/per-set
+  // expansion, SCAMIN buckets, the _layerBase/_variants/_layerVis bookkeeping) is a
+  // PURE function in chart-style.mjs now — buildChartLayers(state). See buildStyle().
 
   // Live layer ids for a template base id (one per band), for per-layer setting
   // updates. Falls back to the base id itself (basemap layers aren't expanded).
@@ -1809,43 +936,28 @@ export class ChartCanvas extends HTMLElement {
     return { ...(L.layout || {}), visibility: this._bandsHidden.has(band) ? "none" : vis };
   }
   buildStyle() {
-    // `{v}` is a cache-busting version token (see registerPmtilesProtocol /
-    // refresh): bumping it forces MapLibre to re-request chart tiles.
-    const v = this._ver;
-    // One vector source per NOAA band, each serving the `chart-<band>` protocol
-    // over its fixed baked zoom range (overzoomed above max). `{v}` is a
-    // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
-    // bands resolve to blank tiles (harmless) until an archive is added.
-    const sources = {};
-    // Per-band prebaked sources in BOTH modes. The source maxzoom is band.bake —
-    // the top zoom the archive actually contains — so MapLibre serves real tiles up
-    // to there and client-overzooms above it (base fills + the finest band fill the
-    // finer zooms for free; coarser bands' lines/patterns are cut in the bake or
-    // capped on the layer, so they don't bleed into a finer band's area).
-    for (const band of CHART_BANDS) {
-      sources["chart-" + band.slug] = {
-        type: "vector",
-        tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
-        // minzoom 0, not band.min: SCAMIN-bearing features are baked into sub-band
-        // tiles (they cross bands down to their SCAMIN scale), so the source must be
-        // allowed to fetch those. They're sparse (only SCAMIN objects live below the
-        // band min), and minzoom only adds requests when the VIEW is coarse (few
-        // tiles), so it's cheap. Per-SCAMIN bucket layers gate the exact display scale.
-        minzoom: 0,
-        maxzoom: band.bake,
-      };
-    }
-    if (this._server) {
-      // One source per active pack, MVT pulled live from /tiles/{set}. minzoom/
-      // maxzoom are the set's REAL range (from its TileJSON) so MapLibre overzooms
-      // the deepest baked tile instead of requesting empty tiles past the bake. With
-      // no packs we add no chart sources (a vector source with an empty `tiles` array
-      // makes MapLibre crash); the no-data hatch shows through.
-      for (const set of this._serverSets) {
-        sources["chart-" + set.name] = { type: "vector", tiles: [set.tiles || this._serverTilesUrl(set.name)], minzoom: set.min, maxzoom: set.max };
-      }
-    }
+    // The CHART band + server-set sources (per-band prebaked sources in BOTH modes,
+    // plus one source per active server pack) are assembled by the chart-source
+    // manager, keyed by its cache-bust token. The element then adds the basemap +
+    // no-data sources/layers below (which read coastline/osmvec/palette state, not
+    // chart-source state).
+    const sources = this._sources.sourcesDict(this._sources.ver);
     const layers = [{ id: "bg", type: "background", paint: { "background-color": this.seaColor() } }];
+
+    // CHART layers + the three bookkeeping maps come from the PURE builder. The
+    // element resolves the SCAMIN reference latitude (manager value, else the map
+    // centre, else 0) before calling, then ASSIGNS the returned maps so the live
+    // updaters (applyFeatureFilters/setBaseFilter/_eachLayer/_setVis/setBandVisible/
+    // setScheme/setMariner) keep reading them unchanged.
+    const scaminLat = this._sources.scaminLat != null ? this._sources.scaminLat
+                      : (this._map ? this._map.getCenter().lat : 0);
+    const { layers: chartLayers, layerBase, variants, layerVis } = buildChartLayers({
+      mariner: this._mariner, palette: this._palette(), atlasPpu: this._atlasPpu, osm: this._osmBasemap(),
+      scheme: this._active,
+      server: this._sources.server, serverSets: this._sources.sets,
+      scaminValues: this._sources.scaminValues, scaminLat, bandsHidden: this._bandsHidden,
+    });
+    this._layerBase = layerBase; this._variants = variants; this._layerVis = layerVis;
 
     const basemap = this.getAttribute("basemap") || "none";
     if (basemap === "osm") {
@@ -1902,35 +1014,14 @@ export class ChartCanvas extends HTMLElement {
       version: 8,
       glyphs: this._assets + "glyphs/{fontstack}/{range}.pbf",
       sources,
-      layers: layers.concat(this.expandChartLayers()),
+      layers: layers.concat(chartLayers),
     };
   }
 }
 
-// S-52 halign/valign → MapLibre text-anchor, one decluttered sublayer per
-// (halign × valign-group) with a constant anchor (text-anchor isn't data-driven).
-function textAnchor(h, v) {
-  const vv = v === "top" ? "top" : v === "bottom" ? "bottom" : "center";
-  const hh = h === "left" ? "left" : h === "right" ? "right" : "center";
-  if (vv === "center" && hh === "center") return "center";
-  if (vv === "center") return hh;
-  if (hh === "center") return vv;
-  return vv + "-" + hh;
-}
-const TEXT_VARIANTS = (function () {
-  const out = [];
-  for (const h of ["left", "center", "right"]) {
-    for (const vg of ["top", "center", "bottom"]) {
-      const anchor = textAnchor(h, vg === "center" ? "middle" : vg);
-      const hf = ["==", ["coalesce", ["get", "halign"], "center"], h];
-      const vf = vg === "center"
-        ? ["match", ["coalesce", ["get", "valign"], "middle"], ["middle", "baseline", "center"], true, false]
-        : ["==", ["coalesce", ["get", "valign"], "middle"], vg];
-      out.push({ id: "text-" + h + "-" + vg, anchor, filter: ["all", hf, vf] });
-    }
-  }
-  return out;
-})();
+// textAnchor + TEXT_VARIANTS (the S-52 halign/valign → text-anchor sublayer
+// templates) live in chart-style.mjs now; TEXT_VARIANTS is imported above for
+// setScheme/setMariner's per-variant text restyle.
 
 // Custom element names must contain a hyphen (HTML spec) — `<chart-plotter>`.
 customElements.define("chart-canvas", ChartCanvas);
