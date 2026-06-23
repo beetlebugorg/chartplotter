@@ -190,7 +190,7 @@ export class OwnShip {
     const heading = num(nav.headingTrue) ?? magTrue ?? num(nav.cogTrue) ?? 0;
     const course = num(nav.cogTrue) ?? num(nav.headingTrue) ?? magTrue;
     const sog = num(nav.sog) ?? 0;
-    this._fix = { lng, lat, courseDeg: typeof course === "number" ? course : heading };
+    this._fix = { lng, lat, courseDeg: typeof course === "number" ? course : heading, headingDeg: heading };
 
     // Marker (heading-rotated, screen-fixed).
     if (!this._marker) {

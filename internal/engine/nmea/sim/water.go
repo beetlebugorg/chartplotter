@@ -81,9 +81,9 @@ func newWaterMask(rings [][][2]float64) *WaterMask {
 	}
 	// Precompute navigable points on a coarse grid for fast, reliable sampling.
 	const grid = 160
-	for iy := 0; iy < grid; iy++ {
+	for iy := range grid {
 		la := m.minLat + (float64(iy)+0.5)/grid*(m.maxLat-m.minLat)
-		for ix := 0; ix < grid; ix++ {
+		for ix := range grid {
 			lo := m.minLon + (float64(ix)+0.5)/grid*(m.maxLon-m.minLon)
 			if m.IsWater(la, lo) {
 				m.samples = append(m.samples, [2]float64{la, lo})

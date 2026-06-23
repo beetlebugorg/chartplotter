@@ -640,6 +640,7 @@ export class ChartCanvas extends HTMLElement {
   //   "free"      — user controls the camera (default)
   //   "north-up"  — recentre on the target, bearing held north
   //   "course-up" — recentre on the target, chart rotated to the target's course
+  //   "head-up"   — recentre on the target, chart rotated to the target's heading
   setCameraMode(mode) {
     this._cameraMode = mode || "free";
     if (this._map && this._cameraMode === "north-up") this._map.easeTo({ bearing: 0, duration: 300 });
@@ -659,6 +660,7 @@ export class ChartCanvas extends HTMLElement {
     // cancel the one-shot bearing reset from setCameraMode (north-up gets stuck at
     // the previous course-up heading).
     if (this._cameraMode === "course-up" && typeof fix.courseDeg === "number") cam.bearing = fix.courseDeg;
+    else if (this._cameraMode === "head-up" && typeof fix.headingDeg === "number") cam.bearing = fix.headingDeg;
     else if (this._cameraMode === "north-up") cam.bearing = 0;
     map.easeTo(cam);
   }

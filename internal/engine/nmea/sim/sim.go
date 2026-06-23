@@ -157,11 +157,12 @@ func (s *Sim) OwnSentences() []string {
 	lon, ew := toNMEALon(s.Own.Lon)
 	cog := s.Own.Course
 	sog := s.Own.Speed
+	hdg := math.Mod(cog-7+360, 360) // a small crab angle so heading ≠ COG (head-up ≠ course-up)
 	return []string{
 		line(fmt.Sprintf("GPGGA,%s,%s,%s,%s,%s,1,10,0.8,2,M,-33.0,M,,", hms, lat, ns, lon, ew)),
 		line(fmt.Sprintf("GPRMC,%s,A,%s,%s,%s,%s,%.1f,%.1f,%s,,,A", hms, lat, ns, lon, ew, sog, cog, dmy)),
 		line(fmt.Sprintf("GPVTG,%.1f,T,,M,%.1f,N,,K,A", cog, sog)),
-		line(fmt.Sprintf("HEHDT,%.1f,T", cog)),
+		line(fmt.Sprintf("HEHDT,%.1f,T", hdg)),
 		line(fmt.Sprintf("IIVHW,%.1f,T,,M,%.1f,N,,K", cog, sog)),
 		line(fmt.Sprintf("SDDPT,%.1f,0.5,", s.depth)),
 		line(fmt.Sprintf("IIMWV,%.1f,R,%.1f,N,A", 45.0, 12.0)),

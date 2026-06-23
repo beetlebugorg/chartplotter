@@ -18,16 +18,15 @@
 // Built like the other host-mounted controllers (see plugins/hud.mjs): the shell
 // constructs it on `ready` with { host, map, plotter } and calls destroy() to tear
 // it down.
-import { NORTH_UP_ICON, COURSE_UP_ICON, NORTH_ARROW_ICON } from "../lib/openbridge-icons.mjs";
+import { NORTH_UP_ICON, COURSE_UP_ICON, HEAD_UP_ICON, NORTH_ARROW_ICON } from "../lib/openbridge-icons.mjs";
 
 export class OrientationControl {
   constructor({ host, map, plotter } = {}) {
     this._map = map;
     this._plotter = plotter; // <chart-canvas> — setCameraMode (sealed API)
-    // Ordered tap cycle. Extend with "course-up"/"head-up" once a heading/course
-    // source exists; the renderer already understands "course-up".
-    // course-up enabled now that the own-ship plugin streams the fix's course.
-    this._modes = ["north-up", "course-up", "free"];
+    // Ordered tap cycle. north-up/course-up/head-up follow the vessel (the own-ship
+    // plugin streams course + heading in each fix); free releases the camera.
+    this._modes = ["north-up", "course-up", "head-up", "free"];
     this._i = 0; // map boots at bearing 0 → north-up
     this._mount(host);
   }
@@ -81,6 +80,8 @@ export class OrientationControl {
     this._btn.title = "Orientation: " + mode + " — tap to cycle";
     if (mode === "course-up") {
       this._btn.innerHTML = COURSE_UP_ICON;
+    } else if (mode === "head-up") {
+      this._btn.innerHTML = HEAD_UP_ICON;
     } else if (mode === "free") {
       this._btn.innerHTML = `<span class="orient-rot" style="display:block;line-height:0">${NORTH_ARROW_ICON}</span>`;
     } else {
