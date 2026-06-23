@@ -34,6 +34,21 @@ The key asymmetry: S-101 has **no lookup table and no separate CSP files** — *
 - `ColorProfiles/colorProfile.xml` (`S100ColorProfile/5.1`) — `<colors>` token dictionary + three `<palette>` (day/dusk/night), each `<item token>` with `<cie><xyL>` and `<srgb>`. **Near-identical to our `CCIE` model.**
 - `Rules/*.lua` (250+) — `main.lua` (dispatch), `S100Scripting.lua` + `PortrayalModel.lua` + `PortrayalAPI.lua` (host boundary), per-feature-class rules. Classic Lua **5.1** (metatables, `rawget`, no `//`/`goto`/bitwise — confirmed from `S100Scripting.lua`).
 
+### Host contract (confirmed by running it — `cmd/lua-portray-test`)
+
+Reverse-engineered from `main.lua`/`PortrayalModel.lua`/`PortrayalAPI.lua` and verified end-to-end (the `Rapids` rule runs and emits the correct stream). The host (Go) must provide:
+
+**Entry sequence:**
+1. Register mariner settings: build an `array:ContextParameter` of `PortrayalCreateContextParameter(name, type, default)` and call `PortrayalInitializeContextParameters(array)` — this *itself* builds the global `portrayalContext` via `PortrayalModel.CreatePortrayalContext()`.
+2. `CreatePortrayalContext()` calls `HostGetFeatureIDs()` → per id `HostFeatureGetCode(id)` → `CreateFeature(id, code)` → adds to `FeaturePortrayalItems`.
+3. `PortrayalMain(featureIDs)` → per item: `require(feature.Code)`; `_G[feature.Code](feature, featurePortrayal, contextParameters)`; result flows back via `HostPortrayalEmit(featureRef, instructionString, observed)`.
+
+**Feature model:** `CreateFeature` returns a table with a lazy `__index` metatable: `feature.PrimitiveType` is derived from `feature:GetSpatialAssociation().SpatialType` (`HostFeatureGetSpatialAssociations`); attribute reads resolve via `HostFeatureGetSimpleAttribute`/`HostFeatureGetComplexAttributeCount`. Enums (`PrimitiveType`, `SpatialType`, `Orientation`, `Interpolation`) are canonical tables compared by identity — host-built spatial associations must reference the *same* `SpatialType.X` table.
+
+**Host callbacks (~30):** type introspection (`HostGet{Feature,Information,SimpleAttribute,ComplexAttribute,Role,...}TypeCodes/Info`), dataset access (`HostGetFeatureIDs`, `HostFeatureGet{Code,SimpleAttribute,ComplexAttributeCount,SpatialAssociations,AssociatedFeatureIDs,AssociatedInformationIDs}`), spatial (`HostGetSpatial`, `HostSpatialGetAssociated{Feature,Information}IDs`), information types (`HostInformationTypeGet*`, `HostGetSimpleAttribute`, `HostGetComplexAttributeCount`), plus `HostPortrayalEmit`, `HostDebuggerEntry`, and a `Debug` table (`StartPerformance`/`StopPerformance`/`Trace`/`Break`/`FirstChanceError`/`ResetPerformance`). The slice stubs introspection to no-ops and implements only `HostGetFeatureIDs`/`HostFeatureGetCode`/`HostFeatureGetSpatialAssociations`; the production host backs introspection with the S-101 feature catalogue (part of Workstream E).
+
+**Output = the instruction stream we parse into primitives.** Verified emissions: `ViewingGroup:32050;DrawingPriority:9;DisplayPlane:UnderRadar`, `LineStyle:_simple_,,0.96,CHGRD`, `LineInstruction:_simple_`, `ColorFill:CHGRD`, `PointInstruction:<sym>`, `NullInstruction`. This stream is the D→primitive seam.
+
 ### The Lua ⇄ host boundary (confirmed from source)
 
 Rules emit a **flat string instruction stream** into `featurePortrayal:AddInstructions(str)`. Observed grammar:
@@ -134,6 +149,7 @@ S-101 also adds 198 symbols + 12 line styles we don't have. Takeaway: **the artw
 
 - **gopher-lua viability (Workstream D, the biggest unknown): PASS.** `cmd/lua-smoke` compiled all **216** `Rules/*.lua` with `github.com/yuin/gopher-lua` v1.1.2 (pure-Go Lua 5.1) — zero parse failures. No 5.2+ constructs anywhere; the VM choice is safe. (Compile-only; runtime host-API behaviour is Workstream D proper.)
 - **Colour seam (Workstream A): PASS, exact.** `cmd/s101-color-diff` compared all 201 token×scheme cells (67 colours × Day/Dusk/Night); the S-101 `colorProfile.xml` sRGB is **byte-identical** to our DAI CIE→sRGB output. Colour profile is a clean drop-in; **0 gaps**.
+- **Lua engine vertical slice (Workstream D): PASS, end-to-end.** `cmd/lua-portray-test` loads the *real* framework (`S100Scripting`+`PortrayalModel`+`PortrayalAPI`) and runs the real `Rapids` rule driven entirely by Go host callbacks. The feature's `PrimitiveType` resolves correctly from a Go-supplied spatial association, mariner context parameters register, and all three geometry branches emit the exact expected instruction stream (Point→`NullInstruction`, Curve→`LineStyle`+`LineInstruction`, Surface→`ColorFill`). This proves rules don't just *compile* — they *execute correctly* against our host and produce the D→primitive instruction grammar. Full host contract documented above.
 - **SVG rasterization + CSS-class colour resolution (Workstream B): PASS, pure Go.** `cmd/svg-raster-test` flattens an S-101 symbol (resolve `<?xml-stylesheet?>` CSS classes → inline `style`, strip `.layout` debug boxes) and rasterizes with `srwiley/oksvg`+`rasterx` (pure Go, wasm-safe). Output matches the `librsvg` reference. Element set is tiny — only `path/rect/circle/line/g`, **no text/gradients/use/images**. Two oksvg defects found + worked around in the flattener: (1) it ignores a non-zero `viewBox` origin → normalize to `0 0 W H` + wrap content in `translate(-minX -minY)`; (2) it applies `stroke-width` in device px without scaling by the draw transform → pre-multiply `stroke-width` by the px/mm scale. No cgo/external rasterizer needed. Caveats for the production flattener: also scale `stroke-width` carried in `style`/CSS or inherited from a parent `<g>` (corpus uses presentation attrs); honour the CSS cascade where an inline presentation attr coexists with a class (e.g. `CBLARE52`).
 
 ## Phasing
@@ -143,7 +159,7 @@ S-101 also adds 198 symbols + 12 line styles we don't have. Takeaway: **the artw
 3. ~~**SVG symbols** (B) — rasterizer de-risk~~ — **DONE** (`cmd/svg-raster-test`; oksvg+rasterx, CSS resolution, matches librsvg). Remaining: production flattener + wire into `assets/sprites.go` for all 724 symbols + sprite atlas/anchors.
 4. **Line styles + area fills** (C).
 5. **Static-artwork checkpoint** — render via a *temporary* keep-our-LUPT path to prove the artwork is correct independent of Lua.
-6. **Lua host API** (D, step 1) — enumerate + stub host interface; get `main.lua` dispatching to a trivial rule.
+6. ~~**Lua host API** (D, step 1) — enumerate + stub host interface; get a real rule running~~ — **DONE** (vertical slice: `cmd/lua-portray-test` runs `Rapids` end-to-end via Go host; contract documented). Remaining: instruction-stream→primitive parser; back introspection with the feature catalogue; `PortrayalMain` over many features + `HostPortrayalEmit`.
 7. **Bridge** (E) — S-57→S-101 features/attributes.
 8. **Wire Lua as the lookup+CSP stage** — instruction-stream → primitives; placeholders live.
 9. **Full-cell visual diff** vs S-52 baseline; iterate on gaps; author overrides.
