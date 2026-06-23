@@ -7,6 +7,7 @@ require (
 	github.com/alecthomas/kong v1.12.1
 	github.com/dhconnelly/rtreego v1.2.0
 	github.com/stretchr/testify v1.11.1
+	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/image v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.52.0
