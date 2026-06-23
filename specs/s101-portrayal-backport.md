@@ -117,8 +117,9 @@ Net: replace the **front** of the pipeline (DAI parse + LUPT + Go CSPs) with **S
 - Write the instruction-stream parser: `AddInstructions` strings → our `InstructionSet`/`Primitive`.
 
 ### E. S-57 → S-101 feature/attribute bridge
-- Largest mechanical piece. Map S-57 6-char acronyms → S-101 camelCase: object class `OBJL` → `feature.Code` (e.g. `ACHARE`→`Anchorage`), attributes (`DRVAL1`→`depthRangeMinimumValue`, `CATACH`→…), and enumerated value remaps. Source of truth: **IHO "S-57 to S-101 conversion guidance"** (verify exact published table).
-- Build as data tables (generated, not hand-typed where possible). Any S-57 class/attribute with **no S-101 mapping → placeholder + logged gap** (see below).
+- **The name mapping is derived, not hand-built.** The S-101 **Feature Catalogue** (`S-101-Documentation-and-FC/S-101FC/FeatureCatalogue.xml`, S100FC/5.2, vendored to sibling `../../../s101-feature-catalogue`) ships each feature type and attribute with its legacy **S-57 6-char acronym in `<alias>`** (e.g. feature `QualityOfNonBathymetricData` alias `M_ACCY`; attribute `beaconShape` alias `BCNSHP`). `pkg/s100/fc` parses it (190 feature types, 236 simple attributes) and exposes `FeatureCodeForS57`/`AttrCodeForS57` — **no separate IHO conversion table needed**. Sample DAI object classes map 10/10.
+- **Enum values pass through.** S-101 `listedValue` codes are the same integers S-57 uses, so attribute values need no remap.
+- Remaining bridge work: an S-57-feature → S-101-feature adapter (rename via the maps; expose camelCase attrs + `PrimitiveType` from geometry), back the Lua `HostGet*TypeInfo`/`HostGet*TypeCodes` callbacks with `pkg/s100/fc` + per-dataset feature data, and handle complex attributes/associations. Any S-57 class/attribute with no alias → placeholder + logged gap.
 
 ## Gap handling — "obvious test data" + "make our own"
 
@@ -162,7 +163,7 @@ S-101 also adds 198 symbols + 12 line styles we don't have. Takeaway: **the artw
 6. ~~**Lua host API** (D, step 1) — enumerate + stub host interface; get a real rule running~~ — **DONE** (vertical slice: `cmd/lua-portray-test` runs `Rapids` end-to-end via Go host; contract documented). Remaining: back introspection with the feature catalogue; `PortrayalMain` over many features + `HostPortrayalEmit`.
 6b. ~~**Instruction-stream → draw commands** (D→primitive seam, parser half)~~ — **DONE**. `pkg/s100/instructions`: tokenizer + state-folding reducer (`ViewingGroup/DrawingPriority/DisplayPlane/LocalOffset/Rotation/LinePlacement` modifiers; `PointInstruction/LineInstruction/ColorFill/AreaFillReference/TextInstruction/NullInstruction` draws; inline `LineStyle:_simple_` capture; unknown kinds surfaced as gaps). Unit-tested on the real `Rapids` streams and wired live into `cmd/lua-portray-test` (Lua emit → parse → `DrawCommand`s).
 6c. ~~**`DrawCommand` → engine `Primitive` lowering** (D→primitive seam, second half)~~ — **DONE**. `internal/engine/portrayal/s101lower.go` `LowerS101(cmd, geometry, catalog)` maps draw commands onto the *existing* engine primitives (`ColorFill`→`FillPolygon`, `AreaFillReference`→`PatternFill`, `LineInstruction:_simple_`→`StrokeLine`, named line→`LinePattern` with catalogue pen-colour, `PointInstruction`→`SymbolCall` with mm→px/units conversions; `Null`/unsupported→suppressed). Colour stays a token; geometry attaches from the host. Unit-tested through the full chain (Lua stream → parse → reduce → lower → primitive). The S-52 path is untouched and its tests still pass.
-7. **Bridge** (E) — S-57→S-101 features/attributes.
+7. **Bridge** (E) — S-57→S-101 features/attributes. **Foundation DONE**: `pkg/s100/fc` parses the Feature Catalogue and derives the S-57↔S-101 name maps from `<alias>` (no conversion table needed); enums pass through. Remaining: S-57-feature adapter + back the Lua `HostGet*` introspection with it.
 8. **Wire Lua as the lookup+CSP stage** — instruction-stream → primitives; placeholders live.
 9. **Full-cell visual diff** vs S-52 baseline; iterate on gaps; author overrides.
 10. **Decommission** — remove DAI, 24 `cs_*.go`, `lookup.go`; flip default.
