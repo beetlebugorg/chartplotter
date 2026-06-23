@@ -338,7 +338,7 @@ func serializeDir(entries []entry) []byte {
 
 // metadataJSON lists the vector layers MapLibre reads from the archive — these
 // match the layer names the baker emits.
-const metadataJSON = `{"name":"chartplotter","format":"pbf","vector_layers":[{"id":"areas","fields":{}},{"id":"area_patterns","fields":{}},{"id":"lines","fields":{}},{"id":"complex_lines","fields":{}},{"id":"point_symbols","fields":{}},{"id":"soundings","fields":{}},{"id":"text","fields":{}}]}`
+const metadataJSON = `{"name":"chartplotter","format":"pbf","vector_layers":[{"id":"areas","fields":{}},{"id":"area_patterns","fields":{}},{"id":"lines","fields":{}},{"id":"complex_lines","fields":{}},{"id":"areas_scamin","fields":{}},{"id":"area_patterns_scamin","fields":{}},{"id":"lines_scamin","fields":{}},{"id":"complex_lines_scamin","fields":{}},{"id":"point_symbols","fields":{}},{"id":"soundings","fields":{}},{"id":"text","fields":{}}]}`
 
 // metadata is the archive's metadata JSON. It's the static vector-layer list, plus
 // a "scamin" array of the distinct SCAMIN denominators present (when any) so the

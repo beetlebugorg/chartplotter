@@ -179,7 +179,11 @@ func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, 
 	}
 
 	if len(dashPaths) > 0 {
-		tb.Layer("complex_lines").AddLines(dashPaths, dashAttrs)
+		// r.layer is "complex_lines" normally, or "complex_lines_scamin" when the
+		// feature carries SCAMIN (set by route via scaminLayer) so the dashes land
+		// in the SCAMIN-bucketed source-layer. The embedded symbols below stay in
+		// point_symbols (already bucketed; they carry `scamin` via attrsFor).
+		tb.Layer(r.layer).AddLines(dashPaths, dashAttrs)
 	}
 	// AddPoints shares one attr set per call, so emit each symbol on its own (their
 	// rotations differ).

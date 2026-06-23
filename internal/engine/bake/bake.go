@@ -770,6 +770,24 @@ func (b *Baker) attrsFor(r *routed, scratch *[]mvt.KeyValue) []mvt.KeyValue {
 	return out
 }
 
+// scaminLayer redirects an area/line primitive's source-layer to a dedicated
+// "<layer>_scamin" layer when the feature carries SCAMIN (1:N display limit, S-52
+// §8.4). The client buckets these *_scamin layers into per-SCAMIN fractional-minzoom
+// variants so the feature DISAPPEARS when zoomed out past its 1:N scale; no-SCAMIN
+// features stay in the original always-in-band layer (unchanged). Only the four
+// area/line layers route here — point_symbols/soundings/text/sector_lines already
+// carry `scamin` and are bucketed directly on their own source-layers.
+func scaminLayer(layer string, scamin uint32) string {
+	if scamin == 0 {
+		return layer
+	}
+	switch layer {
+	case "areas", "area_patterns", "lines", "complex_lines":
+		return layer + "_scamin"
+	}
+	return layer
+}
+
 func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2 float32) {
 	// The always-present base (class/cell/draw_prio/cat/bnd/pts) is stored compactly
 	// (interned class/cell + small ints) and rebuilt at emit by attrsFor; `common`
@@ -807,7 +825,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 
 	switch v := p.(type) {
 	case portrayal.FillPolygon:
-		r.layer, r.kind, r.nrings = "areas", mvt.GeomPolygon, normRings(v.Rings)
+		r.layer, r.kind, r.nrings = scaminLayer("areas", r.bcScamin), mvt.GeomPolygon, normRings(v.Rings)
 		extra := []mvt.KeyValue{{Key: "color_token", Value: mvt.StringVal(v.ColorToken)}}
 		// Depth areas (DEPARE/DRGARE) carry DRVAL1/DRVAL2 so the client runs
 		// SEABED01 shading + the safety-contour line + shallow pattern LIVE
@@ -820,11 +838,11 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		r.attrs = common(extra...)
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.PatternFill:
-		r.layer, r.kind, r.nrings = "area_patterns", mvt.GeomPolygon, normRings(v.Rings)
+		r.layer, r.kind, r.nrings = scaminLayer("area_patterns", r.bcScamin), mvt.GeomPolygon, normRings(v.Rings)
 		r.attrs = common(mvt.KeyValue{Key: "pattern_name", Value: mvt.StringVal(v.PatternName)})
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.StrokeLine:
-		r.layer, r.kind, r.nline = "lines", mvt.GeomLineString, normPts(v.Points)
+		r.layer, r.kind, r.nline = scaminLayer("lines", r.bcScamin), mvt.GeomLineString, normPts(v.Points)
 		r.attrs = common(
 			mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
 			mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(v.WidthPx + 0.5))},
@@ -835,7 +853,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		// Stored as a polyline + its linestyle; emitComplexLine tessellates the
 		// period (dashes → these complex_lines segments, symbols → point_symbols)
 		// per zoom at emit time. colour_token drives the live restyle of the dashes.
-		r.layer, r.kind, r.nline = "complex_lines", mvt.GeomLineString, normPts(v.Points)
+		r.layer, r.kind, r.nline = scaminLayer("complex_lines", r.bcScamin), mvt.GeomLineString, normPts(v.Points)
 		r.ls = b.linestyles[v.LinestyleName]
 		ct := v.ColorToken
 		if ct == "" && r.ls != nil {

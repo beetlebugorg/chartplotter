@@ -123,7 +123,13 @@ const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, h
 // source-layer (not the shared `lines`) precisely so it can be bucketed here
 // without fanning every coastline/contour into per-SCAMIN variants — the sector
 // then cuts at the same exact scale as its light's flare + characteristic text.
-const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines"]);
+// The four area/line *_scamin source-layers carry SCAMIN-bearing AREA/LINE
+// primitives (DEPCNT contours, PIPARE, etc.), routed there by the baker's
+// scaminLayer() so they bucket exactly like the point/text marks above. Their
+// no-SCAMIN counterparts stay in the original (areas/area_patterns/lines/
+// complex_lines) layers — single, always-in-band, NOT bucketed.
+const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines",
+  "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin"]);
 
 // The display zoom at which a 1:N (scamin) feature first becomes visible at the
 // given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
@@ -1502,7 +1508,31 @@ export class ChartCanvas extends HTMLElement {
     ];
     // Template chart layers (source "chart" is a placeholder rewritten per band
     // by expandChartLayers). Their `filter` is the intrinsic (base) filter.
-    return base.concat(this.complexLineLayers(), top, this.textLayers());
+    const tmpl = base.concat(this.complexLineLayers(), top, this.textLayers());
+    // SCAMIN AREA/LINE split: each template layer reading one of the four area/line
+    // source-layers is IMMEDIATELY FOLLOWED BY a clone reading the matching
+    // "<sl>_scamin" source-layer (id "<id>-scamin"). The original now only ever
+    // carries no-SCAMIN features (its source-layer is NOT in SCAMIN_BUCKET_LAYERS,
+    // so expandChartLayers leaves it single, always-in-band). The clone's _scamin
+    // source-layer IS in the set, so expandChartLayers buckets it into per-SCAMIN
+    // fractional-minzoom variants — that's what makes a SCAMIN area/line disappear
+    // past its 1:N scale. Adjacency preserves draw order. The clone tags _baseId =
+    // the original id so its band/bucket variants register in _variants under the
+    // ORIGINAL base id — every live restyle/visibility/filter update (setScheme's
+    // setIf, _eachLayer, setBaseFilter) that targets the original id automatically
+    // also hits the clone, so SCAMIN features restyle/toggle identically. (e.g.
+    // contour-labels for DEPCNT, which now live in lines_scamin; safety-contour /
+    // shallow-pattern reading areas_scamin; danger-boundary reading lines_scamin.)
+    const SCAMIN_SRC = new Set(["areas", "area_patterns", "lines", "complex_lines"]);
+    const withScamin = [];
+    for (const L of tmpl) {
+      withScamin.push(L);
+      const sl = L["source-layer"];
+      if (SCAMIN_SRC.has(sl)) {
+        withScamin.push({ ...L, id: L.id + "-scamin", "source-layer": sl + "_scamin", _baseId: L.id });
+      }
+    }
+    return withScamin;
   }
 
   // Expand the chart layer templates into one stacked set per band source
@@ -1553,8 +1583,11 @@ export class ChartCanvas extends HTMLElement {
           const mk = (suffix, baseFilter, minzoom) => {
             const id = L.id + "@" + set.name + suffix;
             this._layerBase[id] = baseFilter;
-            (this._variants[L.id] ||= []).push(id);
-            const v = { ...L, id, source: "chart-" + set.name, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, set.band, id) };
+            // Register under the ORIGINAL base id for a *_scamin clone (L._baseId),
+            // so every restyle/toggle keyed on the original id reaches the clone too.
+            (this._variants[L._baseId || L.id] ||= []).push(id);
+            const { _baseId, ...tmplL } = L; // _baseId is internal — keep it out of the MapLibre layer
+            const v = { ...tmplL, id, source: "chart-" + set.name, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, set.band, id) };
             if (minzoom != null) v.minzoom = minzoom; // band appears at its scale, not the baked floor
             if (capped) v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
             out.push(v);
@@ -1626,8 +1659,11 @@ export class ChartCanvas extends HTMLElement {
         const mk = (suffix, baseFilter, minzoom) => {
           const id = L.id + "@" + band.slug + suffix;
           this._layerBase[id] = baseFilter;
-          (this._variants[L.id] ||= []).push(id);
-          const v = { ...L, id, source: "chart-" + band.slug, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, band.slug, id) };
+          // Register under the ORIGINAL base id for a *_scamin clone (L._baseId),
+          // so every restyle/toggle keyed on the original id reaches the clone too.
+          (this._variants[L._baseId || L.id] ||= []).push(id);
+          const { _baseId, ...tmplL } = L; // _baseId is internal — keep it out of the MapLibre layer
+          const v = { ...tmplL, id, source: "chart-" + band.slug, filter: this.combineFilters(baseFilter), layout: this._variantLayout(L, band.slug, id) };
           if (minzoom != null) v.minzoom = minzoom;
           if (capped) v.maxzoom = band.max;
           out.push(v);
