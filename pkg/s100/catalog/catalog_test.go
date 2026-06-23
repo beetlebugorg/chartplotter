@@ -69,6 +69,27 @@ func TestLoadCompositeLineStyle(t *testing.T) {
 	}
 }
 
+func TestLoadColorProfileAndCatalog(t *testing.T) {
+	dir := catalogDir(t)
+	cat, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.LineStyles) == 0 || len(cat.AreaFills) == 0 {
+		t.Fatalf("catalog empty: %d lines, %d fills", len(cat.LineStyles), len(cat.AreaFills))
+	}
+	// NODTA day sRGB is 147,174,187 (see cmd/s101-color-diff).
+	if got := cat.Colors.Day["NODTA"]; got != (RGB{147, 174, 187}) {
+		t.Errorf("NODTA day = %+v, want {147 174 187}", got)
+	}
+	if got := cat.Colors.For("night")["CHBLK"]; got == (RGB{}) && len(cat.Colors.Night) == 0 {
+		t.Errorf("night palette empty")
+	}
+	if len(cat.Colors.Day) != len(cat.Colors.Night) || len(cat.Colors.Day) == 0 {
+		t.Errorf("palette sizes off: day=%d night=%d", len(cat.Colors.Day), len(cat.Colors.Night))
+	}
+}
+
 // TestLoadAllParse loads the whole catalogue and reports any definitions that
 // came out empty — those are gaps (e.g. a non-symbolFill area-fill variant) to
 // triage, matching the project's surface-the-gaps approach.
