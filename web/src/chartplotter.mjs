@@ -512,7 +512,7 @@ export class ChartPlotter extends HTMLElement {
     // If the user opened Charts before the renderer was ready (the drawer's
     // already on the charts panel), make sure the panel paints + the map sizes.
     if (this._section === "charts" && this._drawerOpen()) {
-      if (this._chartLib) this._chartLib.show(this._chartLib._selProvider || "noaa");
+      if (this._chartLib) this._chartLib.show(this._chartLib._selProvider);
       map.resize();
     }
     // Refresh-resume: if a provision job is still running on the server, re-attach
@@ -800,7 +800,7 @@ export class ChartPlotter extends HTMLElement {
     this._section = "charts";
     this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
     this.shadowRoot.getElementById("empty").hidden = true;
-    if (this._chartLib) this._chartLib.show(provider || "noaa");
+    if (this._chartLib) this._chartLib.show(provider); // no default provider — nothing selected until the user picks
     this.setDrawerOpen(true);
   }
 
@@ -1785,8 +1785,9 @@ export class ChartPlotter extends HTMLElement {
     r.getElementById("drawer").classList.toggle("wide", name === "charts"); // two-pane list+map
     r.getElementById("drawer").classList.toggle("set-wide", name === "settings"); // rail + content
     r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : (this._prod ? "Add charts" : "Chart library");
-    // Charts = the <chart-library> panel; open it on its current provider.
-    if (name === "charts" && this._chartLib) this._chartLib.show(this._chartLib._selProvider || "noaa");
+    // Charts = the <chart-library> panel; open it on its current provider (none
+    // selected by default — the user picks a source).
+    if (name === "charts" && this._chartLib) this._chartLib.show(this._chartLib._selProvider);
     // Feature-inspect is NOT auto-armed; it's a button inside the Advanced (dev)
     // tab. Any section switch disarms it (DevTools owns the inspect state).
     if (this._devTools) this._devTools.setInspectMode(false);

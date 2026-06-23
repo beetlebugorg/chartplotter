@@ -32,7 +32,7 @@ import {
   STYLE, prodBody, libraryBody, packSearch, providersCol, packsHeader,
   packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
   detailEmpty, detailUnknownSet, detailPack, installedActions, previewMapHost,
-  importDetail, dataFreshness, agreementModal, archiveList,
+  importDetail, dataFreshness, agreementModal, archiveList, millerBack,
 } from "./chart-library.view.mjs";
 
 // NOAA ENC User Agreement acceptance (localStorage). Exported so the shell can
@@ -77,6 +77,10 @@ export class ChartLibrary extends HTMLElement {
     // Selection state for the 3-pane drill-down.
     this._selProvider = null; // "noaa" | "ienc" | "user"
     this._selPack = null;     // set key of the selected pack
+    // Phone drill-down level: which single column shows on a narrow screen
+    // ("provider"|"pack"|"detail"). Ignored by desktop/tablet CSS (it shows all
+    // three). Selecting a row advances it; the phone back bar retreats it.
+    this._phoneLevel = "provider";
     this._cellQuery = "";     // the find-a-chart search box
     this._activeDistrict = null; // CG district whose preview is highlighted
 
@@ -136,7 +140,7 @@ export class ChartLibrary extends HTMLElement {
   // Make the charts UI active for a provider id ("noaa"|"ienc"|"user") and render.
   show(provider) {
     this._active = true;
-    if (provider) { this._selProvider = provider; this._selPack = null; }
+    if (provider) { this._selProvider = provider; this._selPack = null; this._phoneLevel = "provider"; }
     this.refresh();
   }
 
@@ -259,11 +263,45 @@ export class ChartLibrary extends HTMLElement {
       packsCol: this._renderPacksCol(),
       detailCol: this._renderDetailCol(),
       freshnessHtml: this._renderDataFreshness(),
+      level: this._phoneLevel,
+      backLabel: this._backLabel(),
     });
     this._wirePackSearch();
     this._wirePacks();
+    this._wireMillerBack();
     this._wireImport();
     this._renderPreview();
+  }
+
+  // The phone back bar's crumb: the title of the level we'd return TO. From the
+  // detail level it's the provider's pack list; from pack it's "Source".
+  _backLabel() {
+    if (this._phoneLevel === "detail") return this._providerName(this._selProvider || "noaa");
+    return "Source";
+  }
+
+  // Set the phone drill-down level + sync the .miller data-attr and back crumb in
+  // place (so column hot-swaps don't need a full re-render to stay correct).
+  _setPhoneLevel(level) {
+    this._phoneLevel = level;
+    const m = this.shadowRoot.querySelector(".miller");
+    if (!m) return;
+    m.dataset.level = level;
+    const crumb = m.querySelector(".miller-back .mb-crumb");
+    if (crumb) crumb.textContent = this._backLabel();
+  }
+
+  // Phone back bar: step UP a level (detail→pack, pack→provider). Wired each
+  // render (the bar is a stable child of .miller, untouched by column swaps).
+  _wireMillerBack() {
+    const bar = this.shadowRoot.getElementById("miller-back");
+    if (!bar) return;
+    const back = () => {
+      if (this._phoneLevel === "detail") this._setPhoneLevel("pack");
+      else if (this._phoneLevel === "pack") this._setPhoneLevel("provider");
+    };
+    bar.addEventListener("click", back);
+    bar.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); back(); } });
   }
 
   // Build (or tear down) the detail-pane preview map for the selected pack.
@@ -276,7 +314,7 @@ export class ChartLibrary extends HTMLElement {
   // Pane 1: providers. With an active search, providers that contain a match are
   // highlighted and the rest dimmed.
   _renderProvidersCol() {
-    const sel = this._selProvider || "noaa";
+    const sel = this._selProvider; // null until the user picks → nothing highlighted by default
     const hits = this._searchHits();
     const providers = this._providers().map((p) => {
       let cls = sel === p.id ? " sel" : "";
@@ -296,14 +334,15 @@ export class ChartLibrary extends HTMLElement {
 
   // Pane 2: the selected provider's packs.
   _renderPacksCol() {
-    const prov = this._selProvider || "noaa";
+    const prov = this._selProvider;
+    if (!prov) return packsCol({ header: "", rows: emptyRow("Select a source to see its charts.") });
     const packs = this._providerPacks(prov);
     const hits = this._searchHits();
     const q = (this._cellQuery || "").trim().toLowerCase();
     let rows;
     if (prov === "ienc" && this._ienc === undefined) {
       // Catalogue not loaded yet — fetch it, then refresh just this column.
-      if (!this._iencPromise) this._iencCatalog().then(() => { if (this._active && (this._selProvider || "noaa") === "ienc") this._refreshPacksCol(); });
+      if (!this._iencPromise) this._iencCatalog().then(() => { if (this._active && this._selProvider === "ienc") this._refreshPacksCol(); });
       rows = emptyRow("Loading inland ENC catalogue…");
     } else if (prov === "user") rows = packs.length ? packs.map((pk) => this._userPackRow(pk)).join("") : emptyRow("No imported charts yet — open this to add some.");
     else if (!packs.length) rows = emptyRow(prov === "ienc" ? "No inland ENC packs available." : "Nothing installed.");
@@ -346,7 +385,7 @@ export class ChartLibrary extends HTMLElement {
   _renderDetailCol() {
     const key = this._selPack;
     if (!key) {
-      if ((this._selProvider || "noaa") === "user") return this._renderImportDetail();
+      if (this._selProvider === "user") return this._renderImportDetail();
       return detailEmpty();
     }
     const busy = this.busy;
@@ -427,7 +466,10 @@ export class ChartLibrary extends HTMLElement {
     }
     const accent = getComputedStyle(this).getPropertyValue("--ui-accent").trim() || "#1565c0";
     const map = new window.maplibregl.Map({
+      // Static coverage preview inside a scrolling pane: kill all gesture handlers so
+      // a one-finger drag scrolls the pane (not the mini-map) on touch.
       container: host, attributionControl: false, cooperativeGestures: false,
+      interactive: false,
       style: {
         version: 8,
         sources: { osm: { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap" } },
@@ -456,6 +498,7 @@ export class ChartLibrary extends HTMLElement {
     const cols = r.querySelectorAll(".miller > .mcol");
     if (cols[1]) { cols[1].outerHTML = this._renderPacksCol(); this._wireMillerRows(); }
     this._updateDetail();
+    this._setPhoneLevel("pack"); // phone: advance provider → packs
   }
 
   // Pane 2 selection: choose a pack. Partial update.
@@ -464,6 +507,7 @@ export class ChartLibrary extends HTMLElement {
     this._activeDistrict = cg || null;
     this.shadowRoot.querySelectorAll(".m-row[data-pack]").forEach((el) => el.classList.toggle("sel", el.dataset.pack === key));
     this._updateDetail();
+    this._setPhoneLevel("detail"); // phone: advance packs → detail
   }
 
   // Rebuild only the detail column (+ its buttons + preview map), leaving the list
@@ -882,7 +926,10 @@ export class ChartLibrary extends HTMLElement {
     const r = this.shadowRoot;
     const file = r.getElementById("file"), drop = r.getElementById("drop"), pick = r.getElementById("pick");
     if (!file || !drop || !pick) return;
-    pick.onclick = () => file.click();
+    pick.onclick = (e) => { e.stopPropagation(); file.click(); };
+    // iOS/touch has no file drag-and-drop: make the whole drop zone a tap target
+    // that opens the picker (the inner button still works on desktop).
+    drop.onclick = () => file.click();
     file.onchange = () => { if (file.files.length) this.openFiles(file.files); file.value = ""; };
     drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
     drop.ondragleave = () => drop.classList.remove("over");
