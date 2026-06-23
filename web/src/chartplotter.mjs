@@ -569,21 +569,38 @@ export class ChartPlotter extends HTMLElement {
       visible: this._showChartRadar,
     });
 
-    // Close any pinned band-pill popup when clicking elsewhere (pill/cell clicks
-    // stopPropagation, so this only fires for clicks outside them). Also tuck the
-    // on-map search back into its tab when clicking away while it's empty (map
-    // clicks bubble out of the renderer's shadow root to here).
-    this.shadowRoot.addEventListener("click", (e) => {
-      this.shadowRoot.querySelectorAll(".sb-band-wrap.open").forEach((w) => w.classList.remove("open"));
-      const search = this.shadowRoot.getElementById("search");
-      if (search && !search.hidden) {
-        const onSearch = e.composedPath().some((n) => n === search || (n.id === "search-tab"));
-        if (!onSearch) {
-          search.hidden = true;
-          this.shadowRoot.getElementById("search-tab").classList.remove("on");
-        }
+    // Dismiss transient overlays — the cursor-pick report, the on-map search
+    // popover, pinned scale-band pills, and the Charts/Settings drawer — on any
+    // pointer or wheel action OUTSIDE them: grabbing the map to pan/zoom, or
+    // clicking elsewhere on the chrome. One captured document listener sees
+    // through every shadow boundary via composedPath(); each overlay closes only
+    // when the gesture didn't land inside it, so its own controls keep working.
+    const root = this.shadowRoot;
+    this._dismissOverlays = (e) => {
+      const path = e.composedPath();
+      const inside = (el) => !!el && path.includes(el);
+      // Cursor-pick floating panel.
+      if (this._pickEl && !this._pickEl.hidden && !inside(this._pickEl)) this._closePick();
+      // On-map search popover (its tab toggles it, so leave tab clicks be).
+      const search = root.getElementById("search");
+      if (search && !search.hidden && !inside(search) && !inside(root.getElementById("search-tab"))) {
+        search.hidden = true;
+        root.getElementById("search-tab").classList.remove("on");
       }
-    });
+      // Pinned scale-band pills (pill/cell clicks land inside their wrap).
+      root.querySelectorAll(".sb-band-wrap.open").forEach((w) => { if (!inside(w)) w.classList.remove("open"); });
+      // Charts/Settings drawer — but not while the NOAA agreement gate is up (it
+      // owns the interaction; Escape or its buttons resolve it), and not on its
+      // own rail buttons (those toggle it via toggleSection()).
+      if (this._drawerOpen() && !(this._chartLib && this._chartLib.agreementOpen)
+          && !inside(root.getElementById("drawer"))
+          && !inside(root.getElementById("charts-btn"))
+          && !inside(root.getElementById("settings-btn"))) {
+        this.closeDrawer();
+      }
+    };
+    document.addEventListener("pointerdown", this._dismissOverlays, true);
+    document.addEventListener("wheel", this._dismissOverlays, { capture: true, passive: true });
   }
 
 
