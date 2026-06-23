@@ -28,6 +28,7 @@
 
 import { esc, fmtIssue } from "../lib/util.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "../data/zip-import.mjs";
+import { seaColor, landColor, coastColor } from "../chart-canvas/s52-style.mjs"; // our own basemap palette (consistent with the chart)
 import {
   STYLE, prodBody, libraryBody, packSearch, providersCol, packsHeader,
   packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
@@ -38,6 +39,20 @@ import {
 // NOAA ENC User Agreement acceptance (localStorage). Exported so the shell can
 // share the same key if it ever needs to read it.
 export const LS_AGREE = "chartplotter:enc-agreement";
+
+// The GSHHG coastline basemap (the same offline land/lakes the main map uses),
+// fetched ONCE and shared across every coverage-preview snapshot so they all
+// look consistent. Resolves null when absent (best-effort — preview then shows
+// just the coverage box on the sea background).
+let _coastlinePromise = null;
+function loadCoastline(assets) {
+  if (!_coastlinePromise) {
+    _coastlinePromise = fetch(assets + "basemap/coastline.geojson")
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }
+  return _coastlinePromise;
+}
 // NOAA's ENC distribution pages + the User Agreement that must be displayed and
 // accepted before downloading ENCs (charts.noaa.gov/ENCs/ENCs.shtml §3).
 export const NOAA_ENC_URL = "https://www.charts.noaa.gov/ENCs/ENCs.shtml";
@@ -109,7 +124,11 @@ export class ChartLibrary extends HTMLElement {
     this._archive = new Map();  // cell name -> {blob, entry, updates} from opened zips
     this._selected = new Set(); // cell names ticked for import
 
-    this._previewMap = null;    // the detail-pane mini coverage map (MapLibre)
+    this._previewMap = null;    // legacy live preview map (unused; kept for safe teardown)
+    this._previewCache = new Map(); // pack key → coverage snapshot dataURL (rendered once)
+    this._previewKey = null;    // pack key the detail preview currently targets
+    this._snapEl = null; this._snapMap = null; // in-flight off-screen snapshot map
+    this._lightbox = null; this._lightboxKey = null; // tap-to-enlarge overlay
     this._prod = false;         // prod (prebaked) build: import-only Library
     this._active = false;       // is the charts UI currently shown?
   }
@@ -120,8 +139,14 @@ export class ChartLibrary extends HTMLElement {
 
   disconnectedCallback() { this.teardownPreview(); }
 
-  // Tear down the detail-pane OSM preview map (called when the drawer closes).
+  // Tear down the detail-pane preview (called when the drawer closes): drop any
+  // in-flight off-screen snapshot map + the enlarge overlay. (Cached snapshots are
+  // kept so reopening is instant.)
   teardownPreview() {
+    if (this._snapMap) { try { this._snapMap.remove(); } catch (e) { /* ignore */ } this._snapMap = null; }
+    if (this._snapEl && this._snapEl.parentNode) this._snapEl.parentNode.removeChild(this._snapEl);
+    this._snapEl = null;
+    this._closeLightbox();
     if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
   }
 
@@ -304,11 +329,123 @@ export class ChartLibrary extends HTMLElement {
     bar.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); back(); } });
   }
 
-  // Build (or tear down) the detail-pane preview map for the selected pack.
+  // Show the detail-pane coverage preview for the selected pack: a STATIC image
+  // snapshotted once (no live embedded map). Cached per pack so revisits are
+  // instant; user packs have no coverage map.
   _renderPreview() {
     const pk = this._selectedPack();
-    if (pk && pk.kind !== "user") this._buildPreviewMap(this._packCoverage(pk));
-    else if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
+    if (pk && pk.kind !== "user") { this._renderPreviewImage(pk); return; }
+    this._previewKey = null;
+    const h = this.shadowRoot.getElementById("preview-map");
+    if (h) h.innerHTML = "";
+  }
+
+  // Paint the cached snapshot if we have one; otherwise show a placeholder and
+  // render one off-screen, then paint it (only if the pack is still selected).
+  _renderPreviewImage(pk) {
+    const host = this.shadowRoot.getElementById("preview-map");
+    if (!host) return;
+    const key = pk.key;
+    this._previewKey = key;
+    const cached = this._previewCache.get(key);
+    if (cached) { this._setPreviewImg(host, cached); return; }
+    host.innerHTML = `<div class="prev-ph">Rendering coverage…</div>`;
+    this._snapshotPreview(this._packCoverage(pk)).then((url) => {
+      if (!url) return;
+      this._previewCache.set(key, url);
+      if (this._previewKey === key) {
+        const h = this.shadowRoot.getElementById("preview-map");
+        if (h) this._setPreviewImg(h, url);
+      }
+    }).catch(() => {});
+  }
+
+  _setPreviewImg(host, url) {
+    host.innerHTML = "";
+    const img = document.createElement("img");
+    img.className = "prev-img"; img.src = url; img.alt = "Chart coverage"; img.title = "Tap to enlarge";
+    img.addEventListener("click", () => this._openPreviewLightbox(url));
+    host.appendChild(img);
+  }
+
+  // Render the coverage ONCE over our own GSHHG coastline basemap (same land/sea
+  // colours as the chart) into an off-screen MapLibre map, snapshot the canvas to
+  // a PNG data URL, then tear the map down. Resolves null on failure.
+  async _snapshotPreview(cov) {
+    if (!window.maplibregl) return null;
+    // MapLibre's CSS must live in this shadow root for the canvas to size.
+    if (!this.shadowRoot.querySelector("link[data-mlcss]")) {
+      const l = document.createElement("link");
+      l.rel = "stylesheet"; l.href = this._assets + "vendor/maplibre-gl.css"; l.setAttribute("data-mlcss", "");
+      this.shadowRoot.appendChild(l);
+    }
+    const coast = await loadCoastline(this._assets); // module-cached; null if absent
+    const accent = getComputedStyle(this).getPropertyValue("--ui-accent").trim() || "#1565c0";
+    // Off-screen but LAID OUT (display:none won't render WebGL).
+    const el = document.createElement("div");
+    el.style.cssText = "position:absolute;left:-10000px;top:0;width:380px;height:200px;pointer-events:none";
+    this.shadowRoot.appendChild(el);
+    const sources = { cov: { type: "geojson", data: cov.fc } };
+    const layers = [{ id: "bg", type: "background", paint: { "background-color": seaColor({}) } }];
+    if (coast) {
+      sources.coast = { type: "geojson", data: coast };
+      layers.push(
+        { id: "coast-land", type: "fill", source: "coast", filter: ["==", ["get", "level"], 1], paint: { "fill-color": landColor({}) } },
+        { id: "coast-lake", type: "fill", source: "coast", filter: ["==", ["get", "level"], 2], paint: { "fill-color": seaColor({}) } },
+        { id: "coast-line", type: "line", source: "coast", filter: ["<=", ["get", "level"], 2], paint: { "line-color": coastColor({}), "line-width": 1.1 } },
+      );
+    }
+    layers.push(
+      { id: "cov-fill", type: "fill", source: "cov", paint: { "fill-color": accent, "fill-opacity": 0.2 } },
+      { id: "cov-line", type: "line", source: "cov", paint: { "line-color": accent, "line-width": 1.2, "line-opacity": 0.95 } },
+    );
+    const map = new window.maplibregl.Map({
+      container: el, interactive: false, attributionControl: false, fadeDuration: 0, preserveDrawingBuffer: true,
+      style: { version: 8, sources, layers },
+      center: cov.bounds ? [(cov.bounds[0] + cov.bounds[2]) / 2, (cov.bounds[1] + cov.bounds[3]) / 2] : [-98, 39],
+      zoom: 3,
+    });
+    this._snapEl = el; this._snapMap = map;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return; done = true;
+        let url = null;
+        try { url = map.getCanvas().toDataURL("image/png"); } catch (e) { /* ignore */ }
+        try { map.remove(); } catch (e) { /* ignore */ }
+        if (el.parentNode) el.parentNode.removeChild(el);
+        if (this._snapEl === el) { this._snapEl = null; this._snapMap = null; }
+        resolve(url);
+      };
+      map.on("load", () => {
+        if (cov.bounds) map.fitBounds([[cov.bounds[0], cov.bounds[1]], [cov.bounds[2], cov.bounds[3]]], { padding: 24, duration: 0 });
+        map.once("idle", finish);
+      });
+      setTimeout(finish, 2500); // safety: never hang if idle doesn't fire
+    });
+  }
+
+  // Tap-to-enlarge: a full-viewport overlay (appended to the body so it escapes
+  // the drawer's stacking context). Click anywhere or Esc to dismiss.
+  _openPreviewLightbox(url) {
+    this._closeLightbox();
+    const ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;" +
+      "background:rgba(0,0,0,.72);padding:24px;box-sizing:border-box;cursor:zoom-out";
+    const img = document.createElement("img");
+    img.src = url; img.alt = "Chart coverage";
+    img.style.cssText = "max-width:100%;max-height:100%;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.5)";
+    ov.appendChild(img);
+    ov.addEventListener("click", () => this._closeLightbox());
+    this._lightboxKey = (e) => { if (e.key === "Escape") this._closeLightbox(); };
+    document.addEventListener("keydown", this._lightboxKey);
+    document.body.appendChild(ov);
+    this._lightbox = ov;
+  }
+
+  _closeLightbox() {
+    if (this._lightbox) { this._lightbox.remove(); this._lightbox = null; }
+    if (this._lightboxKey) { document.removeEventListener("keydown", this._lightboxKey); this._lightboxKey = null; }
   }
 
   // Pane 1: providers. With an active search, providers that contain a match are
@@ -450,41 +587,6 @@ export class ChartLibrary extends HTMLElement {
       if ([w, s, e, n].every(Number.isFinite)) feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
     }
     return { fc: { type: "FeatureCollection", features: feats }, bounds: pk.bbox || null };
-  }
-
-  // Build the detail-pane preview: a real OSM map framed to the pack with every
-  // cell's coverage footprint outlined. Rebuilt per selection.
-  _buildPreviewMap(cov) {
-    const host = this.shadowRoot.getElementById("preview-map");
-    if (!host || !window.maplibregl) return;
-    if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
-    // MapLibre's stylesheet must live in THIS shadow root for the canvas to size.
-    if (!this.shadowRoot.querySelector("link[data-mlcss]")) {
-      const l = document.createElement("link");
-      l.rel = "stylesheet"; l.href = this._assets + "vendor/maplibre-gl.css"; l.setAttribute("data-mlcss", "");
-      this.shadowRoot.appendChild(l);
-    }
-    const accent = getComputedStyle(this).getPropertyValue("--ui-accent").trim() || "#1565c0";
-    const map = new window.maplibregl.Map({
-      // Static coverage preview inside a scrolling pane: kill all gesture handlers so
-      // a one-finger drag scrolls the pane (not the mini-map) on touch.
-      container: host, attributionControl: false, cooperativeGestures: false,
-      interactive: false,
-      style: {
-        version: 8,
-        sources: { osm: { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap" } },
-        layers: [{ id: "osm", type: "raster", source: "osm" }],
-      },
-      center: cov.bounds ? [(cov.bounds[0] + cov.bounds[2]) / 2, (cov.bounds[1] + cov.bounds[3]) / 2] : [-98, 39],
-      zoom: 3,
-    });
-    this._previewMap = map;
-    map.on("load", () => {
-      map.addSource("cov", { type: "geojson", data: cov.fc });
-      map.addLayer({ id: "cov-fill", type: "fill", source: "cov", paint: { "fill-color": accent, "fill-opacity": 0.18 } });
-      map.addLayer({ id: "cov-line", type: "line", source: "cov", paint: { "line-color": accent, "line-width": 1, "line-opacity": 0.9 } });
-      if (cov.bounds) map.fitBounds([[cov.bounds[0], cov.bounds[1]], [cov.bounds[2], cov.bounds[3]]], { padding: 16, duration: 0 });
-    });
   }
 
   // Pane 1 selection: choose a provider. Partial update — swap the packs + detail

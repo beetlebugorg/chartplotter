@@ -60,9 +60,11 @@ export const STYLE = `
   .m-badge.queued { background:var(--ui-surface-2); color:var(--ui-text-dim); }
   .m-row.dim .m-badge { opacity:.7; }
   .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; line-height:1.5; }
-  /* detail pane — real OSM preview map with the pack's coverage outlined */
-  .prev-map { width:100%; height:260px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; }
-  .prev-map canvas { border-radius:8px; }
+  /* detail pane — a STATIC coverage snapshot rendered once over our own coastline
+     basemap (no live embedded map), shown small and clickable to enlarge. */
+  .prev-map { width:100%; height:150px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; position:relative; }
+  .prev-img { display:block; width:100%; height:100%; object-fit:cover; cursor:zoom-in; touch-action:manipulation; }
+  .prev-ph { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:var(--ui-text-faint); font-size:12px; }
   .m-detail-body { padding:12px 2px 2px; }
   .m-detail-title { font-weight:700; font-size:15px; }
   .m-detail-sub { color:var(--ui-text-dim); font-size:12px; line-height:1.45; margin-top:3px; }
