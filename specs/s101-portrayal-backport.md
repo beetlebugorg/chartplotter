@@ -134,12 +134,13 @@ S-101 also adds 198 symbols + 12 line styles we don't have. Takeaway: **the artw
 
 - **gopher-lua viability (Workstream D, the biggest unknown): PASS.** `cmd/lua-smoke` compiled all **216** `Rules/*.lua` with `github.com/yuin/gopher-lua` v1.1.2 (pure-Go Lua 5.1) — zero parse failures. No 5.2+ constructs anywhere; the VM choice is safe. (Compile-only; runtime host-API behaviour is Workstream D proper.)
 - **Colour seam (Workstream A): PASS, exact.** `cmd/s101-color-diff` compared all 201 token×scheme cells (67 colours × Day/Dusk/Night); the S-101 `colorProfile.xml` sRGB is **byte-identical** to our DAI CIE→sRGB output. Colour profile is a clean drop-in; **0 gaps**.
+- **SVG rasterization + CSS-class colour resolution (Workstream B): PASS, pure Go.** `cmd/svg-raster-test` flattens an S-101 symbol (resolve `<?xml-stylesheet?>` CSS classes → inline `style`, strip `.layout` debug boxes) and rasterizes with `srwiley/oksvg`+`rasterx` (pure Go, wasm-safe). Output matches the `librsvg` reference. Element set is tiny — only `path/rect/circle/line/g`, **no text/gradients/use/images**. Two oksvg defects found + worked around in the flattener: (1) it ignores a non-zero `viewBox` origin → normalize to `0 0 W H` + wrap content in `translate(-minX -minY)`; (2) it applies `stroke-width` in device px without scaling by the draw transform → pre-multiply `stroke-width` by the px/mm scale. No cgo/external rasterizer needed. Caveats for the production flattener: also scale `stroke-width` carried in `style`/CSS or inherited from a parent `<g>` (corpus uses presentation attrs); honour the CSS cascade where an inline presentation attr coexists with a class (e.g. `CBLARE52`).
 
 ## Phasing
 
 1. ~~**Inventory & coverage matrix**~~ — **DONE** (Phase 1 result above; `cmd/portrayal-inventory` → `specs/s101-coverage-matrix.md`).
 2. ~~**Colours** (A)~~ — **DONE** (exact match, `cmd/s101-color-diff`). Remaining: wire `colorProfile.xml` into `assets/colortables.go` as the source (currently still DAI-backed).
-3. **SVG symbols** (B) — rasterizer + a handful of symbols visually diffed vs current sprites.
+3. ~~**SVG symbols** (B) — rasterizer de-risk~~ — **DONE** (`cmd/svg-raster-test`; oksvg+rasterx, CSS resolution, matches librsvg). Remaining: production flattener + wire into `assets/sprites.go` for all 724 symbols + sprite atlas/anchors.
 4. **Line styles + area fills** (C).
 5. **Static-artwork checkpoint** — render via a *temporary* keep-our-LUPT path to prove the artwork is correct independent of Lua.
 6. **Lua host API** (D, step 1) — enumerate + stub host interface; get `main.lua` dispatching to a trivial rule.
