@@ -37,6 +37,22 @@ export class ChartFinder {
 
   setVisible(on) { this._visible = !!on; this.update(); }
 
+  // Cascading safe-area + bottom-bar tokens (px), read off the chip host (they
+  // pierce shadow boundaries from the shell). --botbar-h already includes
+  // env(safe-area-inset-bottom). Falls back to 0 on engines without the tokens.
+  _insets() {
+    const el = this.host;
+    if (!el || !el.isConnected) return { top: 0, right: 0, bottom: 0, left: 0 };
+    const px = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+    const cs = getComputedStyle(el);
+    return {
+      top: px(cs.getPropertyValue("--sa-top")),
+      right: px(cs.getPropertyValue("--sa-right")),
+      bottom: px(cs.getPropertyValue("--botbar-h")),
+      left: px(cs.getPropertyValue("--sa-left")),
+    };
+  }
+
   // Coalesce a flurry of move events into one update per animation frame.
   schedule() {
     if (this._raf) return;
@@ -60,6 +76,13 @@ export class ChartFinder {
     const W = c.clientWidth, H = c.clientHeight;
     if (!W || !H) return;
     const cx = W / 2, cy = H / 2;
+    // Per-side inset so chips never land under the notch / rounded corners / home
+    // indicator / bottom tab bar. MARGIN is the base edge gap; the safe-area +
+    // bottom-bar tokens (which cascade into the shell) add to it per side.
+    const sa = this._insets();
+    // Extra bottom reserve so edge chips clear the floating bottom chrome (the
+    // centred data card + the corner button row), not just the safe-area inset.
+    const mL = MARGIN + sa.left, mR = MARGIN + sa.right, mT = MARGIN + sa.top, mB = MARGIN + sa.bottom + 80;
     const v = map.getBounds();
     const vw = v.getWest(), vs = v.getSouth(), ve = v.getEast(), vn = v.getNorth();
     const ctr = map.getCenter();
@@ -82,7 +105,7 @@ export class ChartFinder {
     targets.sort((a, b) => a.distNm - b.distNm); // nearest first → labels the cluster
     const clusters = [];
     for (const t of targets) {
-      t.pos = edgePoint(cx, cy, t.bearing, W, H, MARGIN);
+      t.pos = edgePoint(cx, cy, t.bearing, W, H, mL, mR, mT, mB);
       const hit = clusters.find((cl) => Math.hypot(cl.pos.x - t.pos.x, cl.pos.y - t.pos.y) < MERGE_PX);
       if (hit) hit.items.push(t);
       else clusters.push({ pos: t.pos, bearing: t.bearing, items: [t] });
@@ -129,14 +152,16 @@ function haversineNm(lat1, lon1, lat2, lon2) {
 
 // Intersection of a ray from (cx,cy) at compass `bearing` with the inset screen
 // rectangle — where the edge chip sits. Screen y is down; bearing 0 = up.
-function edgePoint(cx, cy, brg, W, H, m) {
+// Per-side margins (left/right/top/bottom) keep chips out of the safe-area
+// insets (notch / rounded corners / home indicator / bottom bar).
+function edgePoint(cx, cy, brg, W, H, mL, mR, mT, mB) {
   const r = brg * Math.PI / 180;
   const dx = Math.sin(r), dy = -Math.cos(r);
   let t = Infinity;
-  if (dx > 1e-9) t = Math.min(t, (W - m - cx) / dx);
-  else if (dx < -1e-9) t = Math.min(t, (m - cx) / dx);
-  if (dy > 1e-9) t = Math.min(t, (H - m - cy) / dy);
-  else if (dy < -1e-9) t = Math.min(t, (m - cy) / dy);
+  if (dx > 1e-9) t = Math.min(t, (W - mR - cx) / dx);
+  else if (dx < -1e-9) t = Math.min(t, (mL - cx) / dx);
+  if (dy > 1e-9) t = Math.min(t, (H - mB - cy) / dy);
+  else if (dy < -1e-9) t = Math.min(t, (mT - cy) / dy);
   if (!isFinite(t) || t < 0) t = 0;
   return { x: cx + dx * t, y: cy + dy * t };
 }

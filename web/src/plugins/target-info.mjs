@@ -17,8 +17,12 @@ const STYLE = `
   .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sub { color: var(--ui-text-dim, #888); font-size: 11px; font-weight: 500; }
   .close { flex: none; cursor: pointer; border: none; background: none; color: var(--ui-text-dim, #888);
-    font-size: 16px; line-height: 1; padding: 0 2px; }
+    font-size: 16px; line-height: 1; padding: 0; margin: -6px -4px -6px 0;
+    min-width: var(--tap-min, 44px); min-height: var(--tap-min, 44px);
+    display: inline-flex; align-items: center; justify-content: center; border-radius: 8px;
+    touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   .close:hover { color: var(--ui-accent, #1565c0); }
+  .close:active { background: var(--ui-hover, rgba(0,0,0,.08)); color: var(--ui-accent, #1565c0); }
   .rows { padding: 8px 12px 10px; display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; }
   .k { color: var(--ui-text-dim, #888); white-space: nowrap; }
   .v { text-align: right; font-variant-numeric: tabular-nums; }
@@ -59,15 +63,34 @@ export class TargetInfo extends HTMLElement {
     const card = $("card");
     card.hidden = false;
     this.hidden = false;
-    // Position near the tap, clamped to stay on screen.
+    // Position near the tap, clamped to stay on screen — and clear of the notch /
+    // rounded corners / home indicator / bottom tab bar via the safe-area tokens.
+    const sa = this._insets();
+    const M = 8;
+    const minX = M + sa.left, minY = M + sa.top;
     const r = this.getBoundingClientRect();
     const cw = card.offsetWidth, ch = card.offsetHeight;
+    const maxRight = r.width - M - sa.right, maxBottom = r.height - M - sa.bottom;
     let x = (info.x ?? r.width / 2) + 14;
     let y = (info.y ?? r.height / 2) + 14;
-    if (x + cw > r.width - 8) x = (info.x ?? 0) - cw - 14;
-    if (y + ch > r.height - 8) y = r.height - ch - 8;
-    card.style.left = Math.max(8, x) + "px";
-    card.style.top = Math.max(8, y) + "px";
+    if (x + cw > maxRight) x = (info.x ?? 0) - cw - 14;
+    if (y + ch > maxBottom) y = maxBottom - ch;
+    card.style.left = Math.max(minX, x) + "px";
+    card.style.top = Math.max(minY, y) + "px";
+  }
+
+  // Cascading safe-area + bottom-bar tokens (px) for clamping the card off the
+  // notch / rounded corners / home indicator / bottom tab bar. --botbar-h already
+  // includes env(safe-area-inset-bottom). Falls back to 0.
+  _insets() {
+    const px = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+    const cs = getComputedStyle(this);
+    return {
+      top: px(cs.getPropertyValue("--sa-top")),
+      right: px(cs.getPropertyValue("--sa-right")),
+      bottom: px(cs.getPropertyValue("--botbar-h")),
+      left: px(cs.getPropertyValue("--sa-left")),
+    };
   }
 
   hide() {

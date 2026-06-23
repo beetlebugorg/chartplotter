@@ -14,10 +14,12 @@ const STYLE = `
     background: var(--ui-surface-2, #21262d); color: var(--ui-text, #e6edf3);
     border: 1px solid var(--ui-border, #30363d); border-radius: 6px;
     padding: 5px 10px; font: inherit; cursor: pointer;
+    touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
   }
   button:hover { background: var(--ui-hover, #30363d); }
   button.primary { background: var(--ui-accent, #2f81f7); color: var(--ui-accent-text, #fff); border-color: transparent; }
-  button.icon { padding: 4px 7px; line-height: 1; }
+  button.icon { padding: 4px 7px; line-height: 1; min-width: var(--tap-min, 44px); min-height: var(--tap-min, 44px); display: inline-flex; align-items: center; justify-content: center; }
+  button.icon[data-act=del] { padding: 4px 11px; }
   .empty { color: var(--ui-text-dim, #8b949e); padding: 18px 4px; text-align: center; }
 
   .row {
@@ -30,10 +32,11 @@ const STYLE = `
   .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
   .badge { font-size: 11px; font-weight: 500; color: var(--ui-text-dim, #8b949e); text-transform: uppercase; letter-spacing: .03em; }
   .meta { color: var(--ui-text-dim, #8b949e); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .actions { display: flex; gap: 5px; flex: none; }
+  .actions { display: flex; align-items: center; gap: 8px; flex: none; }
 
   pre.sniff {
     margin: -4px 0 8px; max-height: 160px; overflow: auto;
+    overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
     background: var(--ui-bg, #0d1117); border: 1px solid var(--ui-border, #30363d);
     border-radius: 8px; padding: 8px; font-size: 11px; line-height: 1.45;
     color: var(--ui-text-dim, #8b949e); white-space: pre-wrap; word-break: break-all;
@@ -46,6 +49,7 @@ const STYLE = `
   .field input[type=text], .field input[type=number] {
     flex: 1; background: var(--ui-bg, #0d1117); color: var(--ui-text, #e6edf3);
     border: 1px solid var(--ui-border, #30363d); border-radius: 6px; padding: 5px 8px; font: inherit;
+    font-size: 16px; /* >=16px or iOS zooms the page on focus */
   }
   .field .static { color: var(--ui-text-dim, #8b949e); }
   .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }

@@ -31,7 +31,7 @@ export const STYLE = `
   .btn.sm { padding:3px 10px; font-size:12px; white-space:nowrap; }
 
   /* Feature inspector result panel (the picked feature card(s) + cycler). */
-  .ins-body { overflow:auto; padding:12px 0 0; }
+  .ins-body { overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:12px 0 0; }
   .ins-empty { color:var(--ui-text-faint); text-align:center; padding:24px 10px; }
   .ins-lock { color:var(--ui-text-dim); font-size:12px; text-align:center; padding:0 0 8px; }
   .ins-cycler { display:flex; align-items:center; justify-content:center; gap:10px; padding:0 0 10px; color:var(--ui-text-dim); font-size:12px; }
@@ -52,6 +52,19 @@ export const STYLE = `
   .ins-kv { display:grid; grid-template-columns:minmax(80px,auto) 1fr; gap:3px 12px; padding:8px 10px; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
   .ins-kv .k { color:var(--ui-text-dim); }
   .ins-kv .v { color:var(--ui-text); word-break:break-word; }
+  .dev-tools .btn, .ins-feat.ins-clickable { touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
+  /* Touch hit areas: cycler/area buttons and clickable feature cards reach 44px. */
+  @media (pointer:coarse) {
+    .dev-tools .btn, .dev-tools .btn.sm { min-height:var(--tap-min,44px); }
+    .ins-cycler .btn { min-width:var(--tap-min,44px); }
+    .ins-feat.ins-clickable .ins-title { min-height:var(--tap-min,44px); align-items:center; }
+  }
+  /* Touch-only inspector instructions (hover/SHIFT have no analogue). */
+  .ins-touch-help { display:none; }
+  @media (hover:none) {
+    .ins-mouse-help { display:none; }
+    .ins-touch-help { display:block; }
+  }
 `;
 
 // The Rebake section: one wide "Rebuild all charts" button (disabled while busy).
@@ -65,19 +78,23 @@ export function rebakeSection(busy) {
 
 // The Feature-inspector section: the on/off toggle button + the "Copy feature
 // debug" button (enabled only while inspecting). `inspecting` drives the labels.
-export function inspectorSection(inspecting) {
+// `selectingArea` drives the touch "Select area" toggle (box-capture on touch,
+// where there is no SHIFT+drag). Help text is split mouse/touch (CSS-gated).
+export function inspectorSection(inspecting, selectingArea) {
   return `<section class="dev-sec">
     <div class="dev-h">Feature inspector</div>
-    <button id="dev-inspect" class="btn wide${inspecting ? " on" : ""}">${inspecting ? "● Inspecting — click to stop" : "Inspect features"}</button>
+    <button id="dev-inspect" class="btn wide${inspecting ? " on" : ""}">${inspecting ? "● Inspecting — tap to stop" : "Inspect features"}</button>
+    <button id="dev-area" class="btn wide${selectingArea ? " on" : ""}"${inspecting ? "" : " disabled"} title="Drag a box on the map to capture every feature inside it">${selectingArea ? "● Drag a box on the map" : "Select area"}</button>
     <button id="dev-feat" class="btn wide"${inspecting ? "" : " disabled"} title="Copy the selected feature's source/geometry/attributes to clipboard + server">Copy feature debug</button>
-    <p class="dev-note">Hover a feature to highlight it · click to lock · SHIFT+drag to capture an area.</p>
+    <p class="dev-note ins-mouse-help">Hover a feature to highlight it · click to lock · SHIFT+drag to capture an area.</p>
+    <p class="dev-note ins-touch-help">Tap a feature to inspect it · tap again to release · use “Select area” then drag a box to capture a region.</p>
   </section>`;
 }
 
 // The whole dev-tools panel skeleton: rebake + inspector sections + the
 // inspect-result container (filled separately by the logic on hover/click).
-export function devToolsPanel(busy, inspecting) {
-  return `<div class="dev-tools">${rebakeSection(busy)}${inspectorSection(inspecting)}<div id="inspect-body" class="ins-body"></div></div>`;
+export function devToolsPanel(busy, inspecting, selectingArea) {
+  return `<div class="dev-tools">${rebakeSection(busy)}${inspectorSection(inspecting, selectingArea)}<div id="inspect-body" class="ins-body"></div></div>`;
 }
 
 // One inspected feature card. `label`/`acr`/`named` come from the logic's injected

@@ -31,7 +31,7 @@ import { devToolsPanel, featureCard, lockNote, emptyHint, areaHint, areaMore, cy
 
 export { STYLE };
 
-const INSPECT_HINT = "Hover to inspect · click to lock · SHIFT+drag to capture an area.";
+const INSPECT_HINT = "Point at (or tap) a feature to inspect it. Use “Select area” / SHIFT+drag to capture a region.";
 
 // Is this MapLibre source one of our chart vector sources? (realtime "chart" or a
 // legacy per-band "chart-<band>".) Local copy so this module needn't import the shell.
@@ -82,6 +82,7 @@ export class DevTools {
     this._active = false;  // the Advanced tab is currently showing
     // Inspector state (lifted from the shell).
     this._inspectMode = false;
+    this._selectingArea = false; // touch box-capture toggle armed (no SHIFT on touch)
     this._inspectLocked = false;
     this._inspectFeats = [];
     this._inspectIdx = 0;
@@ -126,10 +127,11 @@ export class DevTools {
     const busy = this._isBusy();
     // The dialog's shadow has its own sheet; inject our chrome once per render so
     // the dev-tools + inspector classes resolve inside it.
-    host.innerHTML = `<style>${STYLE}</style>${devToolsPanel(busy, this._inspectMode)}`;
+    host.innerHTML = `<style>${STYLE}</style>${devToolsPanel(busy, this._inspectMode, this._selectingArea)}`;
     const q = (id) => host.querySelector("#" + id);
     const rebuild = q("dev-rebuild"); if (rebuild && !rebuild.disabled) rebuild.onclick = (e) => this._rebuildAllPerBand(e.currentTarget);
     const inspect = q("dev-inspect"); if (inspect) inspect.onclick = () => this.setInspectMode(!this._inspectMode);
+    const area = q("dev-area"); if (area && !area.disabled) area.onclick = () => this._toggleSelectArea();
     const feat = q("dev-feat"); if (feat && !feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
     // If inspect is on with a live selection, repaint the result panel.
     if (this._inspectMode && this._inspectFeats.length) this._renderInspect();
@@ -202,55 +204,80 @@ export class DevTools {
   _wireMap() {
     const map = this._map;
     if (!map) return;
-    let boxStart = null, boxEl = null;
-    this._onMouseDown = (e) => {
-      if (!this._inspectMode || this._areaCleanup || !e.originalEvent.shiftKey) return;
-      e.preventDefault();
+    let boxStart = null, boxEl = null, dragging = false;
+    // Map a DOM pointer event to a MapLibre canvas point (works for mouse + touch,
+    // unlike MapLibre's synthesized mouse* events which don't fire on touch drags).
+    const ptOf = (ev) => {
+      const r = map.getCanvasContainer().getBoundingClientRect();
+      return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+    };
+    // A drag should capture an area when: SHIFT is held (mouse), or the explicit
+    // "Select area" toggle is armed (touch, where there's no SHIFT).
+    const wantBox = (ev) => this._inspectMode && !this._areaCleanup && (ev.shiftKey || this._selectingArea);
+
+    this._onPointerDown = (ev) => {
+      if (!wantBox(ev)) return;
+      ev.preventDefault();
       map.dragPan.disable();
-      boxStart = e.point;
+      dragging = true;
+      boxStart = ptOf(ev);
       boxEl = document.createElement("div");
       boxEl.style.cssText = "position:absolute;z-index:1000;border:2px solid #ff5252;background:rgba(255,82,82,.12);pointer-events:none;box-sizing:border-box;border-radius:2px;";
-      map.getContainer().appendChild(boxEl);
+      map.getCanvasContainer().appendChild(boxEl);
+      try { ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
     };
-    this._onMouseMove = (e) => {
+    this._onPointerMove = (ev) => {
       if (boxStart && boxEl) {
-        const p = e.point;
+        const p = ptOf(ev);
         boxEl.style.left = Math.min(boxStart.x, p.x) + "px";
         boxEl.style.top = Math.min(boxStart.y, p.y) + "px";
         boxEl.style.width = Math.abs(p.x - boxStart.x) + "px";
         boxEl.style.height = Math.abs(p.y - boxStart.y) + "px";
         return;
       }
+      // Hover preview is a mouse affordance only (no hovering on touch).
+      if (ev.pointerType && ev.pointerType !== "mouse") return;
       if (!this._inspectMode || this._inspectLocked || this._areaCleanup) return;
-      this._inspectAt(e.point, false);
+      this._inspectAt(ptOf(ev), false);
     };
-    this._onMouseUp = (e) => {
-      if (!boxStart) return;
-      const a = boxStart, b = e.point;
+    this._onPointerUp = (ev) => {
+      if (!boxStart) {
+        if (dragging) dragging = false;
+        return;
+      }
+      const a = boxStart, b = ptOf(ev);
       if (boxEl && boxEl.parentNode) boxEl.parentNode.removeChild(boxEl);
-      boxEl = null; boxStart = null;
+      boxEl = null; boxStart = null; dragging = false;
       map.dragPan.enable();
-      if (Math.abs(b.x - a.x) < 3 || Math.abs(b.y - a.y) < 3) return; // too small → ignore
+      // Touch: a single "Select area" capture disarms the toggle afterwards.
+      if (this._selectingArea) { this._selectingArea = false; this._refreshPanel(); }
+      if (Math.abs(b.x - a.x) < 3 || Math.abs(b.y - a.y) < 3) return; // too small → treat as a tap, not a box
       this._showInspectArea(this._captureArea(a, b));
     };
+    // Tap / click to inspect+lock (works on touch via MapLibre's click event).
     this._onClick = (e) => {
       if (!this._inspectMode) return; // shell handles non-inspect clicks (pick/coverage)
-      if (this._areaCleanup || e.originalEvent.shiftKey) return; // shift = box
+      if (this._areaCleanup || e.originalEvent.shiftKey || this._selectingArea) return; // box mode owns the gesture
       if (this._inspectLocked) { this._inspectLocked = false; this._inspectAt(e.point, false); return; }
       this._inspectAt(e.point, true); // lock onto whatever's here
     };
-    map.on("mousedown", this._onMouseDown);
-    map.on("mousemove", this._onMouseMove);
-    map.on("mouseup", this._onMouseUp);
+    const c = map.getCanvasContainer();
+    c.addEventListener("pointerdown", this._onPointerDown);
+    c.addEventListener("pointermove", this._onPointerMove);
+    c.addEventListener("pointerup", this._onPointerUp);
+    c.addEventListener("pointercancel", this._onPointerUp);
     map.on("click", this._onClick);
   }
 
   _unwireMap() {
     const map = this._map;
     if (!map) return;
-    if (this._onMouseDown) map.off("mousedown", this._onMouseDown);
-    if (this._onMouseMove) map.off("mousemove", this._onMouseMove);
-    if (this._onMouseUp) map.off("mouseup", this._onMouseUp);
+    const c = map.getCanvasContainer ? map.getCanvasContainer() : null;
+    if (c) {
+      if (this._onPointerDown) c.removeEventListener("pointerdown", this._onPointerDown);
+      if (this._onPointerMove) c.removeEventListener("pointermove", this._onPointerMove);
+      if (this._onPointerUp) { c.removeEventListener("pointerup", this._onPointerUp); c.removeEventListener("pointercancel", this._onPointerUp); }
+    }
     if (this._onClick) map.off("click", this._onClick);
   }
 
@@ -261,6 +288,7 @@ export class DevTools {
     if (on === this._inspectMode) return;
     this._inspectMode = on;
     if (on && this._d.onInspectOn) this._d.onInspectOn(); // close pick report + cancel box-download (mutual exclusion)
+    this._selectingArea = false; // disarm any touch box-capture toggle
     this._inspectLocked = false;
     this._inspectLastKey = "";
     const map = this._map;
@@ -275,12 +303,23 @@ export class DevTools {
     this._refreshPanel();
   }
 
+  // Arm/disarm the touch "Select area" box-capture (no SHIFT on touch). While
+  // armed, the next drag on the map draws a capture box (see _wireMap.wantBox),
+  // which auto-disarms after one capture.
+  _toggleSelectArea() {
+    if (!this._inspectMode) return;
+    this._selectingArea = !this._selectingArea;
+    this._refreshPanel();
+  }
+
   // Inspect the chart features at a canvas point. `lock` freezes the panel on a
   // hit; a no-hit lock is a no-op; a no-hit hover shows the hint.
   _inspectAt(point, lock) {
     const map = this._map;
     if (!map) return;
-    const feats = map.queryRenderedFeatures(point).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
+    // Accept a MapLibre Point (from the click event) or a plain {x,y} (pointer events).
+    const pt = (point && typeof point.x === "number") ? [point.x, point.y] : point;
+    const feats = map.queryRenderedFeatures(pt).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
     if (!feats.length) {
       if (lock) return;
       this._inspectLastKey = "";

@@ -18,9 +18,11 @@ import "embed"
 // "glyphs/Noto Sans Regular/0-255.pbf").
 //
 //go:embed index.html
+//go:embed manifest.webmanifest
 //go:embed src
 //go:embed colortables.json linestyles.json patterns.json sprite.json catalog.json
 //go:embed patterns.png sprite.png
+//go:embed icon-192.png icon-512.png apple-touch-icon.png
 //go:embed basemap/coastline.geojson
 //go:embed glyphs
 //go:embed vendor

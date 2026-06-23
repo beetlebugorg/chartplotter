@@ -87,19 +87,21 @@ const STYLE = `
   .acr { font-size:10.5px; font-weight:600; color:var(--ui-text-faint,#9aa0a8); letter-spacing:.05em; }
   .title .acr { margin-left:8px; }
   .x { flex:none; border:none; background:none; color:var(--ui-text-dim,#7a828b); cursor:pointer; font-size:17px; line-height:1;
-    padding:3px 5px; border-radius:7px; margin:-3px -5px -3px 0; }
+    padding:3px 5px; border-radius:7px; margin:-3px -5px -3px 0;
+    touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .x:hover { background:var(--ui-hover,#f0f3f6); color:var(--ui-text,#2a2f35); }
   .name { padding:13px 16px 0; font-size:13.5px; color:var(--ui-accent,#1565c0); font-weight:600; line-height:1.3; }
   .meta { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:11px 16px; }
   .cell { font-size:12px; color:var(--ui-text-dim,#7a828b); }
   .cyc { display:inline-flex; align-items:center; gap:8px; margin-left:auto; }
   .nav { border:1px solid var(--ui-border-strong,#cfcfcf); background:var(--ui-surface,#fff); color:var(--ui-text,#2a2f35);
-    border-radius:7px; cursor:pointer; width:26px; height:24px; font-size:11px; padding:0; display:inline-flex; align-items:center; justify-content:center; }
+    border-radius:7px; cursor:pointer; width:26px; height:24px; font-size:11px; padding:0; display:inline-flex; align-items:center; justify-content:center;
+    touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .nav:hover { background:var(--ui-hover,#f0f3f6); }
   .count { font-size:12px; color:var(--ui-text-dim,#7a828b); min-width:46px; text-align:center; font-variant-numeric:tabular-nums; }
   /* Stacked attribute rows: a dim label line (full name + acronym) over the value,
      so long names and long values each get the full width and the rhythm stays even. */
-  .kv { overflow:auto; padding:4px 0; display:flex; flex-direction:column; }
+  .kv { overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:4px 0; display:flex; flex-direction:column; }
   .row { padding:7px 16px; }
   .row + .row { border-top:1px solid var(--ui-border-2,#ededed); }
   .k { color:var(--ui-text-dim,#7a828b); font-size:11.5px; line-height:1.3; margin-bottom:3px; }
@@ -112,7 +114,8 @@ const STYLE = `
   .aux-pending { color:var(--ui-text-faint,#9aa0a8); }
   .admin { margin:8px 16px 16px; align-self:flex-start; border:1px solid var(--ui-border-strong,#cfcfcf);
     background:var(--ui-surface,#fff); color:var(--ui-text-dim,#7a828b); border-radius:8px; padding:7px 13px;
-    font:inherit; font-size:12px; cursor:pointer; }
+    font:inherit; font-size:12px; cursor:pointer;
+    touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .admin:hover { background:var(--ui-hover,#f0f3f6); color:var(--ui-text,#2a2f35); }
 `;
 
@@ -329,6 +332,20 @@ export class PickReport extends HTMLElement {
     return { left: r.left, top: r.top, w: r.width, h: r.height };
   }
 
+  // Read the cascading safe-area + bottom-bar tokens (px) for clamping JS-placed
+  // cards away from the notch / rounded corners / home indicator / bottom tab bar.
+  // --botbar-h already includes env(safe-area-inset-bottom). Falls back to 0.
+  _insets() {
+    const px = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+    const cs = getComputedStyle(this);
+    return {
+      top: px(cs.getPropertyValue("--sa-top")),
+      right: px(cs.getPropertyValue("--sa-right")),
+      bottom: px(cs.getPropertyValue("--botbar-h")),
+      left: px(cs.getPropertyValue("--sa-left")),
+    };
+  }
+
   // Place the panel right NEXT TO the picked point (a small gap to one side) so the
   // report reads as attached to what was tapped — unless the mariner has dragged it
   // (then keep that). Prefers the right of the point, flips left if it won't fit, and
@@ -336,9 +353,9 @@ export class PickReport extends HTMLElement {
   _place(anchor) {
     const fr = this._frame();
     const w = this.offsetWidth || 340, ht = this.offsetHeight || 240;
-    const M = 12, botbar = 66, GAP = 16; // leave room above the bottom tab bar
+    const M = 12, GAP = 16; // bottom reserve derives from --botbar-h (see _apply)
     if (this._userPos) {
-      this._apply(this._userPos.left, this._userPos.top, fr, w, ht, M, botbar);
+      this._apply(this._userPos.left, this._userPos.top, fr, w, ht, M);
       return;
     }
     // anchor is viewport-relative; convert to host-relative.
@@ -347,18 +364,22 @@ export class PickReport extends HTMLElement {
     let left = ax + GAP; // to the right of the point…
     if (left + w + M > fr.w) left = ax - GAP - w; // …unless it overflows → to the left
     const top = ay - ht / 2; // vertically centred on the point
-    this._apply(left, top, fr, w, ht, M, botbar);
+    this._apply(left, top, fr, w, ht, M);
   }
 
-  _apply(left, top, fr, w, ht, M, botbar) {
+  _apply(left, top, fr, w, ht, M) {
     fr = fr || this._frame();
     w = w || this.offsetWidth || 340;
     ht = ht || this.offsetHeight || 240;
-    M = M || 12; botbar = botbar || 66;
-    const maxLeft = Math.max(M, fr.w - w - M);
-    const maxTop = Math.max(M, fr.h - ht - M - botbar);
-    this.style.left = Math.min(Math.max(M, left), maxLeft) + "px";
-    this.style.top = Math.min(Math.max(M, top), maxTop) + "px";
+    M = M || 12;
+    // Safe-area + real bottom-bar height keep the card off the notch / rounded
+    // corners / home indicator and out from behind the bottom tab bar.
+    const sa = this._insets();
+    const minLeft = M + sa.left, minTop = M + sa.top;
+    const maxLeft = Math.max(minLeft, fr.w - w - M - sa.right);
+    const maxTop = Math.max(minTop, fr.h - ht - M - sa.bottom);
+    this.style.left = Math.min(Math.max(minLeft, left), maxLeft) + "px";
+    this.style.top = Math.min(Math.max(minTop, top), maxTop) + "px";
     this.style.right = "auto";
   }
 

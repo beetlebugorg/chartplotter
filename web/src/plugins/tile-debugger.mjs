@@ -113,7 +113,8 @@ export class TileDebugger {
     this._panel = document.createElement("div");
     this._panel.className = "maplibregl-ctrl tile-debugger";
     this._panel.style.cssText = "background:#11161c;color:#e6edf3;font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;"
-      + "max-width:300px;max-height:70vh;overflow:auto;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);";
+      + "max-width:300px;max-height:70vh;max-height:70dvh;overflow:auto;"
+      + "overscroll-behavior:contain;-webkit-overflow-scrolling:touch;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);";
     this._injectCSS();
     this._refreshPanel();
 

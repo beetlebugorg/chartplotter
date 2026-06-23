@@ -18,6 +18,12 @@ export const STYLE = `
              it — four round buttons in the corners and one data card at the bottom
              centre. Panels drop down from their corner button as caret popovers. */
           --botbar-h:env(safe-area-inset-bottom,0px);
+          --tap-min:44px;                                   /* min touch target */
+          --sa-top:env(safe-area-inset-top,0px);
+          --sa-right:env(safe-area-inset-right,0px);
+          --sa-bottom:env(safe-area-inset-bottom,0px);
+          --sa-left:env(safe-area-inset-left,0px);
+          --input-font:16px;                                /* iOS focus-zoom floor */
           --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2);
           --ownship-fill:#1f5fa0; --ownship-edge:#0a2c47; --ownship-halo:#fff;
           --ais-fill:#0a7d55; --ais-halo:#fff; --ais-danger:#e23b2e; }
@@ -40,13 +46,17 @@ export const STYLE = `
           border:1px solid var(--ui-border-strong); box-shadow:0 2px 8px var(--ui-shadow); cursor:pointer;
           font:600 12px/1 system-ui,sans-serif; white-space:nowrap; pointer-events:auto; user-select:none;
           max-width:42vw; transition:background .1s; }
-        .finder-chip:hover { background:var(--ui-hover); }
+        @media (hover:hover) { .finder-chip:hover { background:var(--ui-hover); } }
         .finder-chip .fc-arrow { flex:none; width:14px; height:14px; color:var(--ui-accent); }
         .finder-chip .fc-band { flex:none; width:8px; height:8px; border-radius:50%; box-shadow:0 0 0 1.5px var(--ui-surface); }
         .finder-chip .fc-name { overflow:hidden; text-overflow:ellipsis; }
         .finder-chip .fc-dist { flex:none; color:var(--ui-text-dim); font-weight:500; }
         .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }
-        .btn:hover { background:var(--ui-hover); }
+        @media (hover:hover) { .btn:hover { background:var(--ui-hover); } }
+        /* Shared touch chrome: kill 300ms delay + double-tap zoom on controls,
+           suppress long-press callout/selection. (Convention E) */
+        .rbtn,.btn,.cta,.cc-btn,.pk-btn,.m-row,.cov-cell,.sb-band,.region-row,.sr-item,.finder-chip,.linkbtn,.add-clear {
+          touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
         /* Floating corner controls — a top-left group (search) and a top-right
            group (charts · scheme · settings). Each is a round button; the active
            section's button lights up while its panel is open. */
@@ -63,7 +73,7 @@ export const STYLE = `
           background:color-mix(in srgb, var(--ui-surface) 90%, transparent); border:1px solid var(--ui-border);
           box-shadow:0 2px 10px rgba(0,0,0,.18); backdrop-filter:blur(6px);
           transition:background .12s, color .12s, box-shadow .12s, transform .08s; }
-        .rbtn:hover { color:var(--ui-accent); border-color:var(--ui-accent); box-shadow:0 3px 14px rgba(0,0,0,.24); }
+        @media (hover:hover) { .rbtn:hover { color:var(--ui-accent); border-color:var(--ui-accent); box-shadow:0 3px 14px rgba(0,0,0,.24); } }
         .rbtn:active { transform:scale(.94); }
         .rbtn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
         .rbtn svg { width:21px; height:21px; display:block; }
@@ -77,7 +87,7 @@ export const STYLE = `
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
         .cta { flex:1; background:var(--ui-accent); color:var(--ui-accent-text); border:none; border-radius:8px; padding:11px 12px; font:inherit;
           font-weight:600; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:7px; }
-        .cta:hover { background:var(--ui-accent-hover); }
+        @media (hover:hover) { .cta:hover { background:var(--ui-accent-hover); } }
         .cta svg { width:17px; height:17px; }
         .upd { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
         .charts-summary { color:var(--ui-text-dim); font-size:12px; margin:0 0 12px; }
@@ -89,8 +99,9 @@ export const STYLE = `
         .chart-card .cc-meta { color:var(--ui-text-dim); font-size:12px; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .chart-card .cc-edition { font-size:12px; color:var(--ui-text-faint); margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
         .chart-card .cc-actions { flex:none; display:flex; align-items:center; gap:4px; }
-        .cc-btn { border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:7px; width:30px; height:30px; cursor:pointer;
+        .cc-btn { border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text-dim); border-radius:7px; width:40px; height:40px; cursor:pointer;
           font-size:14px; display:inline-flex; align-items:center; justify-content:center; }
+        @media (pointer:coarse) { .cc-btn { width:var(--tap-min); height:var(--tap-min); } }
         .cc-btn:hover { background:var(--ui-hover); color:var(--ui-accent); border-color:#b9c0c8; }
         .cc-btn.cc-rm:hover { color:#c0392b; border-color:#e2b6b1; background:#fdeceb; }
         /* freshness pill */
@@ -119,8 +130,8 @@ export const STYLE = `
         /* region browser */
         .region-list { display:flex; flex-direction:column; }
         .region-row { display:flex; align-items:center; gap:9px; width:100%; text-align:left;
-          border:none; background:none; border-bottom:1px solid var(--ui-border-2); padding:10px 4px; font:inherit; cursor:pointer; }
-        .region-row:hover { background:var(--ui-hover); }
+          border:none; background:none; border-bottom:1px solid var(--ui-border-2); padding:13px 4px; min-height:var(--tap-min); box-sizing:border-box; font:inherit; cursor:pointer; }
+        @media (hover:hover) { .region-row:hover { background:var(--ui-hover); } }
         .region-row .region-name { font-weight:600; color:var(--ui-text); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .region-row .region-meta { flex:none; color:var(--ui-text-faint); font-size:12px; }
         .rdot { flex:none; width:9px; height:9px; border-radius:50%; box-shadow:inset 0 0 0 1.5px #c2c8cf; }
@@ -130,7 +141,7 @@ export const STYLE = `
         .region-empty { color:var(--ui-text-faint); text-align:center; padding:20px; }
         .region-title { margin:4px 0 2px; font-size:16px; }
         .region-status { background:#e4f5ea; color:#1f7a36; font-weight:600; font-size:12.5px; padding:6px 10px; border-radius:8px; margin:2px 0 4px; }
-        .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:8px 0; display:block; }
+        .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:8px 0; min-height:var(--tap-min); display:block; }
         .linkbtn.danger { color:#c0392b; }
         /* Job activity is signalled by the top notification pill; the dlspin
            keyframes drive its spinner. */
@@ -146,15 +157,15 @@ export const STYLE = `
         .set-section { margin:0 0 28px; }
         .set-section > h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ui-text-faint); margin:0 0 6px; padding-bottom:6px; border-bottom:1px solid var(--ui-border-2); font-weight:700; }
         /* chart download: Finder-style 3-pane drill-down */
-        .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(62vh,560px); margin:2px 0 12px; }
-        .mcol { flex:0 0 26%; min-width:0; overflow-y:auto; border-right:1px solid var(--ui-border-2); padding:6px; }
+        .miller { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:10px; overflow:hidden; min-height:300px; max-height:min(62vh,560px); max-height:min(62dvh,560px); margin:2px 0 12px; }
+        .mcol { flex:0 0 26%; min-width:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; border-right:1px solid var(--ui-border-2); padding:6px; }
         .mcol:nth-child(2) { flex:0 0 32%; }
         .mcol.mcol-detail { flex:1 1 0; border-right:none; padding:12px; }
         .mcol-h { font-size:11px; font-weight:700; color:var(--ui-text); padding:1px 6px 0; }
         .mcol-head { position:sticky; top:0; background:var(--ui-surface); padding:4px 0 7px; margin-bottom:2px; border-bottom:1px solid var(--ui-border-2); z-index:1; }
         .mcol-meta { font-size:10.5px; color:var(--ui-text-faint); padding:1px 6px 0; line-height:1.35; }
         .m-row { display:flex; align-items:center; gap:8px; padding:8px; border-radius:7px; cursor:pointer; transition:background .1s; }
-        .m-row:hover { background:var(--ui-hover); }
+        @media (hover:hover) { .m-row:hover { background:var(--ui-hover); } }
         .m-row:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--ui-accent); }
         .m-row.sel { background:var(--ui-accent); }
         .m-row.sel .m-name, .m-row.sel .m-sub, .m-row.sel .m-chev { color:var(--ui-accent-text); }
@@ -226,13 +237,18 @@ export const STYLE = `
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
           background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
         .modal[hidden] { display:none; }
-        .modal-card { background:var(--ui-surface); max-width:520px; width:calc(100% - 40px); max-height:86%; overflow:auto;
+        .modal-card { background:var(--ui-surface); max-width:520px; width:calc(100% - 40px);
+          max-height:86%;
+          max-height:calc(100dvh - var(--sa-top) - var(--sa-bottom) - 32px);
+          display:flex; flex-direction:column; overflow:hidden;
           border-radius:12px; padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.3); font:14px/1.5 system-ui,sans-serif; color:var(--ui-text); }
-        .modal-card h2 { margin:0 0 10px; font-size:18px; }
+        .modal-card h2 { margin:0 0 10px; font-size:18px; flex:none; }
+        .modal-card .agree-body { overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; flex:1 1 auto; min-height:0; }
         .modal-card .agree-body ul { margin:8px 0; padding-left:20px; }
         .modal-card .agree-body li { margin:5px 0; }
         .modal-card a { color:var(--ui-accent); }
-        .agree-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+        /* Sticky non-scrolling footer so Agree/Cancel stay on-screen. */
+        .agree-actions { flex:none; display:flex; gap:10px; justify-content:flex-end; margin-top:16px; padding-top:12px; }
         /* Live band·scale·zoom readout (left of the statusbar), one line. Each
            field has a fixed width + tabular figures so the bar never reflows. */
         .ins-lock { background:var(--ui-surface-2); color:var(--ui-text-dim); border-radius:6px; padding:6px 9px; margin-bottom:10px; font-size:12px; }
@@ -277,19 +293,23 @@ export const STYLE = `
         .band-pop { display:none; position:absolute; bottom:calc(100% + 6px); right:0; z-index:10;
           background:var(--ui-surface); border:1px solid rgba(0,0,0,.1); border-radius:9px; padding:8px 9px;
           box-shadow:0 6px 22px rgba(0,0,0,.22); width:max-content; max-width:280px; }
-        .band-pop::before { content:""; position:absolute; left:0; right:0; bottom:-6px; height:6px; } /* hover bridge over the gap */
-        .sb-band-wrap:hover .band-pop, .band-pop:hover, .sb-band-wrap.open .band-pop { display:block; }
+        @media (hover:hover) {
+          .band-pop::before { content:""; position:absolute; left:0; right:0; bottom:-6px; height:6px; } /* hover bridge over the gap */
+          .sb-band-wrap:hover .band-pop, .band-pop:hover { display:block; }
+        }
+        .sb-band-wrap.open .band-pop { display:block; } /* tap-pin path works on touch */
         .band-pop-h { font:600 11px/1.3 system-ui,sans-serif; color:var(--ui-text-dim); margin-bottom:6px; }
-        .band-pop-cells { display:flex; flex-wrap:wrap; gap:4px; max-height:210px; overflow-y:auto; }
-        .cov-cell { font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; padding:0 6px; border-radius:5px;
+        .band-pop-cells { display:flex; flex-wrap:wrap; gap:4px; max-height:210px; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
+        .cov-cell { font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; padding:7px 9px; border-radius:5px;
+          display:inline-flex; align-items:center; min-height:36px; box-sizing:border-box;
           border:1px solid rgba(0,0,0,.12); background:var(--ui-surface-2); color:var(--ui-text); cursor:pointer; }
-        .cov-cell:hover { border-color:var(--ui-accent); color:var(--ui-accent); }
+        @media (hover:hover) { .cov-cell:hover { border-color:var(--ui-accent); color:var(--ui-accent); } }
         .cov-cell.missing { background:repeating-linear-gradient(45deg,var(--ui-surface),var(--ui-surface) 4px,var(--ui-surface-2) 4px,var(--ui-surface-2) 8px);
           color:var(--ui-text-faint); border-style:dashed; }
         .cov-cell.missing::after { content:" ↓"; color:var(--ui-accent); }
         .cov-cell.missing:hover { color:var(--ui-accent); border-color:var(--ui-accent); }
         .cov-empty { font:12px system-ui,sans-serif; color:var(--ui-text-faint); }
-        #loading { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
+        #loading { position:absolute; top:calc(12px + var(--sa-top)); left:50%; transform:translateX(-50%); z-index:5; background:rgba(0,0,0,.72);
           color:#fff; border-radius:14px; padding:5px 12px; font-size:12px; box-shadow:0 1px 4px rgba(0,0,0,.3); }
         /* Panels are dialog popovers that DROP DOWN from their corner button, with a
            caret on the top edge pointing back up at it. The Charts/Settings panel
@@ -304,7 +324,7 @@ export const STYLE = `
         /* NB: no overflow:hidden on the popover itself — it would clip the caret.
            Inner scroll areas (.body / #search-results) round their own corners. */
         #drawer { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 66px);
-          width:min(440px, calc(100vw - 24px)); max-height:calc(100vh - var(--botbar-h) - 90px); z-index:6;
+          width:min(440px, calc(100vw - 24px)); max-height:calc(100dvh - var(--botbar-h) - 90px); z-index:9;
           background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border); border-radius:14px;
           box-shadow:0 12px 38px rgba(0,0,0,.30); display:flex; flex-direction:column;
           transform-origin:bottom right; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
@@ -312,7 +332,7 @@ export const STYLE = `
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
         #drawer.set-wide { width:min(520px, calc(100vw - 24px)); } /* settings: rail + content */
-        #drawer.wide .miller { height:calc(100vh - var(--botbar-h) - 208px); max-height:none; }
+        #drawer.wide .miller { height:calc(100dvh - var(--botbar-h) - 208px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
         /* caret on the TOP edge, pointing up at the button above */
         #search::after { content:""; position:absolute; top:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
@@ -330,7 +350,7 @@ export const STYLE = `
            remains in the shell sheet. */
         .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
         .dhead strong { flex:1; font-size:14px; }
-        .body { overflow:auto; padding:14px 16px; flex:1; }
+        .body { overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:14px 16px; flex:1; }
         .panel { display:none; } .panel.sel { display:block; }
         .drop { border:2px dashed var(--ui-border-strong); border-radius:8px; padding:18px; text-align:center; color:var(--ui-text-dim); margin-bottom:10px; }
         .drop.over { border-color:var(--ui-accent); background:var(--ui-hover); color:var(--ui-accent); }
@@ -393,7 +413,7 @@ export const STYLE = `
         #empty p { color:var(--ui-text-dim); margin:0 0 18px; line-height:1.5; }
         #empty .welcome-cta { display:inline-flex; align-items:center; gap:8px; width:auto; padding:11px 22px; font-size:15px; }
         #empty .welcome-sub { margin-top:12px; font-size:13px; color:var(--ui-text-faint); }
-        #empty .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:0; text-decoration:underline; }
+        #empty .linkbtn { background:none; border:none; color:var(--ui-accent); cursor:pointer; font:inherit; padding:4px 0; min-height:var(--tap-min); display:inline-flex; align-items:center; text-decoration:underline; }
         #search[hidden] { display:block; } /* defeat UA hidden so the popover can fade out (base styles keep it invisible/non-interactive) */
         /* Search: same caret-popover as the panels — a dialog card with the input
            on top and results filling in underneath, dropping from the search button
@@ -405,10 +425,10 @@ export const STYLE = `
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #search:not([hidden]) { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #search input { width:100%; box-sizing:border-box; border:none; border-radius:14px; padding:11px 16px;
-          font:inherit; background:transparent; color:var(--ui-text); outline:none; }
-        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(360px, calc(100vh - var(--ctrl-top) - var(--panel-bottom) - 52px)); overflow-y:auto; border-radius:0 0 13px 13px; }
+          font:inherit; font-size:16px; background:transparent; color:var(--ui-text); outline:none; }
+        #search-results { border-top:1px solid var(--ui-border-2); max-height:min(360px, calc(100dvh - var(--ctrl-top) - var(--panel-bottom) - 52px)); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; border-radius:0 0 13px 13px; }
         #search-results[hidden] { display:none; }
-        .sr-item { padding:8px 16px; cursor:pointer; border-bottom:1px solid var(--ui-border-2); }
+        .sr-item { padding:8px 16px; min-height:var(--tap-min); box-sizing:border-box; display:flex; flex-direction:column; justify-content:center; cursor:pointer; border-bottom:1px solid var(--ui-border-2); }
         .sr-item:last-child { border-bottom:none; }
         .sr-item:hover, .sr-item.sel { background:var(--ui-hover); }
         .sr-item .t { font-weight:600; } .sr-item .s { color:var(--ui-text-faint); font-size:12px; }
@@ -431,6 +451,32 @@ export const STYLE = `
         @media (max-width: 640px) {
           #empty .card { max-width:min(360px, calc(100vw - 48px)); }
           .pack-grid { grid-template-columns:1fr; }
+        }
+        /* ---- Phone reflow (<=560px): collapse the Finder-style 3-pane chart
+           download (region · pack · detail) into a single stacked column so each
+           pane is usable full-width. iPad portrait (>=768px) keeps the 3-pane. */
+        @media (max-width: 560px) {
+          #drawer.wide { width:min(96vw, calc(100vw - 16px)); }
+          .miller { flex-direction:column; max-height:none;
+            height:calc(100dvh - var(--botbar-h) - 230px); min-height:0; }
+          #drawer.wide .miller { height:calc(100dvh - var(--botbar-h) - 200px); }
+          /* Drill-down: <chart-library> shows ONE column at a time, driven by its
+             own shadow STYLE + .miller[data-level]. These shell rules only set the
+             column sizing; visibility is owned by the component (see
+             chart-library.view.mjs). */
+          .mcol { flex:1 1 auto; width:100%; border-right:none; border-bottom:none; }
+          .mcol:nth-child(2) { flex:1 1 auto; }
+          .mcol.mcol-detail { flex:1 1 auto; border-bottom:none; }
+          /* The bottom-centre data card and the bottom-right button cluster sit at
+             the same height and collide on a narrow screen. Lift the card ABOVE the
+             44px button row, and move the NOAA attribution to the (free) bottom-left
+             corner so the three no longer overlap. */
+          #databox { width:min(96vw, 420px); bottom:calc(var(--botbar-h) + 64px); }
+          /* Attribution can't share the bottom row (scale bar left · buttons right ·
+             card centred all collide), so float it on its own centred line just
+             above the data card. */
+          #noaa-attr { left:50%; right:auto; transform:translateX(-50%); text-align:center;
+            bottom:calc(var(--botbar-h) + 112px); max-width:96vw; }
         }
         /* On a narrow phone, drop the zoom from the readout so the band·scale·
            position line never runs past the card edge (scale is what matters). */

@@ -18,12 +18,12 @@ import { esc } from "../lib/util.mjs";
 export const STYLE = `
   :host { display:block; }
   #body { padding-top:2px; }
-  .set-shell { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:11px; overflow:hidden; min-height:360px; max-height:min(66vh,620px); }
+  .set-shell { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:11px; overflow:hidden; min-height:360px; max-height:min(66vh,620px); max-height:min(66dvh,620px); }
   .set-rail { flex:0 0 124px; display:flex; flex-direction:column; gap:3px; padding:8px 7px; border-right:1px solid var(--ui-border-2); background:var(--ui-surface-2); }
   .set-rail button { text-align:left; border:none; background:none; color:var(--ui-text-dim); font:inherit; font-size:13px; font-weight:600; padding:9px 11px; border-radius:8px; cursor:pointer; transition:background .1s,color .1s; }
   .set-rail button:hover { background:var(--ui-surface); color:var(--ui-text); }
   .set-rail button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
-  .set-pane { flex:1 1 0; min-width:0; overflow-y:auto; padding:4px 18px 10px; }
+  .set-pane { flex:1 1 0; min-width:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:4px 18px 10px; }
   .set-group { margin-top:14px; font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--ui-text-faint); padding:0 2px 2px; }
   .set-group:first-child { margin-top:4px; }
   .set-host { /* a contribution's custom-render slot */ }
@@ -35,9 +35,10 @@ export const STYLE = `
   .set-row .lbl .t { font-weight:600; font-size:13.5px; }
   .set-row .lbl .d { font-size:12px; color:var(--ui-text-faint); margin-top:3px; line-height:1.45; }
   .set-row .ctl { flex:none; margin-left:auto; display:flex; align-items:center; gap:6px; }
-  .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 7px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
+  .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 7px; font:inherit; font-size:16px; background:var(--ui-surface); color:var(--ui-text); }
   .set-row .ctl .unit { color:var(--ui-text-faint); font-size:12px; min-width:14px; }
-  .set-row .ctl select { border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 8px; font:inherit; background:var(--ui-surface); color:var(--ui-text); }
+  .set-row .ctl select { border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 8px; font:inherit; font-size:16px; background:var(--ui-surface); color:var(--ui-text); }
+  .set-rail button, .seg button, .switch, .set-row .ctl input[type=number], .set-row .ctl select { touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
 
   .switch { position:relative; width:38px; height:22px; display:inline-block; flex:none; }
   .switch input { opacity:0; width:0; height:0; }
@@ -56,6 +57,21 @@ export const STYLE = `
   @media (max-width:560px) {
     .set-row { flex-wrap:wrap; gap:8px 14px; }
     .set-row .lbl { flex:1 1 60%; }
+    /* Stack the shell: the rail becomes a horizontal scrolling tab strip above the pane. */
+    .set-shell { flex-direction:column; max-height:none; }
+    .set-rail { flex:0 0 auto; flex-direction:row; gap:4px; overflow-x:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+      border-right:none; border-bottom:1px solid var(--ui-border-2); padding:7px 8px; }
+    .set-rail button { flex:0 0 auto; white-space:nowrap; }
+    .set-pane { max-height:60dvh; }
+  }
+  /* Touch: rail tabs, segmented buttons and the switch reach a 44px hit area. */
+  @media (pointer:coarse) {
+    .set-rail button { min-height:var(--tap-min,44px); }
+    .seg button { min-height:var(--tap-min,44px); }
+    /* Enlarge the switch hit area without distorting the 38x22 track: an invisible
+       overlay padded out to >=44px, sitting over the .sl which forwards the tap. */
+    .switch .sl:after { content:""; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+      min-width:var(--tap-min,44px); min-height:var(--tap-min,44px); width:100%; height:100%; }
   }
 `;
 

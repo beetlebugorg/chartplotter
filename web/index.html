@@ -3,10 +3,40 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b1b2b" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <link rel="manifest" href="./manifest.webmanifest" />
   <title>chartplotter — WASM S-52 ENC plotter</title>
   <style>
-    html, body { margin: 0; height: 100%; }
-    chart-plotter { display: block; height: 100%; width: 100%; }
+    html {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      /* Backstop so the iOS standalone (Add-to-Home-Screen) home-indicator strip
+         is never the default white — it shows this dark navy if anything peeks. */
+      background: #0b1b2b;
+    }
+    body {
+      margin: 0;
+      /* Pin to ALL four viewport edges (incl. the bottom safe area). Edge-pinning
+         is what actually fills the screen in iOS standalone — height:100dvh alone
+         leaves a white bar behind the home indicator. fixed+overflow:hidden also
+         stops the iOS document rubber-band bounce. */
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: #0b1b2b;
+      touch-action: manipulation;
+    }
+    chart-plotter {
+      display: block;
+      width: 100%;
+      height: 100%;   /* fills the edge-pinned body */
+    }
     /* Splash: painted from the static HTML before any module/wasm/tiles load, so
        the user sees feedback instantly; faded out on the plotter's `ready` event. */
     #splash {
