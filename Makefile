@@ -2,6 +2,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 BIN := bin/chartplotter
 
+# Cross-build matrix for `make xbuild`. Override for a subset, e.g.
+# `make xbuild PLATFORMS=darwin/arm64` or `PLATFORMS="darwin/arm64 linux/amd64"`.
+PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+
 # serve overrides (e.g. `make serve HOST=0.0.0.0 PORT=9000 ASSETS=web`)
 HOST   ?= 127.0.0.1
 PORT   ?= 8080
@@ -15,7 +19,7 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-.PHONY: build test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
+.PHONY: build xbuild test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -51,6 +55,20 @@ NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
 build: ## Build the self-contained shim (embeds web/) into bin/
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
+
+# Quick cross-platform test builds. CGO is off, so this is pure `go build` per
+# target — fast cold, near-instant on re-runs thanks to the build cache. Stamps
+# the same version as `build`; strips symbols (-s -w) and paths (-trimpath) like a
+# release binary. Outputs dist/chartplotter_<os>_<arch>[.exe] (cleaned by `clean`).
+xbuild: ## Cross-compile test binaries for every $(PLATFORMS) into dist/ (e.g. make xbuild PLATFORMS=darwin/arm64)
+	@mkdir -p dist
+	@for p in $(PLATFORMS); do \
+	  os=$${p%/*}; arch=$${p#*/}; ext=; [ "$$os" = windows ] && ext=.exe; \
+	  echo "building $$os/$$arch…"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w $(LDFLAGS)" \
+	    -o "dist/chartplotter_$${os}_$${arch}$$ext" ./cmd/chartplotter || exit 1; \
+	done
+	@echo "→ dist/"; ls -1 dist/chartplotter_*
 
 serve: build ## Serve the web frontend + provisioning API (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)

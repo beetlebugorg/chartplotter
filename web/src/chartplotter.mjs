@@ -23,6 +23,10 @@ import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settin
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
 import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
+import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
+import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
+import { OwnShip } from "./plugins/own-ship.mjs"; // own-ship marker + course predictor + follow camera
+import { PALETTE_DAY_ICON, PALETTE_DUSK_ICON, PALETTE_NIGHT_ICON } from "./lib/openbridge-icons.mjs"; // OpenBridge scheme glyphs
 import { DISTRICTS, NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
 import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discovery + acquisition
 import { NotificationCenter } from "./core/notification-center.mjs"; // app-level task-progress + banner bus
@@ -558,6 +562,23 @@ export class ChartPlotter extends HTMLElement {
         layerLabel: (srcLayer) => INSPECT_LAYER_LABEL[srcLayer],
         onInspectOn: () => { this._closePick(); this._cancelAreaSelect(); },
       });
+    }
+
+    // NMEA0183 live data (server mode only — the feed comes from the server's
+    // connection manager). VesselStateStore streams /api/vessel for the render
+    // plugins (own-ship/AIS/HUD); ConnectionsController contributes the
+    // Connections settings tab for managing data sources.
+    if (!this._prod) {
+      this._vessel = new VesselStateStore({ assets: this._assets, prod: this._prod });
+      this._vessel.start();
+      this._connections = new ConnectionsController({
+        registry: this._settingsRegistry,
+        assets: this._assets,
+        notify: this._notify,
+      });
+      // Own-ship marker + course predictor; follows the vessel (break-out + a
+      // re-centre chip mounted in the shell chrome) and streams fixes to the camera.
+      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot });
     }
 
     // Persist the view so a refresh resumes where you were; refresh the coverage
@@ -1647,22 +1668,22 @@ export class ChartPlotter extends HTMLElement {
     this.applyScheme(SCHEMES[(i + 1) % SCHEMES.length]);
   }
 
-  // Inner SVG for the scheme toggle, reflecting the current scheme: sun (day),
-  // sun-over-horizon (dusk), moon (night).
+  // Full SVG for the scheme toggle — the OpenBridge palette glyphs (day / dusk / night).
   _schemeSvg(s) {
-    if (s === "night") return `<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>`;
-    if (s === "dusk") return `<path d="M3 18h18M5.5 18a6.5 6.5 0 0 1 13 0"/><path d="M12 3v3M4 8l1.6 1.6M20 8l-1.6 1.6M2.5 13H4M20 13h1.5"/>`;
-    return `<circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M19.4 4.6l-1.7 1.7M6.3 17.7l-1.7 1.7"/>`;
+    if (s === "night") return PALETTE_NIGHT_ICON;
+    if (s === "dusk") return PALETTE_DUSK_ICON;
+    return PALETTE_DAY_ICON;
   }
 
   // Keep the tab-bar toggle icon and the Settings segmented control in step with
   // the active scheme (either entry point can change it).
   _syncSchemeUI() {
     const r = this.shadowRoot; if (!r) return;
-    const svg = r.getElementById("scheme-svg");
-    if (svg) svg.innerHTML = this._schemeSvg(this._scheme);
     const tog = r.getElementById("scheme-toggle");
-    if (tog) tog.title = `Colour scheme: ${SCHEME_LABEL[this._scheme]} — tap to cycle`;
+    if (tog) {
+      tog.innerHTML = this._schemeSvg(this._scheme); // full OpenBridge palette glyph
+      tog.title = `Colour scheme: ${SCHEME_LABEL[this._scheme]} — tap to cycle`;
+    }
     // The scheme picker moved into <settings-dialog>; reflect a tab-bar cycle there.
     this._settingsDlg && this._settingsDlg.refresh();
   }

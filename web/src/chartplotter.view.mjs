@@ -10,6 +10,7 @@
 // Convention reference: chart-library.mjs / chart-library.view.mjs.
 
 import { NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA ENC page (static attribution link)
+import { SEARCH_ICON, CHART_ICON, SETTINGS_ICON } from "./lib/openbridge-icons.mjs"; // vendored OpenBridge glyphs
 
 export const STYLE = `
         :host { display:block; position:relative; width:100%; height:100%; font:13px/1.4 system-ui,sans-serif;
@@ -17,11 +18,14 @@ export const STYLE = `
              it — four round buttons in the corners and one data card at the bottom
              centre. Panels drop down from their corner button as caret popovers. */
           --botbar-h:env(safe-area-inset-bottom,0px);
-          --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2); }
+          --ui-bg:#fafafa; --ui-surface:#fff; --ui-surface-2:#eef1f4; --ui-text:#2a2f35; --ui-text-dim:#7a828b; --ui-text-faint:#9aa0a8; --ui-border:#e2e2e2; --ui-border-2:#ededed; --ui-border-strong:#cfcfcf; --ui-hover:#f0f3f6; --ui-accent:#1565c0; --ui-accent-hover:#1257a8; --ui-accent-text:#fff; --ui-shadow:rgba(0,0,0,.2);
+          --ownship-fill:#1f5fa0; --ownship-edge:#0a2c47; --ownship-halo:#fff; }
         :host([data-scheme="dusk"]) {
-          --ui-bg:#20262b; --ui-surface:#2a3137; --ui-surface-2:#333b42; --ui-text:#cdd6dc; --ui-text-dim:#9aa6ae; --ui-text-faint:#7d8990; --ui-border:#3a434a; --ui-border-2:#333b42; --ui-border-strong:#4a555d; --ui-hover:#353f47; --ui-accent:#4f9be6; --ui-accent-hover:#69abe9; --ui-accent-text:#0c1318; --ui-shadow:rgba(0,0,0,.5); }
+          --ui-bg:#20262b; --ui-surface:#2a3137; --ui-surface-2:#333b42; --ui-text:#cdd6dc; --ui-text-dim:#9aa6ae; --ui-text-faint:#7d8990; --ui-border:#3a434a; --ui-border-2:#333b42; --ui-border-strong:#4a555d; --ui-hover:#353f47; --ui-accent:#4f9be6; --ui-accent-hover:#69abe9; --ui-accent-text:#0c1318; --ui-shadow:rgba(0,0,0,.5);
+          --ownship-fill:#3a7ba6; --ownship-edge:#0a2230; --ownship-halo:#dde6ec; }
         :host([data-scheme="night"]) {
-          --ui-bg:#14181b; --ui-surface:#1b2024; --ui-surface-2:#232a2f; --ui-text:#aeb8be; --ui-text-dim:#7e898f; --ui-text-faint:#626c72; --ui-border:#2a3137; --ui-border-2:#232a2f; --ui-border-strong:#38424a; --ui-hover:#232a30; --ui-accent:#3f7fb5; --ui-accent-hover:#4d8cc2; --ui-accent-text:#0a0e11; --ui-shadow:rgba(0,0,0,.6); }
+          --ui-bg:#14181b; --ui-surface:#1b2024; --ui-surface-2:#232a2f; --ui-text:#aeb8be; --ui-text-dim:#7e898f; --ui-text-faint:#626c72; --ui-border:#2a3137; --ui-border-2:#232a2f; --ui-border-strong:#38424a; --ui-hover:#232a30; --ui-accent:#3f7fb5; --ui-accent-hover:#4d8cc2; --ui-accent-text:#0a0e11; --ui-shadow:rgba(0,0,0,.6);
+          --ownship-fill:#b04632; --ownship-edge:#3a120c; --ownship-halo:#e6c6a0; }
         /* Full-bleed map; everything else floats over it. */
         #map { position:absolute; inset:0; }
         #map chart-canvas { width:100%; height:100%; }
@@ -47,6 +51,10 @@ export const STYLE = `
           display:flex; align-items:center; gap:8px; }
         #tl-controls { left:calc(12px + env(safe-area-inset-left,0px)); }
         #tr-controls { right:calc(12px + env(safe-area-inset-right,0px)); }
+        /* Bottom-right cluster: charts · scheme · settings (compass stays top-right;
+           NOAA attribution sits just above this row). */
+        #br-controls { position:absolute; right:calc(12px + env(safe-area-inset-right,0px));
+          bottom:calc(var(--botbar-h) + 12px); z-index:7; display:flex; align-items:center; gap:8px; }
         .rbtn { flex:none; width:44px; height:44px; border-radius:50%; cursor:pointer; padding:0;
           display:flex; align-items:center; justify-content:center; color:var(--ui-text);
           background:color-mix(in srgb, var(--ui-surface) 90%, transparent); border:1px solid var(--ui-border);
@@ -203,7 +211,7 @@ export const STYLE = `
         /* NOAA attribution + "not for navigation" — subtle one-line text tucked
            into the bottom-right corner (no box), kept legible over the chart with a
            soft halo in the current surface colour. */
-        #noaa-attr { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 10px); z-index:5; pointer-events:auto;
+        #noaa-attr { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 64px); z-index:5; pointer-events:auto;
           font:500 10px/1.35 system-ui,sans-serif; letter-spacing:.01em; white-space:nowrap; text-align:right;
           color:var(--ui-text-dim);
           text-shadow:0 0 3px var(--ui-surface), 0 0 3px var(--ui-surface), 0 1px 1px var(--ui-surface); }
@@ -292,22 +300,26 @@ export const STYLE = `
           --panel-bottom:calc(var(--botbar-h) + 92px); }
         /* NB: no overflow:hidden on the popover itself — it would clip the caret.
            Inner scroll areas (.body / #search-results) round their own corners. */
-        #drawer { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); top:var(--ctrl-top);
-          width:min(440px, calc(100vw - 24px)); max-height:calc(100vh - var(--ctrl-top) - var(--panel-bottom)); z-index:6;
+        #drawer { position:absolute; right:calc(12px + env(safe-area-inset-right,0px)); bottom:calc(var(--botbar-h) + 66px);
+          width:min(440px, calc(100vw - 24px)); max-height:calc(100vh - var(--botbar-h) - 90px); z-index:6;
           background:var(--ui-bg); color:var(--ui-text); border:1px solid var(--ui-border); border-radius:14px;
           box-shadow:0 12px 38px rgba(0,0,0,.30); display:flex; flex-direction:column;
-          transform-origin:top right; transform:translateY(-6px) scale(.97); opacity:0; visibility:hidden;
+          transform-origin:bottom right; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
         #drawer.set-wide { width:min(520px, calc(100vw - 24px)); } /* settings: rail + content */
-        #drawer.wide .miller { height:calc(100vh - var(--ctrl-top) - var(--panel-bottom) - 118px); max-height:none; }
+        #drawer.wide .miller { height:calc(100vh - var(--botbar-h) - 208px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
         /* caret on the TOP edge, pointing up at the button above */
-        #drawer::after, #search::after { content:""; position:absolute; top:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
+        #search::after { content:""; position:absolute; top:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
           width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
-          border-bottom:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 -2px 1px rgba(0,0,0,.08)); }
-        #search::after { border-bottom-color:var(--ui-surface); }
+          border-bottom:var(--caret) solid var(--ui-surface); filter:drop-shadow(0 -2px 1px rgba(0,0,0,.08)); }
+        /* Charts/Settings panel pops UP from the bottom-right cluster: caret on the
+           BOTTOM edge, pointing down at the button below. */
+        #drawer::after { content:""; position:absolute; bottom:calc(-1 * var(--caret)); left:var(--caret-left,50%); transform:translateX(-50%);
+          width:0; height:0; border-left:var(--caret) solid transparent; border-right:var(--caret) solid transparent;
+          border-top:var(--caret) solid var(--ui-bg); filter:drop-shadow(0 2px 1px rgba(0,0,0,.08)); }
         /* The settings panel + its control look (toggle/segmented/number/select)
            now live in <settings-dialog> (settings-dialog.view.mjs STYLE); the
            Advanced-tab dev tools (rebake + feature inspector) carry their own CSS in
@@ -435,20 +447,17 @@ export const CHROME = `
            the corners — search alone top-left; charts · scheme · settings top-right
            — plus a read-only data card pinned to the bottom centre. -->
       <div id="tl-controls" class="ctrl-group">
-        <button class="rbtn" id="search-tab" type="button" title="Search charts &amp; features" aria-label="Search">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        </button>
+        <button class="rbtn" id="search-tab" type="button" title="Search charts &amp; features" aria-label="Search">${SEARCH_ICON}</button>
       </div>
-      <div id="tr-controls" class="ctrl-group">
-        <button class="rbtn" id="charts-btn" type="button" title="Get &amp; manage charts" aria-label="Charts">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="M3 12l9 4.5L21 12"/><path d="M3 16.5 12 21l9-4.5"/></svg>
-        </button>
+      <!-- Top-right holds the orientation compass only (mounted at runtime). -->
+      <div id="tr-controls" class="ctrl-group"></div>
+      <!-- Charts · scheme · settings relocated to a bottom-right cluster. -->
+      <div id="br-controls" class="ctrl-group">
+        <button class="rbtn" id="charts-btn" type="button" title="Get &amp; manage charts" aria-label="Charts">${CHART_ICON}</button>
         <button class="rbtn" id="scheme-toggle" type="button" title="Colour scheme — tap to cycle Day · Dusk · Night" aria-label="Colour scheme">
           <svg id="scheme-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg>
         </button>
-        <button class="rbtn" id="settings-btn" type="button" title="Settings" aria-label="Settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
-        </button>
+        <button class="rbtn" id="settings-btn" type="button" title="Settings" aria-label="Settings">${SETTINGS_ICON}</button>
       </div>
       <!-- NotificationCenter banner stack (non-task messages: failures, alerts). -->
       <div id="toasts"></div>

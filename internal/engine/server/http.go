@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/nmea"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 	"github.com/beetlebugorg/chartplotter/web"
 )
@@ -42,6 +43,11 @@ type Server struct {
 	packs   map[string]string // ALL baked packs on disk: set name → pmtiles path
 	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
 	auxIdx  *auxIndex         // index of companion aux.zips for /api/aux (TXTDSC/PICREP)
+
+	vessel *nmea.Store        // latest NMEA0183 vessel state (fed by nmeaMgr)
+	nmeaMgr *nmea.Manager     // live NMEA0183 connections (writes into vessel)
+	conns   *connectionsStore // persisted connection configs (<data>/connections.json)
+	rawHub  *rawHub           // raw-sentence fan-out for the per-connection sniffer
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -61,6 +67,7 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	// lives in <data>/prefs.json so it survives restarts and is shared across clients.
 	s.packs = scanPacks(cacheDir)
 	s.prefs = loadPrefs(dataDir)
+	s.initNMEA() // load connections.json + start their live runners
 	n := 0
 	for _, name := range sortedKeys(s.packs) {
 		if s.prefs.isDisabled(name) {
@@ -82,6 +89,9 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 // Close releases server-held resources (open tile-set archives). Safe to call once
 // at shutdown.
 func (s *Server) Close() error {
+	if s.nmeaMgr != nil {
+		s.nmeaMgr.Close()
+	}
 	s.sets.closeAll()
 	return nil
 }
@@ -165,6 +175,16 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveShare(w, r) // GET/POST the latest "share my view" snapshot
 	case r.URL.Path == "/api/settings":
 		s.serveSettings(w, r) // GET/POST persisted client display settings (shared across screens)
+	case r.URL.Path == "/api/vessel":
+		s.serveVessel(w, r) // GET: latest NMEA0183 vessel-state snapshot
+	case r.URL.Path == "/api/vessel/stream":
+		s.serveVesselStream(w, r) // SSE: coalesced vessel-state deltas
+	case r.URL.Path == "/api/connections":
+		s.serveConnections(w, r) // GET list (+status) / POST create a connection
+	case r.URL.Path == "/api/connections/stream":
+		s.serveConnectionsStream(w, r) // SSE: live connection-status badges
+	case strings.HasPrefix(r.URL.Path, "/api/connections/"):
+		s.serveConnection(w, r) // GET/PUT/DELETE /<id>, or SSE /<id>/raw (sniffer)
 	case strings.HasPrefix(r.URL.Path, "/api/tile/"):
 		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
 	case r.URL.Path == "/api/aux" || strings.HasPrefix(r.URL.Path, "/api/aux/"):

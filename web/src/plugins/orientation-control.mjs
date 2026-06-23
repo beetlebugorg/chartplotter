@@ -18,13 +18,16 @@
 // Built like the other host-mounted controllers (see plugins/hud.mjs): the shell
 // constructs it on `ready` with { host, map, plotter } and calls destroy() to tear
 // it down.
+import { NORTH_UP_ICON, COURSE_UP_ICON, NORTH_ARROW_ICON } from "../lib/openbridge-icons.mjs";
+
 export class OrientationControl {
   constructor({ host, map, plotter } = {}) {
     this._map = map;
     this._plotter = plotter; // <chart-canvas> — setCameraMode (sealed API)
     // Ordered tap cycle. Extend with "course-up"/"head-up" once a heading/course
     // source exists; the renderer already understands "course-up".
-    this._modes = ["north-up", "free"];
+    // course-up enabled now that the own-ship plugin streams the fix's course.
+    this._modes = ["north-up", "course-up", "free"];
     this._i = 0; // map boots at bearing 0 → north-up
     this._mount(host);
   }
@@ -35,30 +38,19 @@ export class OrientationControl {
     btn.className = "rbtn";
     btn.type = "button";
     btn.setAttribute("aria-label", "Map orientation");
-    // Static compass ring + a needle that rotates to point at true north on screen
-    // (north half red per convention). Matches the other 24×24 stroke-currentColor
-    // chrome icons; the needle group is rotated by -bearing in _syncNeedle.
-    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.3" opacity="0.4"/>
-      <g class="orient-needle">
-        <path d="M12 4.2 L14.6 12.4 L12 10.6 L9.4 12.4 Z" fill="#e23b3b"/>
-        <path d="M12 19.8 L9.4 11.6 L12 13.4 L14.6 11.6 Z" fill="currentColor" opacity="0.5"/>
-      </g>
-    </svg>`;
     host.appendChild(btn);
     this._btn = btn;
-    this._needle = btn.querySelector(".orient-needle");
-    this._needle.style.transformOrigin = "12px 12px";
-    this._needle.style.transition = "transform .12s linear";
 
     this._onClick = () => this._cycle();
     btn.addEventListener("click", this._onClick);
-    // Keep the needle aligned with true north as the user rotates the map.
+    // Keep the free-mode north arrow aligned with true north as the map rotates.
     this._onRotate = () => this._syncNeedle();
     this._map.on("rotate", this._onRotate);
 
-    this._syncNeedle();
-    this._reflectMode();
+    this._reflectMode(); // sets the per-mode OpenBridge glyph + (in free) the rotating arrow
+    // Assert the boot mode to the renderer so own-ship follow is active from the
+    // start (updateFollow only recentres in north-up/course-up, not "free").
+    if (this._plotter && this._plotter.setCameraMode) this._plotter.setCameraMode(this._modes[this._i]);
   }
 
   destroy() {
@@ -80,10 +72,26 @@ export class OrientationControl {
     this._reflectMode();
   }
 
+  // Show the OpenBridge orientation glyph for the active mode: north-up (N) and
+  // course-up (C) are static; "free" shows a north arrow that rotates to true
+  // north (the one mode where the chart bearing isn't fixed).
   _reflectMode() {
     if (!this._btn) return;
     const mode = this._modes[this._i];
     this._btn.title = "Orientation: " + mode + " — tap to cycle";
+    if (mode === "course-up") {
+      this._btn.innerHTML = COURSE_UP_ICON;
+    } else if (mode === "free") {
+      this._btn.innerHTML = `<span class="orient-rot" style="display:block;line-height:0">${NORTH_ARROW_ICON}</span>`;
+    } else {
+      this._btn.innerHTML = NORTH_UP_ICON;
+    }
+    this._needle = this._btn.querySelector(".orient-rot"); // present only in free mode
+    if (this._needle) {
+      this._needle.style.transformOrigin = "50% 50%";
+      this._needle.style.transition = "transform .12s linear";
+    }
+    this._syncNeedle();
   }
 
   _syncNeedle() {
