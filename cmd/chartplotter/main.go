@@ -30,15 +30,24 @@ type cli struct {
 }
 
 type emitAssetsCmd struct {
-	Dir string `arg:"" type:"path" help:"Output directory."`
+	Dir  string `arg:"" type:"path" help:"Output directory."`
+	S101 string `name:"s101" type:"existingdir" help:"Emit from an S-101 PortrayalCatalog directory instead of the embedded S-52 PresLib (transitional, until the catalogue is embedded)."`
+	CSS  string `name:"css" default:"daySvgStyle.css" help:"S-101 palette stylesheet (under Symbols/)."`
 }
 
 func (c emitAssetsCmd) Run() error {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		return err
+	var (
+		files []string
+		err   error
+	)
+	if c.S101 != "" {
+		files, err = assets.EmitS101(c.S101, c.CSS, c.Dir)
+	} else {
+		var lib *s52.Library
+		if lib, err = s52.LoadLibraryFromBytes(preslib.DAI); err == nil {
+			files, err = assets.Emit(lib, c.Dir)
+		}
 	}
-	files, err := assets.Emit(lib, c.Dir)
 	if err != nil {
 		return err
 	}
