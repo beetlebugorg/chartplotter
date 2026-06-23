@@ -8,8 +8,17 @@
 // day/dusk/night. The server prunes stale targets, so a target dropping out of the
 // list removes its marker.
 
-import { AIS_TARGET_ICON, AIS_TARGET_NODIR_ICON } from "../lib/openbridge-icons.mjs";
+import {
+  AIS_TARGET_ICON, AIS_TARGET_NODIR_ICON,
+  AIS_TARGET_DANGER_ICON, AIS_TARGET_DANGER_NODIR_ICON,
+} from "../lib/openbridge-icons.mjs";
 import { fmtLatLon } from "./target-info.mjs";
+
+// Pick the AIS glyph for a target's directionality + collision danger.
+function glyphFor(hasDir, danger) {
+  if (danger) return hasDir ? AIS_TARGET_DANGER_ICON : AIS_TARGET_DANGER_NODIR_ICON;
+  return hasDir ? AIS_TARGET_ICON : AIS_TARGET_NODIR_ICON;
+}
 
 const GLYPH_STYLE =
   "line-height:0;pointer-events:auto;cursor:pointer;will-change:transform;" +
@@ -84,9 +93,12 @@ export class AISOverlay {
     rec.t = t; // latest data for the picker
     const dir = num(t.cog) ?? num(t.heading);
     const hasDir = dir != null;
-    if (rec.hasDir !== hasDir) {
-      rec.el.innerHTML = hasDir ? AIS_TARGET_ICON : AIS_TARGET_NODIR_ICON;
+    const danger = !!t.danger;
+    if (rec.hasDir !== hasDir || rec.danger !== danger) {
+      rec.el.innerHTML = glyphFor(hasDir, danger);
+      rec.el.style.color = danger ? "var(--ais-danger, #e23b2e)" : "var(--ais-fill, #0a7d55)";
       rec.hasDir = hasDir;
+      rec.danger = danger;
     }
     if (t.name) rec.el.title = t.name;
     rec.marker.setLngLat([t.lon, t.lat]).setRotation(hasDir ? dir : 0);
@@ -108,9 +120,11 @@ export class AISOverlay {
     if (num(t.cog) != null) rows.push(["COG", Math.round(t.cog) + "°T"]);
     if (num(t.sog) != null) rows.push(["SOG", t.sog.toFixed(1) + " kn"]);
     if (num(t.heading) != null) rows.push(["Heading", Math.round(t.heading) + "°T"]);
+    if (num(t.cpaNm) != null) rows.push(["CPA", t.cpaNm.toFixed(2) + " nm"]);
+    if (num(t.tcpaMin) != null) rows.push(["TCPA", t.tcpaMin < 0 ? "passed" : t.tcpaMin.toFixed(1) + " min"]);
     this._onSelect({
-      title: t.name || `MMSI ${t.mmsi}`,
-      subtitle: "AIS" + (t.class ? " " + t.class : ""),
+      title: (t.danger ? "⚠ " : "") + (t.name || `MMSI ${t.mmsi}`),
+      subtitle: t.danger ? "COLLISION RISK" : "AIS" + (t.class ? " " + t.class : ""),
       rows,
       x: e.clientX,
       y: e.clientY,

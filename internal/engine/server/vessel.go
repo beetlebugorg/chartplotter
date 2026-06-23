@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/beetlebugorg/chartplotter/internal/engine/nmea"
 )
 
 // vessel.go exposes the shared NMEA0183 vessel state. GET /api/vessel returns a
@@ -51,17 +53,64 @@ func (s *Server) serveVesselStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveAIS returns the current AIS target list as JSON.
+// Collision thresholds: a target is "dangerous" when its closest approach is
+// within cpaDangerNm AND that approach is in the future within tcpaDangerMin.
+const (
+	cpaDangerNm   = 0.5
+	tcpaDangerMin = 12
+)
+
+// aisDTO is an AIS target enriched with the collision geometry against own-ship.
+type aisDTO struct {
+	nmea.AISTarget
+	CpaNm   *float64 `json:"cpaNm,omitempty"`
+	TcpaMin *float64 `json:"tcpaMin,omitempty"`
+	Danger  bool     `json:"danger,omitempty"`
+}
+
+// aisDTOs builds the AIS list with CPA/TCPA/danger computed against the current
+// own-ship fix (only when own-ship has position + course + speed and the target
+// has a course + speed).
+func (s *Server) aisDTOs() []aisDTO {
+	targets := s.nmeaMgr.AIS().Snapshot()
+	nav := s.vessel.Snapshot().Navigation
+	haveOwn := nav.Position != nil && nav.SOG != nil && (nav.COGTrue != nil || nav.HeadingTrue != nil)
+	var oLat, oLon, oCog, oSog float64
+	if haveOwn {
+		oLat, oLon, oSog = nav.Position.Lat, nav.Position.Lon, *nav.SOG
+		if nav.COGTrue != nil {
+			oCog = *nav.COGTrue
+		} else {
+			oCog = *nav.HeadingTrue
+		}
+	}
+	out := make([]aisDTO, 0, len(targets))
+	for _, t := range targets {
+		d := aisDTO{AISTarget: t}
+		if haveOwn && t.COG != nil && t.SOG != nil {
+			if cpa, tcpa, ok := nmea.CPA(oLat, oLon, oCog, oSog, t.Lat, t.Lon, *t.COG, *t.SOG); ok {
+				cpaV, tcpaV := cpa, tcpa
+				d.CpaNm, d.TcpaMin = &cpaV, &tcpaV
+				d.Danger = cpa < cpaDangerNm && tcpa >= 0 && tcpa <= tcpaDangerMin
+			}
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// serveAIS returns the current AIS target list (with collision geometry) as JSON.
 func (s *Server) serveAIS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		apiErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "targets": s.nmeaMgr.AIS().Snapshot()})
+	writeJSON(w, map[string]any{"ok": true, "targets": s.aisDTOs()})
 }
 
-// serveAISStream streams the AIS target list over SSE, emitting on connect and
-// whenever the target set changes (cheap version-counter check on a ~1 Hz tick).
+// serveAISStream streams the AIS list over SSE, re-emitting when the target set
+// changes OR own-ship moves (CPA is relative to own-ship, so it must refresh as
+// we move) — checked on a 1 Hz tick.
 func (s *Server) serveAISStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := sseStart(w)
 	if !ok {
@@ -71,12 +120,13 @@ func (s *Server) serveAISStream(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	ais := s.nmeaMgr.AIS()
 	var lastVer uint64
+	var lastUpd time.Time
 	first := true
 	for {
-		if v := ais.Version(); first || v != lastVer {
-			first = false
-			lastVer = v
-			b, _ := json.Marshal(map[string]any{"targets": ais.Snapshot()})
+		v, upd := ais.Version(), s.vessel.Snapshot().Updated
+		if first || v != lastVer || !upd.Equal(lastUpd) {
+			first, lastVer, lastUpd = false, v, upd
+			b, _ := json.Marshal(map[string]any{"targets": s.aisDTOs()})
 			fmt.Fprintf(w, "data: %s\n\n", b)
 			flusher.Flush()
 		}
