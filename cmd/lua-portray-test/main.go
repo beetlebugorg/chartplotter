@@ -21,6 +21,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"strings"
+
+	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -145,14 +148,33 @@ func main() {
 	instr := res.RawGetString("instructions").(*lua.LTable)
 
 	fmt.Printf("Rule %s ran. resolved PrimitiveType=%v viewingGroup=%v\n", *rule, pt, vg)
+	var tokens []string
 	fmt.Printf("Emitted %d drawing instruction(s):\n", instr.Len())
 	for i := 1; i <= instr.Len(); i++ {
 		v := instr.RawGetInt(i)
 		if v != lua.LNil {
 			fmt.Printf("  [%d] %s\n", i, v.String())
+			tokens = append(tokens, v.String())
 		}
 	}
-	fmt.Println("\nRESULT: PASS — a real S-101 rule executed in gopher-lua via a Go host and emitted instructions.")
+
+	// Close the seam: parse the emitted stream into resolved draw commands.
+	cmds, unsupported := instructions.Reduce(instructions.ParseStream(strings.Join(tokens, ";")))
+	fmt.Printf("\nParsed into %d draw command(s):\n", len(cmds))
+	for _, c := range cmds {
+		extra := ""
+		if c.SimpleLine != nil {
+			extra = fmt.Sprintf(" line{w=%g,col=%s,dash=%g}", c.SimpleLine.Width, c.SimpleLine.Color, c.SimpleLine.DashLength)
+		}
+		if c.HasRotation || c.Offset != [2]float64{} {
+			extra += fmt.Sprintf(" off=%v rot=%g", c.Offset, c.Rotation)
+		}
+		fmt.Printf("  %-9s ref=%-10s vg=%d prio=%d plane=%s%s\n", c.Op, c.Reference, c.ViewingGroup, c.Priority, c.DisplayPlane, extra)
+	}
+	if len(unsupported) > 0 {
+		fmt.Printf("Unsupported instruction kinds (gaps): %v\n", unsupported)
+	}
+	fmt.Println("\nRESULT: PASS — real S-101 rule → gopher-lua via Go host → parsed draw commands.")
 }
 
 func fatal(format string, args ...any) {
