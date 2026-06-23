@@ -2,7 +2,8 @@ package catalog
 
 import (
 	"fmt"
-	"path/filepath"
+	"io/fs"
+	"os"
 )
 
 // RGB is an 8-bit sRGB colour.
@@ -46,10 +47,18 @@ type xmlColorProfile struct {
 	} `xml:"palette"`
 }
 
-// LoadColorProfile parses ColorProfiles/colorProfile.xml.
+// LoadColorProfile parses ColorProfiles/colorProfile.xml by path.
 func LoadColorProfile(path string) (*ColorProfile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseColorProfile(data)
+}
+
+func parseColorProfile(data []byte) (*ColorProfile, error) {
 	var x xmlColorProfile
-	if err := readXML(path, &x); err != nil {
+	if err := decodeXML(data, &x); err != nil {
 		return nil, err
 	}
 	cp := &ColorProfile{Day: Palette{}, Dusk: Palette{}, Night: Palette{}}
@@ -81,17 +90,28 @@ type Catalog struct {
 }
 
 // Load reads LineStyles/, AreaFills/, and ColorProfiles/colorProfile.xml from a
-// PortrayalCatalog directory.
+// PortrayalCatalog directory (path).
 func Load(portrayalCatalogDir string) (*Catalog, error) {
+	return LoadFS(os.DirFS(portrayalCatalogDir))
+}
+
+// LoadFS reads the catalogue from an fs.FS rooted at a PortrayalCatalog (e.g.
+// an embed.FS sub-tree). Expects LineStyles/, AreaFills/, and
+// ColorProfiles/colorProfile.xml under the root.
+func LoadFS(fsys fs.FS) (*Catalog, error) {
 	c := &Catalog{}
 	var err error
-	if c.LineStyles, err = LoadLineStyles(filepath.Join(portrayalCatalogDir, "LineStyles")); err != nil {
+	if c.LineStyles, err = loadLineStylesFS(fsys, "LineStyles"); err != nil {
 		return nil, fmt.Errorf("line styles: %w", err)
 	}
-	if c.AreaFills, err = LoadAreaFills(filepath.Join(portrayalCatalogDir, "AreaFills")); err != nil {
+	if c.AreaFills, err = loadAreaFillsFS(fsys, "AreaFills"); err != nil {
 		return nil, fmt.Errorf("area fills: %w", err)
 	}
-	if c.Colors, err = LoadColorProfile(filepath.Join(portrayalCatalogDir, "ColorProfiles", "colorProfile.xml")); err != nil {
+	data, err := fs.ReadFile(fsys, "ColorProfiles/colorProfile.xml")
+	if err != nil {
+		return nil, fmt.Errorf("colour profile: %w", err)
+	}
+	if c.Colors, err = parseColorProfile(data); err != nil {
 		return nil, fmt.Errorf("colour profile: %w", err)
 	}
 	return c, nil

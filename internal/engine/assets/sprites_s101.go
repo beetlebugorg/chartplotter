@@ -2,6 +2,7 @@ package assets
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,16 +21,24 @@ import (
 // scale (pxPerUnit is px per 0.01-mm unit; ×100 = px per mm).
 const s101PxPerMM = pxPerUnit * 100
 
-// SpriteAtlasS101 builds the symbol atlas from an S-101 Symbols directory and
-// one of its *SvgStyle.css palettes. Returns sprites.json + atlas PNG bytes.
+// SpriteAtlasS101 builds the symbol atlas from an S-101 Symbols directory
+// (path) and one of its *SvgStyle.css palettes. Returns sprites.json + atlas
+// PNG bytes.
 func SpriteAtlasS101(symbolsDir, cssPath string) (jsonBytes, pngBytes []byte, err error) {
-	cssData, err := os.ReadFile(cssPath)
+	return SpriteAtlasS101FS(os.DirFS(symbolsDir), filepath.Base(cssPath))
+}
+
+// SpriteAtlasS101FS builds the atlas from an fs.FS rooted at the Symbols
+// directory (e.g. an embed.FS sub-tree); cssName is the stylesheet file within
+// it (e.g. "daySvgStyle.css").
+func SpriteAtlasS101FS(symbolsFS fs.FS, cssName string) (jsonBytes, pngBytes []byte, err error) {
+	cssData, err := fs.ReadFile(symbolsFS, cssName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read css: %w", err)
 	}
 	css := symbols.LoadCSS(cssData)
 
-	entries, err := os.ReadDir(symbolsDir)
+	entries, err := fs.ReadDir(symbolsFS, ".")
 	if err != nil {
 		return nil, nil, fmt.Errorf("read symbols dir: %w", err)
 	}
@@ -42,7 +51,7 @@ func SpriteAtlasS101(symbolsDir, cssPath string) (jsonBytes, pngBytes []byte, er
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-		svg, err := os.ReadFile(filepath.Join(symbolsDir, e.Name()))
+		svg, err := fs.ReadFile(symbolsFS, e.Name())
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", e.Name(), err)
 		}

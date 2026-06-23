@@ -11,6 +11,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,15 +88,23 @@ type xmlAreaFill struct {
 	} `xml:"v2"`
 }
 
-// LoadLineStyle parses one LineStyles/*.xml (simple or composite); the ID is
-// the file stem.
+// LoadLineStyle parses one LineStyles/*.xml (simple or composite) by path; the
+// ID is the file stem.
 func LoadLineStyle(path string) (*LineStyle, error) {
-	var x xmlLineStyle
-	if err := readXML(path, &x); err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil, err
 	}
+	return parseLineStyle(stem(path), data)
+}
+
+func parseLineStyle(id string, data []byte) (*LineStyle, error) {
+	var x xmlLineStyle
+	if err := decodeXML(data, &x); err != nil {
+		return nil, fmt.Errorf("%s: %w", id, err)
+	}
 	ls := lineStyleFromXML(x)
-	ls.ID = stem(path)
+	ls.ID = id
 	return &ls, nil
 }
 
@@ -118,14 +127,23 @@ func lineStyleFromXML(x xmlLineStyle) LineStyle {
 	return ls
 }
 
-// LoadAreaFill parses one AreaFills/*.xml symbolFill; the ID is the file stem.
+// LoadAreaFill parses one AreaFills/*.xml symbolFill by path; the ID is the
+// file stem.
 func LoadAreaFill(path string) (*AreaFill, error) {
-	var x xmlAreaFill
-	if err := readXML(path, &x); err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil, err
 	}
+	return parseAreaFill(stem(path), data)
+}
+
+func parseAreaFill(id string, data []byte) (*AreaFill, error) {
+	var x xmlAreaFill
+	if err := decodeXML(data, &x); err != nil {
+		return nil, fmt.Errorf("%s: %w", id, err)
+	}
 	return &AreaFill{
-		ID:        stem(path),
+		ID:        id,
 		CRS:       x.CRS,
 		SymbolRef: x.Symbol.Reference,
 		V1:        Vec{X: x.V1.X, Y: x.V1.Y},
@@ -133,11 +151,20 @@ func LoadAreaFill(path string) (*AreaFill, error) {
 	}, nil
 }
 
-// LoadLineStyles loads every *.xml in dir, keyed by ID.
+// LoadLineStyles loads every *.xml in a directory (path), keyed by ID.
 func LoadLineStyles(dir string) (map[string]*LineStyle, error) {
+	return loadLineStylesFS(os.DirFS(dir), ".")
+}
+
+// LoadAreaFills loads every *.xml in a directory (path), keyed by ID.
+func LoadAreaFills(dir string) (map[string]*AreaFill, error) {
+	return loadAreaFillsFS(os.DirFS(dir), ".")
+}
+
+func loadLineStylesFS(fsys fs.FS, sub string) (map[string]*LineStyle, error) {
 	out := map[string]*LineStyle{}
-	err := eachXML(dir, func(path string) error {
-		ls, err := LoadLineStyle(path)
+	err := eachXMLFS(fsys, sub, func(name string, data []byte) error {
+		ls, err := parseLineStyle(name, data)
 		if err != nil {
 			return err
 		}
@@ -147,11 +174,10 @@ func LoadLineStyles(dir string) (map[string]*LineStyle, error) {
 	return out, err
 }
 
-// LoadAreaFills loads every *.xml in dir, keyed by ID.
-func LoadAreaFills(dir string) (map[string]*AreaFill, error) {
+func loadAreaFillsFS(fsys fs.FS, sub string) (map[string]*AreaFill, error) {
 	out := map[string]*AreaFill{}
-	err := eachXML(dir, func(path string) error {
-		af, err := LoadAreaFill(path)
+	err := eachXMLFS(fsys, sub, func(name string, data []byte) error {
+		af, err := parseAreaFill(name, data)
 		if err != nil {
 			return err
 		}
@@ -163,17 +189,10 @@ func LoadAreaFills(dir string) (map[string]*AreaFill, error) {
 
 // --- helpers ---
 
-func readXML(path string, v any) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
+func decodeXML(data []byte, v any) error {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.CharsetReader = charsetReader // some catalogue files declare ISO-8859-1
-	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("%s: %w", filepath.Base(path), err)
-	}
-	return nil
+	return dec.Decode(v)
 }
 
 // charsetReader converts the few non-UTF-8 encodings the catalogue uses.
@@ -200,8 +219,10 @@ func charsetReader(label string, input io.Reader) (io.Reader, error) {
 	}
 }
 
-func eachXML(dir string, fn func(path string) error) error {
-	entries, err := os.ReadDir(dir)
+// eachXMLFS calls fn(stem, data) for every *.xml in fsys under sub (use "." for
+// the root). Works for both embed.FS and os.DirFS.
+func eachXMLFS(fsys fs.FS, sub string, fn func(stem string, data []byte) error) error {
+	entries, err := fs.ReadDir(fsys, sub)
 	if err != nil {
 		return err
 	}
@@ -209,7 +230,16 @@ func eachXML(dir string, fn func(path string) error) error {
 		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".xml") {
 			continue
 		}
-		if err := fn(filepath.Join(dir, e.Name())); err != nil {
+		p := e.Name()
+		if sub != "." {
+			p = sub + "/" + e.Name()
+		}
+		data, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		stem := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		if err := fn(stem, data); err != nil {
 			return err
 		}
 	}

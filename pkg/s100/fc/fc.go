@@ -120,12 +120,18 @@ type xmlFeatureType struct {
 	} `xml:"attributeBinding"`
 }
 
-// Load parses a FeatureCatalogue.xml file into a Catalogue.
+// Load parses a FeatureCatalogue.xml file (by path) into a Catalogue.
 func Load(path string) (*Catalogue, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return LoadBytes(data)
+}
+
+// LoadBytes parses FeatureCatalogue.xml bytes (e.g. from an embed.FS) into a
+// Catalogue.
+func LoadBytes(data []byte) (*Catalogue, error) {
 	var x xmlCatalogue
 	if err := xml.Unmarshal(data, &x); err != nil {
 		return nil, fmt.Errorf("parse feature catalogue: %w", err)

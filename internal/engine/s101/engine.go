@@ -13,8 +13,10 @@
 package s101
 
 import (
+	"bytes"
 	"fmt"
-	"path/filepath"
+	"io/fs"
+	"os"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
@@ -53,9 +55,15 @@ type adapted struct {
 	attrs               map[string]string // S-101 attribute code -> value string
 }
 
-// NewEngine loads the S-101 framework from rulesDir and binds host callbacks to
-// cat. rulesDir is the S-101 PortrayalCatalog/Rules directory.
+// NewEngine loads the S-101 framework from a Rules directory (path) and binds
+// host callbacks to cat.
 func NewEngine(rulesDir string, cat *fc.Catalogue) (*Engine, error) {
+	return NewEngineFS(os.DirFS(rulesDir), cat)
+}
+
+// NewEngineFS loads the S-101 framework from an fs.FS rooted at the Rules
+// directory (e.g. an embed.FS sub-tree) and binds host callbacks to cat.
+func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
 	e := &Engine{L: lua.NewState(), cat: cat}
 	L := e.L
 
@@ -73,7 +81,16 @@ func NewEngine(rulesDir string, cat *fc.Catalogue) (*Engine, error) {
 			return 0
 		}
 		loaded[name] = true
-		if err := s.DoFile(filepath.Join(rulesDir, name+".lua")); err != nil {
+		data, err := fs.ReadFile(rules, name+".lua")
+		if err != nil {
+			s.RaiseError("require(%q): %v", name, err)
+		}
+		fn, err := s.Load(bytes.NewReader(data), name+".lua")
+		if err != nil {
+			s.RaiseError("require(%q): %v", name, err)
+		}
+		s.Push(fn)
+		if err := s.PCall(0, 0, nil); err != nil {
 			s.RaiseError("require(%q): %v", name, err)
 		}
 		return 0
