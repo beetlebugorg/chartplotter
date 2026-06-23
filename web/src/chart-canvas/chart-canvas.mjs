@@ -655,7 +655,11 @@ export class ChartCanvas extends HTMLElement {
     const map = this._map;
     if (!map || !fix || (this._cameraMode || "free") === "free") return;
     const cam = { center: [fix.lng, fix.lat], duration: 250 };
+    // Hold the mode's bearing on every fix; otherwise this centre-only ease would
+    // cancel the one-shot bearing reset from setCameraMode (north-up gets stuck at
+    // the previous course-up heading).
     if (this._cameraMode === "course-up" && typeof fix.courseDeg === "number") cam.bearing = fix.courseDeg;
+    else if (this._cameraMode === "north-up") cam.bearing = 0;
     map.easeTo(cam);
   }
 
