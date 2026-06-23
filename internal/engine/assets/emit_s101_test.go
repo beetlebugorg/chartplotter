@@ -24,13 +24,35 @@ func TestEmitS101(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 3 {
-		t.Errorf("wrote %d files, want 3", len(files))
+	if len(files) != 4 {
+		t.Errorf("wrote %d files, want 4", len(files))
 	}
-	for _, name := range []string{"colortables.json", "sprite.json", "sprite.png"} {
+	for _, name := range []string{"colortables.json", "linestyles.json", "sprite.json", "sprite.png"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("missing %s", name)
 		}
+	}
+
+	// ACHARE51 (anchorage boundary: dashed magenta + placed symbols) must come
+	// through with a real period and its embedded symbols.
+	lsData, err := os.ReadFile(filepath.Join(dir, "linestyles.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lsDoc map[string]struct {
+		PeriodPx   float64 `json:"period_px"`
+		ColorToken string  `json:"color_token"`
+		Symbols    []struct {
+			N string `json:"n"`
+		} `json:"symbols"`
+	}
+	if err := json.Unmarshal(lsData, &lsDoc); err != nil {
+		t.Fatalf("linestyles.json: %v", err)
+	}
+	if ach, ok := lsDoc["ACHARE51"]; !ok {
+		t.Error("ACHARE51 missing from linestyles.json")
+	} else if ach.PeriodPx <= 0 || ach.ColorToken != "CHMGD" || len(ach.Symbols) == 0 {
+		t.Errorf("ACHARE51 looks wrong: %+v", ach)
 	}
 
 	// The S-101 colour tables must match what the S-52 library emits (the
