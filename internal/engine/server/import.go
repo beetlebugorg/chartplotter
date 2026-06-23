@@ -398,7 +398,7 @@ func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[s
 		if err != nil {
 			return nil, nil, err
 		}
-		return extractZipCells(data)
+		return s.cacheExtracted(extractZipCells(data))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxImportBytes))
@@ -406,10 +406,21 @@ func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[s
 		return nil, nil, err
 	}
 	if isZip(body) {
-		return extractZipCells(body)
+		return s.cacheExtracted(extractZipCells(body))
 	}
-	// No (zip) body → bake from the cached cells.
+	// No (zip) body → bake from the cached cells (already on disk).
 	return s.cachedCellData(r.URL.Query().Get("cells")), nil, nil
+}
+
+// cacheExtracted persists freshly-extracted upload cells to the ENC_ROOT source
+// cache before baking, so the ORIGINAL cell files are always kept (re-bakeable
+// after a tile-cache wipe) rather than discarded after an in-memory bake. Passes
+// the (cells, aux, err) triple straight through.
+func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, err error) (map[string]baker.CellData, map[string][]byte, error) {
+	if err == nil && len(cells) > 0 {
+		s.cacheCells(cells)
+	}
+	return cells, aux, err
 }
 
 // maxImportBytes caps an uploaded exchange set (a single NOAA district zip is well
