@@ -1016,6 +1016,12 @@ export class ChartPlotter extends HTMLElement {
     // inspector (now in DevTools) sets its own cursor + owns the hover/click/
     // SHIFT+drag listeners; its click handler runs only while inspecting.
     map.getCanvas().style.cursor = "crosshair";
+    // While the user grabs and pans the chart, swap the crosshair for a closed-
+    // hand "grabbing" cursor so the drag reads as a grab; restore the ECDIS
+    // crosshair when the pan ends. The dev inspector owns its own cursor while
+    // armed (SHIFT+drag box-select), so don't fight it then.
+    map.on("dragstart", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "grabbing"; });
+    map.on("dragend", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "crosshair"; });
     map.on("click", (e) => {
       // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
       // it so a pick/coverage tap doesn't fire under an active inspect lock.
