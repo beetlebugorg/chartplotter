@@ -155,6 +155,23 @@ func TestCoastlineMaskingOffKeepsSharedEdge(t *testing.T) {
 	}
 }
 
+// TestCoastDefinerSet locks in which classes define the coast. They are BOTH the
+// edge-set contributors (buildChart) AND exempt from masking. COALNE alone left
+// stray boundary "chevrons" where the NOAA land/water line is encoded only as an
+// LNDARE or SLCONS edge, so the set was widened to all three.
+func TestCoastDefinerSet(t *testing.T) {
+	for _, c := range []string{"COALNE", "LNDARE", "SLCONS"} {
+		if !isCoastlineMaskExempt(c) {
+			t.Errorf("%s must be a coast-definer (exempt + edge-set contributor)", c)
+		}
+	}
+	for _, c := range []string{"DEPARE", "SEAARE", "RESARE", "CTNARE"} {
+		if isCoastlineMaskExempt(c) {
+			t.Errorf("%s must NOT be a coast-definer", c)
+		}
+	}
+}
+
 // TestCoastlineMaskingExemptsLNDARE verifies the coast-definer exemption: an LNDARE
 // area sharing the same edge KEEPS it in BoundaryLines even when masking is on. The
 // exemption is enforced by buildChart (which sets maskCoast=false for LNDARE), so we
