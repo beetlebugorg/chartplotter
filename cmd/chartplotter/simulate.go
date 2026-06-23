@@ -1,14 +1,20 @@
 package main
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/nmea/sim"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 // simulateCmd runs a NMEA0183 traffic generator over TCP: own-ship instruments
@@ -25,6 +31,8 @@ type simulateCmd struct {
 	Targets   int     `default:"6" help:"Number of AIS targets."`
 	Collision bool    `default:"true" negatable:"" help:"Put one target on a collision course."`
 	Seed      int64   `default:"1" help:"RNG seed (reproducible scenarios)."`
+	Cell      string  `type:"existingfile" help:"S-57 cell (.000 or exchange .zip) to keep traffic in navigable water."`
+	MinDepth  float64 `name:"min-depth" default:"2" help:"Minimum charted depth (DRVAL1, m) for navigable water when --cell is set."`
 }
 
 func (c simulateCmd) Run() error {
@@ -32,9 +40,19 @@ func (c simulateCmd) Run() error {
 	if err != nil {
 		return err
 	}
+	var water *sim.WaterMask
+	if c.Cell != "" {
+		chart, err := loadCell(c.Cell)
+		if err != nil {
+			return fmt.Errorf("load cell %s: %w", c.Cell, err)
+		}
+		if water = sim.NewWaterMask(chart, c.MinDepth); water == nil {
+			fmt.Println("warning: no navigable depth areas (DEPARE ≥ min-depth) in cell; placing traffic unconstrained")
+		}
+	}
 	s := sim.New(sim.Options{
 		Lat: lat, Lon: lon, Course: c.Course, Speed: c.Speed,
-		Targets: c.Targets, Collision: c.Collision, Seed: c.Seed,
+		Targets: c.Targets, Collision: c.Collision, Seed: c.Seed, Water: water,
 	})
 
 	addr := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
@@ -43,8 +61,10 @@ func (c simulateCmd) Run() error {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	defer ln.Close()
-	fmt.Printf("nmea0183 simulator → tcp://%s  (own-ship %.4f,%.4f @ %.0f° %.0fkn, %d AIS targets%s)\n",
-		addr, lat, lon, c.Course, c.Speed, c.Targets, ifStr(c.Collision, ", 1 on collision course", ""))
+	fmt.Printf("nmea0183 simulator → tcp://%s  (own-ship %.4f,%.4f @ %.0f° %.0fkn, %d AIS targets%s%s)\n",
+		addr, s.Own.Lat, s.Own.Lon, c.Course, c.Speed, c.Targets,
+		ifStr(c.Collision, ", 1 on collision course", ""),
+		ifStr(water != nil, ", in navigable water from "+filepath.Base(c.Cell), ""))
 	fmt.Println("point a Connection at this host:port; Ctrl-C to stop")
 
 	hub := &connHub{conns: map[net.Conn]struct{}{}}
@@ -108,6 +128,38 @@ func (h *connHub) broadcast(lines []string) {
 			delete(h.conns, c)
 		}
 	}
+}
+
+// loadCell parses an S-57 cell from a .000 file or the first .000 inside an
+// exchange-set .zip.
+func loadCell(p string) (*s57.Chart, error) {
+	if strings.HasSuffix(strings.ToLower(p), ".zip") {
+		zr, err := zip.OpenReader(p)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		for _, f := range zr.File {
+			if strings.HasSuffix(strings.ToLower(f.Name), ".000") {
+				rc, err := f.Open()
+				if err != nil {
+					return nil, err
+				}
+				data, err := io.ReadAll(rc)
+				rc.Close()
+				if err != nil {
+					return nil, err
+				}
+				return baker.ParseCellBytes(filepath.Base(f.Name), data)
+			}
+		}
+		return nil, fmt.Errorf("no .000 cell found in %s", p)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	return baker.ParseCellBytes(filepath.Base(p), data)
 }
 
 func parseLatLon(s string) (float64, float64, error) {

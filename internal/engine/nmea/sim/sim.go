@@ -22,9 +22,9 @@ type Vessel struct {
 	Type     uint8 // AIS ship type
 	Class    byte  // 'A' | 'B'
 	Lat, Lon float64
-	Course   float64 // degrees true
-	Speed    float64 // knots
-	Turn     float64 // deg/min, for a constant gentle course change
+	Course   float64      // degrees true
+	Speed    float64      // knots
+	Turn     float64      // deg/min, for a constant gentle course change
 	wps      [][2]float64 // optional route (lat,lon waypoints) to steer through
 	wpi      int          // current waypoint index
 }
@@ -45,6 +45,7 @@ type Options struct {
 	Targets   int     // number of AIS targets
 	Collision bool    // make one target converge on own-ship
 	Seed      int64
+	Water     *WaterMask // optional: constrain placement to navigable water from a cell
 }
 
 // New builds a Sim: own-ship at the given start, plus N AIS targets scattered
@@ -55,6 +56,23 @@ func New(o Options) *Sim {
 		o.Speed = 6
 	}
 	rng := rand.New(rand.NewSource(o.Seed))
+	water := o.Water
+	// With a cell, keep own-ship in navigable water too.
+	if water != nil && !water.IsWater(o.Lat, o.Lon) {
+		if la, lo, ok := water.Sample(rng); ok {
+			o.Lat, o.Lon = la, lo
+		}
+	}
+	// place returns a navigable point: a water sample if we have a mask, else the
+	// dead-reckoned point from own-ship at (brg,dist).
+	place := func(brg, dist float64) (float64, float64) {
+		if water != nil {
+			if la, lo, ok := water.Sample(rng); ok {
+				return la, lo
+			}
+		}
+		return destination(o.Lat, o.Lon, brg, dist)
+	}
 	s := &Sim{
 		Own:   Vessel{Name: "OWN", Lat: o.Lat, Lon: o.Lon, Course: o.Course, Speed: o.Speed},
 		codec: aisnmea.NMEACodecNew(ais.CodecNew(false, false)),
@@ -65,7 +83,7 @@ func New(o Options) *Sim {
 	for i := 0; i < o.Targets; i++ {
 		brg := rng.Float64() * 360
 		dist := 0.5 + rng.Float64()*2.5 // 0.5–3 nm out
-		lat, lon := destination(o.Lat, o.Lon, brg, dist)
+		lat, lon := place(brg, dist)
 		t := &Vessel{
 			MMSI:   uint32(244000000 + rng.Intn(1000000)),
 			Name:   names[i%len(names)],
@@ -87,7 +105,7 @@ func New(o Options) *Sim {
 		case 2:
 			for k, n := 0, 3+rng.Intn(2); k < n; k++ {
 				b, d := rng.Float64()*360, 0.5+rng.Float64()*2.5
-				wla, wlo := destination(o.Lat, o.Lon, b, d)
+				wla, wlo := place(b, d)
 				t.wps = append(t.wps, [2]float64{wla, wlo})
 			}
 		}
@@ -99,7 +117,7 @@ func New(o Options) *Sim {
 		t := s.Targets[0]
 		t.Name = "CPA ALERT"
 		t.wps, t.Turn = nil, 0
-		t.Lat, t.Lon = destination(o.Lat, o.Lon, o.Course+25, 2.5)
+		t.Lat, t.Lon = place(o.Course+25, 2.5)
 		t.Course = math.Mod(bearing(t.Lat, t.Lon, o.Lat, o.Lon), 360)
 		t.Speed = 10
 	}
