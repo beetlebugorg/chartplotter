@@ -420,6 +420,12 @@ type Feature struct {
 	attributes  map[string]interface{}
 }
 
+// NewFeature constructs a Feature. Useful for tests and for synthesizing
+// features outside the parser; the parser builds them directly.
+func NewFeature(id int64, objectClass string, geometry Geometry, attributes map[string]interface{}) Feature {
+	return Feature{id: id, objectClass: objectClass, geometry: geometry, attributes: attributes}
+}
+
 // ID returns the unique feature identifier.
 func (f *Feature) ID() int64 {
 	return f.id

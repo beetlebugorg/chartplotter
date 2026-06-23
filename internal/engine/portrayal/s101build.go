@@ -1,0 +1,126 @@
+package portrayal
+
+import (
+	"math"
+	"strconv"
+	"strings"
+
+	"github.com/beetlebugorg/chartplotter/internal/engine/s101"
+	"github.com/beetlebugorg/chartplotter/pkg/s100/catalog"
+	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
+)
+
+// S101Builder is the S-101 replacement for the S-52 BuildFeature seam: it runs
+// the S-101 portrayal rules (via the fc-backed Lua engine) for one feature,
+// parses the emitted instruction stream, and lowers each draw onto the feature
+// geometry to produce the same Primitive stream the baker already consumes.
+// (specs/s101-portrayal-backport.md — the cutover that replaces lookup+CSPs.)
+type S101Builder struct {
+	Engine  *s101.Engine
+	Catalog *catalog.Catalog
+}
+
+// Build expands one S-57 feature via S-101 portrayal. ok is false only if the
+// engine returns nothing; an object class with no S-101 mapping renders the
+// QUESMRK1 "unknown object" placeholder (S-52 §10.1.1 parity) so gaps are
+// visible.
+func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
+	feat := s101.Feature{
+		ID:          strconv.FormatInt(f.ID(), 10),
+		ObjectClass: f.ObjectClass(),
+		Primitive:   primitiveName(f.Geometry().Type),
+		Attributes:  stringAttrs(f.Attributes()),
+	}
+	streams, err := b.Engine.Portray([]s101.Feature{feat})
+	if err != nil {
+		return FeatureBuild{}, false
+	}
+	stream, ok := streams[feat.ID]
+	if !ok || stream == "" {
+		return FeatureBuild{}, false
+	}
+	// Unmapped class or a rule error → the magenta "unknown object" mark.
+	if isS101Gap(stream) {
+		return unknownObjectBuild(f), true
+	}
+
+	g := geometryOf(f.Geometry())
+	anchor, _ := textAnchor(g)
+	sg := S101Geometry{Anchor: anchor, Points: g.line, Rings: g.area}
+
+	cmds, _ := instructions.Reduce(instructions.ParseStream(stream))
+	var prims []Primitive
+	priority := 0
+	for _, c := range cmds {
+		if c.Priority > priority {
+			priority = c.Priority
+		}
+		if p, ok := LowerS101(c, sg, b.Catalog); ok {
+			prims = append(prims, p)
+		}
+	}
+	return FeatureBuild{
+		Primitives:      prims,
+		DisplayPriority: priority,
+		DisplayCategory: s52DisplayStandard, // TODO: derive from S-101 viewing group
+	}, true
+}
+
+// s52DisplayStandard mirrors s52.DisplayStandard without importing s52 (the
+// cutover is dropping that dependency). The baker treats this as "standard".
+const s52DisplayStandard = 1
+
+func isS101Gap(stream string) bool {
+	return strings.HasPrefix(stream, "UNMAPPED:") || strings.HasPrefix(stream, "ERROR:")
+}
+
+func primitiveName(t s57.GeometryType) string {
+	switch t {
+	case s57.GeometryTypeLineString:
+		return "Curve"
+	case s57.GeometryTypePolygon:
+		return "Surface"
+	default:
+		return "Point"
+	}
+}
+
+// stringAttrs encodes S-57 attribute values as the strings ConvertEncodedValue
+// expects (enumeration/integer → digits, boolean → "1"/"0", text → as-is).
+func stringAttrs(attrs map[string]interface{}) map[string]string {
+	out := make(map[string]string, len(attrs))
+	for k, v := range attrs {
+		if s, ok := encodeAttr(v); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
+func encodeAttr(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case nil:
+		return "", false
+	case string:
+		return t, true
+	case bool:
+		if t {
+			return "1", true
+		}
+		return "0", true
+	case int:
+		return strconv.Itoa(t), true
+	case int64:
+		return strconv.FormatInt(t, 10), true
+	case float64:
+		if t == math.Trunc(t) && !math.IsInf(t, 0) {
+			return strconv.FormatInt(int64(t), 10), true
+		}
+		return strconv.FormatFloat(t, 'g', -1, 64), true
+	case float32:
+		return encodeAttr(float64(t))
+	default:
+		return "", false
+	}
+}
