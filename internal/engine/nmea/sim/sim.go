@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"strings"
 	"time"
 
 	ais "github.com/BertoldVdb/go-ais"
@@ -25,7 +24,9 @@ type Vessel struct {
 	Lat, Lon float64
 	Course   float64 // degrees true
 	Speed    float64 // knots
-	Turn     float64 // deg/min, for gentle course changes
+	Turn     float64 // deg/min, for a constant gentle course change
+	wps      [][2]float64 // optional route (lat,lon waypoints) to steer through
+	wpi      int          // current waypoint index
 }
 
 // Sim holds the world: own-ship + AIS targets, and the AIS encoder.
@@ -78,12 +79,26 @@ func New(o Options) *Sim {
 		if rng.Intn(3) == 0 {
 			t.Class = 'B'
 		}
+		// Realistic variation: ~⅓ run straight, ~⅓ hold a gentle turn, ~⅓ follow a
+		// multi-leg route (changing course toward each waypoint).
+		switch rng.Intn(3) {
+		case 1:
+			t.Turn = (rng.Float64()*2 - 1) * 6 // ±6 deg/min
+		case 2:
+			for k, n := 0, 3+rng.Intn(2); k < n; k++ {
+				b, d := rng.Float64()*360, 0.5+rng.Float64()*2.5
+				wla, wlo := destination(o.Lat, o.Lon, b, d)
+				t.wps = append(t.wps, [2]float64{wla, wlo})
+			}
+		}
 		s.Targets = append(s.Targets, t)
 	}
 	if o.Collision && len(s.Targets) > 0 {
 		// Place a target ~2.5 nm ahead and aim it back at own-ship for a low CPA.
+		// Straight line (no route/turn) so the encounter is deterministic.
 		t := s.Targets[0]
 		t.Name = "CPA ALERT"
+		t.wps, t.Turn = nil, 0
 		t.Lat, t.Lon = destination(o.Lat, o.Lon, o.Course+25, 2.5)
 		t.Course = math.Mod(bearing(t.Lat, t.Lon, o.Lat, o.Lon), 360)
 		t.Speed = 10
@@ -100,7 +115,15 @@ func (s *Sim) Step(dt float64) {
 }
 
 func advance(v *Vessel, dt float64) {
-	if v.Turn != 0 {
+	switch {
+	case len(v.wps) > 0: // route-follower: steer toward the current waypoint
+		tgt := v.wps[v.wpi]
+		if dist(v.Lat, v.Lon, tgt[0], tgt[1]) < 0.08 { // reached → next (loops)
+			v.wpi = (v.wpi + 1) % len(v.wps)
+			tgt = v.wps[v.wpi]
+		}
+		v.Course = steer(v.Course, bearing(v.Lat, v.Lon, tgt[0], tgt[1]), 20*(dt/60)) // ≤20°/min
+	case v.Turn != 0: // constant gentle turn
 		v.Course = math.Mod(v.Course+v.Turn*(dt/60)+360, 360)
 	}
 	nm := v.Speed * (dt / 3600)
@@ -226,4 +249,20 @@ func bearing(lat1, lon1, lat2, lon2 float64) float64 {
 	return math.Mod(math.Atan2(y, x)*180/math.Pi+360, 360)
 }
 
-var _ = strings.TrimSpace // reserved for future scenario parsing
+// dist is the approximate distance between two points in nautical miles.
+func dist(lat1, lon1, lat2, lon2 float64) float64 {
+	dlat := (lat2 - lat1) * 60
+	dlon := (lon2 - lon1) * 60 * math.Cos((lat1+lat2)/2*math.Pi/180)
+	return math.Hypot(dlat, dlon)
+}
+
+// steer turns cur toward want by at most maxStep degrees, taking the short way.
+func steer(cur, want, maxStep float64) float64 {
+	d := math.Mod(want-cur+540, 360) - 180 // signed delta in [-180,180)
+	if d > maxStep {
+		d = maxStep
+	} else if d < -maxStep {
+		d = -maxStep
+	}
+	return math.Mod(cur+d+360, 360)
+}

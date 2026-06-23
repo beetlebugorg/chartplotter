@@ -31,6 +31,34 @@ func TestSim_OwnShipRoundTrip(t *testing.T) {
 	require.NotNil(t, vs.Environment.Depth.BelowTransducer)
 }
 
+func TestSim_CourseVariation(t *testing.T) {
+	s := New(Options{Lat: 38.978, Lon: -76.478, Course: 45, Speed: 6, Targets: 6, Seed: 1})
+	start := make([]float64, len(s.Targets))
+	for i, tg := range s.Targets {
+		start[i] = tg.Course
+	}
+	for range 180 { // 3 simulated minutes
+		s.Step(1)
+	}
+	changed := 0
+	for i, tg := range s.Targets {
+		d := tg.Course - start[i]
+		for d > 180 {
+			d -= 360
+		}
+		for d < -180 {
+			d += 360
+		}
+		if d < 0 {
+			d = -d
+		}
+		if d > 5 { // turned or steered toward a waypoint
+			changed++
+		}
+	}
+	assert.Positive(t, changed, "some targets should change course (turns / route-following)")
+}
+
 func TestSim_AISFrames(t *testing.T) {
 	s := New(Options{Lat: 38.978, Lon: -76.478, Targets: 4, Seed: 2})
 	pos := s.AISPositions()
