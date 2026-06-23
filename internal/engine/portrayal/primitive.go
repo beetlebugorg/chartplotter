@@ -78,16 +78,22 @@ type SymbolHalo struct {
 // split and the OBSTRN/WRECKS shallow/deep swap against the live safety contour
 // without a re-bake. SoundingDepthM / DangerDepthM are NaN for ordinary symbols.
 type SymbolCall struct {
-	Anchor         geo.LatLon
-	SymbolName     string
-	RotationDeg    float32
-	Scale          float32
-	OffsetXUnits   float32
-	OffsetYUnits   float32
-	Halo           *SymbolHalo
-	SoundingDepthM float32
-	DangerDepthM   float32
-	DeepSymbolName string
+	Anchor      geo.LatLon
+	SymbolName  string
+	RotationDeg float32
+	// RotationTrueNorth marks RotationDeg as referenced to TRUE NORTH (S-52 PresLib
+	// Part I §9.2 ROT case 3 — rotation taken from an S-57 attribute like ORIENT), so
+	// the mark must rotate WITH the chart as it turns. False means screen-referenced
+	// (ROT cases 1 & 2 — no rotation, or a literal angle like a light flare): the mark
+	// stays upright to the screen regardless of chart orientation.
+	RotationTrueNorth bool
+	Scale             float32
+	OffsetXUnits      float32
+	OffsetYUnits      float32
+	Halo              *SymbolHalo
+	SoundingDepthM    float32
+	DangerDepthM      float32
+	DeepSymbolName    string
 }
 
 // PatternFill fills an area with a repeating PresLib pattern (AP instruction).

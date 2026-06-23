@@ -173,6 +173,9 @@ func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, 
 					mvt.KeyValue{Key: "symbol_name", Value: mvt.StringVal(sym.name)},
 					mvt.KeyValue{Key: "rotation_deg", Value: mvt.FloatVal(float32(rot))},
 					mvt.KeyValue{Key: "scale", Value: mvt.FloatVal(float32(symScale))},
+					// The mark is oriented to the edge tangent in chart space, so it must
+					// turn with the chart — map-aligned, like an ORIENT symbol (rot_north).
+					mvt.KeyValue{Key: "rot_north", Value: mvt.IntVal(1)},
 				))
 			}
 		}

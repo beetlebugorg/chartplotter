@@ -324,12 +324,16 @@ func (w *walker) emit(list []s52.Instruction, g geom, depth int) {
 			w.emitLinePattern(in.LineStyleID, g)
 		case *s52.SYInstruction:
 			rot := in.Rotation
-			if in.RotationAttr != "" {
+			// A rotation sourced from an S-57 attribute (e.g. SY(RECTRC57,ORIENT)) is
+			// referenced to TRUE NORTH and must turn with the chart; a literal angle or
+			// no rotation stays upright to the screen (S-52 PresLib §9.2 ROT 1/2 vs 3).
+			trueNorth := in.RotationAttr != ""
+			if trueNorth {
 				if v, ok := floatAttr(w.attrs, in.RotationAttr); ok {
 					rot = v // e.g. SY(RECTRC57,ORIENT) → the feature's ORIENT bearing
 				}
 			}
-			w.emitSymbol(in.SymbolID, float32(rot), g)
+			w.emitSymbol(in.SymbolID, float32(rot), trueNorth, g)
 		case *s52.SectorInstruction:
 			if g.kind == geomPoint {
 				w.out = append(w.out, SectorLight{
@@ -477,7 +481,7 @@ func (w *walker) linestyleColor(name string) string {
 	return ""
 }
 
-func (w *walker) emitSymbol(symbolName string, rotationDeg float32, g geom) {
+func (w *walker) emitSymbol(symbolName string, rotationDeg float32, rotationTrueNorth bool, g geom) {
 	// A point feature symbolises at its point; an area/line feature carries its
 	// SY() as a *centred* symbol at the centroid/midpoint (S-52 §8.3.1) — e.g.
 	// CTNARE's "!" (CTNARE51) or ACHARE's anchor (ACHARE51). Use the same anchor
@@ -496,13 +500,14 @@ func (w *walker) emitSymbol(symbolName string, rotationDeg float32, g geom) {
 		}
 	}
 	w.out = append(w.out, SymbolCall{
-		Anchor:         anchor,
-		SymbolName:     symbolName,
-		RotationDeg:    rotationDeg,
-		Scale:          DefaultPxPerSymbolUnit,
-		Halo:           halo,
-		SoundingDepthM: soundingDepth,
-		DangerDepthM:   nan32,
+		Anchor:            anchor,
+		SymbolName:        symbolName,
+		RotationDeg:       rotationDeg,
+		RotationTrueNorth: rotationTrueNorth,
+		Scale:             DefaultPxPerSymbolUnit,
+		Halo:              halo,
+		SoundingDepthM:    soundingDepth,
+		DangerDepthM:      nan32,
 	})
 }
 

@@ -49,12 +49,13 @@ const generalOverzoomMin uint32 = 0
 // stair-stepped at coarse-tile granularity when overzoomed. Beyond that the extra
 // levels are pure overzoom buffer the client recreates, and at high zoom they cost
 // 4×/16× the tiles, so we don't bake them:
-//   overview 7, general 9 — capped client-side (lines/patterns don't overzoom), so
-//     no cut to sharpen; base fills overzoom from the native max.
-//   coastal 11→13, approach 13→15 — +2 sharpens the cut vs the next finer band.
-//   harbor 16 — native max already cuts vs berthing at ~0.4 km; z17/18 would be
-//     pure buffer (this is the big win: drops ~16× of the harbor archive).
-//   berthing 18 — finest band, nothing finer to cut against; native detail.
+//
+//	overview 7, general 9 — capped client-side (lines/patterns don't overzoom), so
+//	  no cut to sharpen; base fills overzoom from the native max.
+//	coastal 11→13, approach 13→15 — +2 sharpens the cut vs the next finer band.
+//	harbor 16 — native max already cuts vs berthing at ~0.4 km; z17/18 would be
+//	  pure buffer (this is the big win: drops ~16× of the harbor archive).
+//	berthing 18 — finest band, nothing finer to cut against; native detail.
 func bandBakeCeil(bandMax uint32) uint32 {
 	switch bandMax {
 	case 12: // coastal: native max (z12) cuts too coarse; +2 → z14 to sharpen vs approach
@@ -285,17 +286,17 @@ type Baker struct {
 	linestyles map[string]*lsInfo // complex-linestyle period geometry, built once (lazily) from the PresLib
 	bbox       geo.BoundingBox
 	curCell    string // dataset name of the cell currently being added (stamped on each feature)
-	curCscl   uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
-	curScamin uint32 // SCAMIN (1:N min display scale) of the feature currently being expanded; 0 = none
-	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
-	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
-	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
+	curCscl    uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
+	curScamin  uint32 // SCAMIN (1:N min display scale) of the feature currently being expanded; 0 = none
+	curObjnam  string // OBJNAM of the feature currently being expanded (for the inspector)
+	curLight   string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
+	curAttrs   string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
 	// position, the first is "primary" (one flare + a merged multi-line label);
 	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
 	// dedupes identical sector geometry within the current cell.
-	curLightSkip bool                  // current LIGHTS is a non-primary co-located light
-	curLightText string                // merged multi-line characteristic for the primary
+	curLightSkip bool                   // current LIGHTS is a non-primary co-located light
+	curLightText string                 // merged multi-line characteristic for the primary
 	seenSector   map[sectorKey]struct{} // sector dedup for the current cell
 	scaminSeen   map[uint32]struct{}    // distinct SCAMIN denominators routed this band → published manifest
 	coverage     []CellCoverage         // M_COVR data-coverage polygons of added cells (debug)
@@ -593,7 +594,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 			bnd := int64(pass.Bnd)
 			pts := int64(pass.Pts)
 			scamin := intAttr(f.Attributes(), "SCAMIN")
-			b.curScamin = scamin // baked as the `scamin` tag → client per-SCAMIN bucket layers
+			b.curScamin = scamin   // baked as the `scamin` tag → client per-SCAMIN bucket layers
 			b.recordScamin(scamin) // publish the band's distinct values (manifest → TileJSON)
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
@@ -809,9 +810,9 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 	}
 	r := routed{
 		zMin: zMin, zMax: zMax, natMin: zr.Min, natMax: zr.Max,
-		bcBase:  true,
-		bcClass: b.internClass(class),
-		bcCell:  b.internCell(b.curCell),
+		bcBase:   true,
+		bcClass:  b.internClass(class),
+		bcCell:   b.internCell(b.curCell),
 		bcDrawP:  int16(drawPrio),
 		bcCat:    int16(catRank(cat)),
 		bcBnd:    int8(bnd),
@@ -917,6 +918,13 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 		mvt.KeyValue{Key: "halo_color_token", Value: mvt.StringVal(haloSymColor(v.Halo))},
 		mvt.KeyValue{Key: "halo_width", Value: mvt.FloatVal(haloSymWidth(v.Halo))},
 	)
+	// rot_north tags a TRUE-NORTH-referenced rotation (ORIENT etc.), so the client
+	// routes it to the map-aligned point-symbol layer that turns with the chart.
+	// Absent ⇒ screen-referenced (upright), the common case — kept off the tile to
+	// stay compact (S-52 PresLib §9.2 ROT 1/2 vs 3).
+	if v.RotationTrueNorth {
+		attrs = append(attrs, mvt.KeyValue{Key: "rot_north", Value: mvt.IntVal(1)})
+	}
 	if !isNaN32(v.DangerDepthM) {
 		attrs = append(attrs,
 			mvt.KeyValue{Key: "danger_depth", Value: mvt.FloatVal(v.DangerDepthM)},
@@ -1362,8 +1370,8 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 		}
 		return tileCovBand
 	}
-	var suppDown, suppUp, emptyGeom int    // tile-generation diagnostics (see TileDiag)
-	var polyElig, polyEmit int             // polygon prims eligible vs actually emitted (diagnostic)
+	var suppDown, suppUp, emptyGeom int // tile-generation diagnostics (see TileDiag)
+	var polyElig, polyEmit int          // polygon prims eligible vs actually emitted (diagnostic)
 	for _, i := range eligible {
 		r := &b.prims[i]
 		// Down-fill: a prim displayed BELOW its native band (general/overzoom cells)
