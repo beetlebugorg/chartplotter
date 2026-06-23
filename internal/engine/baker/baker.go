@@ -29,6 +29,30 @@ const (
 	MVTBuffer float64 = 64
 )
 
+// s101Portrayer, when set via UseS101Catalog, makes every Baker built here use
+// the S-101 portrayal engine instead of the S-52 lookup+CSPs (specs/
+// s101-portrayal-backport.md). Transitional: at the cutover flip this becomes
+// unconditional and the var is removed.
+var s101Portrayer bake.Portrayer
+
+// UseS101Catalog switches baking to S-101 portrayal, loading the engine from a
+// PortrayalCatalog directory + a FeatureCatalogue.xml path. Call once before
+// baking. (Transitional until the catalogue is embedded and S-101 is default.)
+func UseS101Catalog(portrayalCatalogDir, featureCataloguePath string) error {
+	p, err := bake.NewS101Portrayer(portrayalCatalogDir, featureCataloguePath)
+	if err != nil {
+		return err
+	}
+	s101Portrayer = p
+	return nil
+}
+
+func applyPortrayer(b *bake.Baker) {
+	if s101Portrayer != nil {
+		b.SetPortrayer(s101Portrayer)
+	}
+}
+
 // ParseCellBytes parses an S-57 base cell held entirely in memory (e.g. a zip
 // entry or a downloaded NOAA cell) by staging it on an in-memory filesystem.
 // Updates are not applied (the cell is parsed at its base edition).
@@ -62,6 +86,7 @@ func NewSession() (*Session, error) {
 	}
 	mariner := s52.DefaultMarinerSettings()
 	b := bake.New()
+	applyPortrayer(b)
 	b.OverzoomAllBands = true // realtime/upload path: keep a few uploaded cells visible (skeleton) when zoomed out
 	return &Session{Baker: b, lib: lib, mariner: mariner}, nil
 }
@@ -96,6 +121,7 @@ func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*
 	sort.Strings(names)
 
 	b := bake.New()
+	applyPortrayer(b)
 	var ok []string
 	for _, name := range names {
 		chart, err := ParseCellBytes(name, cells[name])
@@ -156,6 +182,7 @@ func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func
 	sort.Strings(names)
 
 	b := bake.New()
+	applyPortrayer(b)
 	b.OverzoomAllBands = overzoom
 	var ok []string
 	for _, name := range names {
@@ -268,6 +295,7 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 	}
 	mariner := s52.DefaultMarinerSettings()
 	b := bake.New()
+	applyPortrayer(b)
 	if maxZoom > 0 {
 		b.MaxBakeZoom = maxZoom
 	}

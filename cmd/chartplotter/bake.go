@@ -25,9 +25,20 @@ type bakeCmd struct {
 	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
 	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
 	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
+	S101     string   `name:"s101" type:"existingdir" help:"Portray via the S-101 rule engine using this PortrayalCatalog directory instead of the embedded S-52 PresLib (transitional, until the catalogue is embedded). Requires --s101-fc."`
+	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
 }
 
 func (c bakeCmd) Run() error {
+	if c.S101 != "" {
+		if c.S101FC == "" {
+			return fmt.Errorf("--s101 requires --s101-fc")
+		}
+		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
+			return fmt.Errorf("load S-101 catalogue: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "portrayal: S-101 rule engine")
+	}
 	cells, aux, err := collectCells(c.In)
 	if err != nil {
 		return err
@@ -224,8 +235,8 @@ func collectCells(paths []string) (map[string]baker.CellData, map[string][]byte,
 		base    []byte
 		updates map[string][]byte
 	}
-	byCell := map[string]*acc{}  // keyed by cell stem (e.g. US4MD81M)
-	aux := map[string][]byte{}   // referenced aux files, keyed by auxKey (UPPER basename)
+	byCell := map[string]*acc{} // keyed by cell stem (e.g. US4MD81M)
+	aux := map[string][]byte{}  // referenced aux files, keyed by auxKey (UPPER basename)
 	addAux := func(name string, data []byte) {
 		if !isAuxContent(name) {
 			return
