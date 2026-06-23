@@ -1,0 +1,229 @@
+// Package sim is a NMEA0183 traffic generator for development and testing. It
+// dead-reckons an own-ship and a handful of AIS targets (one optionally on a
+// collision course) and emits the matching sentences — own-ship instruments by
+// hand, AIS via go-ais encoding — so the rest of the stack (parser, AISStore,
+// overlays, CPA) can be exercised without a real feed. Driven by `cp simulate`.
+package sim
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"strings"
+	"time"
+
+	ais "github.com/BertoldVdb/go-ais"
+	"github.com/BertoldVdb/go-ais/aisnmea"
+)
+
+// Vessel is a moving point: position plus course-over-ground and speed.
+type Vessel struct {
+	MMSI     uint32
+	Name     string
+	Type     uint8 // AIS ship type
+	Class    byte  // 'A' | 'B'
+	Lat, Lon float64
+	Course   float64 // degrees true
+	Speed    float64 // knots
+	Turn     float64 // deg/min, for gentle course changes
+}
+
+// Sim holds the world: own-ship + AIS targets, and the AIS encoder.
+type Sim struct {
+	Own     Vessel
+	Targets []*Vessel
+	codec   *aisnmea.NMEACodec
+	depth   float64
+}
+
+// Options configures a new Sim.
+type Options struct {
+	Lat, Lon  float64 // own-ship start
+	Course    float64 // own-ship course (deg true)
+	Speed     float64 // own-ship speed (kn)
+	Targets   int     // number of AIS targets
+	Collision bool    // make one target converge on own-ship
+	Seed      int64
+}
+
+// New builds a Sim: own-ship at the given start, plus N AIS targets scattered
+// within ~3 nm on random courses; with Collision, one target is aimed to pass
+// close to own-ship.
+func New(o Options) *Sim {
+	if o.Speed == 0 {
+		o.Speed = 6
+	}
+	rng := rand.New(rand.NewSource(o.Seed))
+	s := &Sim{
+		Own:   Vessel{Name: "OWN", Lat: o.Lat, Lon: o.Lon, Course: o.Course, Speed: o.Speed},
+		codec: aisnmea.NMEACodecNew(ais.CodecNew(false, false)),
+		depth: 12,
+	}
+	names := []string{"SEA BREEZE", "NORDIC STAR", "BAY TRADER", "MISS MOLLY", "EL TORO", "PACIFICA", "ORION", "KESTREL", "ARGO", "TIDEWATER"}
+	types := []uint8{30, 36, 37, 52, 60, 70, 80} // fishing, sailing, pleasure, tug, passenger, cargo, tanker
+	for i := 0; i < o.Targets; i++ {
+		brg := rng.Float64() * 360
+		dist := 0.5 + rng.Float64()*2.5 // 0.5–3 nm out
+		lat, lon := destination(o.Lat, o.Lon, brg, dist)
+		t := &Vessel{
+			MMSI:   uint32(244000000 + rng.Intn(1000000)),
+			Name:   names[i%len(names)],
+			Type:   types[rng.Intn(len(types))],
+			Class:  'A',
+			Lat:    lat,
+			Lon:    lon,
+			Course: rng.Float64() * 360,
+			Speed:  2 + rng.Float64()*12,
+		}
+		if rng.Intn(3) == 0 {
+			t.Class = 'B'
+		}
+		s.Targets = append(s.Targets, t)
+	}
+	if o.Collision && len(s.Targets) > 0 {
+		// Place a target ~2.5 nm ahead and aim it back at own-ship for a low CPA.
+		t := s.Targets[0]
+		t.Name = "CPA ALERT"
+		t.Lat, t.Lon = destination(o.Lat, o.Lon, o.Course+25, 2.5)
+		t.Course = math.Mod(bearing(t.Lat, t.Lon, o.Lat, o.Lon), 360)
+		t.Speed = 10
+	}
+	return s
+}
+
+// Step advances every vessel by dt seconds (dead reckoning + gentle turns).
+func (s *Sim) Step(dt float64) {
+	advance(&s.Own, dt)
+	for _, t := range s.Targets {
+		advance(t, dt)
+	}
+}
+
+func advance(v *Vessel, dt float64) {
+	if v.Turn != 0 {
+		v.Course = math.Mod(v.Course+v.Turn*(dt/60)+360, 360)
+	}
+	nm := v.Speed * (dt / 3600)
+	v.Lat, v.Lon = destination(v.Lat, v.Lon, v.Course, nm)
+}
+
+// OwnSentences returns the own-ship instrument sentences for this instant.
+func (s *Sim) OwnSentences() []string {
+	now := time.Now().UTC()
+	hms := now.Format("150405.00")
+	dmy := now.Format("020106")
+	lat, ns := toNMEALat(s.Own.Lat)
+	lon, ew := toNMEALon(s.Own.Lon)
+	cog := s.Own.Course
+	sog := s.Own.Speed
+	return []string{
+		line(fmt.Sprintf("GPGGA,%s,%s,%s,%s,%s,1,10,0.8,2,M,-33.0,M,,", hms, lat, ns, lon, ew)),
+		line(fmt.Sprintf("GPRMC,%s,A,%s,%s,%s,%s,%.1f,%.1f,%s,,,A", hms, lat, ns, lon, ew, sog, cog, dmy)),
+		line(fmt.Sprintf("GPVTG,%.1f,T,,M,%.1f,N,,K,A", cog, sog)),
+		line(fmt.Sprintf("HEHDT,%.1f,T", cog)),
+		line(fmt.Sprintf("IIVHW,%.1f,T,,M,%.1f,N,,K", cog, sog)),
+		line(fmt.Sprintf("SDDPT,%.1f,0.5,", s.depth)),
+		line(fmt.Sprintf("IIMWV,%.1f,R,%.1f,N,A", 45.0, 12.0)),
+		line(fmt.Sprintf("IIMTW,%.1f,C", 18.0)),
+	}
+}
+
+// AISPositions returns one VDM position report per target.
+func (s *Sim) AISPositions() []string {
+	var out []string
+	for _, t := range s.Targets {
+		out = append(out, s.encodeAIS(positionPacket(t))...)
+	}
+	return out
+}
+
+// AISStatics returns one VDM static-data report (name/type) per target.
+func (s *Sim) AISStatics() []string {
+	var out []string
+	for _, t := range s.Targets {
+		out = append(out, s.encodeAIS(staticPacket(t))...)
+	}
+	return out
+}
+
+func (s *Sim) encodeAIS(p ais.Packet) []string {
+	return s.codec.EncodeSentence(aisnmea.VdmPacket{TalkerID: "AI", MessageType: "VDM", Channel: 1, Packet: p})
+}
+
+func positionPacket(t *Vessel) ais.Packet {
+	hdr := ais.Header{MessageID: 1, UserID: t.MMSI}
+	if t.Class == 'B' {
+		hdr.MessageID = 18
+		return ais.StandardClassBPositionReport{
+			Header: hdr, Valid: true,
+			Sog: ais.Field10(t.Speed), Cog: ais.Field10(t.Course),
+			Latitude: ais.FieldLatLonFine(t.Lat), Longitude: ais.FieldLatLonFine(t.Lon),
+			TrueHeading: uint16(t.Course),
+		}
+	}
+	return ais.PositionReport{
+		Header: hdr, Valid: true, NavigationalStatus: 0,
+		Sog: ais.Field10(t.Speed), Cog: ais.Field10(t.Course),
+		Latitude: ais.FieldLatLonFine(t.Lat), Longitude: ais.FieldLatLonFine(t.Lon),
+		TrueHeading: uint16(t.Course),
+	}
+}
+
+func staticPacket(t *Vessel) ais.Packet {
+	return ais.ShipStaticData{
+		Header: ais.Header{MessageID: 5, UserID: t.MMSI}, Valid: true,
+		Name: t.Name, Type: t.Type, CallSign: "SIM",
+		Dimension: ais.FieldDimension{A: 20, B: 10, C: 4, D: 4},
+	}
+}
+
+// --- geo + formatting helpers ---
+
+func line(body string) string {
+	var c byte
+	for i := 0; i < len(body); i++ {
+		c ^= body[i]
+	}
+	return fmt.Sprintf("$%s*%02X", body, c)
+}
+
+func toNMEALat(lat float64) (string, string) {
+	h := "N"
+	if lat < 0 {
+		h, lat = "S", -lat
+	}
+	d := int(lat)
+	return fmt.Sprintf("%02d%07.4f", d, (lat-float64(d))*60), h
+}
+
+func toNMEALon(lon float64) (string, string) {
+	h := "E"
+	if lon < 0 {
+		h, lon = "W", -lon
+	}
+	d := int(lon)
+	return fmt.Sprintf("%03d%07.4f", d, (lon-float64(d))*60), h
+}
+
+const earthNm = 3440.065
+
+// destination returns the point reached from (lat,lon) along bearingDeg for distNm.
+func destination(lat, lon, bearingDeg, distNm float64) (float64, float64) {
+	br := bearingDeg * math.Pi / 180
+	d := distNm / earthNm
+	la1, lo1 := lat*math.Pi/180, lon*math.Pi/180
+	la2 := math.Asin(math.Sin(la1)*math.Cos(d) + math.Cos(la1)*math.Sin(d)*math.Cos(br))
+	lo2 := lo1 + math.Atan2(math.Sin(br)*math.Sin(d)*math.Cos(la1), math.Cos(d)-math.Sin(la1)*math.Sin(la2))
+	return la2 * 180 / math.Pi, lo2 * 180 / math.Pi
+}
+
+// bearing returns the initial true bearing from point 1 to point 2 in degrees.
+func bearing(lat1, lon1, lat2, lon2 float64) float64 {
+	la1, la2 := lat1*math.Pi/180, lat2*math.Pi/180
+	dlo := (lon2 - lon1) * math.Pi / 180
+	y := math.Sin(dlo) * math.Cos(la2)
+	x := math.Cos(la1)*math.Sin(la2) - math.Sin(la1)*math.Cos(la2)*math.Cos(dlo)
+	return math.Mod(math.Atan2(y, x)*180/math.Pi+360, 360)
+}
+
+var _ = strings.TrimSpace // reserved for future scenario parsing
