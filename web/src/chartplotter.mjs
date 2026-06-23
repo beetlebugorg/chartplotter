@@ -33,6 +33,7 @@ import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (
 import { ChartFinder } from "./plugins/chart-finder.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./plugins/hud.mjs"; // status readout + overscale zoom cap
 import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart coverage overlay
+import { OrientationControl } from "./plugins/orientation-control.mjs"; // compass: north-up / free orientation
 import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
 import { loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
@@ -511,6 +512,15 @@ export class ChartPlotter extends HTMLElement {
       cellMeta: (name) => this._byName.get(name),
       serverSetMetas: () => (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [],
       noChartsEnabled: () => this._noChartsEnabled(),
+    });
+
+    // Compass / orientation control: a round button in the top-right group; tap to
+    // cycle north-up ↔ free and reorient, needle tracks the live bearing. Drives the
+    // renderer's camera API.
+    this._orient = new OrientationControl({
+      host: this.shadowRoot.getElementById("tr-controls"),
+      map,
+      plotter: this._plotter,
     });
 
     // Developer tools (Advanced tab) — the first NON-core contributor to the
