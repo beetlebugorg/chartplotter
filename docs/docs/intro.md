@@ -48,6 +48,18 @@ static binary for any platform with just `GOOS`/`GOARCH`.
   generate the tiles once and adjust these settings live.
 - **Ships as one binary.** The S-101 catalogue is built into the program. You do
   not install extra data files.
+- **Shows live position and AIS (early).** Point a NMEA 0183 feed at the server
+  over TCP and it draws your own ship and basic AIS targets on the chart; a
+  `simulate` command generates traffic for testing.
+
+## Beyond the chart
+
+The chart is the foundation, not the whole app. The frontend is a `<chart-plotter>`
+base plus small **plugins** — own-ship and AIS already work this way — and the goal
+is a stable **plugin API** for building other things on top of the chart:
+**instrument gauges**, custom overlays, routes, and more, without forking the core.
+The NMEA 0183 own-ship and AIS support is the first slice of that, so expect the
+plugin surface to grow and change.
 
 ## Who it is for
 

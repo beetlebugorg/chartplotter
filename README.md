@@ -71,6 +71,18 @@ static binary** for any platform with `GOOS`/`GOARCH` and nothing else to instal
   only the ENC cells.
 - **Runs a server.** The built-in HTTP server downloads NOAA cells, generates tiles in
   the background, and serves the frontend with byte-range support.
+- **Live position and AIS (early).** Point a **NMEA 0183** feed at the server (over
+  TCP) and it shows your **own ship** and **basic AIS targets** on the chart. A
+  built-in `simulate` command generates traffic for testing.
+
+## 🧩 Beyond the chart
+
+The chart is the foundation, not the whole app. The frontend is built from a
+`<chart-plotter>` base plus small **plugins** (own-ship and AIS already work this
+way), and the goal is a stable **plugin API** so you can build other things on top
+of the chart — **instrument gauges**, custom overlays, routes, and more — without
+forking the core. NMEA 0183 own-ship and AIS are the first slice of that; expect
+the surface to grow and change.
 
 ## 📦 Install
 
