@@ -66,6 +66,7 @@ func TestS57BlobBaked(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New()
+	b.SetPortrayer(testS101Portrayer(t))
 	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
 
 	for _, c := range b.TileCoords(mvt.ExtentDefault) {

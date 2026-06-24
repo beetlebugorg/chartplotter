@@ -34,6 +34,7 @@ func TestRotNorthSelective(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New()
+	b.SetPortrayer(testS101Portrayer(t))
 	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
 
 	var total, withNorth int
