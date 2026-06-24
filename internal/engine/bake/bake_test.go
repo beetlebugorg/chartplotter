@@ -367,7 +367,9 @@ func TestSectorLights(t *testing.T) {
 	spR := sp(0, 90, "LITRD")
 	spR.RadiusNM = 8
 	withR := expandSector(anchor, spR, 14)
-	legLen := func(s sectorStroke) float64 { return absf(s.points[1].Lat-s.points[0].Lat) + absf(s.points[1].Lon-s.points[0].Lon) }
+	legLen := func(s sectorStroke) float64 {
+		return absf(s.points[1].Lat-s.points[0].Lat) + absf(s.points[1].Lon-s.points[0].Lon)
+	}
 	if legLen(withR[2]) <= legLen(withR[0]) {
 		t.Errorf("full leg (%.6f) should be longer than short leg (%.6f)", legLen(withR[2]), legLen(withR[0]))
 	}

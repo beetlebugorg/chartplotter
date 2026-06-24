@@ -55,7 +55,6 @@ func (w *writer) writeVarintField(field uint32, v uint64) {
 	w.writeVarint(v)
 }
 
-
 func (w *writer) writeStringField(field uint32, s string) {
 	w.writeTag(field, wireLen)
 	w.writeVarint(uint64(len(s)))

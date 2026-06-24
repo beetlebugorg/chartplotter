@@ -236,7 +236,7 @@ func (b *Builder) WriteArchive(out io.Writer) error {
 	binary.LittleEndian.PutUint64(h[80:88], nEntries) // tile entries
 	binary.LittleEndian.PutUint64(h[88:96], unique)   // tile contents (deduped)
 	h[96] = 0                                         // not clustered (dedup back-references)
-	h[97] = compressionNone // directories are uncompressed
+	h[97] = compressionNone                           // directories are uncompressed
 	h[98] = compressionNone
 	if b.tilesGz {
 		h[98] = compressionGzip // tile contents are gzipped (set by SetTilesGzipped)

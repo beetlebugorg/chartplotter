@@ -22,6 +22,7 @@ import "embed"
 // generated from the S-101 catalogue at build time (`make` runs emit-assets into
 // web/) and regenerated at serve time (the server emits them from the embedded
 // catalogue and serves those). So they're never stale.
+//
 //go:embed index.html
 //go:embed manifest.webmanifest
 //go:embed src

@@ -47,10 +47,10 @@ const (
 type SourceStatus struct {
 	State     SourceState `json:"state"`
 	LastRx    time.Time   `json:"lastRx,omitzero"`
-	RateHz    float64     `json:"rateHz"`          // smoothed sentences/sec
-	Errors    int         `json:"errors"`          // framing/checksum failures
-	Sentences []string    `json:"sentences"`       // sentence types seen, sorted
-	Talkers   []string    `json:"talkers"`         // talker ids seen, sorted
+	RateHz    float64     `json:"rateHz"`    // smoothed sentences/sec
+	Errors    int         `json:"errors"`    // framing/checksum failures
+	Sentences []string    `json:"sentences"` // sentence types seen, sorted
+	Talkers   []string    `json:"talkers"`   // talker ids seen, sorted
 	LastError string      `json:"lastError,omitempty"`
 }
 
