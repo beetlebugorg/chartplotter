@@ -63,9 +63,17 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 	if !ok || stream == "" {
 		return FeatureBuild{}, false
 	}
-	// Unmapped class or a rule error → the magenta "unknown object" mark.
-	if isS101Gap(stream) {
+	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
+	// object" mark (S-52 §10.1.1 parity).
+	if strings.HasPrefix(stream, "UNMAPPED:") {
 		return unknownObjectBuild(f), true
+	}
+	// A rule error → suppress the feature rather than flood the chart with
+	// placeholders. (Most current errors are line/area rules needing the S-57
+	// spatial topology the host doesn't model yet — tracked as a known gap, not
+	// shown as a per-feature "?".)
+	if strings.HasPrefix(stream, "ERROR:") {
+		return FeatureBuild{DisplayCategory: s52DisplayStandard}, true
 	}
 
 	g := geometryOf(f.Geometry())
@@ -93,10 +101,6 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 // s52DisplayStandard mirrors s52.DisplayStandard without importing s52 (the
 // cutover is dropping that dependency). The baker treats this as "standard".
 const s52DisplayStandard = 1
-
-func isS101Gap(stream string) bool {
-	return strings.HasPrefix(stream, "UNMAPPED:") || strings.HasPrefix(stream, "ERROR:")
-}
 
 func primitiveName(t s57.GeometryType) string {
 	switch t {

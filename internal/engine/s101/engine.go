@@ -31,11 +31,23 @@ type Feature struct {
 	Attributes  map[string]string // S-57 attribute acronym -> encoded value, e.g. {"CATSIL":"3"}
 }
 
-// defaultMarinerSettings are the boolean context parameters registered for a
-// run (rules error on reading an unregistered setting). Extend as needed.
-var defaultMarinerSettings = []string{
-	"RadarOverlay", "PlainBoundaries", "TwoColourSoundings", "ShallowPattern",
-	"HonorScamin", "DisplayNOBJNM", "FullSectorLengths", "SymbolizedBoundaries",
+// contextParameters is the full S-101 mariner-setting set the rules read
+// (rules error on reading an unregistered setting); name, S-100 value type, and
+// default. Depth contours default to S-52-typical metres.
+var contextParameters = []struct{ name, typ, def string }{
+	{"RadarOverlay", "boolean", "false"},
+	{"PlainBoundaries", "boolean", "false"},
+	{"SimplifiedSymbols", "boolean", "false"},
+	{"FourShades", "boolean", "true"},
+	{"FullLightLines", "boolean", "false"},
+	{"IgnoreScaleMinimum", "boolean", "false"},
+	{"ShallowWaterDangers", "boolean", "false"},
+	{"SafetyContour", "real", "30"},
+	{"SafetyDepth", "real", "30"},
+	{"ShallowContour", "real", "2"},
+	{"DeepContour", "real", "30"},
+	{"SafetyHeight", "real", "0"},
+	{"PreferredLanguage", "text", "eng"},
 }
 
 // Engine holds a Lua state with the S-101 framework loaded and the host
@@ -98,7 +110,10 @@ func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
 
 	e.bindHost()
 
-	if err := L.DoString(`require 'S100Scripting'; require 'PortrayalModel'; require 'PortrayalAPI'; require 'Default'`); err != nil {
+	// main.lua defines globals the rules rely on (sqParams, unknownValue,
+	// nilMarker, scaminInfinite, …) in addition to PortrayalMain, so it must be
+	// loaded even though we dispatch rules directly rather than via PortrayalMain.
+	if err := L.DoString(`require 'S100Scripting'; require 'PortrayalModel'; require 'PortrayalAPI'; require 'Default'; require 'main'`); err != nil {
 		L.Close()
 		return nil, fmt.Errorf("load framework: %w", err)
 	}
@@ -153,8 +168,8 @@ func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 func (e *Engine) run() error {
 	var b strings.Builder
 	b.WriteString("local cps = { Type = 'array:ContextParameter' }\n")
-	for _, n := range defaultMarinerSettings {
-		fmt.Fprintf(&b, "table.insert(cps, PortrayalCreateContextParameter(%q, 'boolean', 'false'))\n", n)
+	for _, p := range contextParameters {
+		fmt.Fprintf(&b, "table.insert(cps, PortrayalCreateContextParameter(%q, %q, %q))\n", p.name, p.typ, p.def)
 	}
 	b.WriteString(`PortrayalInitializeContextParameters(cps)
 _RESULTS = {}

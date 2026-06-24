@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
@@ -18,9 +21,31 @@ type serveCmd struct {
 	Cache      string `help:"Cache dir for REGENERABLE baked .pmtiles tile sets (default: XDG cache)."`
 	Data       string `help:"Data dir for SOURCE ENC (district zips, raw cells) — safe, not auto-deleted (default: XDG data)."`
 	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached baked archives for a clean slate (source ENC is kept)."`
+	S101       string `name:"s101" type:"existingdir" help:"Portray via the S-101 rule engine: an S-101 PortrayalCatalog directory. Every chart baked by the server (chart library imports) uses S-101 symbology, and the S-101 client assets are served. Requires --s101-fc. (Transitional, until the catalogue is embedded.)"`
+	S101FC     string `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
 }
 
 func (c serveCmd) Run() error {
+	// S-101 mode: switch the server's baker to the S-101 rule engine (so every
+	// chart-library import bakes S-101) and serve the S-101 client assets.
+	if c.S101 != "" {
+		if c.S101FC == "" {
+			return fmt.Errorf("--s101 requires --s101-fc")
+		}
+		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
+			return fmt.Errorf("load S-101 catalogue: %w", err)
+		}
+		assetDir, err := os.MkdirTemp("", "cp-s101-assets-")
+		if err != nil {
+			return err
+		}
+		if _, err := assets.EmitS101(c.S101, "daySvgStyle.css", assetDir); err != nil {
+			return fmt.Errorf("emit S-101 assets: %w", err)
+		}
+		c.Assets = assetDir // override colortables/linestyles/sprite; rest falls back to embedded
+		fmt.Printf("portrayal: S-101 (catalogue=%s, assets=%s)\n", c.S101, assetDir)
+	}
+
 	cacheDir := c.Cache
 	if cacheDir == "" {
 		cacheDir = server.DefaultCacheDir()
