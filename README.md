@@ -27,7 +27,9 @@
 > **Not for navigation.** This project is coded almost entirely with AI (Claude).
 > It is an experiment in building a large, complex specification (IHO S-101) with
 > AI, and a personal learning tool — not a certified or tested product. Do not
-> rely on it for real-world navigation.
+> rely on it for real-world navigation. See
+> [Known limitations](https://beetlebugorg.github.io/chartplotter/limitations) for
+> what the chart rendering does not yet do.
 
 ---
 
