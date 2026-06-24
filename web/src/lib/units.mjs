@@ -18,7 +18,7 @@ const KN_TO_MS = 0.514444;
 // and the human label for the settings UI. Canonical source units: distance=NM,
 // height=m, speed=kn, wind=kn, temperature=°C.
 export const UNIT_CATEGORIES = [
-  { cat: "depth", key: "depthUnit", def: "ft", opts: [["m", "Metric"], ["ft", "Imperial"]], label: "Depth" },
+  { cat: "depth", key: "depthUnit", def: "ft", opts: [["m", "m"], ["ft", "ft"]], label: "Depth" },
   { cat: "distance", key: "distanceUnit", def: "NM", opts: [["NM", "NM"], ["km", "km"], ["mi", "mi"]], label: "Distance" },
   { cat: "height", key: "heightUnit", def: "ft", opts: [["m", "m"], ["ft", "ft"]], label: "Height" },
   { cat: "speed", key: "speedUnit", def: "kn", opts: [["kn", "kn"], ["km/h", "km·h⁻¹"], ["mph", "mph"]], label: "Speed" },
