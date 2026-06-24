@@ -17,6 +17,14 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 WEB="$here/web"
 DIST="${DIST:-$here/dist}"
 
+# The S-101 client portrayal assets (sprite/colortables/linestyles/patterns) are
+# gitignored and generated from the catalogue; build them into web/ so the static
+# dist includes them (make build generates them as a side effect).
+if [ ! -f "$WEB/sprite.png" ]; then
+  echo "generating S-101 client assets for the dist…"
+  ( cd "$here" && make --no-print-directory build >/dev/null )
+fi
+
 PMTILES_URL="${PMTILES_URL:-}"   # one hosted .pmtiles archive (range-read)
 CATALOG_URL="${CATALOG_URL:-}"   # OR a hosted charts-index.json manifest of archives
 OSM_PMTILES_URL="${OSM_PMTILES_URL:-}"  # hosted OSM vector (Protomaps) .pmtiles → enables the Vector basemap

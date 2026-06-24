@@ -17,11 +17,15 @@ import "embed"
 // rooted at the web/ directory (for example, "index.html",
 // "glyphs/Noto Sans Regular/0-255.pbf").
 //
+// The S-101 client portrayal assets (colortables.json, linestyles.json,
+// patterns.json/.png, sprite.json/.png) are NOT embedded or committed — they're
+// generated from the S-101 catalogue at build time (`make` runs emit-assets into
+// web/) and regenerated at serve time (the server emits them from the embedded
+// catalogue and serves those). So they're never stale.
 //go:embed index.html
 //go:embed manifest.webmanifest
 //go:embed src
-//go:embed colortables.json linestyles.json patterns.json sprite.json catalog.json
-//go:embed patterns.png sprite.png
+//go:embed catalog.json
 //go:embed icon-192.png icon-512.png apple-touch-icon.png
 //go:embed basemap/coastline.geojson
 //go:embed glyphs

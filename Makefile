@@ -81,6 +81,8 @@ build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin
 	  $(MAKE) --no-print-directory sync-s101; \
 	  echo "building with embedded S-101 catalogue (-tags embed_s101)…"; \
 	  go build -tags embed_s101 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
+	  echo "generating S-101 client assets into web/ (gitignored)…"; \
+	  $(BIN) emit-assets web/ >/dev/null; \
 	else \
 	  echo "S-101 catalogue not found at $(S101_PC); building WITHOUT it (needs --s101 at runtime)"; \
 	  go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
