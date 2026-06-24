@@ -60,6 +60,10 @@ export class SettingsDialog extends HTMLElement {
   render() {
     const body = this.shadowRoot && this.shadowRoot.getElementById("body");
     if (!body || !this._registry) return;
+    // Toggling a control re-renders the whole pane; preserve the scroll position
+    // so the dialog doesn't jump back to the top on every change.
+    const prevPane = body.querySelector(".set-pane");
+    const prevScroll = prevPane ? prevPane.scrollTop : 0;
     const tabs = this._registry.tabs();
     if (!tabs.length) { body.innerHTML = `<div class="set-empty">No settings available.</div>`; this._emitTab(); return; }
     if (!tabs.some((t) => t.id === this._activeTab)) this._activeTab = tabs[0].id;
@@ -77,6 +81,8 @@ export class SettingsDialog extends HTMLElement {
       if (typeof c.render === "function") pane += customHost(c.id);
     }
     body.innerHTML = shell(tabRail(tabs, this._activeTab), pane);
+    const newPane = body.querySelector(".set-pane");
+    if (newPane && prevScroll) newPane.scrollTop = prevScroll;
 
     // Fill any custom-render slots (e.g. the Advanced tab's dev tools).
     for (const c of contribs) {
