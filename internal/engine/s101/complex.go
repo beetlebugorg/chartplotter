@@ -242,6 +242,12 @@ func (e *Engine) resolveCode(objClass string, attrs map[string]string) (string, 
 		if code := e.resolveMooringClass(attrs); code != "" {
 			return code, true
 		}
+	case "TSELNE", "TSEZNE":
+		// S-101 merged the separation line (TSELNE, a curve) and separation zone
+		// (TSEZNE, a surface) into one geometry-distinguished feature with no alias.
+		if _, ok := e.cat.FeatureTypes["SeparationZoneOrLine"]; ok {
+			return "SeparationZoneOrLine", true
+		}
 	}
 	return e.cat.FeatureCodeForS57(objClass)
 }

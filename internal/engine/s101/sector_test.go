@@ -99,3 +99,17 @@ func TestAmbiguousAliasDefaults(t *testing.T) {
 		}
 	}
 }
+
+// TestSeparationZoneOrLineMapping pins the TSELNE/TSEZNE → SeparationZoneOrLine
+// conversion (S-101 merged the separation line and zone into one geometry-
+// distinguished feature with no alias).
+func TestSeparationZoneOrLineMapping(t *testing.T) {
+	_, cat := testEnv(t)
+	e := &Engine{cat: cat}
+	for _, cls := range []string{"TSELNE", "TSEZNE"} {
+		got, ok := e.resolveCode(cls, nil)
+		if !ok || got != "SeparationZoneOrLine" {
+			t.Errorf("resolveCode(%s) = %q,%v; want SeparationZoneOrLine", cls, got, ok)
+		}
+	}
+}
