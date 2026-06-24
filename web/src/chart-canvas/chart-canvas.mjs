@@ -212,11 +212,20 @@ export class ChartCanvas extends HTMLElement {
     // .pmtiles read by HTTP Range (the serverless static-CDN option).
 
     // -- assets (parallel) --------------------------------------------------
+    // colortables/sprite are REQUIRED (colours + symbol atlas). The server emits
+    // them from the S-101 catalogue; a 404 means the server didn't (stale binary,
+    // or built without the catalogue) — fail with a clear message, not a cryptic
+    // JSON.parse of the "404 page not found" body.
+    const reqJSON = async (name) => {
+      const r = await fetch(assets + name);
+      if (!r.ok) throw new Error(`${name} not available (HTTP ${r.status}) — rebuild/restart the server (it generates the S-101 client assets)`);
+      return r.json();
+    };
     const [ct, sj, lsj, pj] = await Promise.all([
-      fetch(assets + "colortables.json").then((r) => r.json()),
-      fetch(assets + "sprite.json").then((r) => r.json()),
-      fetch(assets + "linestyles.json").then((r) => r.json()).catch(() => ({})),
-      fetch(assets + "patterns.json").then((r) => r.json()).catch(() => ({})),
+      reqJSON("colortables.json"),
+      reqJSON("sprite.json"),
+      fetch(assets + "linestyles.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
+      fetch(assets + "patterns.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
     ]);
     this._colortables = ct;
     this._sprite = sj;
