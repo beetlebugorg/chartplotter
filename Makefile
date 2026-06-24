@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt tidy clean clear-cache serve docs bake-ienc bake-noaa serve-prod
+.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-prod
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -171,14 +171,41 @@ serve-prod: build bake-noaa ## Serve per-district per-band NOAA + IENC prebaked 
 docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
 	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)
 
+# Regenerate the documentation UI screenshots (docs/static/img/ui/*.png) from the
+# live app, so they stay in sync when the UI changes. Needs baked charts in the
+# S-101 cache (e.g. after `make serve` has imported a region); Chromium +
+# playwright-core must be available. Starts a throwaway server, captures, stops it.
+DOCS_SHOTS_PORT ?= 8199
+docs-shots: build ## Regenerate docs UI screenshots from the live app into docs/static/img/ui/
+	@set -e; \
+	$(BIN) serve --host 127.0.0.1 --port $(DOCS_SHOTS_PORT) --assets web \
+	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE) & \
+	srv=$$!; trap "kill $$srv 2>/dev/null || true" EXIT; \
+	for i in $$(seq 1 50); do \
+	  curl -fsS "http://127.0.0.1:$(DOCS_SHOTS_PORT)/api/health" >/dev/null 2>&1 && break; \
+	  sleep 0.2; \
+	done; \
+	node scripts/docs-shots.mjs "http://127.0.0.1:$(DOCS_SHOTS_PORT)"
+
 test:
 	go test ./...
 
 vet:
 	go vet ./...
 
+# Format with the gofmt of the toolchain go.mod pins (Go 1.26), NOT whatever
+# gofmt happens to be on PATH — gofmt's rules change between Go minor releases,
+# so a stray 1.25 gofmt reintroduces drift that the 1.26 CI check rejects. Invoke
+# gofmt over `.` (not `go fmt ./...`, which skips files behind build tags like
+# embed_s101) so the file set matches the CI `gofmt -l .` gate exactly.
 fmt:
-	gofmt -w .
+	@"$$(go env GOROOT)/bin/gofmt" -w .
+
+# Mirror the CI gofmt gate exactly, using the same toolchain gofmt as `fmt`.
+fmt-check:
+	@GOFMT="$$(go env GOROOT)/bin/gofmt"; \
+	  out="$$($$GOFMT -l .)"; \
+	  test -z "$$out" || { echo "needs gofmt:"; echo "$$out"; exit 1; }
 
 tidy:
 	go mod tidy
