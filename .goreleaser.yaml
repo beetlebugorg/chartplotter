@@ -14,6 +14,11 @@ builds:
     binary: chartplotter
     env:
       - CGO_ENABLED=0
+    # Self-contained: embed the S-101 Portrayal + Feature Catalogues (the release
+    # workflow syncs them into internal/engine/s101catalog/catalog/ first). That
+    # catalogue is IHO material with no declared license — see THIRD-PARTY-NOTICES.md.
+    tags:
+      - embed_s101
     flags:
       - -trimpath
     ldflags:
@@ -42,6 +47,7 @@ archives:
     files:
       - README.md
       - LICENSE
+      - THIRD-PARTY-NOTICES.md
 
 checksum:
   name_template: "checksums.txt"
@@ -70,8 +76,7 @@ changelog:
       order: 999
 
 release:
-  github:
-    owner: beetlebugorg
-    name: chartplotter
+  # Repo is auto-detected from the git remote, so this targets whatever repo the
+  # tag was pushed to (no owner/name mismatch to maintain).
   draft: false
   prerelease: auto

@@ -21,6 +21,18 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      # The S-101 Portrayal + Feature Catalogues are IHO material kept out of this
+      # repo. Clone them (public, no auth) into a temp dir and sync into the
+      # gitignored embed dir so GoReleaser builds self-contained (-tags embed_s101)
+      # binaries. The IHO repos declare no license; see THIRD-PARTY-NOTICES.md.
+      - name: Fetch IHO S-101 catalogues
+        run: |
+          git clone --depth 1 https://github.com/iho-ohi/S-101_Portrayal-Catalogue.git "$RUNNER_TEMP/s101-pc"
+          git clone --depth 1 https://github.com/iho-ohi/S-101-Documentation-and-FC.git "$RUNNER_TEMP/s101-fc"
+          make sync-s101 \
+            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
+            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

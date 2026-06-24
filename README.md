@@ -56,8 +56,9 @@ zooms, and recolors those tiles; it never touches the raw charts.
 
 Download an archive for your platform from the
 [**Releases**](https://github.com/beetlebugorg/chartplotter/releases) page, extract it,
-and put `chartplotter` on your `PATH`. The `_s101` builds embed the S-101 catalogue;
-the plain builds need `--s101` at runtime.
+and put `chartplotter` on your `PATH`. Release binaries are self-contained — they
+embed the S-101 catalogue and run with no extra files. (That catalogue is IHO
+material; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).)
 
 ### With go install
 

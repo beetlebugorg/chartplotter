@@ -76,17 +76,23 @@ definitions). The embedded copy is a **draft** — `S-101 2.1.0-DRAFT`, built on
 S-100 Edition 5.2 — sourced from the IHO working-group repositories. These
 materials are **© the International Hydrographic Organization (IHO)**.
 
+Source repositories (public, but **no license declared** — `license: null`, i.e.
+all rights reserved):
+
+- Portrayal Catalogue — <https://github.com/iho-ohi/S-101_Portrayal-Catalogue>
+- Feature Catalogue — <https://github.com/iho-ohi/S-101-Documentation-and-FC>
+
 How chartplotter handles them:
 
 - **Not in this source repository.** The catalogue is `.gitignore`d
-  (`internal/engine/s101catalog/catalog/`). It is synced from an external path at
+  (`internal/engine/s101catalog/catalog/`) and synced from an external copy at
   build time (`make sync-s101`), so the repository itself does not redistribute
   IHO material.
-- **Embedded only in opt-in builds.** A build with `-tags embed_s101` (the
-  self-contained `chartplotter` and the `_s101` release binaries) bakes the
-  catalogue into the binary, which **does** redistribute it. A plain build omits
-  it and requires `--s101 <dir>` at runtime, pointing at your own copy.
+- **Embedded in release binaries.** The release workflow clones the two IHO repos
+  above and builds with `-tags embed_s101`, so the published binaries are
+  self-contained and **do** redistribute the catalogue. A plain `go build`
+  (without the tag) omits it and requires `--s101 <dir>` at runtime.
 
-Before distributing an `_s101` binary, confirm the IHO terms that apply to the
-catalogue version you embed. The IHO copyright and reproduction policy is at
-<https://iho.int>.
+Because the IHO repositories declare no license, the right to redistribute this
+material in release binaries is **unconfirmed**. The IHO copyright and
+reproduction policy is at <https://iho.int>.
