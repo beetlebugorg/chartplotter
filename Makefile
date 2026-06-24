@@ -90,13 +90,21 @@ build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps
 # the same version as `build`; strips symbols (-s -w) and paths (-trimpath) like a
 # release binary. Outputs dist/chartplotter_<os>_<arch>[.exe] (cleaned by `clean`).
-xbuild: ## Cross-compile test binaries for every $(PLATFORMS) into dist/ (e.g. make xbuild PLATFORMS=darwin/arm64)
+xbuild: ## Cross-compile per platform — both a plain binary (needs --s101) and a self-contained _s101 one (embedded catalogue), into dist/
 	@mkdir -p dist
-	@for p in $(PLATFORMS); do \
+	@embed=""; \
+	if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then $(MAKE) --no-print-directory sync-s101; embed=1; \
+	else echo "no S-101 catalogue ($(S101_PC)) — building only the plain (--s101 at runtime) binaries"; fi; \
+	for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; ext=; [ "$$os" = windows ] && ext=.exe; \
-	  echo "building $$os/$$arch…"; \
+	  echo "building $$os/$$arch (plain, needs --s101)…"; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w $(LDFLAGS)" \
 	    -o "dist/chartplotter_$${os}_$${arch}$$ext" ./cmd/chartplotter || exit 1; \
+	  if [ -n "$$embed" ]; then \
+	    echo "building $$os/$$arch (self-contained, embedded catalogue)…"; \
+	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -tags embed_s101 -trimpath -ldflags "-s -w $(LDFLAGS)" \
+	      -o "dist/chartplotter_$${os}_$${arch}_s101$$ext" ./cmd/chartplotter || exit 1; \
+	  fi; \
 	done
 	@echo "→ dist/"; ls -1 dist/chartplotter_*
 
