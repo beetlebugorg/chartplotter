@@ -814,8 +814,15 @@ export class ChartPlotter extends HTMLElement {
   // <chart-library> component owns everything inside the panel.
   openCharts(provider) {
     this._section = "charts";
-    this.shadowRoot.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
-    this.shadowRoot.getElementById("empty").hidden = true;
+    const r = this.shadowRoot;
+    r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === "charts"));
+    // Match toggleSection("charts"): the Charts panel is the WIDE two-pane
+    // (list + map) layout. Without this the drawer opened narrow (the "small
+    // popup" when entering via the welcome "Browse chart regions" button).
+    r.getElementById("drawer").classList.toggle("wide", true);
+    r.getElementById("drawer").classList.toggle("set-wide", false);
+    r.getElementById("dtitle").textContent = this._prod ? "Add charts" : "Chart library";
+    r.getElementById("empty").hidden = true;
     if (this._chartLib) this._chartLib.show(provider); // no default provider — nothing selected until the user picks
     this.setDrawerOpen(true);
   }
