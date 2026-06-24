@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
+.PHONY: build xbuild test vet fmt tidy clean clear-cache serve docs bake-ienc bake-noaa serve-prod
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -81,8 +81,6 @@ build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin
 	  $(MAKE) --no-print-directory sync-s101; \
 	  echo "building with embedded S-101 catalogue (-tags embed_s101)…"; \
 	  go build -tags embed_s101 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	  echo "generating S-101 client assets into web/ (gitignored)…"; \
-	  $(BIN) emit-assets web/ >/dev/null; \
 	else \
 	  echo "S-101 catalogue not found at $(S101_PC); building WITHOUT it (needs --s101 at runtime)"; \
 	  go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
@@ -105,9 +103,6 @@ xbuild: ## Cross-compile test binaries for every $(PLATFORMS) into dist/ (e.g. m
 serve: build ## Serve the web frontend + provisioning API, S-101 portrayal (HOST/PORT/ASSETS/S101_* overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) \
 	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE)
-
-dist: ## Build a static prebaked "prod" site into dist/ for GitHub Pages (set PMTILES_URL or CATALOG_URL)
-	scripts/build-pages.sh
 
 bake-ienc: build $(IENC_PMTILES) ## Bake every IENC cell in $(IENC_SRC) into $(IENC_PMTILES)
 
