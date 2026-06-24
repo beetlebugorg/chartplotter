@@ -50,10 +50,28 @@ type FeatureType struct {
 	Bindings   []AttributeBinding
 }
 
+// ComplexAttribute is an S-101 complex attribute type (a group of sub-attributes,
+// e.g. featureName = {language, name}).
+type ComplexAttribute struct {
+	Code     string
+	Aliases  []string
+	Bindings []AttributeBinding // sub-attribute bindings
+}
+
+// InformationType is an S-101 information type (e.g. SpatialQuality), bound to a
+// feature/spatial via an information association.
+type InformationType struct {
+	Code     string
+	Aliases  []string
+	Bindings []AttributeBinding
+}
+
 // Catalogue is the parsed feature catalogue plus reverse (alias→code) indexes.
 type Catalogue struct {
-	FeatureTypes map[string]*FeatureType
-	SimpleAttrs  map[string]*SimpleAttribute
+	FeatureTypes     map[string]*FeatureType
+	SimpleAttrs      map[string]*SimpleAttribute
+	ComplexAttrs     map[string]*ComplexAttribute
+	InformationTypes map[string]*InformationType
 
 	featureByAlias map[string]string // S-57 OBJL acronym → feature code
 	attrByAlias    map[string]string // S-57 attribute acronym → attribute code
@@ -82,6 +100,37 @@ type xmlCatalogue struct {
 	FeatureTypes struct {
 		Items []xmlFeatureType `xml:"S100_FC_FeatureType"`
 	} `xml:"S100_FC_FeatureTypes"`
+	ComplexAttributes struct {
+		Items []struct {
+			Code     string       `xml:"code"`
+			Aliases  []string     `xml:"alias"`
+			Bindings []xmlBinding `xml:"subAttributeBinding"`
+		} `xml:"S100_FC_ComplexAttribute"`
+	} `xml:"S100_FC_ComplexAttributes"`
+	InformationTypes struct {
+		Items []struct {
+			Code     string       `xml:"code"`
+			Aliases  []string     `xml:"alias"`
+			Bindings []xmlBinding `xml:"attributeBinding"`
+		} `xml:"S100_FC_InformationType"`
+	} `xml:"S100_FC_InformationTypes"`
+}
+
+// xmlBinding is an attribute/sub-attribute binding (multiplicity + ref).
+type xmlBinding struct {
+	Multiplicity struct {
+		Lower int `xml:"lower"`
+		Upper struct {
+			Infinite string `xml:"infinite,attr"`
+			Value    int    `xml:",chardata"`
+		} `xml:"upper"`
+	} `xml:"multiplicity"`
+	PermittedValues struct {
+		Values []int `xml:"value"`
+	} `xml:"permittedValues"`
+	Attribute struct {
+		Ref string `xml:"ref,attr"`
+	} `xml:"attribute"`
 }
 
 type xmlSimpleAttr struct {
@@ -98,26 +147,30 @@ type xmlSimpleAttr struct {
 }
 
 type xmlFeatureType struct {
-	Abstract   string   `xml:"isAbstract,attr"`
-	Name       string   `xml:"name"`
-	Code       string   `xml:"code"`
-	Aliases    []string `xml:"alias"`
-	Primitives []string `xml:"permittedPrimitives"`
-	Bindings   []struct {
-		Multiplicity struct {
-			Lower int `xml:"lower"`
-			Upper struct {
-				Infinite string `xml:"infinite,attr"`
-				Value    int    `xml:",chardata"`
-			} `xml:"upper"`
-		} `xml:"multiplicity"`
-		PermittedValues struct {
-			Values []int `xml:"value"`
-		} `xml:"permittedValues"`
-		Attribute struct {
-			Ref string `xml:"ref,attr"`
-		} `xml:"attribute"`
-	} `xml:"attributeBinding"`
+	Abstract   string       `xml:"isAbstract,attr"`
+	Name       string       `xml:"name"`
+	Code       string       `xml:"code"`
+	Aliases    []string     `xml:"alias"`
+	Primitives []string     `xml:"permittedPrimitives"`
+	Bindings   []xmlBinding `xml:"attributeBinding"`
+}
+
+// bindings converts parsed xml bindings into AttributeBindings.
+func bindings(xs []xmlBinding) []AttributeBinding {
+	var out []AttributeBinding
+	for _, b := range xs {
+		upper := b.Multiplicity.Upper.Value
+		if b.Multiplicity.Upper.Infinite == "true" {
+			upper = -1
+		}
+		out = append(out, AttributeBinding{
+			AttributeRef:    b.Attribute.Ref,
+			Lower:           b.Multiplicity.Lower,
+			Upper:           upper,
+			PermittedValues: b.PermittedValues.Values,
+		})
+	}
+	return out
 }
 
 // Load parses a FeatureCatalogue.xml file (by path) into a Catalogue.
@@ -138,10 +191,12 @@ func LoadBytes(data []byte) (*Catalogue, error) {
 	}
 
 	c := &Catalogue{
-		FeatureTypes:   map[string]*FeatureType{},
-		SimpleAttrs:    map[string]*SimpleAttribute{},
-		featureByAlias: map[string]string{},
-		attrByAlias:    map[string]string{},
+		FeatureTypes:     map[string]*FeatureType{},
+		SimpleAttrs:      map[string]*SimpleAttribute{},
+		ComplexAttrs:     map[string]*ComplexAttribute{},
+		InformationTypes: map[string]*InformationType{},
+		featureByAlias:   map[string]string{},
+		attrByAlias:      map[string]string{},
 	}
 
 	for _, sa := range x.SimpleAttributes.Items {
@@ -168,22 +223,21 @@ func LoadBytes(data []byte) (*Catalogue, error) {
 			Abstract:   ft.Abstract == "true",
 			Primitives: ft.Primitives,
 		}
-		for _, b := range ft.Bindings {
-			upper := b.Multiplicity.Upper.Value
-			if b.Multiplicity.Upper.Infinite == "true" {
-				upper = -1
-			}
-			f.Bindings = append(f.Bindings, AttributeBinding{
-				AttributeRef:    b.Attribute.Ref,
-				Lower:           b.Multiplicity.Lower,
-				Upper:           upper,
-				PermittedValues: b.PermittedValues.Values,
-			})
-		}
+		f.Bindings = bindings(ft.Bindings)
 		c.FeatureTypes[ft.Code] = f
 		for _, a := range ft.Aliases {
 			c.featureByAlias[strings.ToUpper(a)] = ft.Code
 		}
+	}
+
+	for _, ca := range x.ComplexAttributes.Items {
+		c.ComplexAttrs[ca.Code] = &ComplexAttribute{Code: ca.Code, Aliases: ca.Aliases, Bindings: bindings(ca.Bindings)}
+		for _, a := range ca.Aliases {
+			c.attrByAlias[strings.ToUpper(a)] = ca.Code // complex attrs also bridge by alias
+		}
+	}
+	for _, it := range x.InformationTypes.Items {
+		c.InformationTypes[it.Code] = &InformationType{Code: it.Code, Aliases: it.Aliases, Bindings: bindings(it.Bindings)}
 	}
 
 	return c, nil

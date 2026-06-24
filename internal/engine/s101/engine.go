@@ -117,8 +117,41 @@ func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
 		L.Close()
 		return nil, fmt.Errorf("load framework: %w", err)
 	}
+	if err := L.DoString(spatialGlue); err != nil {
+		L.Close()
+		return nil, fmt.Errorf("install spatial glue: %w", err)
+	}
 	return e, nil
 }
+
+// spatialGlue installs HostFeatureGetSpatialAssociations + HostGetSpatial in
+// Lua (after the framework loads) so they can build proper SpatialAssociation /
+// Surface objects via the framework constructors. We model each feature's
+// geometry as ONE association of its primitive type — enough for the line/area
+// rules to iterate GetFlattenedSpatialAssociations without erroring; the actual
+// boundary/fill geometry is attached by the Go lowering (LowerS101), not read
+// from Lua. Surfaces resolve (HostGetSpatial) to a surface with a single
+// exterior-ring curve. _HostFeaturePrimitive (Go) gives the primitive type.
+const spatialGlue = `
+function HostFeatureGetSpatialAssociations(featureID)
+	local pt = _HostFeaturePrimitive(featureID)
+	if pt == '' then return nil end
+	local arr = { Type = 'array:SpatialAssociation' }
+	arr[1] = CreateSpatialAssociation(pt, featureID .. '#' .. string.sub(pt, 1, 1), Orientation.Forward)
+	return arr
+end
+
+function HostGetSpatial(spatialID)
+	-- Only surfaces (id suffix '#S') resolve a Spatial: a surface whose single
+	-- exterior ring is one curve (so GetFlattenedSpatialAssociations yields it).
+	if string.sub(spatialID, -2) == '#S' then
+		local fid = string.sub(spatialID, 1, -3)
+		local ext = CreateSpatialAssociation('Curve', fid .. '#exterior', Orientation.Forward)
+		return CreateSurface(ext, {})
+	end
+	return nil
+end
+`
 
 // Close releases the Lua state.
 func (e *Engine) Close() { e.L.Close() }
