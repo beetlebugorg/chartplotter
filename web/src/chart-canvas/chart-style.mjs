@@ -43,17 +43,53 @@ function complexLineLayers(palette) {
     paint: { "line-color": S52.colorExpr("color_token", undefined, palette), "line-width": ["coalesce", ["get", "width_px"], 1] },
   }];
 }
+// S-52 halign/valign → a DATA-DRIVEN MapLibre text-anchor. text-anchor became a
+// property-function (zoom-and-feature) property, so all general text now rides ONE
+// collidable layer instead of nine per-anchor sublayers. That matters for
+// DECLUTTERING: MapLibre keeps a single collision index but places symbols
+// layer-by-layer, so nine sublayers made a label's survival depend on WHICH anchor
+// it drew in (text-center-* always beat text-right-*), not on importance. One layer
+// + symbol-sort-key lets S-52 text priority decide who survives, globally.
+const TEXT_ANCHOR = (function () {
+  // middle/baseline/center valigns collapse to the "center" row; top/bottom keep.
+  const vrow = ["match", ["coalesce", ["get", "valign"], "middle"], "top", "top", "bottom", "bottom", "center"];
+  const key = ["concat", vrow, "|", ["coalesce", ["get", "halign"], "center"]];
+  return ["match", key,
+    "center|left", "left", "center|right", "right", "center|center", "center",
+    "top|center", "top", "bottom|center", "bottom",
+    "top|left", "top-left", "top|right", "top-right",
+    "bottom|left", "bottom-left", "bottom|right", "bottom-right",
+    "center"]; // default: dead-centre
+})();
+
+// Collision priority (S-52 §14.4 text grouping / S-100 Part 9 text placement):
+// LOWER sort-key = placed FIRST = wins. Rank by the baked `tgrp` (DISPLAY param) so
+// important text (11) outranks geographic/feature names (21/26/29), which outrank
+// descriptive text (nature of seabed 25, magnetic variation 27, heights, …). Within
+// a tier the LARGER label wins (subtract font size) — a dense approach (Annapolis)
+// then thins to the navigationally important labels instead of an anchor-order
+// lottery. Tiers are spaced 50 apart so font size only ever breaks WITHIN-tier ties.
+const TEXT_SORT_KEY = ["-",
+  ["match", ["coalesce", ["get", "tgrp"], -1],
+    11, 0,             // important text
+    [21, 26, 29], 100, // geographic / feature names
+    23, 50,            // light description (a stray non-light group-23 label)
+    150],              // descriptive / other / unknown
+  ["coalesce", ["get", "font_size_px"], 10]];
+
 function textLayers(mariner, palette) {
   // LIGHTS characteristic text is drawn by its OWN always-on layer (see the
   // "light-text" layer in buildLayers) so it can't be decluttered behind a
-  // verbose name label — exclude it from the general (collidable) text layers.
+  // verbose name label — exclude it from the general (collidable) text layer.
   const notLight = ["!=", ["get", "class"], "LIGHTS"];
-  return TEXT_VARIANTS.map((v) => ({
-    id: v.id, type: "symbol", source: "chart", "source-layer": "text",
-    filter: ["all", notLight, v.filter, S52.textGroupFilter(mariner)],
+  return [{
+    id: "text", type: "symbol", source: "chart", "source-layer": "text",
+    filter: ["all", notLight, S52.textGroupFilter(mariner)],
     layout: {
       "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
-      "text-size": ["coalesce", ["get", "font_size_px"], 11], "text-anchor": v.anchor,
+      "text-size": ["coalesce", ["get", "font_size_px"], 11],
+      "text-anchor": TEXT_ANCHOR,
+      "symbol-sort-key": TEXT_SORT_KEY,
       "text-allow-overlap": false, "text-optional": true,
       visibility: "visible",
     },
@@ -64,7 +100,7 @@ function textLayers(mariner, palette) {
       "text-halo-width": 1.4,
       "text-halo-blur": 0.5,
     },
-  }));
+  }];
 }
 function buildLayers(mariner, palette, atlasPpu, osm) {
   // Over an OSM basemap (raster or vector), let its detailed land show through:
@@ -141,6 +177,9 @@ function buildLayers(mariner, palette, atlasPpu, osm) {
         // Left-justify so a merged multi-line light label's lines align on their
         // left edge (e.g. stacked "Mo(U)W 20s 50m 17M" / "Mo(U)R 20s 50m 15M").
         "text-justify": "left",
+        // Within the light layer, the brighter/larger characteristic wins a
+        // collision (bigger font → smaller sort-key → placed first).
+        "symbol-sort-key": ["-", 0, ["coalesce", ["get", "font_size_px"], 10]],
         "text-allow-overlap": false, "text-optional": true,
         // Light descriptions (LIGHTS06 characteristics) — individually
         // selectable per S-52 (default on); toggled by showLightDescriptions.
@@ -434,27 +473,3 @@ export function buildChartLayers({
   return { layers: out, layerBase, variants, layerVis };
 }
 
-// S-52 halign/valign → MapLibre text-anchor, one decluttered sublayer per
-// (halign × valign-group) with a constant anchor (text-anchor isn't data-driven).
-function textAnchor(h, v) {
-  const vv = v === "top" ? "top" : v === "bottom" ? "bottom" : "center";
-  const hh = h === "left" ? "left" : h === "right" ? "right" : "center";
-  if (vv === "center" && hh === "center") return "center";
-  if (vv === "center") return hh;
-  if (hh === "center") return vv;
-  return vv + "-" + hh;
-}
-export const TEXT_VARIANTS = (function () {
-  const out = [];
-  for (const h of ["left", "center", "right"]) {
-    for (const vg of ["top", "center", "bottom"]) {
-      const anchor = textAnchor(h, vg === "center" ? "middle" : vg);
-      const hf = ["==", ["coalesce", ["get", "halign"], "center"], h];
-      const vf = vg === "center"
-        ? ["match", ["coalesce", ["get", "valign"], "middle"], ["middle", "baseline", "center"], true, false]
-        : ["==", ["coalesce", ["get", "valign"], "middle"], vg];
-      out.push({ id: "text-" + h + "-" + vg, anchor, filter: ["all", hf, vf] });
-    }
-  }
-  return out;
-})();
