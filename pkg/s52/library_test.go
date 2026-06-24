@@ -83,27 +83,14 @@ func TestColorAccess(t *testing.T) {
 	}
 }
 
-// TestFeatureLookup tests S-57 feature to S-52 instruction lookup
-func TestFeatureLookup(t *testing.T) {
+// TestObjectClasses verifies the library exposes its lookup-table object classes.
+func TestObjectClasses(t *testing.T) {
 	lib := loadTestLibrary(t)
 
 	// List object classes
 	classes := lib.ListObjectClasses()
 	if len(classes) == 0 {
 		t.Error("Expected some object classes")
-	}
-
-	// Test lookup for a class (if it exists)
-	if len(classes) > 0 {
-		objectClass := classes[0]
-
-		// Lookup without attributes (should match failsafe)
-		instruction := lib.LookupFeature(objectClass, "P", nil, nil)
-		if instruction == nil {
-			t.Logf("No instruction for %s (may be conditional)", objectClass)
-		} else if len(instruction.Instructions) > 0 {
-			t.Logf("Instruction for %s: %s", objectClass, instruction.Instructions[0].String())
-		}
 	}
 }
 

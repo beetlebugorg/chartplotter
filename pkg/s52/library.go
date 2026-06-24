@@ -183,6 +183,24 @@ func (l *Library) Stats() LibraryStats {
 	}
 }
 
+// ListObjectClasses returns the sorted set of S-57 object classes that have at
+// least one lookup-table entry in the loaded library.
+func (l *Library) ListObjectClasses() []string {
+	objClasses := make(map[string]bool)
+	for _, lupt := range l.lookupTables {
+		objClasses[lupt.ObjectClass] = true
+	}
+
+	result := make([]string, 0, len(objClasses))
+	for objClass := range objClasses {
+		result = append(result, objClass)
+	}
+
+	// Sort for deterministic output
+	sort.Strings(result)
+	return result
+}
+
 // LibraryStats contains statistics about library contents
 type LibraryStats struct {
 	Symbols      int
