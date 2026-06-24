@@ -27,6 +27,13 @@ writes the result to a single **PMTiles** archive of vector tiles. A small web
 component built on [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/)
 draws the chart.
 
+## Goal
+
+Implement the IHO chart standards — **S-57** (ENC data), **S-101** portrayal (the
+successor to S-52), and the wider **S-100 / S-102** family — in **pure Go**, with
+**minimal dependencies and no CGO**, so the whole thing cross-compiles to a single
+static binary for any platform with just `GOOS`/`GOARCH`.
+
 ## What it does
 
 - **Turns charts into tiles.** Give it one or more S-57 cells. It produces a

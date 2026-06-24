@@ -46,6 +46,13 @@ the color, symbol, and line of every feature as it goes. It saves those tiles in
 file you can keep on your own machine. The web page is just a map viewer that pans,
 zooms, and recolors those tiles; it never touches the raw charts.
 
+## 🎯 Goal
+
+Implement the IHO chart standards — **S-57** (ENC data), **S-101** portrayal (the
+successor to S-52), and the wider **S-100 / S-102** family — in **pure Go**, with
+**minimal dependencies and no CGO**, so the whole thing **cross-compiles to a single
+static binary** for any platform with `GOOS`/`GOARCH` and nothing else to install.
+
 ## ✨ Features
 
 - **A complete chart pipeline.** chartplotter does every step: ISO 8211 decode, the
