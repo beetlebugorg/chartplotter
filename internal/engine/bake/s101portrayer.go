@@ -51,6 +51,19 @@ func NewS101Portrayer(portrayalCatalogDir, featureCataloguePath string) (Portray
 	return &s101Portrayer{builder: bld}, nil
 }
 
+// LinestyleTable builds the complex-line dash/symbol period geometry from the
+// S-101 catalogue's LineStyles — what the baker's emitComplexLine tessellates.
+// This is the S-101 source that replaced the S-52 PresLib linestyle table.
+func (p *s101Portrayer) LinestyleTable() map[string]*lsInfo {
+	return buildLinestyleTableFromCatalog(p.builder.Catalog)
+}
+
+// linestyleSource is an optional Portrayer capability: the complex-line period
+// geometry keyed by line-style name (the S-101 catalogue provides it).
+type linestyleSource interface {
+	LinestyleTable() map[string]*lsInfo
+}
+
 // NewS101PortrayerFS builds the S-101 portrayer from an in-memory PortrayalCatalog
 // FS + FeatureCatalogue.xml bytes — the build-time embedded catalogue path.
 func NewS101PortrayerFS(catalogFS fs.FS, featureCatalogueXML []byte) (Portrayer, error) {

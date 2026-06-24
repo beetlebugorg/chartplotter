@@ -554,7 +554,12 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		b.curCell = b.curCell[:i]
 	}
 	if b.linestyles == nil {
-		b.linestyles = buildLinestyleTable(lib)
+		// Complex-line dash/symbol geometry comes from the S-101 catalogue (via the
+		// portrayer) now, not the S-52 PresLib. `lib` is unused here (kept in the
+		// signature until the s52.Library is dropped from the bake path entirely).
+		if src, ok := b.portrayer.(linestyleSource); ok {
+			b.linestyles = src.LinestyleTable()
+		}
 	}
 	band := BandForScale(uint32(chart.CompilationScale()))
 	b.curCscl = uint32(chart.CompilationScale()) // per-cell best-available: finer (smaller) wins
