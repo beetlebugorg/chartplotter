@@ -42,11 +42,10 @@ writes the result to a single **PMTiles** archive of **Mapbox Vector Tiles**. A 
 `<chart-plotter>` web component, built on
 [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/), draws the chart.
 
-Here is the whole thing in three sentences. The Go program reads the raw NOAA chart
-files and turns them into map tiles — small, pre-drawn pieces of the map — deciding
-the color, symbol, and line of every feature as it goes. It saves those tiles in one
-file you can keep on your own machine. The web page is just a map viewer that pans,
-zooms, and recolors those tiles; it never touches the raw charts.
+In short: the heavy lifting happens once, up front. chartplotter reads the raw NOAA
+charts and renders every feature — its colors, symbols, and lines — into map tiles,
+saved as a single file on your machine. After that the browser only *displays* those
+tiles — panning, zooming, switching palettes — and never touches the raw charts again.
 
 ## 🎯 Goal
 
