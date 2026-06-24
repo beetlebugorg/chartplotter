@@ -205,7 +205,7 @@ export class ChartPlotter extends HTMLElement {
     this._importedArchives = [];        // in-memory imported/uploaded archives (Blob/File), re-added on every coverage rebuild so a too-large-to-persist import isn't lost when a later provision resets the bands
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage boxes when zoomed out past chart data (default ON; opt-out)
-    this._showChartRadar = localStorage.getItem("cp-chart-radar") !== "0"; // edge pointers to off-screen installed charts (default ON)
+    this._showChartRadar = localStorage.getItem("cp-chart-radar") === "1"; // edge pointers to off-screen installed charts (default OFF; opt-in)
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
     this._hiddenCells = new Set(loadJSON(LS_HIDDEN_CELLS, [])); // individual cells hidden via the per-cell toggle (client filter on baked `cell`)
     this._pxPitch = loadJSON(LS_PX_PITCH, undefined); // calibrated CSS-pixel pitch (mm); undefined → util default (CSS reference)
