@@ -9,7 +9,6 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,8 +270,13 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 			if !isCellName(c.Name) {
 				continue
 			}
+			// SSRF guard: skip any cell whose download URL no provider handles.
+			if c.URL != "" && !allowedChartURL(c.URL) {
+				log.Printf("import %s: skip %s: disallowed url", jobID, c.Name)
+				continue
+			}
 			s.imports.update(jobID, func(j *importJob) { j.Note = "Downloading " + c.Name; j.Done = i })
-			base, _, err := loadCellCached(http.DefaultClient, s.dataDir, c.Name, c.URL)
+			base, _, err := loadCellCached(chartHTTPClient, s.dataDir, c.Name, c.URL)
 			if err != nil {
 				log.Printf("import %s: download %s: %v", jobID, c.Name, err) // skip, keep going
 			} else {
@@ -341,17 +345,15 @@ func filterCells(cells map[string]baker.CellData, names []string) map[string]bak
 	return out
 }
 
-// isChartURL reports whether raw is an http(s) URL on an allowed chart host.
-func isChartURL(raw string) bool {
-	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && isChartHost(u.Hostname())
-}
+// isChartURL reports whether raw is an http(s) URL a registered chart provider
+// handles. Thin alias over the shared allowlist (providers.go).
+func isChartURL(raw string) bool { return allowedChartURL(raw) }
 
 // fetchURLProgress downloads raw (capped at maxImportBytes) and returns the bytes,
 // calling onProgress(bytesSoFar, contentLength) as it streams (contentLength is 0
 // when the server sends no Content-Length).
 func fetchURLProgress(raw string, onProgress func(done, total int)) ([]byte, error) {
-	resp, err := http.DefaultClient.Get(raw)
+	resp, err := chartHTTPClient.Get(raw)
 	if err != nil {
 		return nil, err
 	}

@@ -100,6 +100,7 @@ func (s *Server) Close() error {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	lw := &logResponseWriter{ResponseWriter: w, status: http.StatusOK}
+	setSecurityHeaders(lw)
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/api/"):
 		s.handleAPI(lw, r)
@@ -153,9 +154,71 @@ func hostIsLocal(host string) bool {
 		strings.HasPrefix(host, "[::1]")
 }
 
+// setSecurityHeaders applies defence-in-depth headers to every response: block
+// MIME sniffing, framing (clickjacking), and referrer leakage. Cheap and safe for
+// a map app — none of these constrain how the chart assets load.
+func setSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
+// crossSiteWrite reports whether r is an unsafe (state-changing) request that did
+// NOT originate from our own page — i.e. a CSRF attempt. Safe methods are exempt.
+// The API has no cookies/credentials, but the server holds shared state and, when
+// bound to a LAN (the boat's network), is reachable by other devices, so a
+// malicious page open in a client browser must not be able to drive it. We accept
+// a write only if it is same-origin per Sec-Fetch-Site (modern browsers) or the
+// Origin header; a request with neither is a non-browser client (no ambient
+// authority to abuse) and is allowed.
+func crossSiteWrite(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return false
+	case "cross-site", "same-site":
+		return true
+	}
+	// No Sec-Fetch-Site header: fall back to Origin. A browser cross-origin fetch
+	// always sends Origin; a missing Origin means a non-browser client.
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(u.Host, r.Host)
+}
+
+// chartHTTPClient fetches ENC data from the allowed chart hosts, re-validating the
+// host on every redirect hop so a redirect can't bounce the fetch to an internal
+// address (SSRF defence-in-depth, on top of the caller's initial host check).
+var chartHTTPClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		if providerForHost(req.URL.Hostname()) == nil {
+			return fmt.Errorf("redirect to disallowed host %q", req.URL.Hostname())
+		}
+		return nil
+	},
+}
+
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.allowRemote && !hostIsLocal(r.Host) {
 		apiErr(w, http.StatusForbidden, "non-local host")
+		return
+	}
+	if crossSiteWrite(r) {
+		apiErr(w, http.StatusForbidden, "cross-site request blocked")
 		return
 	}
 	switch {
@@ -223,7 +286,14 @@ func (s *Server) serveCell(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "bad cell name")
 		return
 	}
-	data, _, err := loadCellCached(http.DefaultClient, s.dataDir, name, r.URL.Query().Get("url"))
+	// SSRF guard: the download URL is caller-supplied, so a registered chart
+	// provider must handle it before we fetch it.
+	rawURL := r.URL.Query().Get("url")
+	if rawURL != "" && !allowedChartURL(rawURL) {
+		apiErr(w, http.StatusBadRequest, "url must be from a known chart provider")
+		return
+	}
+	data, _, err := loadCellCached(chartHTTPClient, s.dataDir, name, rawURL)
 	if err != nil {
 		apiErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -245,9 +315,8 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw := r.URL.Query().Get("url")
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !isChartHost(u.Hostname()) {
-		apiErr(w, http.StatusBadRequest, "url must be a charts.noaa.gov or ienccloud.us URL")
+	if !allowedChartURL(raw) {
+		apiErr(w, http.StatusBadRequest, "url must be from a known chart provider")
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, raw, nil)
@@ -258,7 +327,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 	if rng := r.Header.Get("Range"); rng != "" {
 		req.Header.Set("Range", rng) // forward range for random-access reads
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := chartHTTPClient.Do(req)
 	if err != nil {
 		apiErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -275,17 +344,8 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// isChartHost reports whether host is an allowed ENC download host — NOAA
-// (charts.noaa.gov) or USACE Inland ENC (ienccloud.us). The proxy + server-side
-// fetch are restricted to these so neither is an open relay.
-func isChartHost(host string) bool {
-	host = strings.ToLower(host)
-	switch host {
-	case "charts.noaa.gov", "www.charts.noaa.gov", "ienccloud.us", "www.ienccloud.us":
-		return true
-	}
-	return false
-}
+// Allowed ENC download hosts live in the provider registry (providers.go), the
+// single place to add a new source. See allowedChartURL / providerForHost.
 
 // isCellName accepts the alphanumeric NOAA cell ids (e.g. US5MD1MC) — a safe
 // single path component (no separators, dots, or traversal).
