@@ -544,6 +544,9 @@ func (b *Baker) ScaminValues() []uint32 {
 // AddCell expands every feature of a parsed cell into routed primitives at the
 // cell's scale band, with per-feature SCAMIN display z-min.
 func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.MarinerSettings) {
+	if b.portrayer == nil {
+		panic("bake: no S-101 portrayer set — build with `make` (-tags embed_s101) or pass --s101")
+	}
 	// Cell name (sans the .000/.NNN extension) stamped on every feature for the
 	// inspector's source-cell pill.
 	b.curCell = chart.DatasetName()
@@ -568,9 +571,6 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	}
 	cb := chart.Bounds()
 	cellLat := (cb.MinLat + cb.MaxLat) / 2 // SCAMIN→zoom uses the cell's display scale
-	// Per-cell spatial index: depth areas (UDWHAZ05/DEPVAL02 underlying-depth) and
-	// co-located point aids (TOPMAR01 floating/rigid). Built once per cell.
-	cellIdx := buildCellIndex(chart)
 	features := chart.Features()
 	// Cell data-coverage (M_COVR CATCOV=1) → covMeta for best-available suppression
 	// and scale boundaries. Skipped when the coverage was already built in a prior
@@ -614,12 +614,10 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
 		// style live; everything else is one pass tagged bnd=2.
-		var passes []portrayal.FeatureBuildPass
-		if b.portrayer != nil {
-			passes = b.portrayer.Passes(f)
-		} else {
-			passes = portrayal.BuildFeaturePasses(lib, mariner, f, cellIdx.spatialFor(f))
-		}
+		// S-101 is the only portrayal engine now; the baker requires a portrayer
+		// (the build-time embedded catalogue, or --s101). The S-52 lookup+CSP
+		// fallback (portrayal.BuildFeaturePasses) has been removed.
+		passes := b.portrayer.Passes(f)
 		for _, pass := range passes {
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
