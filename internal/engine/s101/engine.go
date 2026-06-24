@@ -65,6 +65,7 @@ type Engine struct {
 type adapted struct {
 	id, code, primitive string
 	attrs               map[string]string // S-101 attribute code -> value string
+	name                string            // S-57 OBJNAM → featureName complex attribute (for name labels)
 }
 
 // NewEngine loads the S-101 framework from a Rules directory (path) and binds
@@ -175,6 +176,13 @@ func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 			if ac, ok := e.cat.AttrCodeForS57(acr); ok {
 				a.attrs[ac] = val
 			}
+		}
+		// S-57 OBJNAM/NOBJNM → the S-101 featureName complex attribute (served as
+		// featureName sub-attrs by the host) so PortrayFeatureName emits a label.
+		if n := f.Attributes["OBJNAM"]; n != "" {
+			a.name = n
+		} else if n := f.Attributes["NOBJNM"]; n != "" {
+			a.name = n
 		}
 		e.adapted[f.ID] = a
 		e.order = append(e.order, f.ID)

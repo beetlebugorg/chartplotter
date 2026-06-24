@@ -1,6 +1,8 @@
 package s101
 
 import (
+	"strings"
+
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -122,18 +124,45 @@ func (e *Engine) bindHost() {
 	set("HostFeatureGetSimpleAttribute", func(s *lua.LState) int {
 		// (featureID, attributePath, attributeCode) -> array of value strings.
 		id := s.CheckString(1)
+		path := s.CheckString(2)
 		code := s.CheckString(3)
 		t := s.NewTable()
-		if a := e.adapted[id]; a != nil {
-			if v, ok := a.attrs[code]; ok {
-				t.Append(lua.LString(v))
+		a := e.adapted[id]
+		if a == nil {
+			s.Push(t)
+			return 1
+		}
+		// featureName complex sub-attributes (path "featureName:1") from OBJNAM.
+		if strings.HasPrefix(path, "featureName") {
+			switch code {
+			case "name":
+				if a.name != "" {
+					t.Append(lua.LString(a.name))
+				}
+			case "language":
+				t.Append(lua.LString("eng"))
+			case "nameUsage":
+				t.Append(lua.LString("1")) // default → selected even if language differs
 			}
+			s.Push(t)
+			return 1
+		}
+		if v, ok := a.attrs[code]; ok {
+			t.Append(lua.LString(v))
 		}
 		s.Push(t)
 		return 1
 	})
 	set("HostFeatureGetComplexAttributeCount", func(s *lua.LState) int {
-		s.Push(lua.LNumber(0))
+		id := s.CheckString(1)
+		code := s.CheckString(3)
+		n := 0
+		if code == "featureName" {
+			if a := e.adapted[id]; a != nil && a.name != "" {
+				n = 1
+			}
+		}
+		s.Push(lua.LNumber(n))
 		return 1
 	})
 	set("HostFeatureGetAssociatedFeatureIDs", emptyArray)

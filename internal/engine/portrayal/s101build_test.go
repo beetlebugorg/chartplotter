@@ -3,6 +3,7 @@ package portrayal
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
@@ -105,5 +106,30 @@ func TestS101BuildUnknownClassPlaceholder(t *testing.T) {
 	}
 	if sc, ok := build.Primitives[0].(SymbolCall); !ok || sc.SymbolName != "QUESMRK1" {
 		t.Errorf("want QUESMRK1 placeholder, got %#v", build.Primitives[0])
+	}
+}
+
+// TestS101NameLabel: a feature with OBJNAM produces a DrawText name label via
+// the PortrayFeatureName wrapper + featureName complex-attr data.
+func TestS101NameLabel(t *testing.T) {
+	b := s101Builder(t)
+	f := s57.NewFeature(99, "BOYLAT",
+		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{-76.4, 38.6}}},
+		map[string]interface{}{"OBJNAM": "G C 5", "CATLAM": 1},
+	)
+	build, ok := b.Build(&f)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	var label string
+	for _, p := range build.Primitives {
+		if dt, ok := p.(DrawText); ok {
+			label = dt.Text
+		}
+	}
+	// The LateralBuoy rule formats the name as "by %s" (catalogue's format), so
+	// the label contains the OBJNAM — the point is that the name text renders.
+	if !strings.Contains(label, "G C 5") {
+		t.Errorf("name label = %q, want it to contain \"G C 5\"; prims=%d", label, len(build.Primitives))
 	}
 }
