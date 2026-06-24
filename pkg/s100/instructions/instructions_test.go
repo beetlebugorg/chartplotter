@@ -2,8 +2,8 @@ package instructions
 
 import "testing"
 
-// Streams below are the actual output of the real Rapids rule captured by
-// cmd/lua-portray-test, plus a synthetic point example exercising modifiers.
+// Streams below are the actual output of the real Rapids rule (captured from the
+// S-101 Lua engine), plus a synthetic point example exercising modifiers.
 
 func TestRapidsCurve(t *testing.T) {
 	stream := "ViewingGroup:32050;DrawingPriority:9;DisplayPlane:UnderRadar;LineStyle:_simple_,,0.96,CHGRD;LineInstruction:_simple_"

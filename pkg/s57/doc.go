@@ -48,12 +48,12 @@
 //	// Get all features in the chart
 //	allFeatures := chart.Features()
 //
-//	// Each feature contains everything needed for S-52 symbology lookup:
+//	// Each feature contains everything needed for S-101 symbology lookup:
 //	for _, feature := range allFeatures {
 //	    class := feature.ObjectClass()        // "ACHARE", "DEPARE", "LNDARE"
 //	    attrs := feature.Attributes()         // All feature attributes
 //	    geom := feature.Geometry()            // Geometry with type and coordinates
-//	    // Pass to S-52 for symbology lookup and rendering
+//	    // Pass to S-101 for symbology lookup and rendering
 //	}
 //
 // # Accessing Feature Data
