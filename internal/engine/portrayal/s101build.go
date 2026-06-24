@@ -197,6 +197,13 @@ func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 		}
 		prims = append(prims, LowerS101(c, sg, b.Catalog)...)
 	}
+	// Soundings: tag each lowered glyph with its depth so the baker emits the
+	// numeric depth + S/G palette variants. Without this the client's depth-unit
+	// conversion (synthSounding) and SNDFRM04 safety-depth split fall back to the
+	// static metric glyphs and never react to those settings.
+	if f.ObjectClass() == "SOUNDG" {
+		attachSoundingDepths(prims, soundingPoints(f.Geometry()))
+	}
 	// Sector / directional light figures: the rule's AugmentedRay / ArcByRadius
 	// geometry is fixed display-mm (screen size) and isn't lowered onto geographic
 	// geometry; emit a SectorLight the baker tessellates per-zoom instead.
@@ -282,6 +289,33 @@ func soundingPoints(g s57.Geometry) [][3]float64 {
 		pts = append(pts, [3]float64{c[0], c[1], z})
 	}
 	return pts
+}
+
+// attachSoundingDepths sets SoundingDepthM on each lowered sounding glyph from the
+// SOUNDG multipoint, matching by anchor (the glyphs are placed at their sounding's
+// lon/lat via AugmentedPoint). The depth then reaches the baker, which emits the
+// numeric depth + S/G palette variants the client needs for live depth-unit
+// conversion and the SNDFRM04 safety-depth split.
+func attachSoundingDepths(prims []Primitive, pts [][3]float64) {
+	if len(pts) == 0 {
+		return
+	}
+	type key struct{ x, y int64 }
+	q := func(v float64) int64 { return int64(math.Round(v * 1e7)) } // ~1cm
+	depthAt := make(map[key]float64, len(pts))
+	for _, p := range pts {
+		depthAt[key{q(p[0]), q(p[1])}] = p[2]
+	}
+	for i := range prims {
+		sc, ok := prims[i].(SymbolCall)
+		if !ok {
+			continue
+		}
+		if d, ok := depthAt[key{q(sc.Anchor.Lon), q(sc.Anchor.Lat)}]; ok {
+			sc.SoundingDepthM = float32(d)
+			prims[i] = sc
+		}
+	}
 }
 
 func primitiveName(t s57.GeometryType) string {
