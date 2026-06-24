@@ -637,6 +637,7 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
+			valdco := contourValdco(f.Attributes(), class)
 			prims := fb.Primitives
 			for pi := 0; pi < len(prims); pi++ {
 				// A sounding number (SOUNDG03) emits one digit glyph per column, all at
@@ -677,7 +678,17 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 						}
 					}
 				}
-				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts, drval1, drval2)
+				// DEPCNT contour values are emitted by the rule as SAFCON digit
+				// glyphs — fixed metres, and "0" when the contour has no value
+				// (the "0 by the shore" labels). Drop them; the client labels the
+				// contour from the baked `valdco`, converting to the chosen unit
+				// and showing nothing when there is no value.
+				if class == "DEPCNT" {
+					if sc, ok := p.(portrayal.SymbolCall); ok && strings.HasPrefix(sc.SymbolName, "SAFCON") {
+						continue
+					}
+				}
+				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts, drval1, drval2, valdco)
 			}
 		}
 	}
@@ -827,7 +838,7 @@ func scaminLayer(layer string, scamin uint32) string {
 	return layer
 }
 
-func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2 float32) {
+func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr ZoomRange, zMin, zMax uint32, bnd, pts int64, drval1, drval2, valdco float32) {
 	// The always-present base (class/cell/draw_prio/cat/bnd/pts) is stored compactly
 	// (interned class/cell + small ints) and rebuilt at emit by attrsFor; `common`
 	// returns only the VARIABLE tags — the per-feature extra plus the sparse
@@ -882,11 +893,17 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.StrokeLine:
 		r.layer, r.kind, r.nline = scaminLayer("lines", r.bcScamin), mvt.GeomLineString, normPts(v.Points)
-		r.attrs = common(
-			mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
-			mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(v.WidthPx + 0.5))},
-			mvt.KeyValue{Key: "dash", Value: mvt.StringVal(dashName(v.Dash))},
-		)
+		extra := []mvt.KeyValue{
+			{Key: "color_token", Value: mvt.StringVal(v.ColorToken)},
+			{Key: "width_px", Value: mvt.IntVal(int64(v.WidthPx + 0.5))},
+			{Key: "dash", Value: mvt.StringVal(dashName(v.Dash))},
+		}
+		// DEPCNT depth-contour value (metres) so the client labels the contour in
+		// the chosen depth unit (SAFCON01, client-side); only set for contours.
+		if !isNaN32(valdco) {
+			extra = append(extra, mvt.KeyValue{Key: "valdco", Value: mvt.FloatVal(valdco)})
+		}
+		r.attrs = common(extra...)
 		b.add(r, ptsBbox(v.Points))
 	case portrayal.LinePattern:
 		// Stored as a polyline + its linestyle; emitComplexLine tessellates the
@@ -2064,6 +2081,23 @@ func depthVals(attrs map[string]interface{}, class string) (float32, float32) {
 		d2 = d1
 	}
 	return float32(d1), float32(d2)
+}
+
+// contourValdco returns a DEPCNT depth contour's VALDCO (metres) so the client can
+// label it in the chosen depth unit, or NaN for non-contours / contours with no
+// value (so route() omits the tag and the client draws no label — not a "0").
+func contourValdco(attrs map[string]interface{}, class string) float32 {
+	if class != "DEPCNT" {
+		return nan32f
+	}
+	// Only label contours deeper than chart datum. The 0 m contour is the
+	// shoreline/drying line; labelling it "0" all along the coast is clutter (the
+	// "0 by the shore" the mariner doesn't want), and a missing VALDCO is unknown,
+	// not zero.
+	if v, ok := floatAttr(attrs, "VALDCO"); ok && v > 0 {
+		return float32(v)
+	}
+	return nan32f
 }
 
 var nan32f = float32(math.NaN())
