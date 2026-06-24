@@ -120,6 +120,12 @@ type datasetParams struct {
 	CSCL int32 // Compilation scale
 	DUNI int   // Depth units: 1=meters, 2=fathoms+feet, 3=feet, 4=fathoms+fractions
 	COUN int   // Coordinate units: 1=lat/lon, 2=projected
+
+	// comfDefaulted/somfDefaulted record that the raw DSPM multiplier was missing
+	// or non-positive and a standard default was substituted (reported as a
+	// conformance warning, not an error).
+	comfDefaulted bool
+	somfDefaulted bool
 }
 
 // defaultDatasetParams returns default parameters when DSPM is not found
@@ -221,12 +227,16 @@ func parseDSPM(data []byte) datasetParams {
 		params.SOMF = int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
 	}
 
-	// Validation: If COMF is 0 or negative, use default
+	// Validation: If COMF is 0 or negative, use default (and flag the deviation —
+	// §7.3.2.1 requires a positive multiplier). Flagging lets the parser emit a
+	// conformance warning while still rendering with the standard factor.
 	if params.COMF <= 0 {
 		params.COMF = 10000000
+		params.comfDefaulted = true
 	}
 	if params.SOMF <= 0 {
 		params.SOMF = 10
+		params.somfDefaulted = true
 	}
 
 	return params

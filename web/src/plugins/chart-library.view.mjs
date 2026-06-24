@@ -62,7 +62,7 @@ export const STYLE = `
   .m-empty { color:var(--ui-text-faint); font-size:12px; padding:14px 8px; text-align:center; line-height:1.5; }
   /* detail pane — a STATIC coverage snapshot rendered once over our own coastline
      basemap (no live embedded map), shown small and clickable to enlarge. */
-  .prev-map { width:100%; height:150px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; position:relative; }
+  .prev-map { width:100%; height:84px; border:1px solid var(--ui-border-2); border-radius:8px; background:var(--ui-surface-2); overflow:hidden; position:relative; }
   .prev-img { display:block; width:100%; height:100%; object-fit:cover; cursor:zoom-in; touch-action:manipulation; }
   .prev-ph { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:var(--ui-text-faint); font-size:12px; }
   .m-detail-body { padding:12px 2px 2px; }
@@ -95,6 +95,17 @@ export const STYLE = `
   .row .name { font-weight:600; } .row .meta { color:var(--ui-text-dim); font-size:12px; }
   .grow { flex:1; }
   .muted { color:var(--ui-text-dim); }
+  /* Per-cell show/hide list (under the pack's enable/disable/remove actions). */
+  .cell-list { margin-top:14px; border-top:1px solid var(--ui-border-2); padding-top:10px; }
+  .cell-list-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:6px; }
+  .cell-list-title { font-size:12.5px; font-weight:600; color:var(--ui-text-dim); }
+  .cell-list-acts { font-size:12px; color:var(--ui-text-faint); white-space:nowrap; }
+  .cl-link { border:none; background:none; padding:0; font:inherit; font-size:12px; color:var(--ui-accent); cursor:pointer; }
+  .cl-link:hover { text-decoration:underline; }
+  .cell-list-body { max-height:240px; overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
+  .cell-row { display:flex; align-items:center; gap:8px; padding:5px 2px; border-bottom:1px solid var(--ui-border-2); cursor:pointer; }
+  .cell-row .name { font-weight:600; font-size:13px; } .cell-row .meta { color:var(--ui-text-dim); font-size:12px; }
+  @media (pointer:coarse) { .cell-row { min-height:var(--tap-min,44px); } }
   /* NOAA ENC user-agreement gate (shown before the first download). */
   .modal { position:fixed; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
     padding:calc(var(--sa-top,0px) + 12px) calc(var(--sa-right,0px) + 12px) calc(var(--sa-bottom,0px) + 12px) calc(var(--sa-left,0px) + 12px);
@@ -274,8 +285,10 @@ export function detailUnknownSet({ label, key, installed, busy }) {
 // Everything is resolved by the logic; `act` is the pre-rendered action HTML
 // (enable/disable/remove buttons, or the download button), `tick` the status
 // pill, `previewMap` the (possibly empty) #preview-map placeholder.
-//   { title, tick, sub, meta, act, previewMap }
-export function detailPack({ title, tick, sub, meta, act, previewMap }) {
+//   { title, tick, sub, meta, act, previewMap, extra }
+// `extra` (optional) is block HTML placed after the action buttons — e.g. the
+// per-cell show/hide list for an installed pack.
+export function detailPack({ title, tick, sub, meta, act, previewMap, extra }) {
   return `<div class="mcol mcol-detail">
       ${previewMap}
       <div class="m-detail-body">
@@ -283,6 +296,7 @@ export function detailPack({ title, tick, sub, meta, act, previewMap }) {
         <div class="m-detail-sub">${sub}</div>
         ${meta ? `<div class="m-detail-meta">${esc(meta)}</div>` : ""}
         <div class="m-detail-act">${act}</div>
+        ${extra || ""}
       </div></div>`;
 }
 
@@ -291,6 +305,26 @@ export function detailPack({ title, tick, sub, meta, act, previewMap }) {
 export function installedActions({ key, disabled, busy }) {
   return `<button class="pk-btn ghost" data-${disabled ? "enable" : "disable"}="${esc(key)}"${busy ? " disabled" : ""}>${disabled ? "Enable" : "Disable"}</button>
          <button class="pk-btn ghost danger" data-uninstall-set="${esc(key)}"${busy ? " disabled" : ""}>Remove</button>`;
+}
+
+// The per-cell show/hide list for an installed pack, shown under installedActions.
+// Each row is one chart cell with its title and a checkbox; CHECKED = shown,
+// unchecked = hidden from the map (a client filter on the baked `cell` id — no
+// re-bake). `Select all` / `Clear all` toggle the whole pack.
+//   items: [{ name, title, shown }]   nShown: count currently shown
+export function packCellList({ items, nShown }) {
+  if (!items.length) return "";
+  const rows = items.map((it) =>
+    `<label class="cell-row"><input type="checkbox" data-cell="${esc(it.name)}"${it.shown ? " checked" : ""}>
+       <span class="grow"><span class="name">${esc(it.name)}</span> <span class="meta">${esc(it.title || "")}</span></span></label>`
+  ).join("");
+  return `<div class="cell-list">
+      <div class="cell-list-head">
+        <span class="cell-list-title">Charts in this pack (${nShown}/${items.length})</span>
+        <span class="cell-list-acts"><button class="cl-link" data-cells-all>Select all</button> · <button class="cl-link" data-cells-none>Clear all</button></span>
+      </div>
+      <div class="cell-list-body">${rows}</div>
+    </div>`;
 }
 
 // The #preview-map placeholder (the logic mounts a MapLibre map into it).

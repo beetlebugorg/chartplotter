@@ -50,6 +50,7 @@
 // There is no in-browser baking; the wasm baker has been retired (server migration).
 import { PMTilesArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 import { convertDistance, unitSuffix } from "../lib/units.mjs";
+import { zoomForScale } from "../lib/util.mjs"; // shared scale↔zoom (512-tile MapLibre resolution)
 import * as S52 from "./s52-style.mjs";
 import { SpriteBuilder } from "./sprite-builder.mjs";
 // Chart SOURCE / ARCHIVE management lives in its own stateful collaborator now (the
@@ -76,15 +77,8 @@ function shortestBearing(from, to) {
   let d = (((to - from) % 360) + 540) % 360 - 180;
   return from + d;
 }
-// Web-Mercator zoom that renders a paper scale of 1:`scale` at `lat` — the
-// inverse of the HUD's scaleDenom (mpp = 156543.034·cos φ / 2^z; scale = mpp/
-// 0.00028). Latitude-dependent because a given scale is a different zoom at each
-// latitude. Clamped to [0,24]; the map's own max-zoom further caps over-fine views.
-function zoomForScale(scale, lat) {
-  if (!(scale > 0)) return 0;
-  const z = Math.log2(156543.03392804097 * Math.cos((lat * Math.PI) / 180) / (0.00028 * scale));
-  return Math.max(0, Math.min(24, z));
-}
+// zoomForScale (scale→zoom) is imported from util.mjs so the 512-tile MapLibre
+// resolution constant lives in exactly one place (see M_PER_PX_Z0).
 // Fill-pattern (AP) images live under this id prefix so they never collide with
 // point-symbol (SY) images of the SAME PresLib name. Several names are BOTH a
 // point symbol and an area fill pattern (QUESMRK1, AIRARE02, FSHFAC03, MARCUL02):
@@ -510,8 +504,25 @@ export class ChartCanvas extends HTMLElement {
 
   // Combine a layer's intrinsic (base) filter with the live category +
   // boundary-style filters (the two client-side portrayal axes baked as
-  // per-feature `cat`/`bnd`).
-  combineFilters(base) { return S52.combineFilters(base, this._mariner); }
+  // per-feature `cat`/`bnd`), then drop any individually-hidden cells. Hiding is
+  // a pure client filter on the baked per-feature `cell` id — instant, no re-bake,
+  // and it works the same in prebaked (pmtiles) and server (dynamic) modes.
+  combineFilters(base) {
+    const f = S52.combineFilters(base, this._mariner);
+    if (this._hiddenCells && this._hiddenCells.length) {
+      // Features without a `cell` (none, in practice) get null → kept.
+      return ["all", ["!", ["in", ["get", "cell"], ["literal", this._hiddenCells]]], f];
+    }
+    return f;
+  }
+
+  // Hide/show individual cells by id (the baked per-feature `cell`). `cells` is the
+  // full set of hidden ids; an empty array shows everything. Re-applies the combined
+  // filter across every chart layer — a snappy restyle, never a re-bake.
+  setHiddenCells(cells) {
+    this._hiddenCells = Array.isArray(cells) ? cells.slice() : [];
+    this.applyFeatureFilters();
+  }
 
   // Re-apply the combined feature filter to every chart layer (on a category
   // or boundary-style toggle), preserving each layer's recorded base filter.

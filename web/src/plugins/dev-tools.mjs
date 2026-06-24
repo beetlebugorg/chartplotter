@@ -162,13 +162,17 @@ export class DevTools {
     // Load the IENC catalogue so we know each installed river pack's cells.
     if (packs.some((p) => p.name.startsWith("ienc-"))) { try { await (chartLib ? chartLib._iencCatalog() : Promise.resolve()); } catch (e) { /* skip ienc */ } }
     const iencPacks = (chartLib ? chartLib._providerPacks("ienc") : null) || [];
+    // Per-cell disabled set: cells the user hid stay out of the rebake, so a
+    // rebuilt district only contains its ENABLED cells.
+    const hidden = d.hiddenCells ? (d.hiddenCells() || new Set()) : new Set();
+    const enabled = (names) => names.filter((n) => !hidden.has(n));
     const todo = [];
     for (const p of packs) {
       const m = /^noaa-d(\d+)$/.exec(p.name);
-      if (m) { const names = d.districtCellNames ? d.districtCellNames(+m[1]) : []; if (names.length) todo.push({ set: p.name, label: d.setLabel(p.name), names }); continue; }
+      if (m) { const names = enabled(d.districtCellNames ? d.districtCellNames(+m[1]) : []); if (names.length) todo.push({ set: p.name, label: d.setLabel(p.name), names }); continue; }
       if (p.name.startsWith("ienc-")) {
         const pk = iencPacks.find((x) => x.key === p.name);
-        const names = pk && pk.cells ? pk.cells.map((c) => c.name) : [];
+        const names = enabled(pk && pk.cells ? pk.cells.map((c) => c.name) : []);
         if (names.length) todo.push({ set: p.name, label: d.setLabel(p.name), names });
       }
     }

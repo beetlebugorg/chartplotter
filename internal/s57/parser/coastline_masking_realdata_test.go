@@ -67,7 +67,7 @@ func TestRealDataCoastlineMasking(t *testing.T) {
 		opts := DefaultParseOptions()
 		opts.ApplyUpdates = false // base .000 only, both runs identical input
 
-		data, _, _, err := parseBaseFile(fsys, cell, opts)
+		data, _, _, err := parseBaseFile(fsys, cell, opts, &conformance{})
 		if err != nil {
 			t.Fatalf("%s: parseBaseFile: %v", cell, err)
 		}
@@ -160,7 +160,7 @@ func TestRealDataCoastlineMaskingEndToEnd(t *testing.T) {
 			opts := DefaultParseOptions()
 			opts.ApplyUpdates = false
 			opts.MaskCoastlineCoincidentBoundaries = mask
-			data, params, meta, err := parseBaseFile(fsys, cell, opts)
+			data, params, meta, err := parseBaseFile(fsys, cell, opts, &conformance{})
 			if err != nil {
 				t.Fatalf("%s: parseBaseFile: %v", cell, err)
 			}

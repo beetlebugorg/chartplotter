@@ -14,6 +14,7 @@
 // SettingsStore here — that's for future plugins.
 
 import { UNIT_CATEGORIES, M_TO_FT } from "../lib/units.mjs";
+import { DEFAULT_PX_PITCH_MM } from "../lib/util.mjs";
 
 // One shared read path for every core contribution. App-level flags live on the
 // shell; everything else is a mariner setting (pre-merged with DEFAULT_MARINER,
@@ -24,6 +25,7 @@ function coreGet(app, key, def) {
   if (key === "scheme") return app._scheme;
   if (key === "showCellBounds") return app._showCellBounds;
   if (key === "showChartRadar") return app._showChartRadar;
+  if (key === "pxPitch") return app._pxPitch;
   const v = app._mariner[key];
   return v === undefined ? def : v;
 }
@@ -35,6 +37,7 @@ function coreSet(app, key, val) {
   if (key === "scheme") return app.applyScheme(val);
   if (key === "showCellBounds") return app._setCellBoundsVisible(val);
   if (key === "showChartRadar") return app._setChartRadarVisible(val);
+  if (key === "pxPitch") return app.setPxPitch(val);
   return app.applyMariner({ [key]: val });
 }
 
@@ -155,5 +158,60 @@ export function coreSettingsContributions(app) {
     ],
   };
 
-  return [general, text, units, depths, advanced];
+  // SCREEN CALIBRATION — make the on-screen scale (the 1:N readout, overscale, and
+  // "go to scale") match a real ruler / other ENCs. We can't know the monitor's
+  // physical pixel size, so the user enters their display's diagonal and we derive
+  // the CSS-pixel pitch from window.screen. Stored as pxPitch (mm per CSS pixel);
+  // the engine scale (bands/SCAMIN/overscale-vs-CSCL) is unaffected.
+  const cssDiagPx = () => {
+    const s = window.screen || {};
+    return Math.hypot(s.width || 1280, s.height || 800) || 1509; // CSS-pixel screen diagonal
+  };
+  const pitchToInches = (mm) => (cssDiagPx() * mm) / 25.4;        // pitch → implied diagonal (in)
+  const inchesToPitch = (inch) => (inch * 25.4) / cssDiagPx();    // diagonal → pitch (mm/CSS px)
+  const calibration = {
+    id: "core-calibration",
+    tab: { id: "general", label: "General" },
+    order: 0.5,
+    group: "Screen calibration",
+    get, set,
+    render(host) {
+      const pitch = get("pxPitch") || DEFAULT_PX_PITCH_MM;
+      host.innerHTML = `
+        <style>
+          .cal { padding:2px 0 4px; }
+          .cal-desc { font-size:12.5px; color:var(--ui-text-dim); line-height:1.45; margin-bottom:11px; }
+          .cal-field { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ui-text); flex-wrap:wrap; }
+          .cal-field input { width:74px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px;
+            padding:5px 7px; font:inherit; font-size:16px; background:var(--ui-surface); color:var(--ui-text); }
+          .cal-readout { font-size:12px; color:var(--ui-text-faint); margin-top:9px; display:flex; align-items:center; gap:10px; }
+          .cal-readout b { color:var(--ui-text-dim); font-variant-numeric:tabular-nums; }
+          .cal-reset { border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text);
+            border-radius:6px; padding:4px 9px; font:inherit; font-size:12px; cursor:pointer; margin-left:auto; }
+        </style>
+        <div class="cal">
+          <div class="cal-desc">Enter your display's diagonal so the scale readout matches a real ruler (and other ENCs). Affects only the on-screen scale numbers — not the charts.</div>
+          <label class="cal-field">Screen diagonal <input class="cal-diag" type="number" inputmode="decimal" step="0.1" min="3" max="120" value="${pitchToInches(pitch).toFixed(1)}"> inches</label>
+          <div class="cal-readout">Pixel pitch: <b class="cal-pitch">${pitch.toFixed(4)}</b> mm<button class="cal-reset" type="button">Reset</button></div>
+        </div>`;
+      const diag = host.querySelector(".cal-diag");
+      const out = host.querySelector(".cal-pitch");
+      const apply = () => {
+        const inch = +diag.value;
+        if (!(inch >= 3 && inch <= 120)) return;
+        const mm = inchesToPitch(inch);
+        set("pxPitch", mm);
+        out.textContent = mm.toFixed(4);
+      };
+      diag.addEventListener("change", apply);
+      diag.addEventListener("input", apply);
+      host.querySelector(".cal-reset").addEventListener("click", () => {
+        set("pxPitch", undefined);
+        diag.value = pitchToInches(DEFAULT_PX_PITCH_MM).toFixed(1);
+        out.textContent = DEFAULT_PX_PITCH_MM.toFixed(4);
+      });
+    },
+  };
+
+  return [general, calibration, text, units, depths, advanced];
 }

@@ -33,7 +33,7 @@ import {
   STYLE, prodBody, libraryBody, packSearch, providersCol, packsHeader,
   packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
   detailEmpty, detailUnknownSet, detailPack, installedActions, previewMapHost,
-  importDetail, dataFreshness, agreementModal, archiveList, millerBack,
+  importDetail, dataFreshness, agreementModal, archiveList, millerBack, packCellList,
 } from "./chart-library.view.mjs";
 
 // NOAA ENC User Agreement acceptance (localStorage). Exported so the shell can
@@ -115,6 +115,7 @@ export class ChartLibrary extends HTMLElement {
     this._installedSets = new Set();
     this._disabled = new Set();
     this._installed = new Set(); // installed cell names (for the NOAA pack counts)
+    this._hiddenCells = new Set(); // cell names hidden from the map (per-cell toggle); owned by the shell, mirrored here for render
 
     // NOAA ENC agreement acceptance (persisted).
     this._agreed = localStorage.getItem(LS_AGREE) === "1";
@@ -554,7 +555,40 @@ export class ChartLibrary extends HTMLElement {
     }
     // User packs have no coverage map; everything else shows the preview.
     const previewMap = pk.kind === "user" ? "" : previewMapHost();
-    return detailPack({ title, tick, sub, meta, act, previewMap });
+    // Per-cell show/hide list, only for an installed & active pack (a fully
+    // disabled pack is already hidden, so per-cell control is moot there).
+    let extra = "";
+    if (installed && !disabled) {
+      const items = this._packCellItems(pk);
+      extra = packCellList({ items, nShown: items.filter((it) => it.shown).length });
+    }
+    return detailPack({ title, tick, sub, meta, act, previewMap, extra });
+  }
+
+  // The installed cells belonging to a pack, as render items for packCellList:
+  // { name, title, shown }. Cells come from the pack's catalogue membership
+  // intersected with what's actually installed; titles from the NOAA catalogue.
+  _packCellItems(pk) {
+    let names = [];
+    if (pk.kind === "noaa") names = this._districtCellNames(pk.cg) || [];
+    else if (pk.cells) names = pk.cells.map((c) => c.name);
+    const seen = new Set();
+    const items = [];
+    for (const name of names) {
+      if (seen.has(name) || !this._installed.has(name)) continue; // installed cells only
+      seen.add(name);
+      items.push({ name, title: (this._byName.get(name) || {}).l || "", shown: !this._hiddenCells.has(name) });
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name));
+    return items;
+  }
+
+  // Replace the shell-owned hidden-cell set (called on boot from persisted
+  // settings and whenever it changes elsewhere). Re-renders the detail so the
+  // checkboxes reflect the new state. Does NOT emit (avoids a feedback loop).
+  setHiddenCells(names) {
+    this._hiddenCells = new Set(names || []);
+    if (this._active) this._updateDetail();
   }
 
   // The User-Charts detail: the import drop zone (baked server-side into the
@@ -657,7 +691,51 @@ export class ChartLibrary extends HTMLElement {
       b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.disable, true); }));
     r.querySelectorAll(".pk-btn[data-enable]").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); this._setPackDisabled(b.dataset.enable, false); }));
+    // Per-cell show/hide checkboxes + Select all / Clear all.
+    r.querySelectorAll(".cell-row input[data-cell]").forEach((cb) =>
+      cb.addEventListener("change", () => this._setCellShown(cb.dataset.cell, cb.checked)));
+    const allBtn = r.querySelector("[data-cells-all]");
+    if (allBtn) allBtn.addEventListener("click", (e) => { e.stopPropagation(); this._setAllCellsShown(true); });
+    const noneBtn = r.querySelector("[data-cells-none]");
+    if (noneBtn) noneBtn.addEventListener("click", (e) => { e.stopPropagation(); this._setAllCellsShown(false); });
   }
+
+  // Show/hide one cell. The checkbox the user clicked is already in the right
+  // state, so we update the mirror + count in place (NOT a full detail re-render,
+  // which would reset the list's scroll position) and emit so the shell applies
+  // the map filter and persists. shown=true → not hidden.
+  _setCellShown(name, shown) {
+    if (shown) this._hiddenCells.delete(name);
+    else this._hiddenCells.add(name);
+    this._emitHiddenCells();
+    this._refreshCellCount();
+  }
+
+  // Show/hide every cell in the selected pack at once. Updates the mirror, every
+  // checkbox, and the count in place (preserving scroll).
+  _setAllCellsShown(shown) {
+    const pk = this._selectedPack();
+    if (!pk) return;
+    for (const it of this._packCellItems(pk)) {
+      if (shown) this._hiddenCells.delete(it.name);
+      else this._hiddenCells.add(it.name);
+    }
+    this.shadowRoot.querySelectorAll(".cell-row input[data-cell]").forEach((cb) => { cb.checked = shown; });
+    this._emitHiddenCells();
+    this._refreshCellCount();
+  }
+
+  // Update only the "(shown/total)" count label from the current checkbox states.
+  _refreshCellCount() {
+    const r = this.shadowRoot;
+    const boxes = r.querySelectorAll(".cell-row input[data-cell]");
+    const title = r.querySelector(".cell-list-title");
+    if (!boxes.length || !title) return;
+    const nShown = [...boxes].filter((cb) => cb.checked).length;
+    title.textContent = `Charts in this pack (${nShown}/${boxes.length})`;
+  }
+
+  _emitHiddenCells() { this._emit("cells-hidden-changed", { hidden: [...this._hiddenCells] }); }
 
   // Click Download on a pack: enqueue it (or start immediately if idle).
   _downloadSelected(key) {

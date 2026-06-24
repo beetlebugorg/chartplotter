@@ -10,6 +10,15 @@ type Chart struct {
 	params         datasetParams                 // Private - DSPM record data
 	Features       []Feature                     // Public - array of extracted features
 	spatialRecords map[spatialKey]*spatialRecord // Private - for update merging
+	warnings       []ConformanceWarning          // Private - non-fatal spec deviations
+}
+
+// Warnings returns the non-fatal S-57 / ISO-8211 spec-conformance deviations
+// detected while parsing this chart (see conformance.go). Empty when the cell is
+// fully conformant. In strict mode (ParseOptions.ValidateConformance) these are
+// returned as a parse error instead.
+func (c *Chart) Warnings() []ConformanceWarning {
+	return c.warnings
 }
 
 // DatasetName returns the chart's dataset name (cell identifier).

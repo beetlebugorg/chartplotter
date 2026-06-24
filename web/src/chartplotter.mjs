@@ -95,6 +95,8 @@ const DEFAULT_MARINER = {
 const LS_VIEW = "chartplotter:view";
 const LS_SOURCE = "chartplotter:source"; // {type:"blob"} or {type:"url",file}
 const LS_BANDS_OFF = "chartplotter:bands-off"; // usage bands the user turned off (array of slugs)
+const LS_HIDDEN_CELLS = "chartplotter:hidden-cells"; // individual chart cells the user hid (array of cell names)
+const LS_PX_PITCH = "chartplotter:px-pitch-mm"; // calibrated physical size of a CSS pixel (mm) for the on-screen scale readout
 // The NOAA ENC User Agreement gate (LS_AGREE) + agreement URLs now live in the
 // <chart-library> component, which owns the download flow; NOAA_ENC_URL is
 // imported above for the bottom-right attribution link the shell still renders.
@@ -205,6 +207,8 @@ export class ChartPlotter extends HTMLElement {
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage boxes when zoomed out past chart data (default ON; opt-out)
     this._showChartRadar = localStorage.getItem("cp-chart-radar") !== "0"; // edge pointers to off-screen installed charts (default ON)
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
+    this._hiddenCells = new Set(loadJSON(LS_HIDDEN_CELLS, [])); // individual cells hidden via the per-cell toggle (client filter on baked `cell`)
+    this._pxPitch = loadJSON(LS_PX_PITCH, undefined); // calibrated CSS-pixel pitch (mm); undefined → util default (CSS reference)
     // Feature-inspect + tile-debugger state now live in DevTools (Advanced tab).
     this._hasArchive = false;           // is a chart archive currently loaded?
     this._mariner = { ...DEFAULT_MARINER, ...loadJSON(LS_MARINER, {}) };
@@ -318,7 +322,15 @@ export class ChartPlotter extends HTMLElement {
     this._chartLib = this.shadowRoot.getElementById("chart-lib");
     if (this._chartLib) {
       this._chartLib.configure({ dl: this._dl, api: this._api, notify: this._notify, store: this._store, assets: this._assets, prod: this._prod });
+      this._chartLib.setHiddenCells([...this._hiddenCells]); // seed checkbox state from persisted prefs
       this._chartLib.addEventListener("charts-changed", () => { this._renderInstalledSets().catch(() => {}); });
+      // Per-cell show/hide: apply the client filter to the live map + persist.
+      this._chartLib.addEventListener("cells-hidden-changed", (e) => {
+        this._hiddenCells = new Set((e.detail && e.detail.hidden) || []);
+        if (this._plotter && this._plotter.setHiddenCells) this._plotter.setHiddenCells([...this._hiddenCells]);
+        try { localStorage.setItem(LS_HIDDEN_CELLS, JSON.stringify([...this._hiddenCells])); } catch (e) { /* quota/private mode */ }
+        this._persistSettings();
+      });
       this._chartLib.addEventListener("chart-focus", (e) => this._flyToBounds(e.detail && e.detail.bounds));
       this._chartLib.addEventListener("chart-import-archive", (e) => this._importArchiveFile(e.detail && e.detail.file));
     }
@@ -489,6 +501,9 @@ export class ChartPlotter extends HTMLElement {
     if (Object.keys(this._mariner).length) {
       try { this._plotter.setMariner(this._mariner); } catch (e) { console.warn(e); }
     }
+    if (this._hiddenCells.size && this._plotter.setHiddenCells) {
+      try { this._plotter.setHiddenCells([...this._hiddenCells]); } catch (e) { console.warn(e); }
+    }
     await this._catalogReady;
     this.addCatalogOverlay(map);
     // The plotter rebuilds the whole style (setStyle) when server sets load or the
@@ -529,6 +544,7 @@ export class ChartPlotter extends HTMLElement {
       cellMeta: (name) => this._byName.get(name),
       serverSetMetas: () => (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [],
       noChartsEnabled: () => this._noChartsEnabled(),
+      getPxPitch: () => this._pxPitch, // calibrated physical CSS-pixel pitch (mm) for the on-screen scale
     });
 
     // Compass / orientation control: a round button in the top-right group; tap to
@@ -557,6 +573,7 @@ export class ChartPlotter extends HTMLElement {
         setTask: (running) => { this._task = running ? { kind: "download", status: "running" } : null; },
         pollImport: (job, onProg, label) => this._pollImport(job, onProg, label),
         districtCellNames: (cg) => this._districtCellNames(cg),
+        hiddenCells: () => this._hiddenCells, // per-cell disabled set — excluded from rebake
         setLabel: (name) => this._setLabel(name),
         chartLib: () => this._chartLib,
         renderInstalledSets: () => this._renderInstalledSets(),
@@ -1616,8 +1633,19 @@ export class ChartPlotter extends HTMLElement {
       showCellBounds: this._showCellBounds,
       chartRadar: this._showChartRadar,
       bandsOff: [...this._bandsOff],
+      hiddenCells: [...this._hiddenCells],
+      pxPitch: this._pxPitch,
       mariner: this._mariner,
     };
+  }
+
+  // Set (or clear) the calibrated physical CSS-pixel pitch (mm) used for the
+  // on-screen scale readout / overscale / go-to-scale. Persists + refreshes the HUD.
+  setPxPitch(mm) {
+    this._pxPitch = (typeof mm === "number" && mm > 0) ? mm : undefined;
+    try { localStorage.setItem(LS_PX_PITCH, JSON.stringify(this._pxPitch ?? null)); } catch (e) { /* quota/private */ }
+    this._persistSettings();
+    if (this._hud) this._hud.updateHud();
   }
 
   // Fetch the server-persisted display settings at boot and adopt them over the
@@ -1635,6 +1663,8 @@ export class ChartPlotter extends HTMLElement {
     if (typeof s.showCellBounds === "boolean") this._showCellBounds = s.showCellBounds;
     if (typeof s.chartRadar === "boolean") this._showChartRadar = s.chartRadar;
     if (Array.isArray(s.bandsOff)) this._bandsOff = new Set(s.bandsOff);
+    if (Array.isArray(s.hiddenCells)) this._hiddenCells = new Set(s.hiddenCells);
+    if (typeof s.pxPitch === "number" && s.pxPitch > 0) this._pxPitch = s.pxPitch;
     // Merge mariner over the (migrated) defaults; Display Base is always forced on.
     if (s.mariner && typeof s.mariner === "object") this._mariner = { ...this._mariner, ...s.mariner, displayBase: true };
   }

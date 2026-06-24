@@ -20,6 +20,7 @@ package bake
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strconv"
@@ -1173,6 +1174,7 @@ func (b *Baker) buildEmitIndex(extent uint32, buffer float64, bandMax uint32) {
 	b.emitScaleBoundaries() // adds scale-boundary prims; must precede indexing
 	idx := map[uint64][]int32{}
 	bufFrac := buffer / float64(extent)
+	var dropped int // prims skipped for a pathological (corrupt-geometry) bbox
 	for i := range b.prims {
 		r := &b.prims[i]
 		hi := b.clampZMax(r.zMax)
@@ -1181,6 +1183,18 @@ func (b *Baker) buildEmitIndex(extent uint32, buffer float64, bandMax uint32) {
 				continue // per-band index: skip other bands' prims
 			}
 			hi = b.clampZMax(bandBakeCeil(bandMax)) // bake the band's overzoom ceiling
+		}
+		// Guard against a single prim with a corrupt, world-spanning bbox (e.g. a
+		// mis-assembled ring with a stray vertex): at a fine zoom it would expand to
+		// hundreds of millions of tiles here and blow up memory (a 20 GB+ index)
+		// before a single tile is baked. A real chart object never spans this many
+		// tiles, so skip+log it rather than OOM the whole bake.
+		if z0n := primTileSpan(r, b.clampZMax(hi), bufFrac); z0n > maxPrimTilesPerZoom {
+			dropped++
+			log.Printf("bake: skipping prim with implausible bbox (corrupt geometry): cell=%s class=%s bbox=[%.4f,%.4f,%.4f,%.4f] ~%d tiles @z%d",
+				b.cellTab[r.bcCell], b.classTab[r.bcClass],
+				r.wMinX*360-180, unnormY(r.wMaxY), r.wMaxX*360-180, unnormY(r.wMinY), z0n, hi)
+			continue
 		}
 		for z := r.zMin; z <= hi; z++ {
 			n := math.Pow(2, float64(z))
@@ -1200,6 +1214,9 @@ func (b *Baker) buildEmitIndex(extent uint32, buffer float64, bandMax uint32) {
 			}
 		}
 	}
+	if dropped > 0 {
+		log.Printf("bake: dropped %d prim(s) with corrupt world-spanning geometry from the emit index", dropped)
+	}
 	b.emitIndex = idx
 }
 
@@ -1211,6 +1228,27 @@ func clampTile(v, last int64) int64 {
 		return last
 	}
 	return v
+}
+
+// maxPrimTilesPerZoom caps how many tiles a single prim may span at its bake
+// ceiling before it's treated as corrupt geometry (a stray vertex inflating the
+// bbox toward world scale) and dropped from the emit index. A real chart object —
+// even a coarse overview cell at its own coarse ceiling (world ≈ 65 k tiles at z8)
+// — stays far below this; only a mis-assembled ring reaches it, and indexing it
+// would expand to hundreds of millions of tiles and OOM the bake.
+const maxPrimTilesPerZoom int64 = 2_000_000
+
+// primTileSpan is the number of tiles a prim's (buffer-expanded) bbox covers at
+// zoom z — the per-prim cost it would add to the emit index at that zoom.
+func primTileSpan(r *routed, z uint32, bufFrac float64) int64 {
+	n := math.Pow(2, float64(z))
+	last := int64(n) - 1
+	bufN := bufFrac / n
+	xMin := clampTile(int64(math.Ceil((r.wMinX-bufN)*n))-1, last)
+	xMax := clampTile(int64(math.Floor((r.wMaxX+bufN)*n)), last)
+	yMin := clampTile(int64(math.Ceil((r.wMinY-bufN)*n))-1, last)
+	yMax := clampTile(int64(math.Floor((r.wMaxY+bufN)*n)), last)
+	return (xMax - xMin + 1) * (yMax - yMin + 1)
 }
 
 // sectorRadiusNorm is the LIGHTS06 sector figure's maximum extent (the 26 mm
@@ -1401,14 +1439,32 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			}
 		} else if r.cscl != 0 && r.layer != "scale_boundaries" &&
 			(r.kind == mvt.GeomPoint || r.kind == mvt.GeomLineString || r.layer == "area_patterns" || r.layer == "areas") {
-			// Points test their own position (a boundary tile keeps coarse points that
-			// fall outside the finer coverage); lines/fills test the tile centre.
-			slat, slon := ctrLat, ctrLon
 			if r.kind == mvt.GeomPoint {
-				slat, slon = unnormY(r.wMinY), r.wMinX*360-180
-			}
-			if s := b.coverageScaleAt(slat, slon, bandZ); s != 0 && s < r.cscl {
+				// A point tests its OWN position — a boundary tile keeps coarse points
+				// that fall outside the finer coverage.
+				if s := b.coverageScaleAt(unnormY(r.wMinY), r.wMinX*360-180, bandZ); s != 0 && s < r.cscl {
+					suppressed = true
+				}
+			} else {
+				// Lines/fills SPAN the tile, so testing the tile CENTRE alone punched a
+				// hole at cell SEAMS: a tile straddling the boundary between a coarse cell
+				// and an adjacent finer cell has its centre in the finer cell, which
+				// suppressed the coarse cell's portion on the OTHER side of the seam where
+				// the finer cell has NO data (e.g. US4MD1ED's depth fill just north of the
+				// 39.0 line it shares with the finer US4MD1DD — the "bottom half disappears"
+				// gap). Suppress only when a finer cell covers the WHOLE tile (centre + 4
+				// corners); a partially-covered seam tile keeps the coarse fill, and the
+				// finer cell — drawn later, on top — covers it where it actually has data.
+				// No visible double-draw (finer wins on top); no seam gap.
+				wLon, eLon := float64(coord.X)/n*360-180, float64(coord.X+1)/n*360-180
+				nLat, sLat := unnormY(float64(coord.Y)/n), unnormY(float64(coord.Y+1)/n)
 				suppressed = true
+				for _, pt := range [...][2]float64{{ctrLat, ctrLon}, {nLat, wLon}, {nLat, eLon}, {sLat, wLon}, {sLat, eLon}} {
+					if s := b.coverageScaleAt(pt[0], pt[1], bandZ); s == 0 || s >= r.cscl {
+						suppressed = false // part of the tile has no finer cell — keep the coarse prim
+						break
+					}
+				}
 			}
 		}
 		if suppressed {

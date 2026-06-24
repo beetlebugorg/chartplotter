@@ -56,6 +56,8 @@ func (p *parserWrapper) ParseWithOptions(filename string, opts ParseOptions) (*C
 
 		MaskCoastlineCoincidentBoundaries: opts.MaskCoastlineCoincidentBoundaries,
 
+		ValidateConformance: opts.ValidateConformance,
+
 		Fs: opts.Fs,
 	}
 	internalChart, err := p.internal.ParseWithOptions(filename, internalOpts)
