@@ -89,10 +89,11 @@ How chartplotter handles them:
   (`internal/engine/s101catalog/catalog/`) and synced from an external copy at
   build time (`make sync-s101`), so the repository itself does not redistribute
   IHO material.
-- **Embedded in release binaries.** The release workflow clones the two IHO repos
-  above and builds with `-tags embed_s101`, so the published binaries are
-  self-contained and **do** redistribute the catalogue. A plain `go build`
-  (without the tag) omits it and requires `--s101 <dir>` at runtime.
+- **Embedded only in the `_s101` release binaries.** Each release ships two builds
+  per platform: a plain binary (no catalogue; needs `--s101 <dir>` at runtime) and
+  an `_s101` binary built with `-tags embed_s101`. The release workflow clones the
+  two IHO repos above so the `_s101` build embeds the catalogue — only that variant
+  **redistributes** IHO material.
 
 Because the IHO repositories declare no license, the right to redistribute this
 material in release binaries is **unconfirmed**. The IHO copyright and

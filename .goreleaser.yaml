@@ -8,46 +8,50 @@ before:
   hooks:
     - go mod tidy
 
+# Two builds per platform, mirroring `make xbuild`:
+#   - plain: needs `--s101 <dir>` at runtime (no IHO content embedded)
+#   - _s101: self-contained, embeds the S-101 Portrayal + Feature Catalogues
+#     (the release workflow runs `make sync-s101` first to populate the embed dir).
+#     That catalogue is IHO material with no declared license — see
+#     THIRD-PARTY-NOTICES.md.
+# Shared settings live in an anchor so the two only differ by the embed tag.
 builds:
   - id: chartplotter
     main: ./cmd/chartplotter
     binary: chartplotter
-    env:
-      - CGO_ENABLED=0
-    # Self-contained: embed the S-101 Portrayal + Feature Catalogues (the release
-    # workflow syncs them into internal/engine/s101catalog/catalog/ first). That
-    # catalogue is IHO material with no declared license — see THIRD-PARTY-NOTICES.md.
-    tags:
-      - embed_s101
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
     # No 32-bit / niche targets: the tile baker is memory-hungry.
+  - id: chartplotter-s101
+    main: ./cmd/chartplotter
+    binary: chartplotter
+    env: [CGO_ENABLED=0]
+    tags: [embed_s101]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
 
 archives:
   - id: chartplotter
+    ids: [chartplotter]
     formats: [tar.gz]
-    # Windows gets a .zip instead of a tarball.
     format_overrides:
       - goos: windows
         formats: [zip]
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- .Version }}_
-      {{- .Os }}_
-      {{- .Arch }}
-    files:
-      - README.md
-      - LICENSE
-      - THIRD-PARTY-NOTICES.md
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md, LICENSE, THIRD-PARTY-NOTICES.md]
+  - id: chartplotter-s101
+    ids: [chartplotter-s101]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}_s101"
+    files: [README.md, LICENSE, THIRD-PARTY-NOTICES.md]
 
 checksum:
   name_template: "checksums.txt"

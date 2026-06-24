@@ -78,9 +78,13 @@ static binary** for any platform with `GOOS`/`GOARCH` and nothing else to instal
 
 Download an archive for your platform from the
 [**Releases**](https://github.com/beetlebugorg/chartplotter/releases) page, extract it,
-and put `chartplotter` on your `PATH`. Release binaries are self-contained — they
-embed the S-101 catalogue and run with no extra files. (That catalogue is IHO
-material; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).)
+and put `chartplotter` on your `PATH`. Each platform ships two builds:
+
+- **`…_s101`** — self-contained: embeds the S-101 catalogue, runs with no extra
+  files. (That catalogue is IHO material; see
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).)
+- **plain** — needs `--s101 <PortrayalCatalog dir>` at runtime, pointing at your
+  own copy of the catalogue.
 
 ### With go install
 
