@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/static/img/ui/newyork.png" alt="chartplotter rendering New York Harbor's Upper Bay" width="800">
-  <br><sub>New York Harbor, Upper Bay — NOAA ENC data, S-101 portrayal.</sub>
+  <img src="docs/static/img/ui/cape-lookout.png" alt="chartplotter rendering the North Carolina coast off Cape Lookout" width="800">
+  <br><sub>The North Carolina coast off Cape Lookout — NOAA ENC data, S-101 portrayal, ~1:700,000.</sub>
 </p>
 
 ---

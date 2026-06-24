@@ -144,18 +144,18 @@ if (want("pick-report")) {
   else console.error("[pick] no chart features under center — skipped pick-report");
 }
 
-// 6) New York Harbor (Upper Bay / Statue of Liberty), the README hero. Needs NY
-// Harbor (US5NYC*) cells in the cache; skipped cleanly if the view is empty.
-// Captured at 1600x1200; the make target downscales it for GitHub.
-if (want("newyork")) {
+// 6) The North Carolina coast off Cape Lookout at an overview scale — the README
+// hero. Covered by the NOAA District 5 packs. Captured at 1600x1200; the make
+// target downscales it for GitHub.
+if (want("cape-lookout")) {
   await page.setViewportSize({ width: 800, height: 600 });
   await scheme("day");
-  await page.evaluate(() => document.querySelector("chart-plotter").setView({ lat: 40.692, lng: -74.045, scale: 24000 }));
-  await idle(2500);
+  await page.evaluate(() => document.querySelector("chart-plotter").setView({ lat: 34.3333, lng: -76.9683, zoom: 8.5 }));
+  await idle(3000);
   await page.evaluate(() => document.querySelector("chart-plotter")._map.triggerRepaint());
   await idle(2000);
   await closeDrawer();
-  await shot("newyork");
+  await shot("cape-lookout");
 }
 
 // 7) Close-up of Annapolis / the U.S. Naval Academy at 1:12,000. Captured at
