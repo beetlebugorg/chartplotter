@@ -134,6 +134,16 @@ export class ChartCanvas extends HTMLElement {
     this._coastline = null; // offline GSHHG basemap GeoJSON fallback, if available
     this._coastlineArchive = null; // offline GSHHG coastline PMTiles (preferred vector basemap)
     this._mariner = {};      // current mariner settings (engine-side)
+    // DEBUG (?ignoreScamin / ?noscamin): drop the per-SCAMIN display gate so every
+    // feature shows in-band regardless of its 1:N min-display-scale. Deliberately a
+    // per-page-load CONSTANT read from the URL — NOT a mariner toggle — so it's baked
+    // into every buildStyle() and NEVER needs a mid-load setStyle (which would race
+    // addCatalogOverlay's addSource → "Style is not done loading"). To flip it, change
+    // the URL and reload.
+    this._ignoreScamin = (() => {
+      try { const q = new URLSearchParams(location.search); return q.has("ignoreScamin") || q.has("noscamin"); }
+      catch (e) { return false; }
+    })();
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
     this._layerVis = {};     // chart layer id → intended (mariner) visibility, so band on/off restores it
@@ -1088,6 +1098,7 @@ export class ChartCanvas extends HTMLElement {
       scheme: this._active,
       server: this._sources.server, serverSets: this._sources.sets,
       scaminValues: this._sources.scaminValues, scaminLat, bandsHidden: this._bandsHidden,
+      ignoreScamin: this._ignoreScamin,
     });
     this._layerBase = layerBase; this._variants = variants; this._layerVis = layerVis;
 

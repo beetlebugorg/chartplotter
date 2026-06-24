@@ -267,6 +267,7 @@ export function buildChartLayers({
   scheme,                                     // active scheme branch ("day"/"dusk"/"night") = this._active
   server, serverSets, scaminValues, scaminLat, // chart-source state (already resolved)
   bandsHidden,                                 // Set (this._bandsHidden)
+  ignoreScamin,                                // DEBUG: drop the per-SCAMIN display gate (show everything in-band)
 }) {
   active = scheme || "day";
   const layerBase = {}, variants = {}, layerVis = {};
@@ -327,7 +328,7 @@ export function buildChartLayers({
         // natively (zero JS/frame). The per-band archive is FLOOR-GATED at bake, so
         // tile CONTENT controls appearance: client layers need no band minzoom.
         const scaminVals = set.scamin || [];
-        if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
+        if (!ignoreScamin && SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
           // Only materialize a per-value bucket where the SCAMIN cutoff zoom is
           // ABOVE this set's source floor (set.min). The set's tiles don't load
           // below set.min, so any SCAMIN whose cutoff is ≤ set.min shows from the
@@ -403,7 +404,7 @@ export function buildChartLayers({
       // SCAMIN value (collected from the tiles). Out-of-zoom buckets are skipped by
       // MapLibre for free, so the extra layers cost nothing at runtime. Features
       // WITHOUT SCAMIN take the band-gated `#no` variant. Other layers: one variant.
-      if (SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminValues && scaminValues.length) {
+      if (!ignoreScamin && SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminValues && scaminValues.length) {
         // Only bucket SCAMIN values whose cutoff is ABOVE this band's display floor
         // (dmin) — values at/below dmin show from the floor anyway (the band isn't
         // displayed below it), so fold them into the dmin-floored `#no` bucket. Cuts
