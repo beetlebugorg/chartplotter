@@ -128,8 +128,12 @@ function buildLayers(mariner, palette, atlasPpu, osm) {
       layout: { "symbol-placement": "line", "text-field": S52.contourLabelField(mariner), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "symbol-spacing": 300, "text-allow-overlap": false, "text-optional": true, visibility: mariner.showContourLabels ? "visible" : "none" },
       paint: { "text-color": S52.contourLabelColor(active, palette), "text-halo-color": S52.textHaloColor(active), "text-halo-width": 1.2 } },
     // Light characteristics (LIGHTS06 TX, e.g. "Fl(1)R 3s 4.2m") — their own
-    // layer, always drawn (allow/ignore-overlap) so the important nav data is
-    // never decluttered behind a name label. Placed below the light flare.
+    // layer. It precedes the feature-name layers in the style order, so MapLibre
+    // places light text FIRST: it wins collisions against plain name labels (a name
+    // can never hide a light) WITHOUT light text being exempt from placement. It
+    // still collides against OTHER light text — S-100 Part 9 text placement says
+    // drop labels you can't place, so a navaid-dense approach (Annapolis) thins to a
+    // readable set instead of an unreadable stack of overlapping characteristics.
     { id: "light-text", type: "symbol", source: "chart", "source-layer": "text",
       filter: ["==", ["get", "class"], "LIGHTS"],
       layout: { "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
@@ -137,7 +141,7 @@ function buildLayers(mariner, palette, atlasPpu, osm) {
         // Left-justify so a merged multi-line light label's lines align on their
         // left edge (e.g. stacked "Mo(U)W 20s 50m 17M" / "Mo(U)R 20s 50m 15M").
         "text-justify": "left",
-        "text-allow-overlap": true, "text-ignore-placement": true,
+        "text-allow-overlap": false, "text-optional": true,
         // Light descriptions (LIGHTS06 characteristics) — individually
         // selectable per S-52 (default on); toggled by showLightDescriptions.
         visibility: mariner.showLightDescriptions === false ? "none" : "visible" },
