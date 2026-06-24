@@ -14,16 +14,21 @@ export function loadJSON(key, fallback) {
 }
 
 // Web-Mercator map scale denominator at zoom z / latitude lat (OGC 0.28mm pixel).
-// NOMINAL web-Mercator scale constant (metres-per-pixel at zoom 0, equator, in the
-// classic 256-tile slippy convention). This is the INTERNAL scale coordinate the
-// whole app is calibrated to — band zoom ranges (bands.mjs), SCAMIN gating
-// (chart-sources.mjs / baker), and the overscale ×n indication all assume it, so it
-// must stay consistent across them. It is NOT the physical on-screen scale
-// (MapLibre's 512-tile geometry renders ~2× finer per CSS pixel, and the true paper
-// scale also depends on the monitor's physical DPI). A physically-accurate readout
-// is a separate concern (read the screen's real pixel size — see scaleDenomPhysical
-// TODO) and must NOT feed the band/SCAMIN/overscale math.
-const M_PER_PX_Z0 = 156543.03392804097;
+// This is the app's ONE display scale — the PHYSICAL on-screen scale, matching what
+// MapLibre actually renders (512-tile geometry: ~2× finer per CSS pixel than the
+// classic 256-tile slippy convention, hence the 512 metres-per-pixel constant). It
+// is the single coordinate that SCAMIN gating (chart-sources.mjs / baker), the
+// overscale ×n indication, and go-to-scale all reason in — producer scales (SCAMIN,
+// CSCL) are real 1:N paper scales, so they MUST be compared against this true scale,
+// not a relabelled 2×-coarse one. (There used to be a separate "nominal" 256
+// coordinate for the engine while only the readout was physical; that split was the
+// root of SCAMIN features vanishing at ~½ their stated scale, so it was removed.)
+// The BAND zoom ranges (bands.mjs / baker ZoomRange) are raw integer zooms and are
+// independent of this constant — they pin each usage band to a tile-pyramid level.
+// scaleDenomPhysical (below) is the same physical scale but with a per-screen,
+// calibratable pixel pitch for an exact ruler-on-glass readout; this OGC-pixel form
+// is the deterministic version the baker (which has no screen to measure) shares.
+const M_PER_PX_Z0 = 78271.516964020485; // metres/CSS-px at z0, equator (512-tile)
 const OGC_PX_M = 0.00028; // 0.28 mm — the OGC "standardized rendering pixel"
 
 export function scaleDenom(z, lat) {
@@ -31,7 +36,7 @@ export function scaleDenom(z, lat) {
   return mpp / OGC_PX_M;
 }
 
-// Inverse of scaleDenom: the (fractional) Web-Mercator zoom that renders nominal
+// Inverse of scaleDenom: the (fractional) Web-Mercator zoom that renders display
 // scale 1:`scale` at `lat`. Used to "go to" a scale and to clamp by scale.
 export function zoomForScale(scale, lat) {
   if (!(scale > 0)) return 0;
@@ -40,10 +45,11 @@ export function zoomForScale(scale, lat) {
 }
 
 // --- PHYSICAL (ruler-on-glass) scale --------------------------------------
-// MapLibre GL renders with 512-tile geometry, so its TRUE resolution is half the
-// nominal 256-tile constant: metres per CSS pixel at zoom 0, equator. (Verified by
-// unprojecting two screen points in the running map.)
-const M_PER_PX_Z0_PHYS = 78271.516964020485;
+// Same 512-tile resolution as scaleDenom above (M_PER_PX_Z0), but with a per-screen,
+// calibratable pixel pitch instead of the OGC reference pixel — for an exact
+// ruler-on-glass readout. (512-tile geometry verified by unprojecting two screen
+// points in the running map.) scaleDenom is the deterministic OGC-pixel form the
+// engine/baker share; this is the calibrated readout layered on top.
 // Physical size of one CSS pixel, in mm. The CSS reference pixel is 1/96 inch ≈
 // 0.2645 mm and browsers keep CSS px near that regardless of device-pixel-ratio, so
 // it's a good DEFAULT; a per-screen calibration (settings) overrides it for exact
@@ -56,24 +62,27 @@ export function clampPxPitch(mm) {
 
 // PHYSICAL paper-scale denominator — what a ruler laid on the screen measures.
 // Uses MapLibre's real per-CSS-pixel resolution and the (calibrated) physical size
-// of a CSS pixel. This is for the user-facing readout / "go to scale" ONLY; the
-// engine (band zoom ranges, SCAMIN, overscale-vs-CSCL) stays on the nominal
-// scaleDenom so its calibration is never disturbed.
+// of a CSS pixel. This is the user-facing readout / "go to scale": it differs from
+// scaleDenom only by the calibrated px pitch (vs the OGC 0.28mm reference) — both are
+// now the same true 512-tile scale, since the engine moved onto the physical scale.
 export function scaleDenomPhysical(z, lat, pxPitchMm = DEFAULT_PX_PITCH_MM) {
-  const mPerCssPx = M_PER_PX_Z0_PHYS * Math.cos((lat * Math.PI) / 180) / Math.pow(2, z);
+  const mPerCssPx = M_PER_PX_Z0 * Math.cos((lat * Math.PI) / 180) / Math.pow(2, z);
   return mPerCssPx / (clampPxPitch(pxPitchMm) / 1000);
 }
 // Inverse: the (fractional) zoom that renders physical scale 1:`scale` at `lat`.
 export function zoomForScalePhysical(scale, lat, pxPitchMm = DEFAULT_PX_PITCH_MM) {
   if (!(scale > 0)) return 0;
-  const z = Math.log2(M_PER_PX_Z0_PHYS * Math.cos((lat * Math.PI) / 180) / ((clampPxPitch(pxPitchMm) / 1000) * scale));
+  const z = Math.log2(M_PER_PX_Z0 * Math.cos((lat * Math.PI) / 180) / ((clampPxPitch(pxPitchMm) / 1000) * scale));
   return Math.max(0, Math.min(24, z));
 }
 
 // Finest map scale we allow: don't magnify charts past 1:MIN_DETAIL_SCALE (past
 // this it's just blocky overzoom). Inverse of scaleDenom — the (fractional) zoom
-// whose scale at `lat` equals the floor (latitude-dependent).
-export const MIN_DETAIL_SCALE = 4000;
+// whose scale at `lat` equals the floor (latitude-dependent). This is a PHYSICAL
+// scale now that scaleDenom is physical: 1:2000 is the old 1:4000-nominal cap (the
+// engine moved to the true 512-tile scale, ~2× finer), so the max-zoom-IN level the
+// user can reach is unchanged — only the scale NUMBER for the same zoom halved.
+export const MIN_DETAIL_SCALE = 2000;
 export function maxZoomForScaleFloor(lat) {
   const z = Math.log2(M_PER_PX_Z0 * Math.cos((lat * Math.PI) / 180) / (OGC_PX_M * MIN_DETAIL_SCALE));
   return Math.max(1, Math.min(18, z));

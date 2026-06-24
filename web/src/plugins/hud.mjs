@@ -8,7 +8,7 @@
 // → {s:scale, bb:[w,s,e,n]} | undefined; serverSetMetas() → [{band, bounds}].
 
 import { bandForScale, bandForZoom, BANDS, BAND_COLOR, BAND_LABEL, BAND_MAXZOOM, OVERSCALE_MARGIN } from "../lib/bands.mjs";
-import { scaleDenom, scaleDenomPhysical, zoomForScalePhysical, fmtScale, fmtLatLon } from "../lib/util.mjs";
+import { scaleDenomPhysical, zoomForScalePhysical, fmtScale, fmtLatLon } from "../lib/util.mjs";
 
 // Parse a user-typed scale into a denominator. Accepts "40000", "40,000",
 // "1:40000", "1:40,000", "40k", "40 000". Returns 0 if it can't.
@@ -113,14 +113,13 @@ export class HudController {
     // amber band. "No charts enabled" outranks it (nothing is drawing at all).
     const warn = this.root.getElementById("db-warn");
     if (!warn) return;
-    // Overscale uses the NOMINAL scale, NOT the physical readout. The nominal scale
-    // is the coordinate the BAND zoom ranges are calibrated to, so a cell shown in
-    // its proper band doesn't read as overscale — the warning only trips once you've
-    // zoomed PAST the data (after the detail/dredge pattern is visible). Driving it
-    // from the physical scale tripped it ~a zoom too early (right as the data
-    // appeared), which is wrong.
-    const ovDenom = scaleDenom(z, c.lat);
-    const f = this.coverScale && ovDenom < this.coverScale ? this.coverScale / ovDenom : 0;
+    // Overscale compares the TRUE on-screen scale against the cell's compilation
+    // scale (CSCL) — both physical, real 1:N scales — so it reads the same physical
+    // denominator as the readout (dispDenom). The engine is now on one physical
+    // scale (no separate nominal coordinate), so ×n is literally how magnified the
+    // survey data is on glass: a 1:45k cell viewed at 1:26k shows ×1.7, in-band or
+    // not, which is the S-52 §10.1.10.1 intent.
+    const f = this.coverScale && dispDenom < this.coverScale ? this.coverScale / dispDenom : 0;
     if (this.noChartsEnabled()) {
       warn.hidden = false;
       warn.innerHTML = WARN_ICO + `<span>No charts are enabled — turn one on in the Chart library</span>`;

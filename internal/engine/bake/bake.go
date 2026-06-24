@@ -157,11 +157,18 @@ func BandForScale(cscl uint32) Band {
 // scale it must live in the floor(z*) tile — hence FLOOR. The client's per-SCAMIN
 // bucket layer then applies the EXACT fractional z* as a native layer minzoom, so
 // the visible cutoff is exact in both directions. S-52 §8.4: cell latitude, not equator.
+//
+// SCAMIN is a PRODUCER scale (a real 1:N paper scale), so denomZ0 is the PHYSICAL
+// display scale at z0 — MapLibre's true 512-tile geometry (78271.517m/px ÷ OGC
+// 0.28mm pixel = 279_541_132), NOT the 256-tile nominal (559M). This matches the
+// client's scaminDisplayZoom so the baked tile floor and the visible cutoff agree,
+// and a 1:N feature survives until the screen truly reads 1:N. (Was the 256 nominal,
+// which made features vanish at ~½ their SCAMIN; see chart-sources.scaminDisplayZoom.)
 func scaminZoom(scamin uint32, lat float64) uint32 {
 	if scamin == 0 {
 		return 0
 	}
-	denomZ0 := 559_082_264.029 * math.Cos(lat*math.Pi/180) // 1:N at z0 at this latitude
+	denomZ0 := 279_541_132.0 * math.Cos(lat*math.Pi/180) // 1:N at z0 at this latitude (physical 512-tile scale)
 	s := float64(scamin)
 	if denomZ0 <= s {
 		return 0

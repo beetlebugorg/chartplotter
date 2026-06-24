@@ -66,13 +66,26 @@ export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach
 export const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines",
   "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin"]);
 
+// Centre-latitude drift (degrees) that triggers a SCAMIN bucket-minzoom rebuild.
+// The cutoff zoom shifts with cos(lat); 2° keeps the error under ~0.05 zoom at
+// typical latitudes without rebuilding the style on every small pan.
+const SCAMIN_LAT_REBUILD_DEG = 2;
+
 // The display zoom at which a 1:N (scamin) feature first becomes visible at the
 // given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
 // — used directly as a MapLibre layer minzoom, which gives the exact S-52 §8.4
 // cutoff (display scale ≤ SCAMIN ⇒ shown) with no client-side per-zoom computation.
+//
+// SCAMIN is a PRODUCER scale (a real 1:N paper scale), so it is gated against the
+// PHYSICAL display scale — MapLibre's true 512-tile geometry (z0 denom 279541132 =
+// M_PER_PX_Z0_PHYS / OGC_PX_M), NOT the band-pyramid's nominal 256 coordinate. That
+// is exactly half the nominal denom, so the cutoff sits ~1 zoom lower: a 1:59999
+// feature now survives until the screen truly reads ~1:59999 instead of ~1:30000.
+// The deterministic OGC pixel (0.28mm) is used (not the calibratable HUD px-pitch)
+// so this matches the baker's scaminZoom tile floor, which has no screen to measure.
 export function scaminDisplayZoom(scamin, lat) {
   if (!scamin) return 0;
-  const denomZ0 = 559082264.029 * Math.cos((lat * Math.PI) / 180);
+  const denomZ0 = 279541132.0 * Math.cos((lat * Math.PI) / 180);
   if (denomZ0 <= scamin) return 0;
   return Math.max(0, Math.min(24, Math.log2(denomZ0 / scamin)));
 }
@@ -112,7 +125,16 @@ export class ChartSources {
   get server() { return this._server; }
   get sets() { return this._serverSets; }
   get scaminValues() { return this._scaminValues; }
-  get scaminLat() { return this._scaminLat; }
+  // The latitude the SCAMIN bucket minzooms are computed at. Falls back to the
+  // map's LIVE centre latitude until the first idle pass sets it — without this,
+  // the initial style (and server mode, which never ran the discovery loop that
+  // sets it) computed scaminDisplayZoom at lat 0 (the equator, cos=1), gating
+  // every SCAMIN feature ~0.4 zoom too late at mid-latitudes (more further north).
+  get scaminLat() {
+    if (this._scaminLat != null) return this._scaminLat;
+    const m = this.getMap();
+    return m ? m.getCenter().lat : 0;
+  }
   // The MultiArchive backing the chart-<slug> PMTiles protocol (registered in boot()).
   bandArchive(slug) { return this._bands[slug]; }
 
@@ -173,14 +195,26 @@ export class ChartSources {
   _refreshScaminBuckets() {
     const m = this.getMap();
     if (!m) return;
-    // Server mode publishes the SCAMIN manifest in each set's TileJSON (set.scamin),
-    // so buckets are built at load — no runtime collection, no setStyle churn (this
-    // idle loop + the probe layers were the per-frame cost). Only the prebaked
-    // (pmtiles) path, which has no manifest, still discovers values from tiles.
-    if (this._server) return;
+    const lat = m.getCenter().lat;
+    // The bucket minzooms are latitude-dependent (scaminDisplayZoom uses cos lat),
+    // so rebuild when the centre latitude has drifted enough to shift a cutoff by a
+    // sub-perceptible amount. 2° keeps the error well under ~0.05 zoom at typical
+    // latitudes (was 5° ≈ 0.1 zoom, which read as features popping a touch early/late).
+    const latShift = this._scaminLat == null || Math.abs(lat - this._scaminLat) > SCAMIN_LAT_REBUILD_DEG;
+    // Server mode publishes the SCAMIN value set in each set's TileJSON (set.scamin),
+    // so it skips the runtime tile discovery below — but the minzooms STILL depend on
+    // latitude, so it must track it and rebuild on a shift (this is what previously
+    // pinned server buckets to the initial/equator latitude).
+    if (this._server) {
+      if (!latShift) return;
+      this._scaminLat = lat;
+      clearTimeout(this._scaminRebuildT);
+      this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+      return;
+    }
     const seen = new Set(this._scaminValues);
     const before = seen.size;
-    const srcs = this._server ? (this._serverSets || []).map((s) => "chart-" + s.name) : CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
+    const srcs = CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
     for (const src of srcs) {
       if (!m.getSource(src)) continue;
       for (const sl of SCAMIN_BUCKET_LAYERS) {
@@ -190,8 +224,6 @@ export class ChartSources {
       }
     }
     const grew = seen.size !== before;
-    const lat = m.getCenter().lat;
-    const latShift = this._scaminLat == null || Math.abs(lat - this._scaminLat) > 5;
     if (!grew && !latShift) return;
     this._scaminValues = [...seen].sort((a, b) => a - b);
     this._scaminLat = lat;
