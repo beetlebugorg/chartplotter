@@ -50,6 +50,21 @@ The S-100 alert mechanism (`AlertReference`, `Warning`, `Error`) is not wired to
 anything. chartplotter does not raise guard-zone alarms or any other indication —
 consistent with it being a viewer, not a certified ECDIS.
 
+## Soundings don't react to the depth settings
+
+Soundings are baked as fixed digit glyphs in the chart's source unit (metres for
+NOAA data). The numeric depth is **not** carried on the baked sounding, so the
+two depth-dependent display options have no effect on them:
+
+- **Depth unit** (metric ↔ imperial) does not re-label soundings — they stay in
+  the source unit.
+- **Safety depth** does not switch soundings between the bold (shallow) and faint
+  (deep) styles live (SNDFRM04).
+
+The `showSoundings` on/off toggle does work. Making the depth settings affect
+soundings needs the engine to carry each sounding's depth and the viewer to
+recompose the glyphs in the chosen unit — a tracked piece of work, not yet done.
+
 ## Text placement
 
 Labels are emitted with simple offsets. There is **no S-100 text-placement or
