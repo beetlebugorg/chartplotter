@@ -20,10 +20,10 @@ const KN_TO_MS = 0.514444;
 export const UNIT_CATEGORIES = [
   { cat: "depth", key: "depthUnit", def: "ft", opts: [["m", "Metric"], ["ft", "Imperial"]], label: "Depth" },
   { cat: "distance", key: "distanceUnit", def: "NM", opts: [["NM", "NM"], ["km", "km"], ["mi", "mi"]], label: "Distance" },
-  { cat: "height", key: "heightUnit", def: "m", opts: [["m", "m"], ["ft", "ft"]], label: "Height" },
+  { cat: "height", key: "heightUnit", def: "ft", opts: [["m", "m"], ["ft", "ft"]], label: "Height" },
   { cat: "speed", key: "speedUnit", def: "kn", opts: [["kn", "kn"], ["km/h", "km·h⁻¹"], ["mph", "mph"]], label: "Speed" },
   { cat: "wind", key: "windUnit", def: "kn", opts: [["kn", "kn"], ["m/s", "m·s⁻¹"], ["mph", "mph"], ["Bft", "Bft"]], label: "Wind speed" },
-  { cat: "temp", key: "tempUnit", def: "C", opts: [["C", "°C"], ["F", "°F"]], label: "Temperature" },
+  { cat: "temp", key: "tempUnit", def: "F", opts: [["C", "°C"], ["F", "°F"]], label: "Temperature" },
 ];
 
 // The mariner-settings defaults contributed by the unit categories (depth excluded
