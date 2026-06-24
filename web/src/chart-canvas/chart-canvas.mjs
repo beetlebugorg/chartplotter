@@ -65,7 +65,7 @@ import {
 // three bookkeeping maps (_layerBase/_variants/_layerVis) the live updaters below
 // read. PAT_PREFIX (the fill-pattern image namespace) is homed there too — used by
 // the layer builder AND this element's registerPattern — and imported back here.
-import { buildChartLayers, PAT_PREFIX, TEXT_VARIANTS } from "./chart-style.mjs";
+import { buildChartLayers, PAT_PREFIX } from "./chart-style.mjs";
 
 const FEATURE_SCALE = 0.01 / 0.35278;
 // Linear (constant-velocity) easing for the follow camera — see updateFollow. The
@@ -613,10 +613,8 @@ export class ChartCanvas extends HTMLElement {
     setIf("contour-labels", "text-color", this.contourLabelColor());
     setIf("contour-labels", "text-halo-color", this.textHaloColor());
     setIf("complex-lines", "line-color", this.colorExpr("color_token"));
-    for (const v of TEXT_VARIANTS) {
-      setIf(v.id, "text-color", this.textColor());
-      setIf(v.id, "text-halo-color", this.textHaloColor());
-    }
+    setIf("text", "text-color", this.textColor());
+    setIf("text", "text-halo-color", this.textHaloColor());
     setIf("light-text", "text-color", this.textColor());
     setIf("light-text", "text-halo-color", this.textHaloColor());
     // Basemap (sea background + offline coastline) is scheme-aware too.
@@ -917,14 +915,13 @@ export class ChartCanvas extends HTMLElement {
       if (keys.includes("showLightDescriptions")) {
         this._eachLayer("light-text", (id) => this._setVis(id, this._mariner.showLightDescriptions === false ? "none" : "visible"));
       }
-      // S-52 §14.5 text groups: re-derive each text variant's BASE filter (so it
+      // S-52 §14.5 text groups: re-derive the text layer's BASE filter (so it
       // survives a later applyFeatureFilters category re-apply) when any group
       // toggle (or light descriptions, which also feeds the general group-23
       // clause) changes. Instant — no re-bake.
       if (keys.some((k) => k === "textImportant" || k === "textNames" || k === "textOther" || k === "showLightDescriptions")) {
         const notLight = ["!=", ["get", "class"], "LIGHTS"];
-        const grp = this.textGroupFilter();
-        for (const v of TEXT_VARIANTS) this.setBaseFilter(v.id, ["all", notLight, v.filter, grp]);
+        this.setBaseFilter("text", ["all", notLight, this.textGroupFilter()]);
       }
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
@@ -1171,9 +1168,9 @@ export class ChartCanvas extends HTMLElement {
   }
 }
 
-// textAnchor + TEXT_VARIANTS (the S-52 halign/valign → text-anchor sublayer
-// templates) live in chart-style.mjs now; TEXT_VARIANTS is imported above for
-// setScheme/setMariner's per-variant text restyle.
+// The S-52 halign/valign → text-anchor mapping and the collision sort-key live in
+// chart-style.mjs now (one data-driven `text` layer); setScheme/setMariner restyle
+// and refilter that single id directly.
 
 // Custom element names must contain a hyphen (HTML spec) — `<chart-plotter>`.
 customElements.define("chart-canvas", ChartCanvas);
