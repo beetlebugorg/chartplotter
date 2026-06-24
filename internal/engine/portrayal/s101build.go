@@ -15,9 +15,11 @@ import (
 
 // NewS101Builder assembles a builder from an S-101 PortrayalCatalog directory
 // and a FeatureCatalogue.xml path: it loads the feature catalogue (the S-57↔
-// S-101 bridge + Lua introspection), the drawing catalogue (line styles / area
-// fills / colours), and the Lua portrayal engine. (When the catalogue is
-// embedded, swap fc.Load/catalog.Load/s101.NewEngine for their *FS variants.)
+// S-101 bridge + Lua introspection) and the drawing catalogue (line styles /
+// area fills / colours). The Lua engine is created fresh per BuildBatch so its
+// per-cell caches (featureCache etc., which are file-local in the catalogue and
+// can't be cleared) are freed each cell — otherwise the shared Lua state grows
+// without bound across a bake.
 func NewS101Builder(portrayalCatalogDir, featureCataloguePath string) (*S101Builder, error) {
 	cat, err := fc.Load(featureCataloguePath)
 	if err != nil {
@@ -27,53 +29,80 @@ func NewS101Builder(portrayalCatalogDir, featureCataloguePath string) (*S101Buil
 	if err != nil {
 		return nil, err
 	}
-	eng, err := s101.NewEngine(filepath.Join(portrayalCatalogDir, "Rules"), cat)
+	rulesDir := filepath.Join(portrayalCatalogDir, "Rules")
+	// Validate the framework loads (fail fast); discard this engine.
+	eng, err := s101.NewEngine(rulesDir, cat)
 	if err != nil {
 		return nil, err
 	}
-	return &S101Builder{Engine: eng, Catalog: draw}, nil
+	eng.Close()
+	return &S101Builder{rulesDir: rulesDir, fcCat: cat, Catalog: draw}, nil
 }
 
 // S101Builder is the S-101 replacement for the S-52 BuildFeature seam: it runs
-// the S-101 portrayal rules (via the fc-backed Lua engine) for one feature,
-// parses the emitted instruction stream, and lowers each draw onto the feature
-// geometry to produce the same Primitive stream the baker already consumes.
+// the S-101 portrayal rules (via the fc-backed Lua engine) for a batch of
+// features, parses each emitted instruction stream, and lowers each draw onto
+// the feature geometry to produce the same Primitive stream the baker consumes.
 // (specs/s101-portrayal-backport.md — the cutover that replaces lookup+CSPs.)
 type S101Builder struct {
-	Engine  *s101.Engine
-	Catalog *catalog.Catalog
+	rulesDir string
+	fcCat    *fc.Catalogue
+	Catalog  *catalog.Catalog
 }
 
-// Build expands one S-57 feature via S-101 portrayal. ok is false only if the
-// engine returns nothing; an object class with no S-101 mapping renders the
-// QUESMRK1 "unknown object" placeholder (S-52 §10.1.1 parity) so gaps are
-// visible.
-func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
-	feat := s101.Feature{
-		ID:          strconv.FormatInt(f.ID(), 10),
-		ObjectClass: f.ObjectClass(),
-		Primitive:   primitiveName(f.Geometry().Type),
-		Attributes:  stringAttrs(f.Attributes()),
+// BuildBatch portrays a whole cell's features in ONE engine pass (one chunk
+// compile, one portrayal context) and lowers each onto its geometry. A fresh
+// Lua state is used and closed here so the per-cell caches don't accumulate.
+// Returns featureID → build for every feature.
+func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuild, error) {
+	eng, err := s101.NewEngine(b.rulesDir, b.fcCat)
+	if err != nil {
+		return nil, err
 	}
-	streams, err := b.Engine.Portray([]s101.Feature{feat})
+	defer eng.Close()
+
+	batch := make([]s101.Feature, len(features))
+	for i, f := range features {
+		batch[i] = s101.Feature{
+			ID:          strconv.FormatInt(f.ID(), 10),
+			ObjectClass: f.ObjectClass(),
+			Primitive:   primitiveName(f.Geometry().Type),
+			Attributes:  stringAttrs(f.Attributes()),
+		}
+	}
+	streams, err := eng.Portray(batch)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]FeatureBuild, len(features))
+	for _, f := range features {
+		out[f.ID()] = b.lower(f, streams[strconv.FormatInt(f.ID(), 10)])
+	}
+	return out, nil
+}
+
+// Build expands one S-57 feature (convenience wrapper over BuildBatch; the bake
+// path uses BuildBatch per cell). ok is false only on engine failure.
+func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
+	m, err := b.BuildBatch([]*s57.Feature{f})
 	if err != nil {
 		return FeatureBuild{}, false
 	}
-	stream, ok := streams[feat.ID]
-	if !ok || stream == "" {
-		return FeatureBuild{}, false
-	}
+	return m[f.ID()], true
+}
+
+// lower turns one feature's emitted instruction stream into its FeatureBuild.
+func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
 	// object" mark (S-52 §10.1.1 parity).
 	if strings.HasPrefix(stream, "UNMAPPED:") {
-		return unknownObjectBuild(f), true
+		return unknownObjectBuild(f)
 	}
-	// A rule error → suppress the feature rather than flood the chart with
-	// placeholders. (Most current errors are line/area rules needing the S-57
-	// spatial topology the host doesn't model yet — tracked as a known gap, not
-	// shown as a per-feature "?".)
-	if strings.HasPrefix(stream, "ERROR:") {
-		return FeatureBuild{DisplayCategory: s52DisplayStandard}, true
+	// A rule error (or no stream) → suppress the feature rather than flood the
+	// chart with placeholders. (Most current errors are line/area rules needing
+	// the S-57 spatial topology the host doesn't model yet — a tracked gap.)
+	if stream == "" || strings.HasPrefix(stream, "ERROR:") {
+		return FeatureBuild{DisplayCategory: s52DisplayStandard}
 	}
 
 	g := geometryOf(f.Geometry())
@@ -95,7 +124,7 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 		Primitives:      prims,
 		DisplayPriority: priority,
 		DisplayCategory: s52DisplayStandard, // TODO: derive from S-101 viewing group
-	}, true
+	}
 }
 
 // s52DisplayStandard mirrors s52.DisplayStandard without importing s52 (the

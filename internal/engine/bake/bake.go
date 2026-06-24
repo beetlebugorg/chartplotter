@@ -570,6 +570,18 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	if !b.skipCoverage {
 		b.extractCoverage(features, zr, b.curCell, b.curCscl, cellDisplayMin(band, zr))
 	}
+	// S-101: portray the whole cell in one engine pass (one Lua chunk + context,
+	// fresh Lua state) up front instead of per-feature — the per-feature path
+	// recompiled the chunk and leaked the catalogue's file-local caches.
+	if bp, ok := b.portrayer.(BatchPortrayer); ok {
+		fps := make([]*s57.Feature, len(features))
+		for i := range features {
+			fps[i] = &features[i]
+		}
+		bp.Begin(fps)
+		defer bp.End()
+	}
+
 	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.
 	lightPrimary, lightSkip := groupCoLocatedLights(features)
 	b.seenSector = make(map[sectorKey]struct{})

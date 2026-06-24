@@ -5,9 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/s101"
-	"github.com/beetlebugorg/chartplotter/pkg/s100/catalog"
-	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
@@ -27,16 +24,11 @@ func s101Builder(t *testing.T) *S101Builder {
 	if _, err := os.Stat(fcPath); err != nil {
 		t.Skipf("S-101 feature catalogue not present")
 	}
-	cat, err := fc.Load(fcPath)
+	b, err := NewS101Builder(pc, fcPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := s101.NewEngine(filepath.Join(pc, "Rules"), cat)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(eng.Close)
-	return &S101Builder{Engine: eng, Catalog: &catalog.Catalog{}}
+	return b
 }
 
 // TestS101BuildPointSymbol drives a real S-57 feature through the full cutover
