@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Go modules — group all bumps into one weekly PR to cut noise.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  # Documentation site (Docusaurus) npm dependencies.
+  - package-ecosystem: npm
+    directory: "/docs"
+    schedule:
+      interval: weekly
+    groups:
+      docs-npm:
+        patterns: ["*"]

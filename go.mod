@@ -2,6 +2,8 @@ module github.com/beetlebugorg/chartplotter
 
 go 1.26.0
 
+toolchain go1.26.4
+
 require (
 	github.com/BertoldVdb/go-ais v0.4.0
 	github.com/alecthomas/kong v1.12.1
@@ -10,7 +12,7 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
 	github.com/stretchr/testify v1.11.1
 	github.com/yuin/gopher-lua v1.1.2
-	golang.org/x/image v0.38.0
+	golang.org/x/image v0.41.0
 	modernc.org/sqlite v1.52.0
 )
 
@@ -23,9 +25,9 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/net v0.0.0-20211118161319-6a13c67c3ce4 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
