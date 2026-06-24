@@ -21,6 +21,11 @@ import (
 // scale (pxPerUnit is px per 0.01-mm unit; ×100 = px per mm).
 const s101PxPerMM = pxPerUnit * 100
 
+// s101AtlasWidth is the packed-atlas width for the ~724 S-101 symbols. Wider
+// than the S-52 512 so the atlas stays under the 4096 WebGL texture limit in
+// height too (one GL texture; Chrome's MAX_TEXTURE_SIZE is 4096).
+const s101AtlasWidth = 2048
+
 // SpriteAtlasS101 builds the symbol atlas from an S-101 Symbols directory
 // (path) and one of its *SvgStyle.css palettes. Returns sprites.json + atlas
 // PNG bytes.
@@ -79,7 +84,10 @@ func SpriteAtlasS101FS(symbolsFS fs.FS, cssName string) (jsonBytes, pngBytes []b
 		})
 	}
 
-	a := packInto(rasters, skipped)
+	// Wider than the S-52 atlas (512) so the ~724 S-101 symbols pack into an
+	// atlas that stays well under the 4096 WebGL texture limit in BOTH
+	// dimensions (at 512 wide it grew to ~4823 tall and broke in Chrome).
+	a := packInto(rasters, skipped, s101AtlasWidth)
 	pngBytes, err = a.encodePNG()
 	if err != nil {
 		return nil, nil, err

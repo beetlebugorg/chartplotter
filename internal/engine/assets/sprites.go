@@ -76,7 +76,7 @@ func buildSymbolAtlas(lib *s52.Library) (atlas, error) {
 			rasters = append(rasters, r)
 		}
 	}
-	return packInto(rasters, skipped), nil
+	return packInto(rasters, skipped, atlasWidth), nil
 }
 
 // buildPatternAtlas rasterises and packs every PresLib pattern into a seamless
@@ -99,7 +99,7 @@ func buildPatternAtlas(lib *s52.Library) (atlas, error) {
 			rasters = append(rasters, r)
 		}
 	}
-	return packInto(rasters, skipped), nil
+	return packInto(rasters, skipped, atlasWidth), nil
 }
 
 // rasterizePattern renders one Pattern into a seamless tile. Pattern
@@ -174,8 +174,12 @@ func patStaggered(pat *s52.Pattern) bool {
 	return len(pat.PatternType) >= 3 && pat.PatternType[:3] == "STG"
 }
 
-// packInto shelf-packs already-rasterised cells (tallest-first) into one atlas.
-func packInto(rasters []raster, skipped int) atlas {
+// packInto shelf-packs already-rasterised cells (tallest-first) into one atlas
+// of the given width. width must stay ≤ the WebGL MAX_TEXTURE_SIZE (commonly
+// 4096 in Chrome) and so must the resulting height — pick a width wide enough
+// that the atlas doesn't grow taller than that, or icons render broken (the
+// whole atlas is one GL texture in the client).
+func packInto(rasters []raster, skipped int, width uint32) atlas {
 	sort.SliceStable(rasters, func(i, j int) bool { return rasters[i].h > rasters[j].h })
 
 	cells := make(map[string]cell, len(rasters))
@@ -184,7 +188,7 @@ func packInto(rasters []raster, skipped int) atlas {
 	shelfH := uint32(0)
 	totalH := uint32(atlasPad)
 	for _, r := range rasters {
-		if penX+r.w+atlasPad > atlasWidth {
+		if penX+r.w+atlasPad > width {
 			penX = atlasPad
 			penY += shelfH + atlasPad
 			shelfH = 0
@@ -196,13 +200,13 @@ func packInto(rasters []raster, skipped int) atlas {
 	}
 	height := maxU32(totalH, 1)
 
-	rgba := make([]byte, int(atlasWidth)*int(height)*4)
+	rgba := make([]byte, int(width)*int(height)*4)
 	for _, r := range rasters {
 		c := cells[r.name]
-		blit(rgba, atlasWidth, r.rgba, r.w, r.h, c.x, c.y)
+		blit(rgba, width, r.rgba, r.w, r.h, c.x, c.y)
 	}
 
-	return atlas{width: atlasWidth, height: height, rgba: rgba, cells: cells, skipped: skipped}
+	return atlas{width: width, height: height, rgba: rgba, cells: cells, skipped: skipped}
 }
 
 // toJSON renders the atlas description (_meta + per-name cells), names sorted.
