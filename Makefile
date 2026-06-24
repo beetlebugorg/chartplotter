@@ -63,8 +63,28 @@ NOAA_JOBS     ?= 5
 NOAA_BANDS  := overview general coastal approach harbor berthing
 NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
-build: ## Build the self-contained shim (embeds web/) into bin/
-	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
+S101_EMBED_DIR := internal/engine/s101catalog/catalog
+
+# Copy the external S-101 catalogue into the (gitignored) embed dir so a
+# `-tags embed_s101` build bakes it into the binary. Files never enter the repo.
+sync-s101: ## Sync the external S-101 PortrayalCatalog + FeatureCatalogue into the embed dir
+	@rm -rf "$(S101_EMBED_DIR)"
+	@mkdir -p "$(S101_EMBED_DIR)/PortrayalCatalog"
+	@cp -a "$(S101_PC)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
+	@cp -a "$(S101_FC)" "$(S101_EMBED_DIR)/FeatureCatalogue.xml"
+	@echo "synced S-101 catalogue → $(S101_EMBED_DIR)"
+
+# Embed the S-101 catalogue when it's available locally (the normal dev/deploy
+# case); otherwise build without it (the binary then needs --s101 at runtime).
+build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin/
+	@if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then \
+	  $(MAKE) --no-print-directory sync-s101; \
+	  echo "building with embedded S-101 catalogue (-tags embed_s101)…"; \
+	  go build -tags embed_s101 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
+	else \
+	  echo "S-101 catalogue not found at $(S101_PC); building WITHOUT it (needs --s101 at runtime)"; \
+	  go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
+	fi
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps

@@ -25,3 +25,6 @@ web/chartplotter.wasm
 .vscode/
 web/vendor/wasm_exec.js
 web/demo-cell.000
+
+# S-101 catalogue: build-synced into the binary (-tags embed_s101), never committed
+internal/engine/s101catalog/catalog/

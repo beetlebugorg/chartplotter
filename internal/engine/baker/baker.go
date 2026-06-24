@@ -15,6 +15,7 @@ import (
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
+	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
 	"github.com/beetlebugorg/chartplotter/pkg/geo"
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
@@ -47,9 +48,43 @@ func UseS101Catalog(portrayalCatalogDir, featureCataloguePath string) error {
 	return nil
 }
 
+var (
+	embeddedOnce sync.Once
+	embeddedPort bake.Portrayer
+)
+
+// embeddedPortrayer lazily builds the portrayer from the build-time embedded
+// S-101 catalogue (internal/engine/s101catalog), or returns nil if this binary
+// was built without it (a plain `go build`, no -tags embed_s101).
+func embeddedPortrayer() bake.Portrayer {
+	embeddedOnce.Do(func() {
+		if !s101catalog.Available() {
+			return
+		}
+		catFS, err := s101catalog.PortrayalFS()
+		if err != nil {
+			return
+		}
+		fcXML, err := s101catalog.FeatureCatalogue()
+		if err != nil {
+			return
+		}
+		if p, err := bake.NewS101PortrayerFS(catFS, fcXML); err == nil {
+			embeddedPort = p
+		}
+	})
+	return embeddedPort
+}
+
 func applyPortrayer(b *bake.Baker) {
-	if s101Portrayer != nil {
-		b.SetPortrayer(s101Portrayer)
+	// An explicit --s101 override (UseS101Catalog) wins; otherwise default to the
+	// build-time embedded catalogue; otherwise nil → the S-52 path (transitional).
+	p := s101Portrayer
+	if p == nil {
+		p = embeddedPortrayer()
+	}
+	if p != nil {
+		b.SetPortrayer(p)
 	}
 }
 

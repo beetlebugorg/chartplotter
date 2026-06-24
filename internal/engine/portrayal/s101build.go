@@ -1,8 +1,9 @@
 package portrayal
 
 import (
+	"io/fs"
 	"math"
-	"path/filepath"
+	"os"
 	"strconv"
 	"strings"
 
@@ -22,22 +23,40 @@ import (
 // can't be cleared) are freed each cell — otherwise the shared Lua state grows
 // without bound across a bake.
 func NewS101Builder(portrayalCatalogDir, featureCataloguePath string) (*S101Builder, error) {
-	cat, err := fc.Load(featureCataloguePath)
+	fcBytes, err := os.ReadFile(featureCataloguePath)
 	if err != nil {
 		return nil, err
 	}
-	draw, err := catalog.Load(portrayalCatalogDir)
+	return newS101Builder(os.DirFS(portrayalCatalogDir), fcBytes)
+}
+
+// NewS101BuilderFS assembles a builder from an in-memory PortrayalCatalog FS (e.g.
+// the build-time embedded catalogue, internal/engine/s101catalog) and the
+// FeatureCatalogue.xml bytes — same builder, no on-disk catalogue directory.
+func NewS101BuilderFS(catalogFS fs.FS, featureCatalogueXML []byte) (*S101Builder, error) {
+	return newS101Builder(catalogFS, featureCatalogueXML)
+}
+
+func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
+	cat, err := fc.LoadBytes(fcBytes)
 	if err != nil {
 		return nil, err
 	}
-	rulesDir := filepath.Join(portrayalCatalogDir, "Rules")
+	draw, err := catalog.LoadFS(catalogFS)
+	if err != nil {
+		return nil, err
+	}
+	rulesFS, err := fs.Sub(catalogFS, "Rules")
+	if err != nil {
+		return nil, err
+	}
 	// Validate the framework loads (fail fast); discard this engine.
-	eng, err := s101.NewEngine(rulesDir, cat)
+	eng, err := s101.NewEngineFS(rulesFS, cat)
 	if err != nil {
 		return nil, err
 	}
 	eng.Close()
-	return &S101Builder{rulesDir: rulesDir, fcCat: cat, Catalog: draw}, nil
+	return &S101Builder{rulesFS: rulesFS, fcCat: cat, Catalog: draw}, nil
 }
 
 // S101Builder is the S-101 replacement for the S-52 BuildFeature seam: it runs
@@ -46,9 +65,9 @@ func NewS101Builder(portrayalCatalogDir, featureCataloguePath string) (*S101Buil
 // the feature geometry to produce the same Primitive stream the baker consumes.
 // (specs/s101-portrayal-backport.md — the cutover that replaces lookup+CSPs.)
 type S101Builder struct {
-	rulesDir string
-	fcCat    *fc.Catalogue
-	Catalog  *catalog.Catalog
+	rulesFS fs.FS
+	fcCat   *fc.Catalogue
+	Catalog *catalog.Catalog
 }
 
 // BuildBatch portrays a whole cell's features in ONE engine pass (one chunk
@@ -56,7 +75,7 @@ type S101Builder struct {
 // Lua state is used and closed here so the per-cell caches don't accumulate.
 // Returns featureID → build for every feature.
 func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuild, error) {
-	eng, err := s101.NewEngine(b.rulesDir, b.fcCat)
+	eng, err := s101.NewEngineFS(b.rulesFS, b.fcCat)
 	if err != nil {
 		return nil, err
 	}

@@ -2,12 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
@@ -26,24 +28,41 @@ type serveCmd struct {
 }
 
 func (c serveCmd) Run() error {
-	// S-101 mode: switch the server's baker to the S-101 rule engine (so every
-	// chart-library import bakes S-101) and serve the S-101 client assets.
-	if c.S101 != "" {
+	// Portrayal is S-101. Pick the catalogue source: an explicit --s101 dir wins
+	// (override / rule iteration); otherwise the build-time embedded catalogue (the
+	// default — `make` builds it in). The baker defaults to the embedded portrayer
+	// on its own (baker.applyPortrayer); here we emit the matching client assets
+	// (colortables/sprite/patterns/linestyles) into a temp dir and serve them.
+	var catalogFS fs.FS
+	switch {
+	case c.S101 != "":
 		if c.S101FC == "" {
 			return fmt.Errorf("--s101 requires --s101-fc")
 		}
 		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
 			return fmt.Errorf("load S-101 catalogue: %w", err)
 		}
+		catalogFS = os.DirFS(c.S101)
+		fmt.Printf("portrayal: S-101 (catalogue=%s)\n", c.S101)
+	case s101catalog.Available():
+		fsys, err := s101catalog.PortrayalFS()
+		if err != nil {
+			return fmt.Errorf("embedded S-101 catalogue: %w", err)
+		}
+		catalogFS = fsys
+		fmt.Println("portrayal: S-101 (embedded catalogue)")
+	default:
+		fmt.Println("portrayal: none embedded — pass --s101 or build with `make` (-tags embed_s101)")
+	}
+	if catalogFS != nil {
 		assetDir, err := os.MkdirTemp("", "cp-s101-assets-")
 		if err != nil {
 			return err
 		}
-		if _, err := assets.EmitS101(c.S101, "daySvgStyle.css", assetDir); err != nil {
+		if _, err := assets.EmitS101FS(catalogFS, "daySvgStyle.css", assetDir); err != nil {
 			return fmt.Errorf("emit S-101 assets: %w", err)
 		}
 		c.Assets = assetDir // override colortables/linestyles/sprite; rest falls back to embedded
-		fmt.Printf("portrayal: S-101 (catalogue=%s, assets=%s)\n", c.S101, assetDir)
 	}
 
 	cacheDir := c.Cache

@@ -1,6 +1,8 @@
 package bake
 
 import (
+	"io/fs"
+
 	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
@@ -43,6 +45,16 @@ type s101Portrayer struct {
 // and a FeatureCatalogue.xml path.
 func NewS101Portrayer(portrayalCatalogDir, featureCataloguePath string) (Portrayer, error) {
 	bld, err := portrayal.NewS101Builder(portrayalCatalogDir, featureCataloguePath)
+	if err != nil {
+		return nil, err
+	}
+	return &s101Portrayer{builder: bld}, nil
+}
+
+// NewS101PortrayerFS builds the S-101 portrayer from an in-memory PortrayalCatalog
+// FS + FeatureCatalogue.xml bytes — the build-time embedded catalogue path.
+func NewS101PortrayerFS(catalogFS fs.FS, featureCatalogueXML []byte) (Portrayer, error) {
+	bld, err := portrayal.NewS101BuilderFS(catalogFS, featureCatalogueXML)
 	if err != nil {
 		return nil, err
 	}
