@@ -60,10 +60,11 @@ chartplotter reads NOAA S-57 ENC cells and ships a distilled product catalog
 the U.S. Government and are in the **public domain**. They carry NOAA's standard
 disclaimer: the data is **not to be used for navigation**.
 
-### IHO S-57 attribute table
+### S-57 attribute table (from GDAL)
 
-`internal/s57/parser/s57attributes.csv` lists S-57 object/attribute acronyms and
-codes derived from the **IHO S-57** Object and Attribute Catalogue. © IHO.
+`internal/s57/parser/s57attributes.csv` is the S-57 attribute catalogue from the
+**GDAL** project (<https://gdal.org>), licensed **MIT/X11**. The acronyms and codes
+it contains originate from the IHO S-57 Object and Attribute Catalogue.
 
 ## IHO S-101 Portrayal Catalogue and Feature Catalogue
 
