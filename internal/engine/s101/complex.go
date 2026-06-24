@@ -202,6 +202,14 @@ func (e *Engine) splitValue(code, val string) []string {
 	return []string{val}
 }
 
+// firstListVal returns the first integer of an S-57 comma-separated list value,
+// or 0 if absent/unparseable.
+func firstListVal(csv string) int {
+	head, _, _ := strings.Cut(csv, ",")
+	n, _ := strconv.Atoi(strings.TrimSpace(head))
+	return n
+}
+
 // hasListVal reports whether the S-57 comma-separated list value contains want.
 func hasListVal(csv string, want int) bool {
 	for _, p := range strings.Split(csv, ",") {
@@ -228,8 +236,40 @@ func (e *Engine) resolveCode(objClass string, attrs map[string]string) (string, 
 		if _, ok := e.cat.FeatureTypes["AdministrationArea"]; ok {
 			return "AdministrationArea", true
 		}
+	case "MORFAC":
+		// S-57 MORFAC (mooring/warping facility) has no single S-101 class; it
+		// decomposes by CATMOR into distinct feature classes.
+		if code := e.resolveMooringClass(attrs); code != "" {
+			return code, true
+		}
 	}
 	return e.cat.FeatureCodeForS57(objClass)
+}
+
+// resolveMooringClass maps an S-57 MORFAC to its S-101 feature class by CATMOR
+// (category of mooring/warping facility): dolphin→Dolphin, bollard→Bollard,
+// post/pile→Pile, chain/wire/cable→MooringTrot, mooring buoy→MooringBuoy. An
+// unknown/absent category (incl. tie-up wall, which has no point-feature target)
+// falls back to Pile, the generic mooring post. Returns "" if the resolved class
+// isn't in the catalogue (caller then falls back to the alias lookup).
+func (e *Engine) resolveMooringClass(attrs map[string]string) string {
+	var code string
+	switch firstListVal(attrs["CATMOR"]) {
+	case 1, 2: // dolphin, deviation dolphin
+		code = "Dolphin"
+	case 3: // bollard
+		code = "Bollard"
+	case 6: // chain / wire / cable
+		code = "MooringTrot"
+	case 7: // mooring buoy
+		code = "MooringBuoy"
+	default: // post or pile (5), tie-up wall (4), unknown
+		code = "Pile"
+	}
+	if _, ok := e.cat.FeatureTypes[code]; ok {
+		return code
+	}
+	return ""
 }
 
 // resolveLightClass picks the S-101 light class for an S-57 LIGHTS feature. A

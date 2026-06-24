@@ -394,3 +394,47 @@ func TestS101BuildTopmark(t *testing.T) {
 		t.Errorf("buoy should emit a topmark symbol; primitives=%#v", m[1].Primitives)
 	}
 }
+
+// TestS101BuildMorfac proves the S-57 MORFAC → S-101 class decomposition by
+// CATMOR: each category routes to its dedicated rule and portrays a symbol
+// (point pilings/bollards/buoys are the bulk of harbour MORFAC features).
+func TestS101BuildMorfac(t *testing.T) {
+	b := s101Builder(t)
+	at := s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}}
+	cases := []struct{ catmor, wantSym string }{
+		{"5", ""}, // pile
+		{"3", ""}, // bollard
+		{"1", ""}, // dolphin
+		{"7", ""}, // mooring buoy
+	}
+	for _, c := range cases {
+		f := s57.NewFeature(1, "MORFAC", at, map[string]interface{}{"CATMOR": c.catmor})
+		build, ok := b.Build(&f)
+		if !ok {
+			t.Fatalf("CATMOR=%s: build failed", c.catmor)
+		}
+		var sym bool
+		for _, p := range build.Primitives {
+			if _, ok := p.(SymbolCall); ok {
+				sym = true
+			}
+		}
+		// Magenta "unknown object" is the failure we're fixing — assert it's gone.
+		if isUnknownBuild(build) {
+			t.Errorf("CATMOR=%s: still portrays as unknown object", c.catmor)
+		}
+		if !sym {
+			t.Errorf("CATMOR=%s: want a symbol, got %#v", c.catmor, build.Primitives)
+		}
+	}
+}
+
+// isUnknownBuild reports whether a build is the magenta unknown-object mark.
+func isUnknownBuild(b FeatureBuild) bool {
+	for _, p := range b.Primitives {
+		if sc, ok := p.(SymbolCall); ok && (sc.SymbolName == "QUESMRK1" || sc.SymbolName == "ISODGR51") {
+			return true
+		}
+	}
+	return false
+}

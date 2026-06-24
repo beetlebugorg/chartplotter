@@ -205,7 +205,10 @@ var clearances = map[string]struct{ s57, value string }{
 //   - inTheWater: read by Building, SlopeTopline, … (boolean).
 //   - orientationValue: read by route/traffic rules (RadarLine, RecommendedTrack,
 //     TwoWayRoutePart, …) that don't all bind it (the S-57 ORIENT alias).
-var guaranteedAttrs = []string{"inTheWater", "orientationValue"}
+//   - topmark: the TOPMAR02 CSP reads feature.topmark, but some classes that call
+//     it (e.g. MooringBuoy) don't bind it. It's a complex attribute; the injected
+//     Upper:1 binding resolves it as a single-valued complex (see LookupAttributeValue).
+var guaranteedAttrs = []string{"inTheWater", "orientationValue", "topmark"}
 
 // withGuaranteed appends any guaranteedAttrs binding the feature type is missing.
 func withGuaranteed(binds []fc.AttributeBinding) []fc.AttributeBinding {
