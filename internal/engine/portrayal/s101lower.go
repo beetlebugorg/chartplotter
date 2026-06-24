@@ -122,6 +122,12 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 			HAlign:     hAlign(cmd.TextAlignH),
 			VAlign:     vAlign(cmd.TextAlignV),
 			OffsetYPx:  float32(cmd.TextVOffset),
+			// AddTextInstruction emits "ViewingGroup:<textViewingGroup>,<viewingGroup>",
+			// so for text cmd.ViewingGroup is the S-52 text group (11 important,
+			// 21/26/29 names, 23 light, …). Carry it as `tgrp` so the client's
+			// §14.5 text-group toggles work. Without it every label is group 0 →
+			// "Other", and Important/Names toggle nothing.
+			Group: cmd.ViewingGroup,
 		}}
 
 	default: // OpNull, OpOther
