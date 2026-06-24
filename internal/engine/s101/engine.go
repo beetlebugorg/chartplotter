@@ -204,14 +204,22 @@ func (e *Engine) run() error {
 	for _, p := range contextParameters {
 		fmt.Fprintf(&b, "table.insert(cps, PortrayalCreateContextParameter(%q, %q, %q))\n", p.name, p.typ, p.def)
 	}
+	// Mirror main.lua's ProcessFeaturePortrayalItem success path (rule + feature
+	// name + nautical info), but on error we suppress the feature rather than
+	// fall back to Default (which would stamp QUESMRK1 everywhere).
 	b.WriteString(`PortrayalInitializeContextParameters(cps)
 _RESULTS = {}
+local ctx = portrayalContext.ContextParameters
 for _, item in ipairs(portrayalContext.FeaturePortrayalItems) do
 	local feature = item.Feature
 	local fp = item:NewFeaturePortrayal()
 	local ok, err = pcall(function()
 		require(feature.Code)
-		_G[feature.Code](feature, fp, portrayalContext.ContextParameters)
+		local vg = _G[feature.Code](feature, fp, ctx)
+		if not fp.GetFeatureNameCalled then
+			PortrayFeatureName(feature, fp, ctx, 32, 24, vg, nil, 'TextAlignHorizontal:Center;TextAlignVertical:Top;LocalOffset:0,-3.51;FontColor:CHBLK')
+		end
+		ProcessNauticalInformation(feature, fp, ctx, vg)
 	end)
 	if ok then
 		_RESULTS[feature.ID] = table.concat(fp.DrawingInstructions, ';')

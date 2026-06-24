@@ -92,11 +92,24 @@ func TestLowerComplexLineResolvesPenColor(t *testing.T) {
 	}
 }
 
-func TestLowerAreaFillReference(t *testing.T) {
+func TestLowerAreaFillSuppressed(t *testing.T) {
+	// S-101 area-fill patterns are suppressed until the S-101 pattern atlas is
+	// emitted (they'd resolve against the S-52 atlas and render garbage).
 	geom := S101Geometry{Rings: [][]geo.LatLon{{{}, {}}}}
-	pf, ok := lowerStream(t, "AreaFillReference:DRGARE01", geom, nil)[0].(PatternFill)
-	if !ok || pf.PatternName != "DRGARE01" {
-		t.Fatalf("want PatternFill DRGARE01, got %T %+v", nil, pf)
+	if prims := lowerStream(t, "AreaFillReference:DRGARE01", geom, nil); len(prims) != 0 {
+		t.Fatalf("AreaFillReference should be suppressed, got %d primitives", len(prims))
+	}
+}
+
+func TestLowerText(t *testing.T) {
+	geom := S101Geometry{Anchor: geo.LatLon{}}
+	stream := "ViewingGroup:25010;FontColor:CHBLK;TextAlignHorizontal:Center;TextInstruction:Fl.R.4s"
+	dt, ok := lowerStream(t, stream, geom, nil)[0].(DrawText)
+	if !ok {
+		t.Fatalf("want DrawText")
+	}
+	if dt.Text != "Fl.R.4s" || dt.ColorToken != "CHBLK" || dt.HAlign != HAlignCenter {
+		t.Errorf("text wrong: %+v", dt)
 	}
 }
 

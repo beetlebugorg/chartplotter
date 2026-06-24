@@ -75,8 +75,57 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 			DangerDepthM:   float32(math.NaN()),
 		}, true
 
-	default: // OpNull, OpText (font model TODO), OpOther
+	case instructions.OpText:
+		if cmd.Reference == "" {
+			return nil, false
+		}
+		fontPx := float32(cmd.FontSizePx)
+		if fontPx <= 0 {
+			fontPx = 12 // default body size
+		}
+		var halo *TextHalo
+		if fontPx >= 10 {
+			halo = &TextHalo{ColorToken: "CHWHT", WidthPx: 1}
+		}
+		color := cmd.FontColor
+		if color == "" {
+			color = "CHBLK"
+		}
+		return DrawText{
+			Anchor:     geom.Anchor,
+			Text:       cmd.Reference,
+			FontSizePx: fontPx,
+			ColorToken: color,
+			Halo:       halo,
+			HAlign:     hAlign(cmd.TextAlignH),
+			VAlign:     vAlign(cmd.TextAlignV),
+			OffsetYPx:  float32(cmd.TextVOffset),
+		}, true
+
+	default: // OpNull, OpOther
 		return nil, false
+	}
+}
+
+func hAlign(s string) HAlign {
+	switch s {
+	case "Center":
+		return HAlignCenter
+	case "Right":
+		return HAlignRight
+	default:
+		return HAlignLeft
+	}
+}
+
+func vAlign(s string) VAlign {
+	switch s {
+	case "Top":
+		return VAlignTop
+	case "Center":
+		return VAlignMiddle
+	default:
+		return VAlignBottom
 	}
 }
 

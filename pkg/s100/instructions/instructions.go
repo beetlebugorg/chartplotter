@@ -79,6 +79,13 @@ type DrawCommand struct {
 	LinePlacement string      // raw, e.g. "Relative,0.5"
 	SimpleLine    *SimpleLine // set when Op==OpLine and Reference=="_simple_"
 
+	// Text style (set on OpText): the resolved text is in Reference.
+	FontColor   string  // colour token (e.g. CHBLK)
+	FontSizePx  float64 // 0 ⇒ default
+	TextAlignH  string  // "Center" | "Left" | "Right"
+	TextAlignV  string  // "Top" | "Bottom" | "Center"
+	TextVOffset float64
+
 	Raw string // the originating draw token, for debugging
 }
 
@@ -96,6 +103,11 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		hasRotation  bool
 		linePlace    string
 		simple       *SimpleLine
+		fontColor    string
+		fontSize     float64
+		textAlignH   string
+		textAlignV   string
+		textVOffset  float64
 		seenUnsup    = map[string]bool{}
 	)
 	noteUnsupported := func(kind string) {
@@ -112,6 +124,10 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		}
 		if op == OpLine && ref == "_simple_" {
 			c.SimpleLine = simple
+		}
+		if op == OpText {
+			c.FontColor, c.FontSizePx = fontColor, fontSize
+			c.TextAlignH, c.TextAlignV, c.TextVOffset = textAlignH, textAlignV, textVOffset
 		}
 		cmds = append(cmds, c)
 	}
@@ -136,6 +152,17 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			// standalone Dash only meaningfully precedes a LineStyle.
 		case "LineStyle":
 			simple = parseSimpleLine(in.Args)
+		// --- text-style modifiers (apply to the next TextInstruction) ---
+		case "FontColor":
+			fontColor = arg(in, 0)
+		case "FontSize":
+			fontSize = atof(arg(in, 0))
+		case "TextAlignHorizontal":
+			textAlignH = arg(in, 0)
+		case "TextAlignVertical":
+			textAlignV = arg(in, 0)
+		case "TextVerticalOffset":
+			textVOffset = atof(arg(in, 0))
 		// modifiers we intentionally ignore for geometry lowering
 		case "ScaleMinimum", "ScaleMaximum", "Date", "Time", "DateTime", "TimeValid",
 			"AlertReference", "Warning", "Error", "Hover", "SpatialReference":
@@ -151,7 +178,9 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		case "AreaFillReference":
 			emit(OpAreaFill, arg(in, 0), in.Raw)
 		case "TextInstruction":
-			emit(OpText, strings.Join(in.Args, ","), in.Raw)
+			// Text is DEF-encoded (separators escaped) so it survives the ;/:/,
+			// tokenizing; decode it back to the display string.
+			emit(OpText, decodeDEF(strings.Join(in.Args, ",")), in.Raw)
 		case "NullInstruction":
 			emit(OpNull, "", in.Raw)
 
@@ -168,6 +197,19 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		}
 	}
 	return cmds, unsupported
+}
+
+// decodeDEF reverses the framework's EncodeDEFString escaping (& ; : , →
+// &a &s &c &m). The escape char (&a→&) is decoded last.
+func decodeDEF(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+	s = strings.ReplaceAll(s, "&s", ";")
+	s = strings.ReplaceAll(s, "&c", ":")
+	s = strings.ReplaceAll(s, "&m", ",")
+	s = strings.ReplaceAll(s, "&a", "&")
+	return s
 }
 
 func parseSimpleLine(args []string) *SimpleLine {
