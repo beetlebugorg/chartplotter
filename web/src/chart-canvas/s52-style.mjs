@@ -259,7 +259,8 @@ export function textGroupFilter(mariner) {
   const g = ["coalesce", ["get", "tgrp"], -1];
   const named = ["match", g, [21, 26, 29], true, false]; // §14.5 Names
   const clauses = [];
-  if (m.textImportant !== false) clauses.push(["==", g, 11]);     // §14.5 Important text
+  clauses.push(["==", g, 11]); // §14.5 Important text — ALWAYS on: clearances and
+  // route bearings are safety-critical, so there is no mariner toggle to hide them.
   if (m.textNames !== false) clauses.push(named);
   if (m.showLightDescriptions !== false) clauses.push(["==", g, 23]); // Light description
   // Other: everything not already claimed above (incl. missing tgrp = -1, so

@@ -97,9 +97,10 @@ export function coreSettingsContributions(app) {
     tab: { id: "text", label: "Text" },
     order: 1,
     get, set,
+    // "Important text" (bridge/cable clearances, route bearings) has no toggle —
+    // it is safety-critical and always shown (see textGroupFilter).
     items: [
       { key: "showLightDescriptions", type: "toggle", label: "Light descriptions", desc: "Light characteristics, e.g. Fl(2)R 10s", default: true },
-      { key: "textImportant", type: "toggle", label: "Important text", desc: "Bridge/cable clearances & route bearings", default: true },
       { key: "textNames", type: "toggle", label: "Names", desc: "Buoy, beacon & place names, berth numbers", default: true },
       { key: "textOther", type: "toggle", label: "Other text", desc: "Notes, seabed, magnetic variation, heights", default: true },
       { key: "showContourLabels", type: "toggle", label: "Contour labels", desc: "Depth values along contour lines" },
