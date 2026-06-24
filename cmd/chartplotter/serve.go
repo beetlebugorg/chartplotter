@@ -68,6 +68,7 @@ func (c serveCmd) Run() error {
 	allowRemote := !(c.Host == "127.0.0.1" || c.Host == "localhost" || c.Host == "::1")
 	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote)
 	srv.Version = version
+	srv.ReportStaleCache() // loud warning if any served pack predates this binary
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""

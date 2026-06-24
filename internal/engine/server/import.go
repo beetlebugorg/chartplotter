@@ -597,6 +597,12 @@ func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder, aux map[strin
 		os.Remove(tmpName)
 		return err
 	}
+	// Stamp the build version beside the pack (<pack>.bakever) so startup can flag a
+	// cache baked by an OLDER binary — the stale-tile trap where the server serves
+	// tiles from before a baker/portrayal change. Best-effort; absence reads as stale.
+	if s.Version != "" {
+		_ = os.WriteFile(final+bakeVerExt, []byte(s.Version), 0o644)
+	}
 	// Companion aux.zip (best-effort — a missing aux archive only disables pictures
 	// in the pick report, it doesn't break tiles).
 	if len(aux) > 0 {

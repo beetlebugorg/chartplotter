@@ -2,12 +2,44 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 )
+
+// bakeVerExt is the sidecar that records the build version that baked a pack
+// (<pack>.pmtiles.bakever), so startup can flag a cache baked by an older binary.
+const bakeVerExt = ".bakever"
+
+// ReportStaleCache logs a loud warning for any served pack whose recorded build
+// version (its <pack>.bakever sidecar) differs from the running binary — the
+// stale-cache trap, where `make serve` keeps serving tiles baked by older
+// baker/portrayal code. Call AFTER s.Version is set (serve.go), not in New().
+func (s *Server) ReportStaleCache() {
+	if s.Version == "" {
+		return // dev build with no version stamp — can't compare
+	}
+	names := s.packNames()
+	var stale []string
+	for _, set := range names {
+		p, ok := s.packPath(set)
+		if !ok {
+			continue
+		}
+		got, _ := os.ReadFile(p + bakeVerExt)
+		if strings.TrimSpace(string(got)) != s.Version {
+			stale = append(stale, set)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	log.Printf("⚠️  STALE CACHE: %d/%d served pack(s) were NOT baked by this binary (%s) — they predate the current baker/portrayal code and may be missing features (re-bake to update): %s",
+		len(stale), len(names), s.Version, strings.Join(stale, ", "))
+}
 
 // Pack enable/disable state is SERVER-side (the client only talks to our API): a
 // disabled pack stays baked on disk but is not registered, so it isn't served at
