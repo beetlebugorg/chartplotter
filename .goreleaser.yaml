@@ -25,6 +25,11 @@ builds:
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     # No 32-bit / niche targets: the tile baker is memory-hungry.
+    # Sign + notarize the macOS binaries in place (no-op elsewhere / without creds).
+    hooks:
+      post:
+        - cmd: ./scripts/quill-sign.sh "{{ .Path }}" "{{ .Os }}"
+          output: true
   - id: chartplotter-s101
     main: ./cmd/chartplotter
     binary: chartplotter
@@ -34,6 +39,10 @@ builds:
     ldflags: ["-s -w -X main.version={{ .Version }}"]
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    hooks:
+      post:
+        - cmd: ./scripts/quill-sign.sh "{{ .Path }}" "{{ .Os }}"
+          output: true
 
 archives:
   - id: chartplotter

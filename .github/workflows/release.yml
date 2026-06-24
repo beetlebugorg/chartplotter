@@ -33,6 +33,13 @@ jobs:
             S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
             S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml"
 
+      # quill signs + notarizes the macOS binaries from this Linux runner (no Mac
+      # needed). The GoReleaser build hook (scripts/quill-sign.sh) invokes it.
+      - name: Install quill
+        run: |
+          go install github.com/anchore/quill/cmd/quill@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -41,3 +48,10 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing/notarization (quill). Set these as repo secrets; if they
+          # are absent the hook skips signing and the release still builds.
+          QUILL_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          QUILL_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          QUILL_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          QUILL_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          QUILL_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
