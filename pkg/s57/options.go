@@ -18,6 +18,10 @@ type ParseOptions struct {
 	// Set to false to parse only the base cell without updates.
 	ApplyUpdates bool
 
+	// ValidateConformance promotes S-57 / ISO-8211 spec deviations from non-fatal
+	// warnings (the default; see Chart.Warnings) to a parse error. Default false.
+	ValidateConformance bool
+
 	// MaskCoastlineCoincidentBoundaries derives coastline-coincident edge masking
 	// for area features (S-57 Appendix B.1 Annex A §17 scenario 2). When true, an
 	// area feature's drawn boundary edge whose RCID is also referenced by a COALNE

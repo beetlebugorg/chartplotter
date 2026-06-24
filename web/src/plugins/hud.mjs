@@ -8,7 +8,20 @@
 // → {s:scale, bb:[w,s,e,n]} | undefined; serverSetMetas() → [{band, bounds}].
 
 import { bandForScale, bandForZoom, BANDS, BAND_COLOR, BAND_LABEL, BAND_MAXZOOM, OVERSCALE_MARGIN } from "../lib/bands.mjs";
-import { scaleDenom, fmtScale, fmtLatLon } from "../lib/util.mjs";
+import { scaleDenom, scaleDenomPhysical, zoomForScalePhysical, fmtScale, fmtLatLon } from "../lib/util.mjs";
+
+// Parse a user-typed scale into a denominator. Accepts "40000", "40,000",
+// "1:40000", "1:40,000", "40k", "40 000". Returns 0 if it can't.
+function parseScale(s) {
+  if (!s) return 0;
+  let t = String(s).trim().replace(/^1\s*:/, "");
+  const k = /k$/i.test(t.replace(/[\s,]/g, ""));
+  t = t.replace(/[\s,]/g, "").replace(/k$/i, "");
+  let n = parseFloat(t);
+  if (!isFinite(n) || n <= 0) return 0;
+  if (k) n *= 1000;
+  return Math.round(n);
+}
 
 const WARN_ICO = `<svg class="db-warn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>`;
 
@@ -20,14 +33,63 @@ export class HudController {
     this.cellMeta = opts.cellMeta || (() => undefined);
     this.serverSetMetas = opts.serverSetMetas || (() => []);
     this.noChartsEnabled = opts.noChartsEnabled || (() => false);
+    // Monitor's physical CSS-pixel pitch (mm), for the PHYSICAL (ruler-on-glass)
+    // scale shown in the readout / overscale / go-to-scale. undefined → util's
+    // default (CSS reference). The user calibrates it in settings.
+    this.getPxPitch = opts.getPxPitch || (() => undefined);
     this.coverScale = 0; // finest covering chart's CSCL — the overscale ×n reference
     this._onMove = () => this.updateHud();
     this.map.on("move", this._onMove);
     this.updateHud();
     this.updateZoomCap();
+    this._wireScaleInput();
   }
 
-  destroy() { if (this.map) this.map.off("move", this._onMove); }
+  destroy() {
+    if (this.map) this.map.off("move", this._onMove);
+    if (this._onDocClick) document.removeEventListener("pointerdown", this._onDocClick, true);
+  }
+
+  // Click the scale readout → a small popover to type a target scale and jump to
+  // it. The readout's innerHTML is rebuilt every move, so the click is delegated
+  // from the stable #cov-readout parent and the popover lives OUTSIDE it.
+  _wireScaleInput() {
+    const root = this.root;
+    const pop = root.getElementById("scale-pop");
+    const input = root.getElementById("scale-input");
+    const go = root.getElementById("scale-go");
+    const readout = root.getElementById("cov-readout");
+    if (!pop || !input || !readout) return;
+
+    const open = () => {
+      const c = this.map.getCenter();
+      input.value = String(Math.round(scaleDenomPhysical(this.map.getZoom(), c.lat, this.getPxPitch())));
+      pop.hidden = false;
+      input.focus();
+      input.select();
+    };
+    const close = () => { pop.hidden = true; };
+    const apply = () => {
+      const denom = parseScale(input.value);
+      if (denom > 0) {
+        const c = this.map.getCenter();
+        this.map.easeTo({ zoom: zoomForScalePhysical(denom, c.lat, this.getPxPitch()), duration: 300 });
+      }
+      close();
+    };
+
+    readout.addEventListener("click", (e) => {
+      if (e.target.closest(".hud-scale")) { e.stopPropagation(); pop.hidden ? open() : close(); }
+    });
+    go.addEventListener("click", (e) => { e.stopPropagation(); apply(); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); apply(); }
+      else if (e.key === "Escape") { e.preventDefault(); close(); }
+    });
+    // Click elsewhere closes it.
+    this._onDocClick = (e) => { if (!pop.hidden && !pop.contains(e.target) && !e.target.closest?.(".hud-scale")) close(); };
+    document.addEventListener("pointerdown", this._onDocClick, true);
+  }
 
   // Live readout: band · scale · zoom · position, with fixed-width fields (+
   // tabular-nums in CSS) so the bar doesn't reflow as digit counts change. The
@@ -38,7 +100,8 @@ export class HudController {
     const box = this.root.getElementById("databox"); if (box) box.hidden = false;
     const z = this.map.getZoom(), c = this.map.getCenter();
     const band = bandForZoom(z);
-    const dispDenom = scaleDenom(z, c.lat);
+    // The READOUT shows the PHYSICAL scale (matches a ruler / other ENCs).
+    const dispDenom = scaleDenomPhysical(z, c.lat, this.getPxPitch());
     el.innerHTML =
       `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
       `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
@@ -50,11 +113,21 @@ export class HudController {
     // amber band. "No charts enabled" outranks it (nothing is drawing at all).
     const warn = this.root.getElementById("db-warn");
     if (!warn) return;
-    const f = this.coverScale && dispDenom < this.coverScale ? this.coverScale / dispDenom : 0;
+    // Overscale uses the NOMINAL scale, NOT the physical readout. The nominal scale
+    // is the coordinate the BAND zoom ranges are calibrated to, so a cell shown in
+    // its proper band doesn't read as overscale — the warning only trips once you've
+    // zoomed PAST the data (after the detail/dredge pattern is visible). Driving it
+    // from the physical scale tripped it ~a zoom too early (right as the data
+    // appeared), which is wrong.
+    const ovDenom = scaleDenom(z, c.lat);
+    const f = this.coverScale && ovDenom < this.coverScale ? this.coverScale / ovDenom : 0;
     if (this.noChartsEnabled()) {
       warn.hidden = false;
       warn.innerHTML = WARN_ICO + `<span>No charts are enabled — turn one on in the Chart library</span>`;
-    } else if (f >= 1.15) {
+    } else if (f >= 1.05) {
+      // Show from ~×1.1 so the factor RAMPS (1.1 → 1.2 → …) as you zoom rather than
+      // popping straight to ×1.2: the old 1.15 gate skipped the ×1.1 step entirely
+      // (1.15 already rounds to "1.2", so the ×1.1 window had ~zero width).
       warn.hidden = false;
       warn.innerHTML = WARN_ICO + `<span>Overscale ×${f < 10 ? f.toFixed(1) : Math.round(f)} — data magnified beyond survey scale</span>`;
     } else {

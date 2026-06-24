@@ -276,7 +276,21 @@ export const STYLE = `
           font-weight:600; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
         .db-readout .hud-dot { width:8px; height:8px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.6); margin-right:1px; }
         .db-readout .hud-band { display:inline-block; width:56px; }
-        .db-readout .hud-scale { display:inline-block; width:74px; color:var(--ui-accent); }
+        .db-readout .hud-scale { display:inline-block; width:74px; color:var(--ui-accent); cursor:pointer; }
+        .db-readout .hud-scale:hover { text-decoration:underline; }
+        /* Click-the-scale → "go to scale" popover. SIBLING of #databox, anchored
+           bottom-centre just above the readout card (which is ~52px tall), with a
+           higher z-index so it sits above the card and map controls. */
+        .scale-pop { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 76px); transform:translateX(-50%);
+          display:flex; align-items:center; gap:6px; white-space:nowrap;
+          background:var(--ui-surface); border:1px solid var(--ui-border-strong); border-radius:8px;
+          padding:6px 8px; box-shadow:0 6px 20px rgba(0,0,0,.22); font-size:13px; color:var(--ui-text); z-index:9; }
+        .scale-pop[hidden] { display:none; }
+        .scale-pop input { width:84px; border:1px solid var(--ui-border-strong); border-radius:6px;
+          padding:4px 6px; font:inherit; font-size:14px; background:var(--ui-surface); color:var(--ui-text); }
+        .scale-pop input:focus { outline:none; border-color:var(--ui-accent); }
+        .scale-pop button { border:none; background:var(--ui-accent); color:var(--ui-accent-text);
+          border-radius:6px; padding:5px 10px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
         .db-readout .hud-z { display:inline-block; width:40px; color:var(--ui-text-dim); }
         .db-readout .hud-coord { display:inline-block; width:150px; color:var(--ui-text-dim); }
         .db-readout .hud-sep { color:var(--ui-text-faint); }
@@ -525,6 +539,12 @@ export const CHROME = `
         </div>
         <span id="cov-readout" class="db-readout"></span>
         <div id="db-warn" class="db-warn" hidden></div>
+      </div>
+      <!-- "Go to scale" popover — a SIBLING of #databox (not a child) so the card's
+           overflow:hidden doesn't clip it. Anchored bottom-centre, above the card. -->
+      <div id="scale-pop" class="scale-pop" hidden>
+        <label>Go to scale&nbsp;1:<input id="scale-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="40000"></label>
+        <button id="scale-go" type="button">Go</button>
       </div>
       <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
       <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>

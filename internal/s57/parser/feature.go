@@ -116,6 +116,20 @@ func parseFeatureRecord(record *iso8211.DataRecord) *featureRecord {
 		featureRec.Attributes = parseAttributes(attfData)
 	}
 
+	// Parse NATF (Feature Record National Attribute) — same [ATTL(2) + ATVL]
+	// repeating structure as ATTF (S-57 §7.6.4, 31Main.pdf p76), but carries the
+	// national-language attributes (NOBJNM=301, NINFOM=300, NTXTDS=304, …) which
+	// share the attribute catalogue's code space. Without this, a feature's
+	// national object name / national text was silently dropped. Merge into the
+	// same Attributes map; ATTF is parsed first so it wins on any code overlap.
+	if natfData, ok := record.Fields["NATF"]; ok {
+		for code, val := range parseAttributes(natfData) {
+			if _, exists := featureRec.Attributes[code]; !exists {
+				featureRec.Attributes[code] = val
+			}
+		}
+	}
+
 	// Parse FSPT (Feature to Spatial Pointer) for spatial references
 	if fsptData, ok := record.Fields["FSPT"]; ok {
 		featureRec.SpatialRefs = parseSpatialPointers(fsptData)

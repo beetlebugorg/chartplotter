@@ -48,6 +48,12 @@ type ParseOptions struct {
 	// Default: true
 	ApplyUpdates bool
 
+	// ValidateConformance: if true, any S-57 / ISO-8211 spec deviation detected
+	// during parsing (see conformance.go) is promoted to a parse error instead of
+	// a non-fatal warning. Default: false — deviations are collected on the Chart
+	// (Chart.Warnings) and the cell still renders.
+	ValidateConformance bool
+
 	// MaskCoastlineCoincidentBoundaries: if true, DERIVE coastline-coincident edge
 	// masking for area features. S-57 Appendix B.1 Annex A §17 scenario 2 says area
 	// boundary edges that coincide with the coastline should be masked to avoid
@@ -101,11 +107,17 @@ func (p *defaultParser) ParseWithOptions(filename string, opts ParseOptions) (*C
 		fsys = iso8211.OSFS()
 	}
 
+	// Collector for non-fatal spec-conformance deviations (see conformance.go).
+	// In strict mode (ValidateConformance) these are promoted to an error below;
+	// otherwise they are attached to the returned Chart.
+	conf := &conformance{}
+
 	// 1. Parse base file and extract raw records
-	baseData, params, metadata, err := parseBaseFile(fsys, filename, opts)
+	baseData, params, metadata, err := parseBaseFile(fsys, filename, opts, conf)
 	if err != nil {
 		return nil, err
 	}
+	baseData.warnings = conf
 
 	// 2. Discover and apply updates if enabled
 	if opts.ApplyUpdates {
@@ -121,12 +133,24 @@ func (p *defaultParser) ParseWithOptions(filename string, opts ParseOptions) (*C
 	}
 
 	// 3. Build final chart with geometries
-	return buildChart(baseData, metadata, params, opts)
+	chart, err := buildChart(baseData, metadata, params, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Surface conformance deviations: error in strict mode, else attach.
+	if opts.ValidateConformance {
+		if cerr := conf.asError(); cerr != nil {
+			return nil, cerr
+		}
+	}
+	chart.warnings = conf.warnings()
+	return chart, nil
 }
 
 // parseBaseFile extracts raw feature and spatial records without building geometries.
 // This allows update files to be applied before geometry construction.
-func parseBaseFile(fsys fs.FS, filename string, opts ParseOptions) (*chartData, datasetParams, *datasetMetadata, error) {
+func parseBaseFile(fsys fs.FS, filename string, opts ParseOptions, conf *conformance) (*chartData, datasetParams, *datasetMetadata, error) {
 	// Open ISO 8211 file from filesystem using OpenFS
 	parser, err := iso8211.OpenFS(fsys, filename)
 	if err != nil {
@@ -140,8 +164,19 @@ func parseBaseFile(fsys fs.FS, filename string, opts ParseOptions) (*chartData, 
 		return nil, datasetParams{}, nil, fmt.Errorf("failed to parse ISO 8211: %w", err)
 	}
 
+	// ISO/IEC 8211 leader conformance (Annex A.2.2 fixed values).
+	validateLeaders(isoFile, conf)
+
 	// Extract dataset parameters (COMF, SOMF, etc.) from DSPM record
 	params := extractDatasetParams(isoFile)
+	// DSPM coordinate/sounding multipliers (§7.3.2.1): a non-positive COMF/SOMF is
+	// invalid; we fall back to the standard 10^7 / 10 to keep rendering, but report.
+	if params.comfDefaulted {
+		conf.add("7.3.2.1", "DSPM_COMF_INVALID", "DSPM COMF was missing or <= 0; defaulted to 10000000")
+	}
+	if params.somfDefaulted {
+		conf.add("7.3.2.1", "DSPM_SOMF_INVALID", "DSPM SOMF was missing or <= 0; defaulted to 10")
+	}
 
 	// Extract dataset metadata from DSID record
 	metadata := extractDSID(isoFile)
@@ -151,6 +186,7 @@ func parseBaseFile(fsys fs.FS, filename string, opts ParseOptions) (*chartData, 
 	featuresByID := make(map[featureID]*featureRecord)
 	for _, record := range isoFile.Records {
 		if featureRec := parseFeatureRecord(record); featureRec != nil {
+			validateFeatureConformance(featureRec, conf)
 			features = append(features, featureRec)
 			// Create composite key from FOID fields
 			key := featureID{
@@ -166,6 +202,7 @@ func parseBaseFile(fsys fs.FS, filename string, opts ParseOptions) (*chartData, 
 	spatialRecords := make(map[spatialKey]*spatialRecord)
 	for _, record := range isoFile.Records {
 		if spatialRec := parseSpatialRecordWithParams(record, params); spatialRec != nil {
+			validateSpatialConformance(spatialRec, conf)
 			key := spatialKey{RCNM: int(spatialRec.RecordType), RCID: spatialRec.ID}
 			spatialRecords[key] = spatialRec
 		}
@@ -454,9 +491,10 @@ func (p *defaultParser) SupportedObjectClasses() []string {
 
 // coastDefinerClasses are the object classes that DEFINE the visible coast / shore
 // edge. They play two roles in derived coastline-coincident masking:
-//   1. their boundary edge RCIDs form the "coast edge set" (see buildChart), and
-//   2. they are EXEMPT from masking — they keep their own coincident edges so the
-//      shore stays drawn.
+//  1. their boundary edge RCIDs form the "coast edge set" (see buildChart), and
+//  2. they are EXEMPT from masking — they keep their own coincident edges so the
+//     shore stays drawn.
+//
 // COALNE (coastline) and SLCONS (shoreline construction: piers, wharves, seawalls)
 // are usually lines; LNDARE (land area) is the area whose boundary IS the shore.
 // In NOAA cells the land/water boundary is frequently encoded only as an LNDARE

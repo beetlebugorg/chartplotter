@@ -37,6 +37,24 @@ type Chart struct {
 	depthUnits       DepthUnits      // DUNI field from DSPM record
 	horizontalDatum  int             // HDAT field from DSPM record
 	compilationScale int32           // CSCL field from DSPM record
+
+	warnings []ConformanceWarning // Non-fatal S-57/ISO-8211 spec deviations
+}
+
+// ConformanceWarning is one non-fatal S-57 / ISO-8211 spec deviation detected
+// while parsing. See Chart.Warnings.
+type ConformanceWarning struct {
+	Clause  string // governing spec clause
+	Code    string // short stable identifier
+	Message string // human-readable detail
+	Count   int    // times this code was hit during the parse
+}
+
+// Warnings returns the non-fatal spec-conformance deviations detected while
+// parsing this chart. Empty when the cell is fully conformant. Use
+// ParseOptions.ValidateConformance to turn these into a parse error instead.
+func (c *Chart) Warnings() []ConformanceWarning {
+	return c.warnings
 }
 
 // CoordinateUnits indicates how coordinates are encoded in the chart.
@@ -629,6 +647,13 @@ func convertChart(internal *parser.Chart) *Chart {
 		depthUnits:       DepthUnits(internal.DepthUnits()),
 		horizontalDatum:  internal.HorizontalDatum(),
 		compilationScale: internal.CompilationScale(),
+	}
+
+	// Carry over non-fatal conformance warnings.
+	for _, w := range internal.Warnings() {
+		chart.warnings = append(chart.warnings, ConformanceWarning{
+			Clause: w.Clause, Code: w.Code, Message: w.Message, Count: w.Count,
+		})
 	}
 
 	// Build spatial index for fast viewport queries
