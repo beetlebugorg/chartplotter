@@ -73,22 +73,26 @@ func (idx *DepthIndex) shoalestDRVAL1(lat, lon float64) (float64, bool) {
 
 // DerivedAttrs computes the S-101-coded attributes a feature needs but S-57
 // doesn't carry directly. For under/awash dangers it supplies defaultClearanceDepth
-// from the underlying depth area so OBSTRN07/WRECKS05 don't error on a missing depth.
+// so OBSTRN07/WRECKS05 (which hard-require valueOfSounding OR defaultClearanceDepth)
+// don't error on a missing depth and drop the hazard.
+//
+// Per S-52 DEPVAL the danger inherits the shoalest DRVAL1 of the depth area it
+// lies in. With no such area the depth is genuinely unknown — default to 0
+// (awash) so UDWHAZ05 treats it as a hazard (an unknown-depth danger is assumed
+// dangerous) rather than the feature being suppressed by the rule error.
 func DerivedAttrs(f *s57.Feature, idx *DepthIndex) map[string]string {
 	switch f.ObjectClass() {
 	case "OBSTRN", "WRECKS", "UWTROC":
 	default:
 		return nil
 	}
-	pt, ok := representativePoint(f)
-	if !ok {
-		return nil
+	depth := 0.0
+	if pt, ok := representativePoint(f); ok {
+		if d, ok := idx.shoalestDRVAL1(pt.Lat, pt.Lon); ok {
+			depth = d
+		}
 	}
-	d, ok := idx.shoalestDRVAL1(pt.Lat, pt.Lon)
-	if !ok {
-		return nil
-	}
-	return map[string]string{"defaultClearanceDepth": strconv.FormatFloat(d, 'f', -1, 64)}
+	return map[string]string{"defaultClearanceDepth": strconv.FormatFloat(depth, 'f', -1, 64)}
 }
 
 // polygonRings returns a polygon's rings as [lon,lat] lists (Rings field first,
