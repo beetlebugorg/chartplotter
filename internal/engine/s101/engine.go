@@ -67,14 +67,13 @@ type Engine struct {
 	order   []string
 }
 
-// adapted is an S-57 feature rewritten into S-101 terms via the bridge.
+// adapted is an S-57 feature rewritten into S-101 terms via the bridge. root is
+// the synthesized attribute tree (simple attributes + featureName / clearance /
+// orientation / sector complex attributes) the host serves to the rule.
 type adapted struct {
 	id, code, primitive string
-	objClass            string            // raw S-57 acronym (e.g. BRIDGE), for class-specific complex attrs
-	attrs               map[string]string // S-101 attribute code -> value string
-	s57                 map[string]string // raw S-57 acronym -> value string (complex-attr synthesis)
-	name                string            // S-57 OBJNAM → featureName complex attribute (for name labels)
-	points              [][3]float64      // multipoint vertices (lon,lat,depth) for SOUNDG
+	root                *cnode       // synthesized attribute tree (see complex.go)
+	points              [][3]float64 // multipoint vertices (lon,lat,depth) for SOUNDG
 }
 
 // NewEngine loads the S-101 framework from a Rules directory (path) and binds
@@ -207,27 +206,23 @@ func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 	results := map[string]string{}
 
 	for _, f := range features {
-		code, ok := e.cat.FeatureCodeForS57(f.ObjectClass)
+		code, ok := e.resolveCode(f.ObjectClass, f.Attributes)
 		if !ok {
 			results[f.ID] = "UNMAPPED:" + f.ObjectClass
 			continue
 		}
-		a := &adapted{id: f.ID, code: code, primitive: f.Primitive, objClass: f.ObjectClass, attrs: map[string]string{}, s57: f.Attributes, points: f.Points}
-		for acr, val := range f.Attributes {
-			if ac, ok := e.cat.AttrCodeForS57(acr); ok {
-				a.attrs[ac] = val
-			}
+		// S-57 OBJNAM/NOBJNM → the S-101 featureName complex attribute (served by
+		// the host) so PortrayFeatureName emits a label.
+		name := f.Attributes["OBJNAM"]
+		if name == "" {
+			name = f.Attributes["NOBJNM"]
 		}
-		// Derived attributes are already in S-101 code form (no S-57 alias).
-		for code, val := range f.Derived {
-			a.attrs[code] = val
-		}
-		// S-57 OBJNAM/NOBJNM → the S-101 featureName complex attribute (served as
-		// featureName sub-attrs by the host) so PortrayFeatureName emits a label.
-		if n := f.Attributes["OBJNAM"]; n != "" {
-			a.name = n
-		} else if n := f.Attributes["NOBJNM"]; n != "" {
-			a.name = n
+		a := &adapted{
+			id:        f.ID,
+			code:      code,
+			primitive: f.Primitive,
+			points:    f.Points,
+			root:      e.buildRoot(f.ObjectClass, f.Attributes, f.Derived, name),
 		}
 		e.adapted[f.ID] = a
 		e.order = append(e.order, f.ID)

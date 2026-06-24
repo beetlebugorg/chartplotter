@@ -2,7 +2,6 @@ package s101
 
 import (
 	"strconv"
-	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	lua "github.com/yuin/gopher-lua"
@@ -60,7 +59,7 @@ func (e *Engine) bindHost() {
 		if ft := e.cat.FeatureTypes[code]; ft != nil {
 			binds = ft.Bindings
 		}
-		binds = withInTheWater(binds)
+		binds = withGuaranteed(binds)
 		s.Push(typeInfo(s, "FeatureTypeInfo", code, binds))
 		return 1
 	})
@@ -142,65 +141,32 @@ func (e *Engine) bindHost() {
 	})
 	set("HostFeatureGetSimpleAttribute", func(s *lua.LState) int {
 		// (featureID, attributePath, attributeCode) -> array of value strings.
+		// Served from the synthesized attribute tree: resolve the container the
+		// path points at, then return that node's simple values for the code.
 		id := s.CheckString(1)
 		path := s.CheckString(2)
 		code := s.CheckString(3)
 		t := s.NewTable()
-		a := e.adapted[id]
-		if a == nil {
-			s.Push(t)
-			return 1
-		}
-		// featureName complex sub-attributes (path "featureName:1") from OBJNAM.
-		if strings.HasPrefix(path, "featureName") {
-			switch code {
-			case "name":
-				if a.name != "" {
-					t.Append(lua.LString(a.name))
+		if a := e.adapted[id]; a != nil && a.root != nil {
+			if node := a.root.resolve(path); node != nil {
+				for _, v := range node.simple[code] {
+					t.Append(lua.LString(v))
 				}
-			case "language":
-				t.Append(lua.LString("eng"))
-			case "nameUsage":
-				t.Append(lua.LString("1")) // default → selected even if language differs
 			}
-			s.Push(t)
-			return 1
-		}
-		// Clearance complex sub-attributes (e.g. path "verticalClearanceClosed:1",
-		// code "verticalClearanceValue"): synthesise from the backing S-57 simple
-		// attribute (VERCCL etc.) so the bridge rules can read the value.
-		if cl := clearanceForPath(path); cl != nil && code == cl.value {
-			if v := a.s57[cl.s57]; v != "" {
-				t.Append(lua.LString(v))
-			}
-			s.Push(t)
-			return 1
-		}
-		if v, ok := a.attrs[code]; ok {
-			t.Append(lua.LString(v))
 		}
 		s.Push(t)
 		return 1
 	})
 	set("HostFeatureGetComplexAttributeCount", func(s *lua.LState) int {
+		// (featureID, attributePath, attributeCode) -> count of that complex
+		// attribute's instances at the container the path points at.
 		id := s.CheckString(1)
+		path := s.CheckString(2)
 		code := s.CheckString(3)
 		n := 0
-		a := e.adapted[id]
-		switch {
-		case code == "featureName":
-			if a != nil && a.name != "" {
-				n = 1
-			}
-		case clearances[code].value != "":
-			// A clearance complex attribute is present when its backing S-57
-			// attribute is, OR — for an opening bridge's verticalClearanceClosed —
-			// always, so SpanOpening's unguarded `verticalClearanceClosed.
-			// verticalClearanceValue` deref (a DRAFT-catalogue bug) reads a nil
-			// value (→ hazard alert) instead of crashing on a nil table.
-			if a != nil && (a.s57[clearances[code].s57] != "" ||
-				(code == "verticalClearanceClosed" && a.objClass == "BRIDGE")) {
-				n = 1
+		if a := e.adapted[id]; a != nil && a.root != nil {
+			if node := a.root.resolve(path); node != nil {
+				n = len(node.children[code])
 			}
 		}
 		s.Push(lua.LNumber(n))
@@ -232,31 +198,31 @@ var clearances = map[string]struct{ s57, value string }{
 	"horizontalClearanceFixed": {"HORCLR", "horizontalClearanceValue"},
 }
 
-// clearanceForPath returns the clearance mapping for a complex-attribute path
-// like "verticalClearanceClosed:1" (the head before ':'), or nil if the path is
-// not a clearance complex attribute.
-func clearanceForPath(path string) *struct{ s57, value string } {
-	head, _, _ := strings.Cut(path, ":")
-	if c, ok := clearances[head]; ok {
-		return &c
-	}
-	return nil
-}
+// guaranteedAttrs are attributes some DRAFT-catalogue rules read WITHOUT the
+// nil-safe `!` prefix on feature types the catalogue doesn't bind them to — so
+// the framework raises "Invalid attribute code". Binding them on every feature
+// type makes such a read return nil (attribute absent) instead of erroring:
+//   - inTheWater: read by Building, SlopeTopline, … (boolean).
+//   - orientationValue: read by route/traffic rules (RadarLine, RecommendedTrack,
+//     TwoWayRoutePart, …) that don't all bind it (the S-57 ORIENT alias).
+var guaranteedAttrs = []string{"inTheWater", "orientationValue"}
 
-// withInTheWater guarantees the boolean `inTheWater` attribute is bound on every
-// feature type. Several DRAFT-catalogue rules (Building, SlopeTopline, …) read
-// `feature.inTheWater` WITHOUT the nil-safe `!` prefix, but the feature
-// catalogue only binds it to some of those classes — so on the others the
-// framework raises "Invalid attribute code". Binding it everywhere makes the
-// read return nil (the attribute is simply absent) instead of erroring, which is
-// the intended "not in the water" outcome.
-func withInTheWater(binds []fc.AttributeBinding) []fc.AttributeBinding {
-	for _, b := range binds {
-		if b.AttributeRef == "inTheWater" {
-			return binds
+// withGuaranteed appends any guaranteedAttrs binding the feature type is missing.
+func withGuaranteed(binds []fc.AttributeBinding) []fc.AttributeBinding {
+	out := binds
+	for _, name := range guaranteedAttrs {
+		found := false
+		for _, b := range out {
+			if b.AttributeRef == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out[:len(out):len(out)], fc.AttributeBinding{AttributeRef: name, Lower: 0, Upper: 1})
 		}
 	}
-	return append(binds[:len(binds):len(binds)], fc.AttributeBinding{AttributeRef: "inTheWater", Lower: 0, Upper: 1})
+	return out
 }
 
 // bindingsTable builds the AttributeBindings table (attr code → {Upper,Lower

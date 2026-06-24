@@ -183,6 +183,10 @@ func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 		}
 		prims = append(prims, LowerS101(c, sg, b.Catalog)...)
 	}
+	// Sector / directional light figures: the rule's AugmentedRay / ArcByRadius
+	// geometry is fixed display-mm (screen size) and isn't lowered onto geographic
+	// geometry; emit a SectorLight the baker tessellates per-zoom instead.
+	prims = append(prims, sectorLightPrims(f, anchor)...)
 	if cat == 0 {
 		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}

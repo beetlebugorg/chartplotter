@@ -325,3 +325,42 @@ func TestS101NameLabel(t *testing.T) {
 		t.Errorf("name label = %q, want it to contain \"G C 5\"; prims=%d", label, len(build.Primitives))
 	}
 }
+
+// TestS101BuildSectorLight drives an S-57 sectored light through the full build
+// seam and asserts a SectorLight primitive is produced (the fixed-screen-size
+// sector legs/arc the baker tessellates into the sector_lines layer), with the
+// S-57 sector limits/colour carried through unflipped.
+func TestS101BuildSectorLight(t *testing.T) {
+	b := s101Builder(t)
+
+	lt := s57.NewFeature(1, "LIGHTS",
+		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}},
+		map[string]interface{}{
+			"SECTR1": "045", "SECTR2": "090",
+			"COLOUR": "3", "VALNMR": "9", "LITCHR": 2,
+		},
+	)
+	build, ok := b.Build(&lt)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	var sec *SectorLight
+	for i := range build.Primitives {
+		if s, ok := build.Primitives[i].(SectorLight); ok {
+			sec = &s
+			break
+		}
+	}
+	if sec == nil {
+		t.Fatalf("no SectorLight emitted; got %#v", build.Primitives)
+	}
+	if sec.Sector.StartAngleDeg != 45 || sec.Sector.EndAngleDeg != 90 {
+		t.Errorf("angles = %v..%v, want 45..90 (unflipped seaward)", sec.Sector.StartAngleDeg, sec.Sector.EndAngleDeg)
+	}
+	if sec.Sector.ColorToken != "LITRD" {
+		t.Errorf("colour = %q, want LITRD (red)", sec.Sector.ColorToken)
+	}
+	if sec.Sector.RadiusNM != 9 {
+		t.Errorf("radius = %v, want 9 NM", sec.Sector.RadiusNM)
+	}
+}
