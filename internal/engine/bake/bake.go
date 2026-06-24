@@ -300,10 +300,10 @@ type Baker struct {
 	// the full scan (the EmitTile convenience path / tests). Read-only after build.
 	emitIndex  map[uint64][]int32
 	linestyles map[string]*lsInfo // complex-linestyle period geometry, built once (lazily) from the PresLib
-	// portrayer, when set, replaces the S-52 lookup+CSP portrayal (BuildFeaturePasses)
-	// with an alternative — the S-101 path (specs/s101-portrayal-backport.md). This is
-	// the replace-then-delete seam: the S-52 branch below is removed once S-101 is the
-	// only renderer. Internal (not a user-facing toggle).
+	// portrayer drives portrayal: the S-101 rule engine
+	// (specs/s101-portrayal-backport.md). S-101 is the only renderer now, so a
+	// portrayer is required (the old S-52 lookup+CSP fallback has been removed).
+	// Internal (not a user-facing toggle).
 	portrayer Portrayer
 	bbox      geo.BoundingBox
 	curCell   string // dataset name of the cell currently being added (stamped on each feature)

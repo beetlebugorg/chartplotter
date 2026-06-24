@@ -19,21 +19,6 @@ import (
 	"golang.org/x/image/tiff"
 )
 
-// IsContent reports whether a non-cell file is aux *content* we ship. It keys off
-// the content extensions (text + pictures) and excludes the exchange-set catalogue
-// (CATALOG.031) and readmes, which are set plumbing, not feature data.
-func IsContent(name string) bool {
-	base := strings.ToUpper(filepath.Base(name))
-	if strings.HasPrefix(base, "README") || strings.HasPrefix(base, "CATALOG") {
-		return false
-	}
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".txt", ".tif", ".tiff", ".jpg", ".jpeg", ".png":
-		return true
-	}
-	return false
-}
-
 // Key normalises an aux filename to the form features reference it by: the bare
 // basename, upper-cased (S-57 stores TXTDSC/PICREP values upper-cased, and exchange
 // sets are case-inconsistent across platforms).

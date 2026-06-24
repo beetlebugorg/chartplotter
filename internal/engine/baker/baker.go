@@ -1,4 +1,4 @@
-// Package baker wires S-57 cell bytes through parse + S-52 portrayal into a
+// Package baker wires S-57 cell bytes through parse + S-101 portrayal into a
 // PMTiles archive. It is the shared core behind the bake-zip / provision CLI
 // paths and the server's background provision job.
 package baker

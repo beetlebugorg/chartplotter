@@ -1,5 +1,5 @@
 // Command chartplotter is the Go chartplotter engine: it bakes NOAA S-57 ENC
-// cells into S-52-portrayed Mapbox Vector Tile / PMTiles archives and serves
+// cells into S-101-portrayed Mapbox Vector Tile / PMTiles archives and serves
 // the region-centric web frontend. All tile generation happens here in the
 // backend; the browser only renders pre-baked tiles.
 //
@@ -72,7 +72,7 @@ func main() {
 	var c cli
 	ctx := kong.Parse(&c,
 		kong.Name("chartplotter"),
-		kong.Description("S-52 marine chart tile engine (Go)."),
+		kong.Description("S-101 marine chart tile engine (Go)."),
 		kong.UsageOnError(),
 	)
 	ctx.FatalIfErrorf(ctx.Run())

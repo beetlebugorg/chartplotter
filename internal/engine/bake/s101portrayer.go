@@ -8,10 +8,9 @@ import (
 )
 
 // Portrayer produces the portrayal passes for one S-57 feature. It is the seam
-// that lets the bake pipeline swap the S-52 lookup+CSP engine
-// (portrayal.BuildFeaturePasses) for the S-101 rule engine
-// (specs/s101-portrayal-backport.md). The S-52 path is the default (nil
-// portrayer); the S-101 path is selected by SetPortrayer.
+// the bake pipeline drives portrayal through: the S-101 rule engine
+// (specs/s101-portrayal-backport.md), selected via SetPortrayer. A portrayer is
+// required — the old S-52 lookup+CSP fallback has been removed.
 type Portrayer interface {
 	Passes(f *s57.Feature) []portrayal.FeatureBuildPass
 }

@@ -476,12 +476,11 @@ export class ChartPlotter extends HTMLElement {
       else await this._aux.loadApi(this._assets);
       return r;
     });
-    // S-57 object/attribute catalogue for the cursor-pick report (decodes class
-    // and attribute names, enumerated values and units — S-52 PresLib §10.8).
-    // Independent of the chart catalogue; the report degrades to raw acronyms if absent.
+    // Pick-report class/attribute name lookup. The old S-57 PresLib catalogue
+    // (web/s57-catalogue.json + cmd/gen-s57-catalogue) was removed with S-52; the
+    // report degrades to raw acronyms until this is re-derived from the embedded
+    // S-101 FeatureCatalogue (TODO). Empty table = acronyms.
     this._s57cat = { classes: {}, attributes: {} };
-    fetch(this._assets + "s57-catalogue.json")
-      .then((r) => (r.ok ? r.json() : null)).then((j) => { if (j) this._s57cat = j; }).catch(() => {});
     return dl;
   }
 
@@ -1462,7 +1461,6 @@ export class ChartPlotter extends HTMLElement {
   _refreshInstalledBounds() {
     if (!this._coverage) return; // coverage overlay not set up yet
     const feats = [];
-    const missing = []; // foreign cells with no footprint yet → parse one once
     // Per-CELL footprints are the prod (pmtiles) path only. In SERVER mode we draw
     // one box per ENABLED pack (below) instead — a full NOAA install has thousands
     // of cells, and a box per cell (re-projected to its min on-screen size on every
@@ -1470,11 +1468,8 @@ export class ChartPlotter extends HTMLElement {
     // so they'd keep showing a disabled district's coverage. Per-pack boxes fix both.
     if (this._prod) {
       for (const name of this._installed) {
-        const bb = this._cellLocation(name); // catalog bb OR a parsed foreign footprint
-        if (!bb) {
-          if (!this._byName.has(name) && !(this._foreignTried && this._foreignTried.has(name))) missing.push(name);
-          continue;
-        }
+        const bb = this._cellLocation(name); // catalog footprint
+        if (!bb) continue;
         const c = this._byName.get(name);
         const scale = (c && typeof c.s === "number" && c.s) || this._cellScale.get(name) || 0;
         const band = scale ? bandForScale(scale) : "harbor"; // unknown scale → assume large-scale
@@ -1511,14 +1506,6 @@ export class ChartPlotter extends HTMLElement {
     // per-zoom minimum on-screen size so a tiny cell never shrinks to an invisible
     // speck when zoomed out.
     if (this._coverage) this._coverage.setFeatures(feats);
-    // Foreign cells carry no catalog footprint, so they'd be invisible when zoomed
-    // out. Parse each one's bounds ONCE (best-effort) then rebuild, so an uploaded
-    // harbour shows a coverage outline at z0 you can see and zoom into.
-    if (missing.length) {
-      this._foreignTried = this._foreignTried || new Set();
-      missing.forEach((n) => this._foreignTried.add(n));
-      this._ensureForeignBounds(missing).then(() => this._refreshInstalledBounds()).catch(() => {});
-    }
   }
 
   // Show/hide the installed-chart coverage overlay.
@@ -1583,29 +1570,6 @@ export class ChartPlotter extends HTMLElement {
     const fill = r.getElementById("db-prog-fill");
     fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
     fill.classList.toggle("indet", p.frac == null && !done); // sweeping bar when no fraction
-  }
-
-  // For installed cells with no catalog footprint (foreign uploads), parse their
-  // bounds in the wasm (no bake) so we can frame/locate them. Capped so a huge
-  // import doesn't stall; the rest still become locatable once they bake.
-  async _ensureForeignBounds(names, cap = 60) {
-    if (!this._plotter || !this._plotter.cellBounds || !this._store) return;
-    let n = 0;
-    for (const name of names) {
-      if (n >= cap) break;
-      if (this._cellLocation(name)) continue; // already have a footprint
-      n++;
-      try {
-        const bytes = await this._store.getBytes(name);
-        if (!bytes) continue;
-        const res = await this._plotter.cellBounds(name, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
-        const bb = res && res.bounds;
-        if (Array.isArray(bb) && bb.length === 4 && bb[0] <= bb[2]) {
-          this._cellBounds.set(name, bb);
-          if (res.scale) this._cellScale.set(name, res.scale);
-        }
-      } catch (e) { /* best-effort */ }
-    }
   }
 
   // Frame to the union bounds of the installed region archives (from the manifest).

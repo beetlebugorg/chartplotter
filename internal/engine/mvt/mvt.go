@@ -57,11 +57,10 @@ const (
 	valBool
 )
 
-// StringVal / IntVal / FloatVal / BoolVal construct attribute values.
+// StringVal / IntVal / FloatVal construct attribute values.
 func StringVal(s string) Value { return Value{kind: valString, str: s} }
 func IntVal(n int64) Value     { return Value{kind: valInt, intV: n} }
 func FloatVal(f float32) Value { return Value{kind: valFloat, float: f} }
-func BoolVal(b bool) Value     { return Value{kind: valBool, boolV: b} }
 
 // KeyValue is one feature attribute.
 type KeyValue struct {

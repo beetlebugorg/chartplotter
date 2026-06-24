@@ -24,19 +24,20 @@ added without touching the renderer.
 
 ## Layer 1 — `<chart-plotter>` (base renderer)
 
-The stable contract everything else builds on. It renders S-52 ENC tiles
-(baked in-browser by the wasm engine) and exposes **only** the surface below.
-Nothing outside reaches into private (`_`) fields or MapLibre internals.
+The stable contract everything else builds on. It renders S-101 ENC tiles
+baked **server-side** (the client imports cells via `POST /api/import` and the
+server bakes them into tiles under `/tiles`; the browser only renders pre-baked
+tiles). It exposes **only** the surface below. Nothing outside reaches into
+private (`_`) fields or MapLibre internals.
 
 | Group | Methods |
 |---|---|
-| Charts | `setArchive` `addArchive` `addArchives` `loadRegions` `replaceBand` `loadArchiveUrl` `loadStoreCells` `listCharts` |
+| Charts | `setArchive` `addArchive` `addArchives` `loadRegions` `replaceBand` `loadArchiveUrl` |
 | Display | `setScheme` `setMariner` `setBasemap` |
 | Tiles | `refresh` `flushTiles` |
-| Introspection | `realtimeStats` `realtimeCoverage` `cellBounds` |
 | Overlays | `get map` · `overlayBeforeId` · `addOverlayLayer(layer,{belowLabels})` · `removeOverlay(ids,source)` |
 | Camera | `setCameraMode("free"\|"north-up"\|"course-up")` · `updateFollow({lng,lat,courseDeg})` · `clearFollow` |
-| Events | `ready{map}` · `bake-activity{inflight}` · `cell-status{name,status,info}` |
+| Events | `ready{map}` |
 
 Status: data/renderer boundary is **sealed** — the former reach-ins
 (`_rtCache`, `map.style.sourceCaches`) are now behind `flushTiles()`; the

@@ -13,9 +13,10 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
-// serveCmd hosts the web frontend (embedded static assets + the wasm baker) and
-// the /api/cell NOAA-download proxy. Everything else — parse, bake, render — runs
-// in the browser, so this is just a static server + a thin CORS proxy.
+// serveCmd hosts the web frontend (embedded static assets) plus the server-side
+// S-101 baking + tile-serving API: chart imports are parsed and baked into tiles
+// in the backend (the browser only renders pre-baked tiles), alongside the
+// /api/cell NOAA-download proxy.
 type serveCmd struct {
 	Host       string `default:"127.0.0.1" help:"Bind host."`
 	Port       int    `default:"8080" help:"Bind port."`
