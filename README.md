@@ -18,6 +18,14 @@
 
 ---
 
+> [!WARNING]
+> **Not for navigation.** This project is coded almost entirely with AI (Claude).
+> It is an experiment in building a large, complex specification (IHO S-101) with
+> AI, and a personal learning tool — not a certified or tested product. Do not
+> rely on it for real-world navigation.
+
+---
+
 chartplotter turns official NOAA nautical charts into fast map tiles you can view
 in a web browser, online or fully offline.
 

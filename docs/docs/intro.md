@@ -7,6 +7,15 @@ sidebar_position: 1
 
 # chartplotter
 
+:::warning Not for navigation
+
+This project is coded almost entirely with AI (Claude). It is an experiment in
+building a large, complex specification (IHO S-101) with AI, and a personal
+learning tool — not a certified or tested product. **Do not rely on it for
+real-world navigation.**
+
+:::
+
 **chartplotter** is a marine chart engine written in Go. It turns official NOAA
 nautical charts into fast, offline map tiles that you can view in a web browser.
 
