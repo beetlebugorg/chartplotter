@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>⚓ A marine chart plotter, in Go.</b><br>
-  Bake NOAA S-57 ENC cells into offline vector-tile archives and render them in the browser.
+  Generate offline vector-tile archives from NOAA S-57 ENC cells and render them in the browser.
 </p>
 
 <p align="center">
@@ -27,30 +27,28 @@ writes the result to a single **PMTiles** archive of **Mapbox Vector Tiles**. A 
 `<chart-plotter>` web component, built on
 [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/), draws the chart.
 
-The Go backend does all the work. The browser only renders pre-baked tiles, so there
-is no heavy WebAssembly pipeline to ship.
-
-> **S-102** bathymetric surface support is planned.
+Here is the whole thing in three sentences. The Go program reads the raw NOAA chart
+files and turns them into map tiles — small, pre-drawn pieces of the map — deciding
+the color, symbol, and line of every feature as it goes. It saves those tiles in one
+file you can keep on your own machine. The web page is just a map viewer that pans,
+zooms, and recolors those tiles; it never touches the raw charts.
 
 ## ✨ Features
 
 - **A complete chart pipeline.** chartplotter does every step: ISO 8211 decode, the
   S-57 feature model, S-101 portrayal, web-Mercator tiling, vector-tile encode, and a
   streaming PMTiles writer.
-- **Works offline.** Bake a region once into one `.pmtiles` archive, then serve or
-  ship it. You do not need a tile server to view it.
-- **Switches Day, Dusk, and Night instantly.** chartplotter stores colors as S-101
-  color *names*, not RGB values. The browser resolves the palette from
-  `colortables.json`, so changing the lighting mode restyles the map at once — no
-  re-bake.
-- **Bake once.** Mariner settings — depth shading, soundings, contours, and
-  safety-depth danger highlighting — ride along as tile attributes. The viewer applies
-  them live.
+- **Works offline.** Generate one `.pmtiles` archive for a region, then serve or ship
+  it. You do not need a tile server to view it.
+- **Adjust the chart live.** Switch Day, Dusk, and Night palettes and toggle mariner
+  settings — depth shading, soundings, contours, safety-depth danger highlighting — and
+  the map restyles at once. Colors are stored as S-101 names and settings ride along as
+  tile attributes, so the viewer applies your changes without regenerating the tiles.
 - **Ships as one binary.** The S-101 catalogue *and* the web frontend build into the
   program. A self-contained `chartplotter serve` needs no files on disk — you supply
-  only the ENC cells you bake.
-- **Runs a server.** The built-in HTTP server downloads NOAA cells, bakes them in the
-  background, and serves the frontend with byte-range support.
+  only the ENC cells.
+- **Runs a server.** The built-in HTTP server downloads NOAA cells, generates tiles in
+  the background, and serves the frontend with byte-range support.
 
 ## 📦 Install
 
@@ -85,19 +83,19 @@ and open the viewer:
 
 ```sh
 chartplotter serve
-# open http://127.0.0.1:8080 → pick a region → it downloads and bakes → the chart appears
+# open http://127.0.0.1:8080 → pick a region → it downloads and builds tiles → the chart appears
 ```
 
-The server writes everything it bakes to your cache directory
+The server writes everything it generates to your cache directory
 (`~/.cache/chartplotter`), never into the binary's assets.
 
-You can also bake S-57 cells yourself into a standalone archive:
+You can also build a standalone archive yourself with the `bake` command:
 
 ```sh
-# Bake cells, a directory, or a NOAA ENC zip into one archive.
+# Generate one archive from cells, a directory, or a NOAA ENC zip.
 chartplotter bake -o charts.pmtiles US4MD81M.000
 
-# Bake one archive per navigational band (best-available display).
+# Generate one archive per navigational band (best-available display).
 chartplotter bake --bands -o charts.pmtiles US5MD_ENCs.zip
 ```
 
@@ -114,7 +112,7 @@ chartplotter serve --assets web
 | `version` | Print the version and whether the S-101 catalogue is embedded. |
 | `emit-assets DIR` | Write the S-101 client assets (color tables, sprites, line styles, patterns) to a directory. |
 | `catalog-json IN.xml OUT.json` | Distil NOAA `ENCProdCat.xml` into a compact `catalog.json`. |
-| `bake -o OUT.pmtiles IN…` | Bake S-57 cells, directories, or NOAA ENC zips into a PMTiles archive. |
+| `bake -o OUT.pmtiles IN…` | Generate a PMTiles archive from S-57 cells, directories, or NOAA ENC zips. |
 | `serve [--host] [--port] [--assets DIR]` | Serve the web frontend, the baking API, and the NOAA cell proxy. |
 | `simulate` | Run an NMEA 0183 traffic generator over TCP (own-ship + AIS targets) for testing. |
 
@@ -165,4 +163,14 @@ install, the CLI reference, the chart pipeline, and the vector-tile schema.
 
 ## 📄 License
 
-[MIT](LICENSE) © Jeremy Collins
+chartplotter's own code is [MIT](LICENSE) © Jeremy Collins.
+
+It bundles third-party software and data under their own licenses — all Go
+dependencies are permissive (MIT / BSD-3-Clause), plus MapLibre GL JS (BSD),
+Noto Sans (OFL), OpenBridge icons (CC BY 4.0), and a GSHHG coastline basemap
+(LGPL). NOAA ENC charts are U.S. public domain and **not for navigation**.
+
+The **IHO S-101 Portrayal & Feature Catalogue** is © IHO and is *not* included in
+this repository; a draft copy is embedded only in opt-in `_s101` builds, and its
+redistribution terms are still to be confirmed. See
+[**THIRD-PARTY-NOTICES.md**](THIRD-PARTY-NOTICES.md) for the full inventory.

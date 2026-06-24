@@ -6,75 +6,65 @@ sidebar_position: 3
 
 # Getting Started
 
-This guide shows you how to bake a NOAA chart and view it in a browser. It takes
-a few minutes.
+This guide walks you through the app. You do the work in the browser — the
+server downloads and bakes charts for you. It takes a few minutes.
 
-## Before you start
+## Step 1: Start the app
 
-- [Install chartplotter](./installation.md).
-- Download at least one S-57 ENC cell from NOAA. Cells come as `.000` files,
-  often inside a `.zip` named for the cell (for example, `US4MD81M.zip`).
-
-## Step 1: Bake a chart
-
-Turn an ENC cell into a tile archive:
-
-```sh
-chartplotter emit-pmtiles charts.pmtiles US4MD81M.000
-```
-
-This writes `charts.pmtiles`. The archive holds every tile for that cell.
-
-You can bake several cells into one archive. List them all:
-
-```sh
-chartplotter emit-pmtiles charts.pmtiles US4MD81M.000 US5MD11M.000
-```
-
-If your cell is still inside a NOAA zip, bake straight from the zip:
-
-```sh
-chartplotter bake-zip charts.pmtiles US4MD81M.zip
-```
-
-## Step 2: Serve the viewer
-
-The web frontend is built into the binary, so you do not need any files on disk.
-Start the server:
-
-```sh
-chartplotter serve --port 8080
-```
-
-Open `http://127.0.0.1:8080` in your browser. The chart appears.
-
-Switch between Day, Dusk, and Night in the viewer. The map restyles right away
-because the engine stores color names, not fixed colors.
-
-The server writes everything it bakes to your XDG cache directory
-(`~/.cache/chartplotter`). It never writes into the binary's embedded assets. To
-develop the frontend, serve the assets from a directory instead with
-`chartplotter serve --assets web`.
-
-## Step 3 (optional): Let the viewer download charts
-
-Instead of baking by hand, you can let the server download and bake regions on
-demand. The NOAA catalog is built into the binary, so just start the server:
+The web frontend is built into the binary, so you need no other files. Start the
+server:
 
 ```sh
 chartplotter serve
 ```
 
-Pick a region in the viewer. The server downloads the cells, bakes them in the
-background, and the chart appears when it finishes. The viewer shows progress
-while it works.
+Open `http://127.0.0.1:8080` in your browser. You see an empty map and a toolbar.
 
-## What you built
+## Step 2: Add charts
 
-- `charts.pmtiles` — a single, offline-ready archive of vector tiles.
-- A running viewer at `http://127.0.0.1:8080`.
+Open the **Chart Library**, pick a source, and choose a region. The server
+downloads the cells and bakes them into tiles in the background.
+
+![The Chart Library, where you pick a source and region](/img/ui/chart-library.png)
+
+- **NOAA** — official U.S. charts, grouped by Coast Guard district.
+- **Inland ENC** — USACE inland waterway charts.
+- **User Charts** — import your own S-57 cells or a NOAA ENC zip.
+
+When the bake finishes, the chart appears on the map. Baking is the
+memory-intensive step and can use several gigabytes of RAM for a large region; on
+a small machine, add one region at a time. See
+[Memory and disk](./installation.md#memory-and-disk).
+
+![A baked NOAA chart of Chesapeake Bay](/img/ui/chart-day.png)
+
+## Step 3: Switch Day, Dusk, and Night
+
+Tap the color-scheme button to cycle **Day → Dusk → Night**. The map restyles at
+once, because the engine stores color names and resolves the palette in the
+browser. You never rebake to change the lighting mode.
+
+![The same chart in the Night palette](/img/ui/palette-night.png)
+
+## Step 4: Adjust the display
+
+Open **Settings** to control what the chart shows: the basemap, the level of
+detail, depth shading, soundings, contours, and more. These settings apply live —
+the viewer reads attributes already baked into the tiles, so there is nothing to
+rebake.
+
+![The Settings panel with display options](/img/ui/settings.png)
+
+## Step 5: Inspect a feature
+
+Tap any feature to open the **pick report**. It lists the feature's attributes —
+restrictions, light characteristics, depths, source dates, and any attached text.
+
+![A pick report for a charted feature](/img/ui/pick-report.png)
 
 ## Where to go next
 
-- Look up every flag in the [CLI Reference](./cli.md).
-- See how a cell becomes tiles in [Architecture](./architecture.md).
+- Learn how a cell becomes tiles in [Architecture](./architecture.md).
+- See the exact tile layers and fields in the [Tile Schema](./tile-schema.md).
+- Look up the commands in the [CLI Reference](./cli.md) if you want to bake
+  archives from a script.

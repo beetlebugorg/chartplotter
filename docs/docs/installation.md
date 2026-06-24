@@ -54,8 +54,25 @@ bin/chartplotter version
 ## Requirements
 
 - **Go 1.26 or newer** to build from source or use `go install`.
-- Nothing extra to run a pre-built binary. The S-52 presentation library is built
-  into the program.
+- Nothing extra to run a pre-built binary. The S-101 catalogue is built into the
+  program.
+
+## Memory and disk
+
+Baking tiles is the heavy step. It is memory-intensive: a single large cell holds
+all of its geometry in memory while it builds tiles, so a bake can use **several
+gigabytes of RAM**. Memory scales with the size and number of cells you bake at
+once, and baking many regions in parallel multiplies it. If you run on a small
+machine, such as a Raspberry Pi, bake one region at a time.
+
+Once the tiles are built, the cost drops sharply. Serving charts streams
+pre-baked tiles from disk, so a running `chartplotter serve` uses only **modest
+RAM** — well within a small machine's budget. Plan your memory for the bake, not
+for everyday use.
+
+Baked tiles live in your cache directory (`~/.cache/chartplotter`). A region is a
+single `.pmtiles` archive; size depends on the area and detail, from a few
+megabytes for one harbor to gigabytes for a whole district.
 
 ## Next steps
 

@@ -10,26 +10,28 @@ sidebar_position: 1
 **chartplotter** is a marine chart engine written in Go. It turns official NOAA
 nautical charts into fast, offline map tiles that you can view in a web browser.
 
-It reads **S-57** electronic navigational chart (ENC) cells, applies the
-**S-52** display rules that govern how nautical charts look, and writes the
-result to a single **PMTiles** archive of vector tiles. A small web component
-built on [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/) draws the
-chart.
+![A chartplotter chart of Chesapeake Bay](/img/ui/chart-day.png)
+
+It reads **S-57** electronic navigational chart (ENC) cells, draws them with the
+**S-101 Portrayal Catalogue** — the modern IHO standard for how charts look — and
+writes the result to a single **PMTiles** archive of vector tiles. A small web
+component built on [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/)
+draws the chart.
 
 ## What it does
 
-- **Bakes charts into tiles.** Give it one or more S-57 cells. It produces a
+- **Turns charts into tiles.** Give it one or more S-57 cells. It produces a
   `.pmtiles` archive you can serve or copy to another machine.
-- **Works offline.** Once you bake a region, you do not need a tile server or an
-  internet connection to view it.
-- **Switches Day, Dusk, and Night instantly.** The engine stores colors as S-52
+- **Works offline.** Once you generate a region, you do not need a tile server or
+  an internet connection to view it.
+- **Switches Day, Dusk, and Night instantly.** The engine stores colors as S-101
   color *names*, not fixed RGB values. The browser looks up the right palette and
-  restyles the map. You never re-bake to change the lighting mode.
+  restyles the map. You never regenerate the tiles to change the lighting mode.
 - **Applies chart settings in the browser.** Depth shading, soundings, depth
   contours, and danger highlights all come from data baked into the tiles. You
-  bake once and adjust these settings live.
-- **Ships as one binary.** The S-52 presentation library is built into the
-  program. You do not install extra data files.
+  generate the tiles once and adjust these settings live.
+- **Ships as one binary.** The S-101 catalogue is built into the program. You do
+  not install extra data files.
 
 ## Who it is for
 
@@ -54,6 +56,6 @@ Use chartplotter if you want to:
 | --- | --- |
 | **S-57** | The international file format for electronic navigational charts. NOAA distributes U.S. charts as S-57 cells. |
 | **ENC cell** | One S-57 chart file, named like `US4MD81M.000`. |
-| **S-52** | The international standard that defines how to draw an ENC: colors, symbols, and line styles. |
+| **S-101** | The IHO standard that defines how to draw an ENC: colors, symbols, and line styles. Its Portrayal Catalogue holds those rules. |
 | **MVT** | Mapbox Vector Tile. A compact binary format for map data. |
 | **PMTiles** | A single-file archive that holds many vector tiles. You can serve it with simple byte-range requests. |
