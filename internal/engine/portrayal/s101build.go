@@ -81,6 +81,7 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 	defer eng.Close()
 
 	depthIdx := BuildDepthIndex(features) // underlying DEPARE/DRGARE for danger depths
+	topmarkIdx := buildTopmarkIndex(features)
 	batch := make([]s101.Feature, 0, len(features))
 	for _, f := range features {
 		g := f.Geometry()
@@ -88,6 +89,12 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 		// group other features and carry no geometry, so there's nothing to
 		// portray and the rule would error on the missing primitive.
 		if len(g.Coordinates) == 0 && len(g.Rings) == 0 {
+			continue
+		}
+		// TOPMAR is folded into its co-located buoy/beacon as the topmark complex
+		// attribute (below); the standalone feature has no S-101 class, so skip it
+		// rather than portray it as a magenta unknown mark.
+		if f.ObjectClass() == "TOPMAR" {
 			continue
 		}
 		prim := primitiveName(g.Type)
@@ -106,6 +113,12 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 				prim = "MultiPoint"
 			}
 		}
+		var topmark map[string]string
+		if isTopmarkParent(f.ObjectClass()) {
+			if key, ok := pointLocKey(g); ok {
+				topmark = topmarkIdx[key]
+			}
+		}
 		batch = append(batch, s101.Feature{
 			ID:          strconv.FormatInt(f.ID(), 10),
 			ObjectClass: f.ObjectClass(),
@@ -113,6 +126,7 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 			Attributes:  stringAttrs(f.Attributes()),
 			Derived:     DerivedAttrs(f, depthIdx),
 			Points:      points,
+			Topmark:     topmark,
 		})
 	}
 	streams, err := eng.Portray(batch)

@@ -364,3 +364,33 @@ func TestS101BuildSectorLight(t *testing.T) {
 		t.Errorf("radius = %v, want 9 NM", sec.Sector.RadiusNM)
 	}
 }
+
+// TestS101BuildTopmark proves a co-located S-57 TOPMAR is folded into its parent
+// buoy as the S-101 topmark complex attribute, so the buoy's TOPMAR02 CSP emits
+// a topmark symbol (TMARDEF2 here: floating, no specific shape match yet).
+func TestS101BuildTopmark(t *testing.T) {
+	b := s101Builder(t)
+
+	at := s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}}
+	buoy := s57.NewFeature(1, "BOYLAT", at, map[string]interface{}{"BOYSHP": 2, "COLOUR": "3"})
+	top := s57.NewFeature(2, "TOPMAR", at, map[string]interface{}{"TOPSHP": 1, "COLOUR": "3"})
+
+	m, err := b.BuildBatch([]*s57.Feature{&buoy, &top})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The standalone TOPMAR is suppressed (folded into the parent).
+	if len(m[2].Primitives) != 0 {
+		t.Errorf("standalone TOPMAR should be suppressed, got %#v", m[2].Primitives)
+	}
+	// The buoy now carries a topmark symbol (TOPMAR02 → a TOPMARxx/TMARDEFx call).
+	var topSym bool
+	for _, p := range m[1].Primitives {
+		if sc, ok := p.(SymbolCall); ok && (strings.HasPrefix(sc.SymbolName, "TOPMAR") || strings.HasPrefix(sc.SymbolName, "TMARDEF")) {
+			topSym = true
+		}
+	}
+	if !topSym {
+		t.Errorf("buoy should emit a topmark symbol; primitives=%#v", m[1].Primitives)
+	}
+}

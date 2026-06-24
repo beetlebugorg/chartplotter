@@ -83,6 +83,12 @@ func TestS101Audit(t *testing.T) {
 			if len(g.Coordinates) == 0 && len(g.Rings) == 0 {
 				continue
 			}
+			// TOPMAR is folded into its co-located buoy/beacon by S101Builder (the
+			// real bake path); skip it here too so this lower-level harness doesn't
+			// report it as a false "unmapped" gap.
+			if f.ObjectClass() == "TOPMAR" {
+				continue
+			}
 			id := strconv.Itoa(i)
 			idClass[id] = f.ObjectClass()
 			primitive := prim(g.Type)

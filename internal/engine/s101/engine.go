@@ -35,6 +35,12 @@ type Feature struct {
 	// primitive (SOUNDG): the rule (Sounding→SOUNDG03) iterates them, reading each
 	// point's X/Y and ScaledZ (depth). Empty for non-multipoint features.
 	Points [][3]float64
+	// Topmark carries a co-located S-57 TOPMAR's data ("shape" from TOPSHP,
+	// "colour" from COLOUR) for a buoy/beacon. In S-101 the topmark is a complex
+	// attribute on the parent, not a separate feature, so the baker folds the
+	// co-located TOPMAR in here and the bridge synthesizes the topmark complex
+	// attribute the buoy/beacon rules' TOPMAR02 CSP reads. Empty otherwise.
+	Topmark map[string]string
 }
 
 // contextParameters is the full S-101 mariner-setting set the rules read
@@ -222,7 +228,7 @@ func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 			code:      code,
 			primitive: f.Primitive,
 			points:    f.Points,
-			root:      e.buildRoot(f.ObjectClass, f.Attributes, f.Derived, name),
+			root:      e.buildRoot(f.ObjectClass, f.Attributes, f.Derived, name, f.Topmark),
 		}
 		e.adapted[f.ID] = a
 		e.order = append(e.order, f.ID)

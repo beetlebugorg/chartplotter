@@ -72,7 +72,7 @@ func (n *cnode) resolve(path string) *cnode {
 // attribute (translated to its S-101 code, list values split into array
 // entries), the derived attributes, plus the complex attributes the rules read
 // but S-57 stores flat.
-func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name string) *cnode {
+func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name string, topmark map[string]string) *cnode {
 	root := newCNode()
 	for acr, val := range s57 {
 		if code, ok := e.cat.AttrCodeForS57(acr); ok {
@@ -116,6 +116,19 @@ func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name
 		o := newCNode()
 		o.addSimple("orientationValue", v)
 		root.addChild("orientation", o)
+	}
+
+	// Topmark (buoys/beacons): a co-located S-57 TOPMAR feature folded in by the
+	// baker → the S-101 topmark complex attribute the TOPMAR02 CSP reads.
+	if len(topmark) > 0 {
+		tm := newCNode()
+		tm.addSimple("topmarkDaymarkShape", topmark["shape"])
+		if c := topmark["colour"]; c != "" {
+			tm.simple["colour"] = e.splitValue("colour", c)
+		}
+		if len(tm.simple) > 0 {
+			root.addChild("topmark", tm)
+		}
 	}
 
 	// Light sectors / directional character (LIGHTS routed to LightSectored).
