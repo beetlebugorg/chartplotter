@@ -9,6 +9,7 @@ const sidebars = {
     'cli',
     'architecture',
     'tile-schema',
+    'limitations',
   ],
 };
 
