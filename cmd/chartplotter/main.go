@@ -9,12 +9,12 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 
 	"github.com/alecthomas/kong"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
+	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -22,7 +22,7 @@ var version = "dev"
 
 type cli struct {
 	Version     versionCmd     `cmd:"" help:"Print version and embedded-asset info."`
-	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-52 client assets (colortables.json, ...) into a directory."`
+	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-101 client assets (colortables.json, ...) into a directory."`
 	CatalogJSON catalogJSONCmd `cmd:"" name:"catalog-json" help:"Distil NOAA ENCProdCat.xml into a compact catalog.json."`
 	Bake        bakeCmd        `cmd:"" name:"bake" help:"Bake S-57 ENC cells (.zip/.000/dir) into a PMTiles archive for a prebaked deployment."`
 	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static + wasm) + the NOAA cell proxy."`
@@ -31,7 +31,7 @@ type cli struct {
 
 type emitAssetsCmd struct {
 	Dir  string `arg:"" type:"path" help:"Output directory."`
-	S101 string `name:"s101" type:"existingdir" help:"Emit from an S-101 PortrayalCatalog directory instead of the embedded S-52 PresLib (transitional, until the catalogue is embedded)."`
+	S101 string `name:"s101" type:"existingdir" help:"Emit from an external S-101 PortrayalCatalog directory instead of the build-time embedded catalogue."`
 	CSS  string `name:"css" default:"daySvgStyle.css" help:"S-101 palette stylesheet (under Symbols/)."`
 }
 
@@ -40,13 +40,16 @@ func (c emitAssetsCmd) Run() error {
 		files []string
 		err   error
 	)
-	if c.S101 != "" {
+	switch {
+	case c.S101 != "":
 		files, err = assets.EmitS101(c.S101, c.CSS, c.Dir)
-	} else {
-		var lib *s52.Library
-		if lib, err = s52.LoadLibraryFromBytes(preslib.DAI); err == nil {
-			files, err = assets.Emit(lib, c.Dir)
+	case s101catalog.Available():
+		var fsys fs.FS
+		if fsys, err = s101catalog.PortrayalFS(); err == nil {
+			files, err = assets.EmitS101FS(fsys, c.CSS, c.Dir)
 		}
+	default:
+		return fmt.Errorf("no S-101 catalogue (build with `make` or pass --s101)")
 	}
 	if err != nil {
 		return err
@@ -61,7 +64,7 @@ type versionCmd struct{}
 
 func (versionCmd) Run() error {
 	fmt.Printf("chartplotter %s\n", version)
-	fmt.Printf("embedded S-52 PresLib DAI: %d bytes\n", len(preslib.DAI))
+	fmt.Printf("embedded S-101 catalogue: %v\n", s101catalog.Available())
 	return nil
 }
 

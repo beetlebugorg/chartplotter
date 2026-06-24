@@ -1,3 +1,7 @@
+// Package assets generates the client-side asset files from the S-101 Portrayal
+// Catalogue: colortables.json (token -> hex per scheme), linestyles.json (dash
+// data), and the sprite/pattern PNG atlases. Colour is the only place RGB
+// appears; everything in the tiles stays a token.
 package assets
 
 import (

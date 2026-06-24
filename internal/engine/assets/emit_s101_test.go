@@ -5,9 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
 func TestEmitS101(t *testing.T) {
@@ -55,29 +52,23 @@ func TestEmitS101(t *testing.T) {
 		t.Errorf("ACHARE51 looks wrong: %+v", ach)
 	}
 
-	// The S-101 colour tables must match what the S-52 library emits (the
-	// colours are byte-identical — see cmd/s101-color-diff).
+	// The S-101 colour tables carry a populated Day/Dusk/Night palette with
+	// well-formed #rrggbb hex (colorTablesJSONFromProfile over the colour
+	// profile). DEPDW (deep-water fill) is a representative always-present token.
 	s101CT := loadColorTables(t, filepath.Join(dir, "colortables.json"))
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s52Bytes, err := ColorTablesJSON(lib)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var s52CT map[string]map[string]string
-	if err := json.Unmarshal(s52Bytes, &s52CT); err != nil {
-		t.Fatal(err)
-	}
 	for _, scheme := range []string{"day", "dusk", "night"} {
-		if len(s101CT[scheme]) != len(s52CT[scheme]) {
-			t.Errorf("%s: %d tokens vs S-52 %d", scheme, len(s101CT[scheme]), len(s52CT[scheme]))
+		pal := s101CT[scheme]
+		if len(pal) == 0 {
+			t.Errorf("%s: empty palette", scheme)
+			continue
 		}
-		for tok, hex := range s52CT[scheme] {
-			if s101CT[scheme][tok] != hex {
-				t.Errorf("%s/%s: S-101 %q vs S-52 %q", scheme, tok, s101CT[scheme][tok], hex)
+		for tok, hex := range pal {
+			if len(hex) != 7 || hex[0] != '#' {
+				t.Errorf("%s/%s: malformed hex %q", scheme, tok, hex)
 			}
+		}
+		if _, ok := pal["DEPDW"]; !ok {
+			t.Errorf("%s: DEPDW token missing", scheme)
 		}
 	}
 }

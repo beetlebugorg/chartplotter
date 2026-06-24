@@ -5,17 +5,14 @@ import (
 	"fmt"
 	"image"
 	"image/png"
-	"math"
 	"sort"
-
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
-// Sprite / pattern atlas exporter: every PresLib symbol
-// (and pattern tile) is run through the HP-GL interpreter, rasterised with AA,
-// shelf-packed into one 512-px-wide RGBA atlas, and described by JSON the
-// MapLibre client references as Icon sub-rects. Pen colours resolve to the Day
-// table (the only place RGB is baked into the artwork).
+// Sprite / pattern atlas packer + encoder: already-rasterised cells are
+// shelf-packed into one RGBA atlas and described by JSON the MapLibre client
+// references as Icon sub-rects. The S-101 sprite/pattern builders
+// (sprites_s101.go, patterns_s101.go) feed this; colour is the only place RGB
+// is baked into the artwork.
 
 // cell is one packed atlas cell.
 type cell struct {
@@ -29,149 +26,6 @@ type atlas struct {
 	rgba          []byte
 	cells         map[string]cell
 	skipped       int
-}
-
-// dayColors builds token -> RGB from the Day colour table, using the same
-// rounding as colortables.json (ConvertToRGB then *255+0.5).
-func dayColors(lib *s52.Library) (map[string]rcolor, error) {
-	cols, err := lib.GetColorsByScheme(s52.ColorSchemeDay)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]rcolor, len(cols))
-	to8 := func(v float64) uint8 {
-		n := int(v*255.0 + 0.5)
-		if n < 0 {
-			n = 0
-		}
-		if n > 255 {
-			n = 255
-		}
-		return uint8(n)
-	}
-	for tok, c := range cols {
-		r, g, b := c.ConvertToRGB()
-		out[tok] = rcolor{to8(r), to8(g), to8(b)}
-	}
-	return out, nil
-}
-
-// buildSymbolAtlas rasterises and packs every PresLib symbol.
-func buildSymbolAtlas(lib *s52.Library) (atlas, error) {
-	day, err := dayColors(lib)
-	if err != nil {
-		return atlas{}, err
-	}
-	scale := float32(pxPerUnit * supersample)
-	var rasters []raster
-	skipped := 0
-	for _, id := range lib.ListSymbols() {
-		sym, err := lib.GetSymbol(id)
-		if err != nil {
-			continue
-		}
-		roles := s52.ParseSCRF(sym.ColorRef)
-		cmds := renderOps(sym.VectorCommands, sym.PivotPoint.X, sym.PivotPoint.Y, roles, day, scale)
-		if r, ok := cellFromCommands(id, cmds, &skipped); ok {
-			rasters = append(rasters, r)
-		}
-	}
-	return packInto(rasters, skipped, atlasWidth), nil
-}
-
-// buildPatternAtlas rasterises and packs every PresLib pattern into a seamless
-// tile sized to its spacing (×2 rows when staggered), with the art stamped at
-// its 8 neighbours so it tiles without a seam.
-func buildPatternAtlas(lib *s52.Library) (atlas, error) {
-	day, err := dayColors(lib)
-	if err != nil {
-		return atlas{}, err
-	}
-	scale := float32(pxPerUnit * supersample)
-	var rasters []raster
-	skipped := 0
-	for _, id := range lib.ListPatterns() {
-		pat, err := lib.GetPattern(id)
-		if err != nil {
-			continue
-		}
-		if r, ok := rasterizePattern(pat, day, scale, &skipped); ok {
-			rasters = append(rasters, r)
-		}
-	}
-	return packInto(rasters, skipped, atlasWidth), nil
-}
-
-// rasterizePattern renders one Pattern into a seamless tile. Pattern
-// VectorCommands are already normalised so the bbox upper-left is at the origin;
-// the registration pivot is therefore the bbox centre (w/2, h/2).
-func rasterizePattern(pat *s52.Pattern, day map[string]rcolor, scale float32, skipped *int) (raster, bool) {
-	roles := pat.Colors.Roles
-	// Pivot = bbox centre, in the normalised coordinate space.
-	pivotX := float64(pat.TileWidth / 2)
-	pivotY := float64(pat.TileHeight / 2)
-	cmds := renderOps(pat.VectorCommands, pivotX, pivotY, roles, day, scale)
-	if len(cmds) == 0 {
-		return raster{}, false
-	}
-
-	// S-52 §11.5.3: PAMI (SpacingX/Y) is the minimum distance between symbol
-	// COVERS (the gap between adjacent bounding boxes), NOT the centre-to-centre
-	// pitch — confirmed by patterns like NODATA03 whose PAMI (1 mm) is far
-	// smaller than the symbol (6 mm), impossible if PAMI were the pitch. So the
-	// tile period is the cover plus the gap. The old max(PAMI, cover) under-spaced
-	// every pattern (≈45% too dense for the M_QUAL/CATZOC quality overlays, whose
-	// 17 mm symbol exceeds their 14 mm PAMI, making them overlap).
-	twUnits := pat.TileWidth + pat.SpacingX
-	thUnits := pat.TileHeight + pat.SpacingY
-	if twUnits == 0 || thUnits == 0 {
-		return raster{}, false
-	}
-
-	twSS := roundUp(maxU32(1, uint32(math.Ceil(float64(float32(twUnits)*scale)))), supersample)
-	thOne := roundUp(maxU32(1, uint32(math.Ceil(float64(float32(thUnits)*scale)))), supersample)
-	rows := uint32(1)
-	if patStaggered(pat) {
-		rows = 2
-	}
-	thSS := thOne * rows
-	if twSS/supersample > maxCellSide || thSS/supersample > maxCellSide {
-		*skipped++
-		return raster{}, false
-	}
-
-	buf := make([]byte, int(twSS)*int(thSS)*4)
-
-	// Grid positions (ss px) within one tile; staggered adds a half-offset row.
-	fwSS := float32(twSS)
-	fh1 := float32(thOne)
-	positions := [][2]float32{{fwSS / 2, fh1 / 2}}
-	if patStaggered(pat) {
-		positions = append(positions, [2]float32{fwSS, fh1 * 1.5})
-	}
-
-	// Stamp each position plus its 8 neighbours (full tile period) so
-	// edge-crossing art wraps in — a clean repeat.
-	pw := float32(twSS)
-	ph := float32(thSS)
-	for _, pos := range positions {
-		for dj := float32(-1); dj <= 1; dj++ {
-			for di := float32(-1); di <= 1; di++ {
-				rasterizeCommands(buf, twSS, thSS, cmds, pos[0]+di*pw, pos[1]+dj*ph)
-			}
-		}
-	}
-
-	fw := twSS / supersample
-	fh := thSS / supersample
-	final := make([]byte, int(fw)*int(fh)*4)
-	downsample(final, buf, twSS, thSS)
-	return raster{name: pat.ID, w: fw, h: fh, pivotX: 0, pivotY: 0, rgba: final}, true
-}
-
-// patStaggered reports whether the pattern tiles on a staggered grid (PATP STG).
-func patStaggered(pat *s52.Pattern) bool {
-	return len(pat.PatternType) >= 3 && pat.PatternType[:3] == "STG"
 }
 
 // packInto shelf-packs already-rasterised cells (tallest-first) into one atlas
@@ -244,41 +98,8 @@ func (a atlas) encodePNG() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// SpriteAtlas builds the symbol atlas and returns its JSON + PNG bytes.
-func SpriteAtlas(lib *s52.Library) (jsonBytes, pngBytes []byte, err error) {
-	a, err := buildSymbolAtlas(lib)
-	if err != nil {
-		return nil, nil, err
-	}
-	pngBytes, err = a.encodePNG()
-	if err != nil {
-		return nil, nil, err
-	}
-	return a.toJSON(), pngBytes, nil
-}
-
-// PatternAtlas builds the pattern atlas and returns its JSON + PNG bytes.
-func PatternAtlas(lib *s52.Library) (jsonBytes, pngBytes []byte, err error) {
-	a, err := buildPatternAtlas(lib)
-	if err != nil {
-		return nil, nil, err
-	}
-	pngBytes, err = a.encodePNG()
-	if err != nil {
-		return nil, nil, err
-	}
-	return a.toJSON(), pngBytes, nil
-}
-
 // fmtNum formats a float without trailing zeros (used for px_per_unit).
 func fmtNum(v float64) string {
 	s := fmt.Sprintf("%g", v)
 	return s
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
