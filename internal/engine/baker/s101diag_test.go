@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
 	"github.com/beetlebugorg/chartplotter/internal/engine/s101"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
@@ -48,17 +49,40 @@ func TestS101Diag(t *testing.T) {
 	}
 
 	features := chart.Features()
+	ptrs := make([]*s57.Feature, len(features))
+	for i := range features {
+		ptrs[i] = &features[i]
+	}
+	depthIdx := portrayal.BuildDepthIndex(ptrs) // mirrors S101Builder (danger depths)
 	var batch []s101.Feature
 	idClass := map[string]string{}
 	for i := range features {
 		f := &features[i]
+		g := f.Geometry()
+		if len(g.Coordinates) == 0 && len(g.Rings) == 0 {
+			continue // non-spatial collection object (C_AGGR/C_ASSO) — mirrors S101Builder
+		}
 		id := strconv.Itoa(i)
 		idClass[id] = f.ObjectClass()
+		primitive := prim(f.Geometry().Type)
+		var points [][3]float64
+		if f.ObjectClass() == "SOUNDG" { // multipoint bridge (mirrors S101Builder)
+			primitive = "MultiPoint"
+			for _, c := range f.Geometry().Coordinates {
+				if len(c) >= 3 {
+					points = append(points, [3]float64{c[0], c[1], c[2]})
+				} else if len(c) == 2 {
+					points = append(points, [3]float64{c[0], c[1], 0})
+				}
+			}
+		}
 		batch = append(batch, s101.Feature{
 			ID:          id,
 			ObjectClass: f.ObjectClass(),
-			Primitive:   prim(f.Geometry().Type),
+			Primitive:   primitive,
 			Attributes:  strAttrs(f.Attributes()),
+			Derived:     portrayal.DerivedAttrs(f, depthIdx),
+			Points:      points,
 		})
 	}
 	res, err := eng.Portray(batch)

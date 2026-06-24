@@ -73,8 +73,19 @@ type DrawCommand struct {
 	Priority     int
 	DisplayPlane string // "UnderRadar" | "OverRadar" (empty if unset)
 	Offset       [2]float64
-	Rotation     float64
-	HasRotation  bool
+	// Anchor / HasAnchor carry an explicit draw location from an AugmentedPoint
+	// (GeographicCRS lon,lat) — used for SOUNDG, whose one feature emits a symbol
+	// per sounding at its own point. When HasAnchor is false the draw attaches to
+	// the feature geometry (the usual case).
+	Anchor      [2]float64 // {lon, lat}
+	HasAnchor   bool
+	Rotation    float64
+	HasRotation bool
+	// RotationTrueNorth is set when the rotation is in GeographicCRS (referenced
+	// to true north, so the symbol turns WITH the chart — e.g. a directional
+	// light's orientation); false means PortrayalCRS (screen-referenced, e.g. the
+	// 135° light flare), which stays upright to the screen.
+	RotationTrueNorth bool
 
 	LinePlacement string      // raw, e.g. "Relative,0.5"
 	SimpleLine    *SimpleLine // set when Op==OpLine and Reference=="_simple_"
@@ -99,8 +110,11 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		priority     int
 		displayPlane string
 		offset       [2]float64
+		anchor       [2]float64
+		hasAnchor    bool
 		rotation     float64
 		hasRotation  bool
+		rotTrueNorth bool
 		linePlace    string
 		simple       *SimpleLine
 		fontColor    string
@@ -119,8 +133,9 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 	emit := func(op DrawOp, ref, raw string) {
 		c := DrawCommand{
 			Op: op, Reference: ref, ViewingGroup: viewingGroup, Priority: priority,
-			DisplayPlane: displayPlane, Offset: offset, Rotation: rotation,
-			HasRotation: hasRotation, LinePlacement: linePlace, Raw: raw,
+			DisplayPlane: displayPlane, Offset: offset, Anchor: anchor, HasAnchor: hasAnchor,
+			Rotation: rotation, HasRotation: hasRotation, RotationTrueNorth: rotTrueNorth,
+			LinePlacement: linePlace, Raw: raw,
 		}
 		if op == OpLine && ref == "_simple_" {
 			c.SimpleLine = simple
@@ -143,8 +158,24 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			displayPlane = arg(in, 0)
 		case "LocalOffset":
 			offset = [2]float64{atof(arg(in, 0)), atof(arg(in, 1))}
+		case "AugmentedPoint":
+			// "AugmentedPoint:<CRS>,<x>,<y>" places subsequent point draws at the
+			// geographic point (x=lon, y=lat) — SOUNDG emits one per sounding.
+			anchor, hasAnchor = [2]float64{atof(arg(in, 1)), atof(arg(in, 2))}, true
+		case "ClearGeometry":
+			// End of an augmented-geometry run: drop the explicit anchor/offset so
+			// later draws re-attach to the feature geometry.
+			hasAnchor, anchor, offset = false, [2]float64{}, [2]float64{}
 		case "Rotation":
-			rotation, hasRotation = atof(arg(in, 0)), true
+			// S-101 form: "Rotation:<CRS>,<angle>" where CRS is GeographicCRS
+			// (true-north, rotates with the chart) or PortrayalCRS (screen). A
+			// bare "Rotation:<angle>" (no CRS) is tolerated as screen-referenced.
+			crs, ang := arg(in, 0), arg(in, 1)
+			if ang == "" {
+				crs, ang = "", crs
+			}
+			rotation, hasRotation = atof(ang), true
+			rotTrueNorth = crs == "GeographicCRS"
 		case "LinePlacement":
 			linePlace = strings.Join(in.Args, ",")
 		case "Dash":
@@ -185,7 +216,7 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			emit(OpNull, "", in.Raw)
 
 		// recognized-but-not-yet-lowered draws → gap
-		case "AugmentedRay", "AugmentedPath", "AugmentedPoint", "ArcByRadius", "CoverageFill":
+		case "AugmentedRay", "AugmentedPath", "ArcByRadius", "CoverageFill":
 			emit(OpOther, in.Kind, in.Raw)
 
 		default:

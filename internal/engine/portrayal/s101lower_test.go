@@ -18,15 +18,13 @@ func lowerStream(t *testing.T, stream string, geom S101Geometry, cat *catalog.Ca
 	}
 	var out []Primitive
 	for _, c := range cmds {
-		if p, ok := LowerS101(c, geom, cat); ok {
-			out = append(out, p)
-		}
+		out = append(out, LowerS101(c, geom, cat)...)
 	}
 	return out
 }
 
 func TestLowerRapidsCurveToStrokeLine(t *testing.T) {
-	geom := S101Geometry{Points: []geo.LatLon{{}, {}}}
+	geom := S101Geometry{Lines: [][]geo.LatLon{{{}, {}}}}
 	stream := "ViewingGroup:32050;DrawingPriority:9;DisplayPlane:UnderRadar;LineStyle:_simple_,,0.96,CHGRD;LineInstruction:_simple_"
 	prims := lowerStream(t, stream, geom, nil)
 	if len(prims) != 1 {
@@ -82,7 +80,7 @@ func TestLowerComplexLineResolvesPenColor(t *testing.T) {
 	cat := &catalog.Catalog{LineStyles: map[string]*catalog.LineStyle{
 		"ACHARE51": {ID: "ACHARE51", PenColor: "CHMGD"},
 	}}
-	geom := S101Geometry{Points: []geo.LatLon{{}, {}}}
+	geom := S101Geometry{Lines: [][]geo.LatLon{{{}, {}}}}
 	lp, ok := lowerStream(t, "LineInstruction:ACHARE51", geom, cat)[0].(LinePattern)
 	if !ok {
 		t.Fatalf("want LinePattern")
@@ -98,6 +96,71 @@ func TestLowerAreaFillReference(t *testing.T) {
 	pf, ok := prims[0].(PatternFill)
 	if !ok || pf.PatternName != "DRGARE01" || len(pf.Rings) == 0 {
 		t.Fatalf("want PatternFill DRGARE01 on rings, got %#v", prims)
+	}
+}
+
+// TestLowerAreaBoundaryLine: a boundary line strokes EACH drawable run, not
+// empty geometry. The regression: an area feature has no Lines unless the
+// builder fills them from its (masked) boundary; lowering onto empty geometry
+// yielded a NaN/Inf bbox the baker dropped ("skipping prim with implausible
+// bbox"). Here two drawable runs ⇒ two LinePatterns.
+func TestLowerAreaBoundaryLine(t *testing.T) {
+	run1 := []geo.LatLon{{Lat: 0, Lon: 0}, {Lat: 0, Lon: 1}, {Lat: 1, Lon: 1}}
+	run2 := []geo.LatLon{{Lat: 0.2, Lon: 0.2}, {Lat: 0.2, Lon: 0.4}, {Lat: 0.4, Lon: 0.4}}
+	geom := S101Geometry{Lines: [][]geo.LatLon{run1, run2}}
+	prims := lowerStream(t, "LineInstruction:CTNARE51", geom, nil)
+	if len(prims) != 2 {
+		t.Fatalf("want one line per run (2), got %d: %#v", len(prims), prims)
+	}
+	for i, p := range prims {
+		lp, ok := p.(LinePattern)
+		if !ok {
+			t.Fatalf("run %d: want LinePattern, got %T", i, p)
+		}
+		if lp.LinestyleName != "CTNARE51" || len(lp.Points) < 2 {
+			t.Errorf("run %d lowered onto empty/wrong geometry: %+v", i, lp)
+		}
+	}
+}
+
+// TestLowerLineNoGeometry: a line draw with no drawable runs lowers to nothing
+// rather than a degenerate primitive.
+func TestLowerLineNoGeometry(t *testing.T) {
+	if prims := lowerStream(t, "LineInstruction:CTNARE51", S101Geometry{}, nil); len(prims) != 0 {
+		t.Fatalf("want no primitives for empty geometry, got %d", len(prims))
+	}
+}
+
+// TestStrokeRunsForMasking: the builder strokes the MASKED boundary/parts when
+// the parser computed them (coastline-coincident edges removed), and falls back
+// to the full geometry only when masking wasn't computed. Area fills keep the
+// whole rings either way.
+func TestStrokeRunsForMasking(t *testing.T) {
+	ring := []geo.LatLon{{Lat: 0, Lon: 0}, {Lat: 0, Lon: 1}, {Lat: 1, Lon: 1}, {Lat: 0, Lon: 0}}
+	masked := []geo.LatLon{{Lat: 0, Lon: 0}, {Lat: 0, Lon: 1}} // only the seaward edge
+
+	// boundary computed (non-nil) → use it verbatim, NOT the full ring.
+	area := geom{kind: geomArea, area: [][]geo.LatLon{ring}, boundary: [][]geo.LatLon{masked}}
+	if runs := strokeRunsFor(area); len(runs) != 1 || len(runs[0]) != 2 {
+		t.Errorf("masked area boundary = %#v, want the single 2-pt seaward run", runs)
+	}
+
+	// boundary NOT computed (nil) → fall back to the full rings.
+	areaNoMask := geom{kind: geomArea, area: [][]geo.LatLon{ring}}
+	if runs := strokeRunsFor(areaNoMask); len(runs) != 1 || len(runs[0]) != len(ring) {
+		t.Errorf("unmasked area boundary = %#v, want the full ring", runs)
+	}
+
+	// empty (non-nil) boundary → stroke nothing (fully coastline-coincident).
+	areaAllMasked := geom{kind: geomArea, area: [][]geo.LatLon{ring}, boundary: [][]geo.LatLon{}}
+	if runs := strokeRunsFor(areaAllMasked); len(runs) != 0 {
+		t.Errorf("fully-masked area boundary = %#v, want no runs", runs)
+	}
+
+	// a line feature uses its masked parts when present.
+	line := geom{kind: geomLine, line: ring, lineParts: [][]geo.LatLon{masked}}
+	if runs := strokeRunsFor(line); len(runs) != 1 || len(runs[0]) != 2 {
+		t.Errorf("masked line parts = %#v, want the single 2-pt part", runs)
 	}
 }
 

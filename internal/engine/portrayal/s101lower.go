@@ -23,56 +23,84 @@ const (
 )
 
 // S101Geometry carries the feature geometry a draw command attaches to. The
-// command's Op selects which field is used: Anchor (points), Points (lines),
-// Rings (areas, outer ring first then holes).
+// command's Op selects which field is used: Anchor (point symbols/text), Lines
+// (line strokes), Rings (area fills, outer ring first then holes).
 type S101Geometry struct {
 	Anchor geo.LatLon
-	Points []geo.LatLon
-	Rings  [][]geo.LatLon
+	// Rings are the feature's COMPLETE area rings — area fills (ColorFill/
+	// AreaFill) use these unchanged. Empty for non-area features.
+	Rings [][]geo.LatLon
+	// Lines are the DRAWABLE polylines a line draw strokes, already reduced to
+	// the masked / data-limit parts (S-52 §8.6.2): a line feature's drawable
+	// parts, or — for an area — its drawable boundary (coastline-coincident and
+	// MASK=1/USAG=3 edges removed). One stroke primitive is emitted per run, so a
+	// masked area boundary skips its land-shared edges while the fill stays whole.
+	Lines [][]geo.LatLon
 }
 
-// LowerS101 maps one resolved S-101 draw command onto an engine Primitive,
+// LowerS101 maps one resolved S-101 draw command onto engine Primitives,
 // attaching geometry and resolving line-style references against the catalogue.
-// ok is false for a no-op (Null) or a draw kind not yet lowered (the caller can
-// emit a placeholder).
-func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Catalog) (Primitive, bool) {
+// It returns a slice because an area-boundary line fans into one line primitive
+// per ring (matching the S-52 path); fills/symbols/text are a single primitive.
+// An empty slice means nothing to draw (a no-op, an unlowered draw kind, or a
+// draw whose geometry is missing).
+func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Catalog) []Primitive {
 	switch cmd.Op {
 	case instructions.OpColorFill:
-		return FillPolygon{Rings: geom.Rings, ColorToken: cmd.Reference}, true
+		if len(geom.Rings) == 0 {
+			return nil
+		}
+		return []Primitive{FillPolygon{Rings: geom.Rings, ColorToken: cmd.Reference}}
 
 	case instructions.OpAreaFill:
-		return PatternFill{Rings: geom.Rings, PatternName: cmd.Reference}, true
+		if len(geom.Rings) == 0 {
+			return nil
+		}
+		return []Primitive{PatternFill{Rings: geom.Rings, PatternName: cmd.Reference}}
 
 	case instructions.OpLine:
-		if cmd.Reference == "_simple_" && cmd.SimpleLine != nil {
-			return StrokeLine{
-				Points:     geom.Points,
-				ColorToken: cmd.SimpleLine.Color,
-				WidthPx:    float32(cmd.SimpleLine.Width * pxPerMM),
-				Dash:       dashFor(cmd.SimpleLine.DashLength),
-			}, true
+		out := make([]Primitive, 0, len(geom.Lines))
+		for _, pts := range geom.Lines {
+			if len(pts) < 2 {
+				continue // a degenerate ring/run can't be stroked
+			}
+			if cmd.Reference == "_simple_" && cmd.SimpleLine != nil {
+				out = append(out, StrokeLine{
+					Points:     pts,
+					ColorToken: cmd.SimpleLine.Color,
+					WidthPx:    float32(cmd.SimpleLine.Width * pxPerMM),
+					Dash:       dashFor(cmd.SimpleLine.DashLength),
+				})
+			} else {
+				out = append(out, LinePattern{
+					Points:        pts,
+					LinestyleName: cmd.Reference,
+					ColorToken:    linePenColor(cmd.Reference, cat),
+				})
+			}
 		}
-		return LinePattern{
-			Points:        geom.Points,
-			LinestyleName: cmd.Reference,
-			ColorToken:    linePenColor(cmd.Reference, cat),
-		}, true
+		return out
 
 	case instructions.OpPoint:
-		return SymbolCall{
-			Anchor:         geom.Anchor,
-			SymbolName:     cmd.Reference,
-			RotationDeg:    float32(cmd.Rotation),
-			OffsetXUnits:   float32(cmd.Offset[0] * unitsPerMM),
-			OffsetYUnits:   float32(cmd.Offset[1] * unitsPerMM),
-			Scale:          DefaultPxPerSymbolUnit, // same as the S-52 path; matches the sprite atlas px_per_unit
-			SoundingDepthM: float32(math.NaN()),
-			DangerDepthM:   float32(math.NaN()),
-		}, true
+		anchor := geom.Anchor
+		if cmd.HasAnchor { // an AugmentedPoint draw (e.g. one SOUNDG sounding)
+			anchor = geo.LatLon{Lat: cmd.Anchor[1], Lon: cmd.Anchor[0]}
+		}
+		return []Primitive{SymbolCall{
+			Anchor:            anchor,
+			SymbolName:        cmd.Reference,
+			RotationDeg:       float32(cmd.Rotation),
+			RotationTrueNorth: cmd.RotationTrueNorth,
+			OffsetXUnits:      float32(cmd.Offset[0] * unitsPerMM),
+			OffsetYUnits:      float32(cmd.Offset[1] * unitsPerMM),
+			Scale:             DefaultPxPerSymbolUnit, // same as the S-52 path; matches the sprite atlas px_per_unit
+			SoundingDepthM:    float32(math.NaN()),
+			DangerDepthM:      float32(math.NaN()),
+		}}
 
 	case instructions.OpText:
 		if cmd.Reference == "" {
-			return nil, false
+			return nil
 		}
 		fontPx := float32(cmd.FontSizePx)
 		if fontPx <= 0 {
@@ -86,7 +114,7 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 		if color == "" {
 			color = "CHBLK"
 		}
-		return DrawText{
+		return []Primitive{DrawText{
 			Anchor:     geom.Anchor,
 			Text:       cmd.Reference,
 			FontSizePx: fontPx,
@@ -95,10 +123,10 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 			HAlign:     hAlign(cmd.TextAlignH),
 			VAlign:     vAlign(cmd.TextAlignV),
 			OffsetYPx:  float32(cmd.TextVOffset),
-		}, true
+		}}
 
 	default: // OpNull, OpOther
-		return nil, false
+		return nil
 	}
 }
 

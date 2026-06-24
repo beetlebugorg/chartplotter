@@ -215,9 +215,19 @@ export class ChartCanvas extends HTMLElement {
     this._atlasPpu = (sj._meta && sj._meta.px_per_unit) || this._atlasPpu;
     this._patternPixelRatio = 0.08 / FEATURE_SCALE;
 
+    // crossOrigin MUST be set (before src) on the atlas images: SpriteBuilder
+    // draws them to a <canvas> and calls getImageData() to cut out each symbol /
+    // fill-pattern cell. Without it, if the assets are served cross-origin (a
+    // different host/port than the page) the canvas is TAINTED and Chrome throws a
+    // SecurityError on getImageData — so EVERY symbol build fails (icons vanish)
+    // and EVERY pattern fails to register (MapLibre paints missing fill-patterns
+    // as black boxes). The server sends Access-Control-Allow-Origin:* so anonymous
+    // CORS succeeds for both same- and cross-origin.
     this._spriteImg = new Image();
+    this._spriteImg.crossOrigin = "anonymous";
     this._spriteImg.src = assets + "sprite.png";
     this._patternsImg = new Image();
+    this._patternsImg.crossOrigin = "anonymous";
     this._patternsImg.src = assets + "patterns.png";
     await Promise.all([
       this._spriteImg.decode().catch(() => {}),
@@ -298,6 +308,20 @@ export class ChartCanvas extends HTMLElement {
     this._map = map;
     this.map = map; // public handle
 
+    // Console diagnostics (black-box triage), available as soon as the map exists.
+    // __chartImages() lists every CURRENTLY-registered image + size (live, via the
+    // public listImages/getImage API). __chartGL() prints the GPU limits.
+    window.__chartImages = () => {
+      const rows = (map.listImages() || []).map((id) => {
+        const im = map.getImage(id);
+        const d = (im && (im.data || im)) || {};
+        return { id, size: (d.width || 0) + "x" + (d.height || 0) };
+      }).sort((a, b) => a.id.localeCompare(b.id));
+      console.table(rows);
+      return `${rows.length} images registered`;
+    };
+    window.__chartGL = () => this._logGLDiag();
+
     // Touch gestures: keep pinch-zoom but DROP two-finger rotate (and drag-rotate)
     // so a pinch can't tilt/spin the chart out from under the north-up/course-up/
     // head-up follow modes (setCameraMode/updateFollow). MapLibre's default
@@ -321,7 +345,12 @@ export class ChartCanvas extends HTMLElement {
     map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
     map.on("move", () => this._renderScalebar());
 
+    // Surface MapLibre's own errors (style/source/tile/WebGL) to the console —
+    // otherwise a failed texture upload is silent (renders black).
+    map.on("error", (e) => console.warn("[maplibre error]", (e && e.error && e.error.message) || e));
+
     map.on("styleimagemissing", (e) => {
+      if (window.__chartImgLog) console.log(`[missing] ${e.id}`); // did MapLibre request it?
       // Pattern images are requested under the `pat:` namespace (fill-pattern
       // exprs add the prefix); everything else is a point/sounding symbol.
       if (e.id.startsWith(PAT_PREFIX)) this.registerPattern(e.id.slice(PAT_PREFIX.length));
@@ -334,13 +363,14 @@ export class ChartCanvas extends HTMLElement {
     map.on("idle", () => this._sources._refreshScaminBuckets());
     map.on("load", async () => {
       this._renderScalebar(); // initial draw (the move hook only fires on movement)
-      try {
-        this.registerAllSymbols();
-        this.registerAllPatterns();
-        map.triggerRepaint();
-      } catch (err) {
-        console.warn("[chartplotter] register", err);
-      }
+      // Images are registered LAZILY via the styleimagemissing handler above —
+      // only the symbols/patterns actually referenced by visible tiles enter
+      // MapLibre's icon atlas. Eagerly registering all ~750 (724 symbols + 26
+      // patterns, some 300×600) packed a huge single atlas texture that exceeded
+      // MAX_TEXTURE_SIZE on low-end / software GPUs, so the WHOLE atlas failed to
+      // upload and every symbol/pattern rendered as a black box. Lazy keeps the
+      // atlas to the handful on screen (see _logGLDiag for the live count).
+      this._logGLDiag(); // print GPU limits + image-atlas stats (black-box triage)
       // `pmtiles="<url>"`: render a hosted prebaked archive directly (no
       // baking) — the third ingest route alongside upload + bake-once. With no
       // explicit `center`, frame to the archive's data extent.
@@ -890,6 +920,40 @@ export class ChartCanvas extends HTMLElement {
     if (!imgData || this._map.hasImage(id)) return;
     try { this._map.addImage(id, imgData, { pixelRatio: 1 }); } catch (e) { console.warn("addImage", id, e); }
   }
+  // Black-box triage: dump the GPU texture limit, the renderer, the number of
+  // images packed into MapLibre's icon atlas, and the biggest one — plus any
+  // pending WebGL error. If MAX_TEXTURE_SIZE is small (2048/4096) and the atlas
+  // (or its widest/tallest packed row) approaches it, the atlas upload fails and
+  // every symbol/pattern renders black. Logged once on load and on demand.
+  _logGLDiag() {
+    try {
+      const map = this._map;
+      const gl = map && map.painter && map.painter.context && map.painter.context.gl;
+      if (!gl) { console.warn("[gldiag] no GL context"); return; }
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : "(masked)";
+      const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+      let n = 0, big = "", bw = 0, bh = 0, maxW = 0, maxH = 0;
+      for (const id of map.listImages() || []) {
+        n++;
+        const im = map.getImage(id);
+        const d = (im && (im.data || im)) || {};
+        const w = d.width || 0, h = d.height || 0;
+        maxW = Math.max(maxW, w); maxH = Math.max(maxH, h);
+        if (w * h > bw * bh) { big = id; bw = w; bh = h; }
+      }
+      console.log(
+        `[gldiag] MAX_TEXTURE_SIZE=${maxTex} renderer="${renderer}" | ` +
+        `images=${n} widest=${maxW} tallest=${maxH} biggest=${big}(${bw}x${bh})`
+      );
+      if (maxW > maxTex || maxH > maxTex) {
+        console.error(`[gldiag] an image exceeds MAX_TEXTURE_SIZE (${maxTex}) → it WILL render black`);
+      }
+      const err = gl.getError();
+      if (err) console.warn(`[gldiag] gl.getError()=0x${err.toString(16)} (1281=INVALID_VALUE, e.g. texture too large)`);
+    } catch (e) { console.warn("[gldiag] failed", e); }
+  }
+
   registerImage(id) {
     if (!this._sprites || this._map.hasImage(id)) return;
     let img = null;
@@ -898,6 +962,7 @@ export class ChartCanvas extends HTMLElement {
     try {
       img = this._sprites.imageFor(id);
     } catch (e) { console.warn("registerImage", id, e); }
+    if (window.__chartImgLog) console.log(`[img] symbol ${id} ${img ? img.width + "x" + img.height : "BUILD-FAILED"}`);
     // NEVER leave a referenced icon-image unresolved — MapLibre's symbol
     // renderer can crash on a missing image (the `getx` atlas-lookup crash).
     // A failed/unknown symbol falls back to a blank 1×1 so the layer is inert.
@@ -923,6 +988,7 @@ export class ChartCanvas extends HTMLElement {
     if (!cell || cell.w === undefined) return;
     try { this._map.addImage(id, this._sprites.rawCell(this._patternsImg, cell), { pixelRatio: this._patternPixelRatio }); }
     catch (e) { console.warn("registerPattern", id, e); }
+    if (window.__chartImgLog) console.log(`[img] pattern ${id} ${cell.w}x${cell.h}`);
   }
   registerAllPatterns() {
     if (!this._patternsImg) return;

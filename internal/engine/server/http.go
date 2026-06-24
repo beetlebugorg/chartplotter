@@ -44,7 +44,7 @@ type Server struct {
 	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
 	auxIdx  *auxIndex         // index of companion aux.zips for /api/aux (TXTDSC/PICREP)
 
-	vessel *nmea.Store        // latest NMEA0183 vessel state (fed by nmeaMgr)
+	vessel  *nmea.Store       // latest NMEA0183 vessel state (fed by nmeaMgr)
 	nmeaMgr *nmea.Manager     // live NMEA0183 connections (writes into vessel)
 	conns   *connectionsStore // persisted connection configs (<data>/connections.json)
 	rawHub  *rawHub           // raw-sentence fan-out for the per-connection sniffer
@@ -385,6 +385,18 @@ func setAssetHeaders(w http.ResponseWriter, rel string) {
 	switch strings.ToLower(filepath.Ext(rel)) {
 	case ".html", ".js", ".mjs", ".json", ".wasm":
 		w.Header().Set("Cache-Control", "no-cache")
+	default:
+		// The sprite / pattern atlas PNGs are a matched pair with their .json
+		// metadata (which is no-cache): the JSON holds each cell's x/y/w/h into the
+		// image, so a stale atlas PNG against fresh offsets crops every symbol and
+		// fill-pattern from the WRONG region — patterns vanish or render as black
+		// boxes (worse on Chrome, whose heuristic cache held the old PNG). Keep the
+		// pair in sync by revalidating these too. (Other PNGs — tiles, glyphs,
+		// basemap — are large and cache-busted by ?t=/?g=, so they may cache.)
+		switch strings.ToLower(filepath.Base(rel)) {
+		case "sprite.png", "patterns.png":
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 	}
 }
 

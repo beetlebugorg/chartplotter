@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/s101"
+	"github.com/beetlebugorg/chartplotter/pkg/geo"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/catalog"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
@@ -61,14 +62,40 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 	}
 	defer eng.Close()
 
-	batch := make([]s101.Feature, len(features))
-	for i, f := range features {
-		batch[i] = s101.Feature{
+	depthIdx := BuildDepthIndex(features) // underlying DEPARE/DRGARE for danger depths
+	batch := make([]s101.Feature, 0, len(features))
+	for _, f := range features {
+		g := f.Geometry()
+		// Skip non-spatial collection/relationship objects (C_AGGR, C_ASSO) — they
+		// group other features and carry no geometry, so there's nothing to
+		// portray and the rule would error on the missing primitive.
+		if len(g.Coordinates) == 0 && len(g.Rings) == 0 {
+			continue
+		}
+		prim := primitiveName(g.Type)
+		var points [][3]float64
+		// Point features carry their vertices (lon,lat,depth) so the host can
+		// resolve a REAL point spatial (HostGetSpatial '#P'/'#M'). SOUNDG is a
+		// multipoint (the Sounding rule iterates each point's depth); other point
+		// features are a single point. This is required even when the geometry is
+		// otherwise attached by the Go lowering: a rule that reads feature.Point /
+		// feature.Spatial would otherwise hit the framework's GetSpatial infinite
+		// recursion (it reads self['Spatial'] right after assigning it nil, which
+		// re-fires __index) — the cause of the OBSTRN/WRECKS stack overflows.
+		if f.Geometry().Type == s57.GeometryTypePoint {
+			points = soundingPoints(f.Geometry())
+			if f.ObjectClass() == "SOUNDG" {
+				prim = "MultiPoint"
+			}
+		}
+		batch = append(batch, s101.Feature{
 			ID:          strconv.FormatInt(f.ID(), 10),
 			ObjectClass: f.ObjectClass(),
-			Primitive:   primitiveName(f.Geometry().Type),
+			Primitive:   prim,
 			Attributes:  stringAttrs(f.Attributes()),
-		}
+			Derived:     DerivedAttrs(f, depthIdx),
+			Points:      points,
+		})
 	}
 	streams, err := eng.Portray(batch)
 	if err != nil {
@@ -102,34 +129,124 @@ func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 	// chart with placeholders. (Most current errors are line/area rules needing
 	// the S-57 spatial topology the host doesn't model yet — a tracked gap.)
 	if stream == "" || strings.HasPrefix(stream, "ERROR:") {
-		return FeatureBuild{DisplayCategory: s52DisplayStandard}
+		return FeatureBuild{DisplayCategory: displayStandard}
 	}
 
 	g := geometryOf(f.Geometry())
 	anchor, _ := textAnchor(g)
-	sg := S101Geometry{Anchor: anchor, Points: g.line, Rings: g.area}
+	sg := S101Geometry{Anchor: anchor, Rings: g.area, Lines: strokeRunsFor(g)}
 
 	cmds, _ := instructions.Reduce(instructions.ParseStream(stream))
 	var prims []Primitive
 	priority := 0
+	cat := 0 // unset; resolved from the viewing groups the rule emits
 	for _, c := range cmds {
 		if c.Priority > priority {
 			priority = c.Priority
 		}
-		if p, ok := LowerS101(c, sg, b.Catalog); ok {
-			prims = append(prims, p)
+		// The shallow-water pattern (SEABED01 emits AreaFillReference:DIAMOND1 in
+		// viewing group 90000 on every depth area shallower than the safety
+		// contour) is a MARINER SELECTION, not a fixed portrayal. The client owns
+		// it: a dedicated shallow-pattern layer applies DIAMOND1 over the depth
+		// areas live from the baked drval1 + the mariner's safety contour, toggled
+		// by mariner.shallowPattern. Baking it here too made it (a) always visible
+		// and (b) double up beside the client layer when the toggle was on — so
+		// drop it and let the client's toggle-aware, live-safety-contour layer win.
+		if c.Op == instructions.OpAreaFill && c.Reference == "DIAMOND1" {
+			continue
 		}
+		// Display category is a per-viewing-group property (S-101 partitions
+		// viewing groups into Base/Standard/Other/quality bands). A feature can
+		// emit draws across bands; take the MOST-VISIBLE (lowest enum) so a
+		// safety-critical base-display draw is never hidden because the feature
+		// also carries a standard/other label.
+		if dc := displayCategoryForViewingGroup(c.ViewingGroup); dc != 0 && (cat == 0 || dc < cat) {
+			cat = dc
+		}
+		prims = append(prims, LowerS101(c, sg, b.Catalog)...)
+	}
+	if cat == 0 {
+		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}
 	return FeatureBuild{
 		Primitives:      prims,
 		DisplayPriority: priority,
-		DisplayCategory: s52DisplayStandard, // TODO: derive from S-101 viewing group
+		DisplayCategory: cat,
 	}
 }
 
-// s52DisplayStandard mirrors s52.DisplayStandard without importing s52 (the
-// cutover is dropping that dependency). The baker treats this as "standard".
-const s52DisplayStandard = 1
+// strokeRunsFor returns the drawable polylines an S-101 line draw strokes for a
+// feature, honoring S-52 §8.6.2 masking exactly as the S-52 walker does: a line
+// feature's drawable parts, or — for an area — its drawable boundary, each with
+// coastline-coincident / MASK=1 / data-limit edges already removed by the
+// parser. A non-nil (even empty) lineParts/boundary means masking was computed,
+// so it is used verbatim (empty ⇒ stroke nothing); nil means it wasn't computed
+// (fallback geometry) → stroke the full line / rings. Area FILLS keep the
+// complete rings (g.area) regardless.
+func strokeRunsFor(g geom) [][]geo.LatLon {
+	switch g.kind {
+	case geomLine:
+		if g.lineParts != nil {
+			return g.lineParts
+		}
+		if len(g.line) >= 2 {
+			return [][]geo.LatLon{g.line}
+		}
+	case geomArea:
+		if g.boundary != nil {
+			return g.boundary
+		}
+		return g.area
+	}
+	return nil
+}
+
+// S-52 display-category enum values (s52.DisplayBase/Standard/Other), which the
+// baker's catRank switches on. Defined locally to keep the S-101 builder
+// decoupled from pkg/s52 (the cutover is dropping that dependency).
+const (
+	displayBase     = 6
+	displayStandard = 7
+	displayOther    = 8
+)
+
+// displayCategoryForViewingGroup maps an S-101 viewing-group id to its S-52
+// display category. The portrayal catalogue partitions viewing groups into
+// bands by leading digit (portrayal_catalogue.xml <viewingGroups>): 1xxxx =
+// Display Base, 2xxxx = Display Standard, 3xxxx = Display Other, 9xxxx =
+// optional quality/CATZOC overlays (Other, hidden by default). The 5xxxx and
+// sub-10000 ids are independent text-group selectors (not display-category
+// bands). Returns 0 for an id that carries no display category.
+func displayCategoryForViewingGroup(vg int) int {
+	switch vg / 10000 {
+	case 1:
+		return displayBase
+	case 2:
+		return displayStandard
+	case 3, 9:
+		return displayOther
+	default:
+		return 0
+	}
+}
+
+// soundingPoints extracts a SOUNDG multipoint's vertices as (lon, lat, depth).
+// S-57 encodes soundings as 3-D points [lon, lat, depth]; a point missing its Z
+// is given depth 0 so the rule still places a "0" sounding rather than dropping.
+func soundingPoints(g s57.Geometry) [][3]float64 {
+	pts := make([][3]float64, 0, len(g.Coordinates))
+	for _, c := range g.Coordinates {
+		if len(c) < 2 {
+			continue
+		}
+		var z float64
+		if len(c) >= 3 {
+			z = c[2]
+		}
+		pts = append(pts, [3]float64{c[0], c[1], z})
+	}
+	return pts
+}
 
 func primitiveName(t s57.GeometryType) string {
 	switch t {

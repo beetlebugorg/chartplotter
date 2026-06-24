@@ -27,8 +27,17 @@ import (
 type Feature struct {
 	ID          string
 	ObjectClass string            // S-57 acronym, e.g. SILTNK
-	Primitive   string            // "Point" | "Curve" | "Surface"
+	Primitive   string            // "Point" | "MultiPoint" | "Curve" | "Surface"
 	Attributes  map[string]string // S-57 attribute acronym -> encoded value, e.g. {"CATSIL":"3"}
+	// Derived carries pre-computed S-101 attribute values keyed by their S-101
+	// code (NOT an S-57 acronym) — for S-101 attributes with no direct S-57
+	// source, e.g. defaultClearanceDepth (the underlying depth-area depth a
+	// danger of unknown depth inherits, S-52 DEPVAL02).
+	Derived map[string]string
+	// Points carries the multipoint vertices (lon, lat, depth) for a MultiPoint
+	// primitive (SOUNDG): the rule (Sounding→SOUNDG03) iterates them, reading each
+	// point's X/Y and ScaledZ (depth). Empty for non-multipoint features.
+	Points [][3]float64
 }
 
 // contextParameters is the full S-101 mariner-setting set the rules read
@@ -64,8 +73,11 @@ type Engine struct {
 // adapted is an S-57 feature rewritten into S-101 terms via the bridge.
 type adapted struct {
 	id, code, primitive string
+	objClass            string            // raw S-57 acronym (e.g. BRIDGE), for class-specific complex attrs
 	attrs               map[string]string // S-101 attribute code -> value string
+	s57                 map[string]string // raw S-57 acronym -> value string (complex-attr synthesis)
 	name                string            // S-57 OBJNAM → featureName complex attribute (for name labels)
+	points              [][3]float64      // multipoint vertices (lon,lat,depth) for SOUNDG
 }
 
 // NewEngine loads the S-101 framework from a Rules directory (path) and binds
@@ -77,7 +89,16 @@ func NewEngine(rulesDir string, cat *fc.Catalogue) (*Engine, error) {
 // NewEngineFS loads the S-101 framework from an fs.FS rooted at the Rules
 // directory (e.g. an embed.FS sub-tree) and binds host callbacks to cat.
 func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
-	e := &Engine{L: lua.NewState(), cat: cat}
+	// A growable registry: a single SOUNDG can carry thousands of soundings, and
+	// resolving its multipoint builds one Lua object per point (plus SOUNDG03's
+	// per-point instructions). The default fixed registry overflows on such a
+	// feature, so allow it to grow well past the default ceiling.
+	e := &Engine{L: lua.NewState(lua.Options{
+		RegistrySize:        1024 * 64,
+		RegistryMaxSize:     1024 * 1024,
+		RegistryGrowStep:    1024 * 32,
+		IncludeGoStackTrace: false,
+	}), cat: cat}
 	L := e.L
 
 	noop := L.NewFunction(func(*lua.LState) int { return 0 })
@@ -143,12 +164,35 @@ function HostFeatureGetSpatialAssociations(featureID)
 end
 
 function HostGetSpatial(spatialID)
-	-- Only surfaces (id suffix '#S') resolve a Spatial: a surface whose single
+	-- Surfaces (id suffix '#S') resolve a Spatial: a surface whose single
 	-- exterior ring is one curve (so GetFlattenedSpatialAssociations yields it).
 	if string.sub(spatialID, -2) == '#S' then
 		local fid = string.sub(spatialID, 1, -3)
 		local ext = CreateSpatialAssociation('Curve', fid .. '#exterior', Orientation.Forward)
 		return CreateSurface(ext, {})
+	end
+	-- MultiPoints (id suffix '#M', SOUNDG) resolve to a real multipoint built
+	-- from the feature's vertices, so SOUNDG03 can iterate point.X/Y/ScaledZ.
+	if string.sub(spatialID, -2) == '#M' then
+		local fid = string.sub(spatialID, 1, -3)
+		local pts = _HostFeaturePoints(fid)
+		local spatials = { Type = 'array:Spatial' }
+		for _, p in ipairs(pts) do
+			spatials[#spatials + 1] = CreatePoint(p[1], p[2], p[3])
+		end
+		return CreateMultiPoint(spatials)
+	end
+	-- Points (id suffix '#P') MUST resolve to a real Point, never nil: the
+	-- framework's GetSpatial does self['Spatial'] = sa.Spatial then re-reads
+	-- self['Spatial'] — assigning nil leaves the field absent, so the re-read
+	-- re-enters GetSpatial forever (the OBSTRN/WRECKS deep-sounding overflow).
+	if string.sub(spatialID, -2) == '#P' then
+		local fid = string.sub(spatialID, 1, -3)
+		local pts = _HostFeaturePoints(fid)
+		if pts[1] then
+			return CreatePoint(pts[1][1], pts[1][2], pts[1][3])
+		end
+		return CreatePoint('0', '0', nil)
 	end
 	return nil
 end
@@ -171,11 +215,15 @@ func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 			results[f.ID] = "UNMAPPED:" + f.ObjectClass
 			continue
 		}
-		a := &adapted{id: f.ID, code: code, primitive: f.Primitive, attrs: map[string]string{}}
+		a := &adapted{id: f.ID, code: code, primitive: f.Primitive, objClass: f.ObjectClass, attrs: map[string]string{}, s57: f.Attributes, points: f.Points}
 		for acr, val := range f.Attributes {
 			if ac, ok := e.cat.AttrCodeForS57(acr); ok {
 				a.attrs[ac] = val
 			}
+		}
+		// Derived attributes are already in S-101 code form (no S-57 alias).
+		for code, val := range f.Derived {
+			a.attrs[code] = val
 		}
 		// S-57 OBJNAM/NOBJNM → the S-101 featureName complex attribute (served as
 		// featureName sub-attrs by the host) so PortrayFeatureName emits a label.

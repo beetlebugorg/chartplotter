@@ -19,6 +19,16 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
+# S-101 portrayal for `make serve` (transitional, until the catalogue is embedded).
+# The catalogue + feature catalogue are vendored as siblings of the repo (not
+# committed — IHO DRAFT licence unconfirmed); override the paths if they live
+# elsewhere. Baked tiles carry their portrayal, so S-101 uses its OWN cache dir
+# (a subdir of $(CACHE), still wiped by clear-cache) to avoid mixing with any
+# S-52 tiles; the SOURCE ENC dir (--data) is portrayal-agnostic and stays shared.
+S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
+S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
+S101_CACHE ?= $(CACHE)/s101
+
 .PHONY: build xbuild test vet fmt tidy clean clear-cache serve docs dist bake-ienc bake-noaa serve-prod
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
@@ -70,8 +80,9 @@ xbuild: ## Cross-compile test binaries for every $(PLATFORMS) into dist/ (e.g. m
 	done
 	@echo "→ dist/"; ls -1 dist/chartplotter_*
 
-serve: build ## Serve the web frontend + provisioning API (HOST/PORT/ASSETS overridable)
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)
+serve: build ## Serve the web frontend + provisioning API, S-101 portrayal (HOST/PORT/ASSETS/S101_* overridable)
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) \
+	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE)
 
 dist: ## Build a static prebaked "prod" site into dist/ for GitHub Pages (set PMTILES_URL or CATALOG_URL)
 	scripts/build-pages.sh

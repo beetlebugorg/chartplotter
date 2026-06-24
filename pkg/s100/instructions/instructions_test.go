@@ -60,6 +60,27 @@ func TestPointSymbolWithModifiers(t *testing.T) {
 	}
 }
 
+// TestRotationCRS: the real catalogue emits "Rotation:<CRS>,<angle>". The angle
+// must come from arg 1 (arg 0 is the CRS), and GeographicCRS marks a true-north
+// rotation. Regression: reading arg 0 as the angle made every light flare 0°.
+func TestRotationCRS(t *testing.T) {
+	// PortrayalCRS = screen-referenced (the 135° light flare).
+	cmds, _ := Reduce(ParseStream("Rotation:PortrayalCRS,135;PointInstruction:LIGHTS11"))
+	if cmds[0].Rotation != 135 || cmds[0].RotationTrueNorth {
+		t.Errorf("PortrayalCRS,135 → %v (trueN=%v), want 135 screen", cmds[0].Rotation, cmds[0].RotationTrueNorth)
+	}
+	// GeographicCRS = true-north (a directional light's orientation).
+	cmds, _ = Reduce(ParseStream("Rotation:GeographicCRS,200;PointInstruction:LIGHTS82"))
+	if cmds[0].Rotation != 200 || !cmds[0].RotationTrueNorth {
+		t.Errorf("GeographicCRS,200 → %v (trueN=%v), want 200 true-north", cmds[0].Rotation, cmds[0].RotationTrueNorth)
+	}
+	// Bare "Rotation:<angle>" (no CRS) tolerated as screen-referenced.
+	cmds, _ = Reduce(ParseStream("Rotation:45;PointInstruction:BCNCAR01"))
+	if cmds[0].Rotation != 45 || cmds[0].RotationTrueNorth {
+		t.Errorf("bare 45 → %v (trueN=%v), want 45 screen", cmds[0].Rotation, cmds[0].RotationTrueNorth)
+	}
+}
+
 func TestStateCarriesAcrossMultipleDraws(t *testing.T) {
 	// One viewing group, two draws: a fill then a boundary line. Both should
 	// inherit the viewing group; the line picks up its own _simple_ style.

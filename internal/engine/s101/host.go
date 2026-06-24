@@ -1,6 +1,7 @@
 package s101
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
@@ -59,6 +60,7 @@ func (e *Engine) bindHost() {
 		if ft := e.cat.FeatureTypes[code]; ft != nil {
 			binds = ft.Bindings
 		}
+		binds = withInTheWater(binds)
 		s.Push(typeInfo(s, "FeatureTypeInfo", code, binds))
 		return 1
 	})
@@ -121,6 +123,23 @@ func (e *Engine) bindHost() {
 		}
 		return 1
 	})
+	// _HostFeaturePoints backs the MultiPoint spatial glue (HostGetSpatial '#M'):
+	// returns the feature's multipoint vertices as an array of {x,y,z} string
+	// triples (CreatePoint takes strings), x=lon y=lat z=depth. Used for SOUNDG.
+	set("_HostFeaturePoints", func(s *lua.LState) int {
+		t := s.NewTable()
+		if a := e.adapted[s.CheckString(1)]; a != nil {
+			for _, p := range a.points {
+				row := s.NewTable()
+				row.Append(lua.LString(strconv.FormatFloat(p[0], 'f', -1, 64)))
+				row.Append(lua.LString(strconv.FormatFloat(p[1], 'f', -1, 64)))
+				row.Append(lua.LString(strconv.FormatFloat(p[2], 'f', -1, 64)))
+				t.Append(row)
+			}
+		}
+		s.Push(t)
+		return 1
+	})
 	set("HostFeatureGetSimpleAttribute", func(s *lua.LState) int {
 		// (featureID, attributePath, attributeCode) -> array of value strings.
 		id := s.CheckString(1)
@@ -147,6 +166,16 @@ func (e *Engine) bindHost() {
 			s.Push(t)
 			return 1
 		}
+		// Clearance complex sub-attributes (e.g. path "verticalClearanceClosed:1",
+		// code "verticalClearanceValue"): synthesise from the backing S-57 simple
+		// attribute (VERCCL etc.) so the bridge rules can read the value.
+		if cl := clearanceForPath(path); cl != nil && code == cl.value {
+			if v := a.s57[cl.s57]; v != "" {
+				t.Append(lua.LString(v))
+			}
+			s.Push(t)
+			return 1
+		}
 		if v, ok := a.attrs[code]; ok {
 			t.Append(lua.LString(v))
 		}
@@ -157,8 +186,20 @@ func (e *Engine) bindHost() {
 		id := s.CheckString(1)
 		code := s.CheckString(3)
 		n := 0
-		if code == "featureName" {
-			if a := e.adapted[id]; a != nil && a.name != "" {
+		a := e.adapted[id]
+		switch {
+		case code == "featureName":
+			if a != nil && a.name != "" {
+				n = 1
+			}
+		case clearances[code].value != "":
+			// A clearance complex attribute is present when its backing S-57
+			// attribute is, OR — for an opening bridge's verticalClearanceClosed —
+			// always, so SpanOpening's unguarded `verticalClearanceClosed.
+			// verticalClearanceValue` deref (a DRAFT-catalogue bug) reads a nil
+			// value (→ hazard alert) instead of crashing on a nil table.
+			if a != nil && (a.s57[clearances[code].s57] != "" ||
+				(code == "verticalClearanceClosed" && a.objClass == "BRIDGE")) {
 				n = 1
 			}
 		}
@@ -178,6 +219,44 @@ func (e *Engine) bindHost() {
 
 	set("HostPortrayalEmit", func(s *lua.LState) int { s.Push(lua.LTrue); return 1 })
 	set("HostDebuggerEntry", func(*lua.LState) int { return 0 })
+}
+
+// clearances maps each S-101 clearance complex attribute to the S-57 simple
+// attribute that backs it and the value sub-attribute the rules read. Bridges
+// carry clearances as S-57 simple attributes (VERCCL/VERCLR/HORCLR/VERCOP); the
+// S-101 catalogue models them as complex attributes wrapping a *Value field.
+var clearances = map[string]struct{ s57, value string }{
+	"verticalClearanceClosed":  {"VERCCL", "verticalClearanceValue"},
+	"verticalClearanceFixed":   {"VERCLR", "verticalClearanceValue"},
+	"verticalClearanceOpen":    {"VERCOP", "verticalClearanceValue"},
+	"horizontalClearanceFixed": {"HORCLR", "horizontalClearanceValue"},
+}
+
+// clearanceForPath returns the clearance mapping for a complex-attribute path
+// like "verticalClearanceClosed:1" (the head before ':'), or nil if the path is
+// not a clearance complex attribute.
+func clearanceForPath(path string) *struct{ s57, value string } {
+	head, _, _ := strings.Cut(path, ":")
+	if c, ok := clearances[head]; ok {
+		return &c
+	}
+	return nil
+}
+
+// withInTheWater guarantees the boolean `inTheWater` attribute is bound on every
+// feature type. Several DRAFT-catalogue rules (Building, SlopeTopline, …) read
+// `feature.inTheWater` WITHOUT the nil-safe `!` prefix, but the feature
+// catalogue only binds it to some of those classes — so on the others the
+// framework raises "Invalid attribute code". Binding it everywhere makes the
+// read return nil (the attribute is simply absent) instead of erroring, which is
+// the intended "not in the water" outcome.
+func withInTheWater(binds []fc.AttributeBinding) []fc.AttributeBinding {
+	for _, b := range binds {
+		if b.AttributeRef == "inTheWater" {
+			return binds
+		}
+	}
+	return append(binds[:len(binds):len(binds)], fc.AttributeBinding{AttributeRef: "inTheWater", Lower: 0, Upper: 1})
 }
 
 // bindingsTable builds the AttributeBindings table (attr code → {Upper,Lower
