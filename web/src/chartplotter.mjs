@@ -602,9 +602,9 @@ export class ChartPlotter extends HTMLElement {
       map.on("click", () => tinfo.hide());
       // Own-ship marker + course predictor; follows the vessel (break-out + a
       // re-centre chip mounted in the shell chrome) and streams fixes to the camera.
-      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo });
+      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
       // AIS targets (other vessels) from the live feed.
-      this._ais = new AISOverlay({ map, assets: this._assets, prod: this._prod, onSelect: showInfo });
+      this._ais = new AISOverlay({ map, assets: this._assets, prod: this._prod, onSelect: showInfo, units: () => this._mariner });
     }
 
     // Persist the view so a refresh resumes where you were; refresh the coverage

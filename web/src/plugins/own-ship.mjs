@@ -16,6 +16,7 @@
 
 import { OWN_SHIP_MARKER, CENTER_ICON } from "../lib/openbridge-icons.mjs";
 import { fmtLatLon } from "./target-info.mjs";
+import { format } from "../lib/units.mjs";
 
 const SRC = "ownship-predictor";
 const CASING = "ownship-predictor-casing";
@@ -42,11 +43,12 @@ const CHIP_STYLE = `
 const EMPTY = { type: "FeatureCollection", features: [] };
 
 export class OwnShip {
-  constructor({ map, plotter, vessel, host, onSelect, predictMin = 6 } = {}) {
+  constructor({ map, plotter, vessel, host, onSelect, units, predictMin = 6 } = {}) {
     this._map = map;
     this._plotter = plotter;
     this._vessel = vessel;
     this._onSelect = onSelect; // tap → info picker
+    this._units = units; // () => mariner prefs, for the SOG/STW unit (live)
     this._predictMin = predictMin;
     this._marker = null;
     this._added = false;
@@ -284,8 +286,9 @@ export class OwnShip {
       (num(nav.headingMagnetic) != null ? num(nav.headingMagnetic) + (num(nav.magneticVariation) ?? 0) : null);
     if (hdg != null) rows.push(["Heading", Math.round(hdg) + "°T"]);
     if (num(nav.cogTrue) != null) rows.push(["COG", Math.round(nav.cogTrue) + "°T"]);
-    if (num(nav.sog) != null) rows.push(["SOG", nav.sog.toFixed(1) + " kn"]);
-    if (num(nav.speedThroughWater) != null) rows.push(["STW", nav.speedThroughWater.toFixed(1) + " kn"]);
+    const u = (this._units && this._units()) || null;
+    if (num(nav.sog) != null) rows.push(["SOG", format("speed", nav.sog, u)]);
+    if (num(nav.speedThroughWater) != null) rows.push(["STW", format("speed", nav.speedThroughWater, u)]);
     this._onSelect({ title: "Own ship", rows, x: e.clientX, y: e.clientY });
   }
 

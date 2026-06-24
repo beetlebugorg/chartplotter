@@ -13,6 +13,7 @@ import {
   AIS_TARGET_DANGER_ICON, AIS_TARGET_DANGER_NODIR_ICON,
 } from "../lib/openbridge-icons.mjs";
 import { fmtLatLon } from "./target-info.mjs";
+import { format } from "../lib/units.mjs";
 
 // Pick the AIS glyph for a target's directionality + collision danger.
 function glyphFor(hasDir, danger) {
@@ -26,10 +27,11 @@ const GLYPH_STYLE =
   "filter:drop-shadow(0 0 1px var(--ais-halo,#fff)) drop-shadow(0 0 1px var(--ais-halo,#fff));";
 
 export class AISOverlay {
-  constructor({ map, assets = "/", prod = false, onSelect } = {}) {
+  constructor({ map, assets = "/", prod = false, onSelect, units } = {}) {
     this._map = map;
     this._assets = assets;
     this._prod = prod;
+    this._units = units; // () => mariner prefs, for SOG/CPA/draught units (live)
     this._onSelect = onSelect; // tap → info picker
     this._markers = new Map(); // mmsi -> {marker, el, hasDir}
     this._es = null;
@@ -114,13 +116,14 @@ export class AISOverlay {
     else if (t.shipType) rows.push(["Type", String(t.shipType)]);
     if (t.status) rows.push(["Status", t.status]);
     if (t.destination) rows.push(["Destination", t.destination]);
+    const u = (this._units && this._units()) || null;
     if (t.length && t.beam) rows.push(["Size", `${t.length} × ${t.beam} m`]);
-    if (num(t.draught) != null) rows.push(["Draught", t.draught.toFixed(1) + " m"]);
+    if (num(t.draught) != null) rows.push(["Draught", format("depth", t.draught, u)]);
     if (typeof t.lat === "number") rows.push(["Position", fmtLatLon(t.lat, t.lon)]);
     if (num(t.cog) != null) rows.push(["COG", Math.round(t.cog) + "°T"]);
-    if (num(t.sog) != null) rows.push(["SOG", t.sog.toFixed(1) + " kn"]);
+    if (num(t.sog) != null) rows.push(["SOG", format("speed", t.sog, u)]);
     if (num(t.heading) != null) rows.push(["Heading", Math.round(t.heading) + "°T"]);
-    if (num(t.cpaNm) != null) rows.push(["CPA", t.cpaNm.toFixed(2) + " nm"]);
+    if (num(t.cpaNm) != null) rows.push(["CPA", format("distance", t.cpaNm, u)]);
     if (num(t.tcpaMin) != null) rows.push(["TCPA", t.tcpaMin < 0 ? "passed" : t.tcpaMin.toFixed(1) + " min"]);
     this._onSelect({
       title: (t.danger ? "⚠ " : "") + (t.name || `MMSI ${t.mmsi}`),

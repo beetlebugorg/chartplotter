@@ -69,6 +69,7 @@ export function format(cat, value, prefs) {
   switch (cat) {
     case "distance": v = convertDistance(value, unit); break;
     case "height": v = convertHeight(value, unit); break;
+    case "depth": v = unit === "ft" ? value * M_TO_FT : value; break;
     case "speed": v = convertSpeed(value, unit); break;
     case "wind": v = convertWind(value, unit); break;
     case "temp": v = convertTemp(value, unit); break;
