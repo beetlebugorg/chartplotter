@@ -74,10 +74,18 @@ type S101Builder struct {
 // Lua state is used and closed here so the per-cell caches don't accumulate.
 // Returns featureID → build for every feature.
 func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuild, error) {
+	return b.BuildBatchOverrides(features, nil)
+}
+
+// BuildBatchOverrides is BuildBatch with S-101 context-parameter overrides (e.g.
+// {"PlainBoundaries":"true"} or {"SimplifiedSymbols":"true"}), so the baker can
+// portray the plain-boundary / simplified-symbol display variants.
+func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map[string]string) (map[int64]FeatureBuild, error) {
 	eng, err := s101.NewEngineFS(b.rulesFS, b.fcCat)
 	if err != nil {
 		return nil, err
 	}
+	eng.SetContextOverrides(overrides)
 	defer eng.Close()
 
 	depthIdx := BuildDepthIndex(features) // underlying DEPARE/DRGARE for danger depths

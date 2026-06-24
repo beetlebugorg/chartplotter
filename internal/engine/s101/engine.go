@@ -68,10 +68,20 @@ type Engine struct {
 	L   *lua.LState
 	cat *fc.Catalogue
 
+	// overrides replaces a context parameter's default for this engine (e.g.
+	// PlainBoundaries=true), so the baker can portray boundary-style / point-style
+	// variants. Empty = the defaults in contextParameters.
+	overrides map[string]string
+
 	// per-run feature data (set by Portray); keyed by feature ID.
 	adapted map[string]*adapted
 	order   []string
 }
+
+// SetContextOverrides overrides context-parameter defaults (e.g.
+// {"PlainBoundaries": "true"}) before Portray, so a variant pass renders plain
+// boundaries / simplified symbols. Call right after construction.
+func (e *Engine) SetContextOverrides(o map[string]string) { e.overrides = o }
 
 // adapted is an S-57 feature rewritten into S-101 terms via the bridge. root is
 // the synthesized attribute tree (simple attributes + featureName / clearance /
@@ -256,7 +266,11 @@ func (e *Engine) run() error {
 	var b strings.Builder
 	b.WriteString("local cps = { Type = 'array:ContextParameter' }\n")
 	for _, p := range contextParameters {
-		fmt.Fprintf(&b, "table.insert(cps, PortrayalCreateContextParameter(%q, %q, %q))\n", p.name, p.typ, p.def)
+		def := p.def
+		if v, ok := e.overrides[p.name]; ok {
+			def = v
+		}
+		fmt.Fprintf(&b, "table.insert(cps, PortrayalCreateContextParameter(%q, %q, %q))\n", p.name, p.typ, def)
 	}
 	// Mirror main.lua's ProcessFeaturePortrayalItem success path (rule + feature
 	// name + nautical info), but on error we suppress the feature rather than
