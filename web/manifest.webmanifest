@@ -1,7 +1,7 @@
 {
   "name": "chartplotter",
   "short_name": "chartplotter",
-  "description": "S-52 ENC chartplotter — official NOAA charts, baked and rendered locally.",
+  "description": "S-101 marine chart plotter — official NOAA charts, baked and rendered locally.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
