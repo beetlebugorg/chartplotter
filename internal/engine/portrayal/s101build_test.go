@@ -33,7 +33,7 @@ func s101Builder(t *testing.T) *S101Builder {
 	return b
 }
 
-// TestS101BuildPointSymbol drives a real S-57 feature through the full cutover
+// TestS101BuildPointSymbol drives a real S-57 feature through the full build
 // seam: S-57 acronyms → S-101 rule → instructions → geometry-placed Primitive.
 func TestS101BuildPointSymbol(t *testing.T) {
 	b := s101Builder(t)

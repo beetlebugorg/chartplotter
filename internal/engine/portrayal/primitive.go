@@ -1,11 +1,11 @@
 // Package portrayal turns one S-57 feature into a stream of viewport-independent
-// lat/lon Primitives — the S-52 "expand" step (lookup + CSP + instruction walk),
-// stopping short of projection and colour resolution. Colour stays as S-52
-// *token* strings; the tile engine projects/clips/encodes the Primitives into
-// MVT and the browser resolves Day/Dusk/Night from colortables.json.
+// lat/lon Primitives by running the S-101 portrayal rules and lowering the
+// emitted drawing instructions, stopping short of projection and colour
+// resolution. Colour stays as *token* strings; the tile engine
+// projects/clips/encodes the Primitives into MVT and the browser resolves
+// Day/Dusk/Night from colortables.json.
 //
-// The legacy page-space DrawCommand projection path is not used — the tile
-// engine (internal/engine/bake) projects the Primitive IR directly.
+// The tile engine (internal/engine/bake) projects the Primitive IR directly.
 package portrayal
 
 import "github.com/beetlebugorg/chartplotter/pkg/geo"

@@ -64,8 +64,8 @@ func LinestylesJSONS101(lines map[string]*catalog.LineStyle) ([]byte, error) {
 }
 
 // s101Pattern converts one S-101 line style (single component) into the analysed
-// dash pattern shared with the S-52 path. No <dash> means a solid pen line (one
-// run over the whole period); symbols carry no rotation in the S-101 schema.
+// dash pattern. No <dash> means a solid pen line (one run over the whole
+// period); symbols carry no rotation in the S-101 schema.
 func s101Pattern(ls *catalog.LineStyle) (lsPattern, bool) {
 	periodPx := ls.IntervalLength * linestylePxPerMM
 	if periodPx < 0.5 {

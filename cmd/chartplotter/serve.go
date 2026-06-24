@@ -24,7 +24,7 @@ type serveCmd struct {
 	Cache      string `help:"Cache dir for REGENERABLE baked .pmtiles tile sets (default: XDG cache)."`
 	Data       string `help:"Data dir for SOURCE ENC (district zips, raw cells) — safe, not auto-deleted (default: XDG data)."`
 	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached baked archives for a clean slate (source ENC is kept)."`
-	S101       string `name:"s101" type:"existingdir" help:"Portray via the S-101 rule engine: an S-101 PortrayalCatalog directory. Every chart baked by the server (chart library imports) uses S-101 symbology, and the S-101 client assets are served. Requires --s101-fc. (Transitional, until the catalogue is embedded.)"`
+	S101       string `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Every chart baked by the server (chart library imports) uses this catalogue's symbology, and the matching client assets are served. Requires --s101-fc."`
 	S101FC     string `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
 }
 

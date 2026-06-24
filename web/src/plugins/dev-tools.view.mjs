@@ -6,8 +6,8 @@
 // dialog's custom-render host, then wires the rendered nodes by their ids/classes.
 //
 // Convention: same logic↔view split as chart-library / settings-dialog. The CSS
-// lifted here is exactly the dev-panel + inspector chrome that used to live in the
-// shell <style> (the `.dev-*` rules for the two kept sections + all `.ins-*`).
+// here is the dev-panel + inspector chrome (the `.dev-*` rules for the two
+// sections + all `.ins-*`).
 
 import { esc } from "../lib/util.mjs";
 

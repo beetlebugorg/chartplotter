@@ -11,14 +11,12 @@ import (
 	"github.com/beetlebugorg/chartplotter/pkg/s100/symbols"
 )
 
-// S-101 sprite-atlas builder (specs/s101-portrayal-backport.md, Workstream B):
-// rasterizes every IHO S-101 symbol SVG (CSS colour classes resolved against
-// the chosen palette stylesheet) and shelf-packs it into the same atlas
-// format the S-52 path emits — so sprites.json / the atlas PNG stay drop-in
-// for the MapLibre client. Replaces the HP-GL interpreter with pure-Go SVG.
+// S-101 sprite-atlas builder: rasterizes every IHO S-101 symbol SVG (CSS colour
+// classes resolved against the chosen palette stylesheet) with pure-Go SVG and
+// shelf-packs it into the sprites.json / atlas PNG the MapLibre client consumes.
 
-// s101PxPerMM is the final device px per millimetre, matching the S-52 atlas
-// scale (pxPerUnit is px per 0.01-mm unit; ×100 = px per mm).
+// s101PxPerMM is the final device px per millimetre (pxPerUnit is px per
+// 0.01-mm unit; ×100 = px per mm).
 const s101PxPerMM = pxPerUnit * 100
 
 // s101AtlasWidth is the packed-atlas width for the ~724 S-101 symbols. Wider

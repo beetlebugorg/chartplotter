@@ -86,10 +86,8 @@ export class ChartDownloader {
     return dir + String(cg).padStart(2, "0") + "CGD_ENCs.zip";
   }
 
-  // Acquisition is SERVER-SIDE now: the shell POSTs a fetch spec to /api/import
+  // Acquisition is SERVER-SIDE: the shell POSTs a fetch spec to /api/import
   // (zipUrl/names or per-cell {name,url}) and the server downloads the cells from
-  // NOAA into its XDG cache, then bakes. (The old in-browser bulk/per-cell
-  // download-into-OPFS primitives were retired with the wasm baker.) Per-cell
-  // NOAA URLs come from each catalogue entry's `z` field; the district bundle URL
-  // is districtZipUrl(cg) above.
+  // NOAA into its XDG cache, then bakes. Per-cell NOAA URLs come from each
+  // catalogue entry's `z` field; the district bundle URL is districtZipUrl(cg) above.
 }

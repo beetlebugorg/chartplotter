@@ -59,11 +59,10 @@ func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
 	return &S101Builder{rulesFS: rulesFS, fcCat: cat, Catalog: draw}, nil
 }
 
-// S101Builder is the S-101 replacement for the S-52 BuildFeature seam: it runs
-// the S-101 portrayal rules (via the fc-backed Lua engine) for a batch of
-// features, parses each emitted instruction stream, and lowers each draw onto
-// the feature geometry to produce the same Primitive stream the baker consumes.
-// (specs/s101-portrayal-backport.md — the cutover that replaces lookup+CSPs.)
+// S101Builder is the feature-build seam: it runs the S-101 portrayal rules (via
+// the fc-backed Lua engine) for a batch of features, parses each emitted
+// instruction stream, and lowers each draw onto the feature geometry to produce
+// the Primitive stream the baker consumes.
 type S101Builder struct {
 	rulesFS fs.FS
 	fcCat   *fc.Catalogue
@@ -220,9 +219,9 @@ func strokeRunsFor(g geom) [][]geo.LatLon {
 	return nil
 }
 
-// S-52 display-category enum values (s52.DisplayBase/Standard/Other), which the
-// baker's catRank switches on. Defined locally to keep the S-101 builder
-// decoupled from pkg/s52 (the cutover is dropping that dependency).
+// Display-category enum values (DisplayBase/Standard/Other), which the baker's
+// catRank switches on. Defined locally so the S-101 builder needn't import
+// pkg/s52.
 const (
 	displayBase     = 6
 	displayStandard = 7

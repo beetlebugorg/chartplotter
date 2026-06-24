@@ -1,8 +1,7 @@
 // Package symbols flattens IHO S-101 symbol SVGs (resolving their CSS colour
 // classes against a palette stylesheet and stripping the .layout debug boxes)
-// and rasterizes them in pure Go (see specs/s101-portrayal-backport.md,
-// Workstream B). It is the single source of truth for SVG→raster, used by the
-// sprite-atlas builder.
+// and rasterizes them in pure Go. It is the single source of truth for
+// SVG→raster, used by the sprite-atlas builder.
 //
 // Two oksvg defects are worked around here: it ignores a non-zero viewBox
 // origin (we normalize to "0 0 W H" and wrap the content in a translate), and

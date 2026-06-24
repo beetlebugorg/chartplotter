@@ -1,8 +1,9 @@
-// Package server is the tiny distribution shim for the 100%-wasm chartplotter:
-// it serves the embedded web frontend (static files + the wasm baker, with
-// HTTP Range) and one API endpoint — GET /api/cell/<NAME>?url=… — that downloads
-// a raw NOAA ENC cell and caches it (the shim acting as a CORS proxy, since
-// charts.noaa.gov sends no CORS headers). All parse/bake/render runs in-browser.
+// Package server is the chartplotter's HTTP hub. It serves the web frontend
+// (static files, with HTTP Range), bakes imported ENCs server-side into PMTiles
+// packs and serves their tiles, proxies raw NOAA ENC downloads (a CORS proxy,
+// since charts.noaa.gov sends no CORS headers), and exposes the vessel/AIS/NMEA
+// and chart-library APIs. State lives under the data dir and is shared across
+// connected clients.
 package server
 
 import (
@@ -62,7 +63,7 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 		dataDir = cacheDir
 	}
 	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex()}
-	// Discover every baked pack on disk (provider trees + legacy tiles/), then
+	// Discover every baked pack on disk (provider trees + flat tiles/), then
 	// register the ENABLED ones (disabled packs stay on disk but off the map). State
 	// lives in <data>/prefs.json so it survives restarts and is shared across clients.
 	s.packs = scanPacks(cacheDir)
@@ -208,10 +209,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveCell serves a raw S-57 base cell (.000) for the in-browser wasm baker —
-// the 100%-wasm path. GET /api/cell/<NAME>?url=<noaa-zip-url>: returns the cached
-// cell from ENC_ROOT, or (the shim acting as a NOAA download proxy, since
-// charts.noaa.gov sends no CORS headers) downloads + caches it from `url` first.
+// serveCell serves a raw S-57 base cell (.000) over HTTP. GET
+// /api/cell/<NAME>?url=<noaa-zip-url>: returns the cached cell from ENC_ROOT, or
+// (acting as a NOAA download proxy, since charts.noaa.gov sends no CORS headers)
+// downloads + caches it from `url` first.
 func (s *Server) serveCell(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		apiErr(w, http.StatusMethodNotAllowed, "GET only")
@@ -371,11 +372,11 @@ func (s *Server) serveEmbedded(w http.ResponseWriter, r *http.Request, name, rel
 // setAssetHeaders writes the Range/CORS/cache headers shared by the on-disk and
 // embedded asset paths. The app code + manifests must always reflect the latest
 // build/bake, so HTML/JS/JSON revalidate (otherwise a cached chartplotter-app.mjs
-// keeps the old region logic after an update). The wasm baker must revalidate
-// too: it is loaded together with wasm_exec.js (a .js, already no-cache), and the
-// two are a matched pair — a cached .wasm against a fresh wasm_exec.js fails with
-// "import object field 'runtime.ticks' is not a Function" (a tinygo↔go runtime
-// mismatch). Tiles/atlases are large and change only via a fresh provision
+// serves stale app logic after an update). The .wasm module revalidates too: it
+// is loaded together with wasm_exec.js (a .js, already no-cache), and the two are
+// a matched pair — a cached .wasm against a fresh wasm_exec.js fails with "import
+// object field 'runtime.ticks' is not a Function" (a runtime mismatch).
+// Tiles/atlases are large and change only via a fresh provision
 // (cache-busted by ?t=), so they may cache.
 func setAssetHeaders(w http.ResponseWriter, rel string) {
 	w.Header().Set("Content-Type", mimeFor(rel))

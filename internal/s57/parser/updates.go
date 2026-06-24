@@ -359,9 +359,10 @@ func applySpatialUpdate(chart *chartData, record *iso8211.DataRecord, vridData [
 // list. The control is a repeating group of 5-byte entries: UI (b11: 1=insert,
 // 2=delete, 3=modify), IX (b12, 1-based index), NC (b12, count). Insert/modify
 // consume items from `upd` (the update's new SG2D/SG3D or FSPT, in order); delete
-// consumes none. Instructions are applied in sequence to the evolving list — so a
-// small edit no longer wipes out the whole base list (the bug that collapsed a
-// 123-point coverage ring to 3).
+// consumes none. Instructions are applied in sequence to the evolving list, so a
+// small edit touches only its indexed entries and leaves the rest of the base
+// list intact (e.g. a one-point edit to a 123-point coverage ring keeps the
+// other 122).
 func applyControl[T any](existing, upd []T, ctrl []byte) []T {
 	out := append([]T(nil), existing...) // don't mutate the base record's slice
 	ui := 0                              // cursor into the update's new items

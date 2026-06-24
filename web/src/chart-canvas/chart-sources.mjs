@@ -92,7 +92,7 @@ export function scaminDisplayZoom(scamin, lat) {
 
 // Server sets are baked PER BAND, named "<district>-<band>" (e.g. noaa-d5-general).
 // bandOfSet recovers the band slug from a set name ("all" for a bandless/merged set
-// — a user upload or a legacy pack). BAND_RANK orders sets coarse→fine so a finer
+// — a user upload or a non-banded pack). BAND_RANK orders sets coarse→fine so a finer
 // band's fill draws over a coarser one (the same stacking the per-band pmtiles path
 // gets for free). Both let server mode do per-band overzoom + suppression, so a
 // coarse-only spot (open water) is filled by the general/overview source overzooming

@@ -21,7 +21,7 @@ import { esc, fmtIssue } from "../lib/util.mjs";
 // Charts-panel styles, lifted verbatim from the shell <style> (the rules that
 // only ever applied inside #charts-body). The element has its own shadow DOM, so
 // a handful of generic helpers (.btn, .muted, .row, .grow) are duplicated here
-// rather than relying on the shell's sheet — they no longer cross the boundary.
+// rather than relying on the shell's sheet — they do not cross the shadow boundary.
 export const STYLE = `
   :host { display:block; }
   .btn { cursor:pointer; border:1px solid var(--ui-border-strong); background:var(--ui-surface); border-radius:6px; padding:6px 10px; font:inherit; color:var(--ui-text); }

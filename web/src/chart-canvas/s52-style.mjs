@@ -155,8 +155,8 @@ export function soundingsIconImage(mariner) {
 // OBSTRN06/WRECKS05 (S-52 §13.2.6/§13.2.20): a danger symbol carries its
 // VALSOU + the deep-water variant. The baked `symbol_name` is the dangerous
 // (DANGER01) variant; when the depth is DEEPER than the live safety contour
-// swap to the less-prominent `sym_deep` (DANGER02). Picked client-side so the
-// safety contour no longer re-bakes. Non-danger symbols use `symbol_name`.
+// swap to the less-prominent `sym_deep` (DANGER02). Picked client-side so
+// changing the safety contour needs no re-bake. Non-danger symbols use `symbol_name`.
 export function pointSymbolImage(mariner) {
   const sfc = mariner.safetyContour ?? 10;
   return ["case",
@@ -194,7 +194,7 @@ export function categoryFilter(mariner) {
   // is baked display-category Other, so enabling Other dumped it on top of
   // everything — too cluttered. Decouple it into its own `dataQuality` toggle:
   // quality features show IFF dataQuality (independent of Other), and are
-  // excluded from the normal category membership so Other no longer carries it.
+  // excluded from the normal category membership so Other does not carry them.
   const isQual = ["==", ["get", "class"], "M_QUAL"];
   return m.dataQuality
     ? ["any", isQual, ["all", inCat, ["!", isQual]]]

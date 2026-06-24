@@ -10,9 +10,8 @@ import (
 )
 
 // TestS101BakeProducesTiles bakes a real NOAA cell through the S-101 portrayal
-// engine (the cutover seam) and confirms tiles come out — the first real
-// end-to-end S-101 render in the bake pipeline. Skips without the vendored
-// catalogue.
+// engine and confirms tiles come out — an end-to-end S-101 render in the bake
+// pipeline. Skips without the vendored catalogue.
 func TestS101BakeProducesTiles(t *testing.T) {
 	pc := os.Getenv("S101_CATALOG")
 	if pc == "" {

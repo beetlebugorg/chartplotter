@@ -1,6 +1,6 @@
 // Package instructions parses the flat drawing-instruction stream emitted by
-// S-101 portrayal rules (see specs/s101-portrayal-backport.md) into structured
-// draw commands that downstream code lowers onto the engine's primitive layer.
+// S-101 portrayal rules into structured draw commands that downstream code
+// lowers onto the engine's primitive layer.
 //
 // The stream is a ';'-separated list of "Keyword:arg,arg,..." tokens (or bare
 // keywords like NullInstruction). Following the S-100 Part 9 portrayal model,

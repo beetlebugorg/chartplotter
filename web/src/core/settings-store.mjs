@@ -61,7 +61,7 @@ export class SettingsStore {
     };
   }
 
-  // The whole blob (read-only snapshot) — for migration / inspection.
+  // The whole blob (read-only snapshot) — for inspection or bulk transforms.
   snapshot() { return JSON.parse(JSON.stringify(this._blob)); }
 
   // Mirror locally now; debounce the server POST so a flurry of toggles coalesces.

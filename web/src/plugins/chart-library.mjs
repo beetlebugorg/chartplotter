@@ -125,7 +125,7 @@ export class ChartLibrary extends HTMLElement {
     this._archive = new Map();  // cell name -> {blob, entry, updates} from opened zips
     this._selected = new Set(); // cell names ticked for import
 
-    this._previewMap = null;    // legacy live preview map (unused; kept for safe teardown)
+    this._previewMap = null;    // live preview map (unused; kept for safe teardown)
     this._previewCache = new Map(); // pack key → coverage snapshot dataURL (rendered once)
     this._previewKey = null;    // pack key the detail preview currently targets
     this._snapEl = null; this._snapMap = null; // in-flight off-screen snapshot map

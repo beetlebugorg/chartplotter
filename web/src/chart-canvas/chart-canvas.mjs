@@ -47,7 +47,7 @@
 //     at /tiles/{set}/{z}/{x}/{y}.mvt (POST /api/import bakes + registers a set).
 //   • prebaked (pmtiles="<url>" / setArchive / loadRegions) — a hosted .pmtiles
 //     read by HTTP Range, the serverless static-CDN option. No tile server.
-// There is no in-browser baking; the wasm baker has been retired (server migration).
+// Baking runs server-side; the client only renders tiles.
 import { PMTilesArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 import { convertDistance, unitSuffix } from "../lib/units.mjs";
 import { zoomForScale } from "../lib/util.mjs"; // shared scale↔zoom (512-tile MapLibre resolution)
@@ -500,8 +500,8 @@ export class ChartCanvas extends HTMLElement {
   // OBSTRN06/WRECKS05 (S-52 §13.2.6/§13.2.20): a danger symbol carries its
   // VALSOU + the deep-water variant. The baked `symbol_name` is the dangerous
   // (DANGER01) variant; when the depth is DEEPER than the live safety contour
-  // swap to the less-prominent `sym_deep` (DANGER02). Picked client-side so the
-  // safety contour no longer re-bakes. Non-danger symbols use `symbol_name`.
+  // swap to the less-prominent `sym_deep` (DANGER02). Picked client-side so
+  // changing the safety contour needs no re-bake. Non-danger symbols use `symbol_name`.
   pointSymbolImage() { return S52.pointSymbolImage(this._mariner); }
 
   // The dotted CHBLK foul boundary (OBSTRN/WRECKS) is shown only where the

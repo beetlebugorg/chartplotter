@@ -189,7 +189,7 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 				spatial = sp
 			}
 		} else {
-			// Legacy/unknown RCNM in the pointer: fall back to searching by RCID.
+			// Unknown RCNM in the pointer: fall back to searching by RCID.
 			for _, rcnm := range []int{int(spatialTypeEdge), int(spatialTypeConnectedNode), int(spatialTypeIsolatedNode), int(spatialTypeFace)} {
 				key := spatialKey{RCNM: rcnm, RCID: spatialRef.RCID}
 				if sp, ok := spatialRecords[key]; ok {

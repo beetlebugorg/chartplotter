@@ -2,14 +2,11 @@
 // S-57 feature data, with the Lua host's type introspection backed by the
 // S-101 Feature Catalogue (pkg/s100/fc) and an S-57→S-101 feature/attribute
 // adapter built from the catalogue's <alias> mapping. It is the bridge +
-// host-API integration of the S-101 backport (specs/s101-portrayal-backport.md,
-// Workstreams D & E).
+// host-API integration that connects S-57 features to the S-101 rules.
 //
-// This step drives each feature's rule directly (require(Code); the global of
-// that name), which exercises the real feature/attribute model — lazy attribute
-// resolution, PrimitiveType from geometry, enum decoding — through the bridge.
-// The full PortrayalMain wrapper (feature-name text, nautical info, dates) and
-// complex attributes / associations are the next integration step.
+// Each feature's rule runs directly (require(Code); the global of that name),
+// exercising the real feature/attribute model — lazy attribute resolution,
+// PrimitiveType from geometry, enum decoding — through the bridge.
 package s101
 
 import (

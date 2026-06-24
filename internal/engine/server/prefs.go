@@ -88,7 +88,7 @@ func (p *prefs) setDisabled(set string, off bool) {
 }
 
 // scanPacks walks the cache and returns every baked pack file keyed by set name
-// (basename sans extension) → path. Includes the provider trees plus legacy tiles/.
+// (basename sans extension) → path. Includes the provider trees plus flat tiles/.
 func scanPacks(cacheDir string) map[string]string {
 	out := map[string]string{}
 	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {

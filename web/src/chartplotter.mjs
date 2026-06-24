@@ -114,8 +114,8 @@ const STATE_FILL = { installed: "#2e7d32", archive: "#1565c0", catalog: "#000000
 // <chart-library>; the shell imports DISTRICTS from there for the few places it
 // still needs the region labels (_reattachName, _setLabel — used by DevTools' rebake).
 
-// A chart vector source: the realtime path has one "chart" source; the legacy
-// pmtiles path had a "chart-<band>" source per band. (Used by the cursor pick.)
+// A chart vector source: the realtime path has one "chart" source; the pmtiles
+// path has a "chart-<band>" source per band. (Used by the cursor pick.)
 function isChartSource(s) {
   return typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
 }
@@ -233,7 +233,7 @@ export class ChartPlotter extends HTMLElement {
     // be deselected. Force it on regardless of any (stale) persisted value.
     this._mariner.displayBase = true;
     this._scheme = localStorage.getItem(LS_SCHEME) || "day";
-    if (!SCHEMES.includes(this._scheme)) this._scheme = "day"; // drop a retired scheme (e.g. bright)
+    if (!SCHEMES.includes(this._scheme)) this._scheme = "day"; // fall back if the persisted scheme isn't a known one
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
     // which verb) the server doesn't know. `_poll` is the polling interval handle.
@@ -354,7 +354,7 @@ export class ChartPlotter extends HTMLElement {
     // adopts the publisher's camera — no cells to install, nothing to download;
     // the spot renders from whatever the server/local store already holds. Strip
     // the hash afterward so a later reload resumes the user's own last view.
-    // Legacy #share snapshot links still reconstruct cells via _loadSharedView.
+    // #share snapshot links reconstruct cells via _loadSharedView.
     let shareView = parseViewHash();
     if (shareView) {
       this._sharePending = shareView; // onReady applies bearing/pitch
@@ -856,7 +856,7 @@ export class ChartPlotter extends HTMLElement {
   // resume — no client-side job persistence). A finished/idle task is ignored so
   // a stale "done" never shows a phantom pill.
   // Refresh-resume: a bake / download / rebuild may still be running server-side
-  // after a page refresh (we no longer hold the job id). Ask the server what's
+  // after a page refresh (the client doesn't hold the job id then). Ask the server what's
   // running and, if anything is, RE-ATTACH — stream its progress back into the
   // notification pill and refresh the installed charts when it finishes.
   async _reattachTask() {
@@ -1234,10 +1234,10 @@ export class ChartPlotter extends HTMLElement {
   // cell boxes show, framed out to a wide overview, with box-select armed. Home
   // restores the chart render and the view you came from.
 
-  // The main-map cell picker (cell-box overlay + tap-to-preview-a-district) was
-  // removed: the <chart-library> panel is the one chart surface now. Closing the
-  // drawer/leaving the charts section no longer toggles a map mode; _clearFocus()
-  // still clears the focus highlight via _clearFocus below.
+  // The <chart-library> panel is the one chart surface; there is no main-map cell
+  // picker (cell-box overlay + tap-to-preview-a-district). Closing the
+  // drawer/leaving the charts section doesn't toggle a map mode; _clearFocus()
+  // clears the focus highlight via _clearFocus below.
 
   // A cell is "installed" when locally imported (OPFS) OR its NOAA region is
   // downloaded (one pmtiles per region — so region membership IS installed-ness).
@@ -1249,8 +1249,8 @@ export class ChartPlotter extends HTMLElement {
     return "catalog";
   }
 
-  // (legacy) focus a single chart cell — kept for reference; superseded by
-  // the map drag-a-box selector's highlight.
+  // Focus a single chart cell. The map drag-a-box selector's highlight is the
+  // primary path; this is kept for reference.
   focusChart(name) {
     const c = this._byName.get(name);
     if (!c || !this._map || !Array.isArray(c.bb) || c.bb.length !== 4) return;
@@ -1481,8 +1481,8 @@ export class ChartPlotter extends HTMLElement {
         });
       }
     }
-    // Server mode: the per-cell footprints above come from the (retired) wasm baker,
-    // so they're empty here. Add ONE coverage box per ENABLED pack from /api/packs
+    // Server mode has no per-cell footprints, so the list above is empty here.
+    // Add ONE coverage box per ENABLED pack from /api/packs
     // (which carries each pack's union bounds + bands). Tag with the pack's COARSEST
     // band (bands[0], coarse→fine from the server) for the click-to-fly zoom + the
     // band-capped fill. DISABLED packs render nothing on the map, so they get no

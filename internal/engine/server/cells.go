@@ -16,7 +16,7 @@ import (
 func isBaseCell(name string) bool { return strings.HasSuffix(name, ".000") }
 
 // ClearCache removes only the REGENERABLE baked tile sets under cacheDir (the
-// per-district NOAA/, import/, and legacy tiles/ trees). It deliberately leaves the
+// per-district NOAA/, import/, and flat tiles/ trees). It deliberately leaves the
 // SOURCE ENC (ENC_ROOT/, in the data dir) untouched — clearing the cache must not
 // delete downloaded charts; they rebake from source. Returns how many trees removed.
 func ClearCache(cacheDir string) (int, error) {
@@ -77,8 +77,8 @@ func loadCellCached(client *http.Client, dir, name, url string) (data []byte, hi
 	if b, e := os.ReadFile(cpath); e == nil {
 		return b, true, nil
 	}
-	// Honour a legacy flat cache (dir/.cellcache-<name>.000) so an upgrade doesn't
-	// force a re-download of everything already on disk.
+	// Also honour a flat cache location (dir/.cellcache-<name>.000), so cells
+	// already on disk there are reused instead of re-downloaded.
 	if b, e := os.ReadFile(filepath.Join(dir, ".cellcache-"+name+".000")); e == nil {
 		return b, true, nil
 	}

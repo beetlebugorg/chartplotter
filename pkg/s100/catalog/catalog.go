@@ -1,7 +1,6 @@
 // Package catalog loads the static drawing assets of the IHO S-101 Portrayal
-// Catalogue — line styles, area fills, and the colour profile — into Go structs
-// (see specs/s101-portrayal-backport.md, Workstreams A & C). Symbols (SVG) are
-// handled separately by the rasterizer. These are the definitions that
+// Catalogue — line styles, area fills, and the colour profile — into Go structs.
+// Symbols (SVG) are handled separately by the rasterizer. These are the definitions that
 // DrawCommand references (LineInstruction/AreaFillReference/colour tokens) are
 // resolved against when lowering S-101 portrayal output to engine primitives.
 package catalog

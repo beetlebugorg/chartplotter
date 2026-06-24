@@ -1,13 +1,13 @@
 // Package fc parses the IHO S-101 Feature Catalogue (S100FC/5.2) into a type
-// registry, and — crucially for the S-57→S-101 bridge (see
-// specs/s101-portrayal-backport.md, Workstream E) — exposes the alias mapping
-// the catalogue ships: every feature type and attribute carries its legacy S-57
-// 6-char acronym in <alias>, so the name half of the bridge is derived directly
-// from this one file rather than a separate conversion table. Enumerated values
-// keep S-57's integer codes, so attribute values pass through unchanged.
+// registry, and — crucially for the S-57→S-101 bridge — exposes the alias
+// mapping the catalogue ships: every feature type and attribute carries its
+// S-57 6-char acronym in <alias>, so the name half of the bridge is derived
+// directly from this one file rather than a separate conversion table.
+// Enumerated values keep S-57's integer codes, so attribute values pass through
+// unchanged.
 //
 // The registry also backs the Lua portrayal engine's HostGet*TypeInfo /
-// HostGet*TypeCodes introspection callbacks (Workstream D host contract).
+// HostGet*TypeCodes introspection callbacks (the host contract).
 package fc
 
 import (

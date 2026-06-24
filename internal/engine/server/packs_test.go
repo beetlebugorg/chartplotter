@@ -17,7 +17,7 @@ func TestSplitSet(t *testing.T) {
 		{"noaa-d5-overview", "noaa-d5", "overview"},
 		{"ienc-allegheny-berthing", "ienc-allegheny", "berthing"},
 		{"noaa-d5", "noaa-d5", "all"},           // no band suffix → whole name, "all"
-		{"user", "user", "all"},                 // legacy merged / local import
+		{"user", "user", "all"},                 // merged / local import
 		{"import-harbor", "import", "harbor"},   // a band slug is still split off
 		{"general", "general", "all"},           // bare slug (len == suffix) is NOT split
 		{"x-coastalish", "x-coastalish", "all"}, // "-coastalish" is not "-coastal"
@@ -36,11 +36,11 @@ func TestHandlePacksGrouping(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir, dir, dir, false)
 
-	// Register band-sets out of order across two districts plus a legacy merged set.
+	// Register band-sets out of order across two districts plus a merged set.
 	for _, n := range []string{
 		"noaa-d5-harbor", "noaa-d5-overview", "noaa-d5-general", "noaa-d5-coastal",
 		"ienc-x-berthing",
-		"legacy", // old merged → band "all"
+		"legacy", // merged set → band "all"
 	} {
 		s.packAdd(n, dir+"/"+n+".pmtiles")
 	}

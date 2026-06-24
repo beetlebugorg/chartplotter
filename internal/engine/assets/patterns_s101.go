@@ -13,7 +13,7 @@ import (
 // PatternAtlasS101FS builds the area-fill pattern atlas (patterns.{png,json})
 // from the S-101 AreaFills: each fill rasterizes its referenced symbol and tiles
 // it on the v1/v2 lattice into a seamless rectangular tile (one GL fill-pattern
-// per fill name). Same atlas format the S-52 path emits.
+// per fill name).
 //
 // v1 is always horizontal in the S-101 catalogue, so a STRAIGHT lattice (v2.x==0)
 // is a v1.x × v2.y rectangle with the symbol stamped at the cell centre plus its

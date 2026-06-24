@@ -14,7 +14,7 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
 
-// tilesDir is the legacy flat archive directory: <cacheDir>/tiles.
+// tilesDir is the flat archive directory: <cacheDir>/tiles.
 func tilesDir(cacheDir string) string { return filepath.Join(cacheDir, "tiles") }
 
 // tileSets is the server's registry of named tile sets (set name → backend). It is
@@ -82,7 +82,7 @@ func (ts *tileSets) closeAll() {
 // bandSlugs is the fixed COARSE→FINE band order. A registered tile SET is named
 // "<district>-<slug>" (one archive per nav-purpose band, so coarse-band-only areas
 // keep tiles above the merged archive's single maxzoom). "all" is the catch-all for
-// a name that doesn't end in a known band (a legacy merged set, or a non-banded
+// a name that doesn't end in a known band (a merged set, or a non-banded
 // import). bandOrder ranks a slug for the sorted /api/packs listing.
 var bandSlugs = []string{"overview", "general", "coastal", "approach", "harbor", "berthing"}
 
@@ -97,8 +97,8 @@ func bandOrder(slug string) int {
 
 // splitSet splits a registered set name into its logical district + band. If the
 // name ends in "-<knownband>", district = the prefix and band = that slug; otherwise
-// the whole name is the district and band = "all" (a legacy merged set or a non-
-// banded local import). The district is the API-facing pack name (/api/packs, the
+// the whole name is the district and band = "all" (a merged set or a non-banded
+// local import). The district is the API-facing pack name (/api/packs, the
 // enable/disable/delete ?set=); band is the per-archive suffix.
 func splitSet(name string) (district, band string) {
 	for _, slug := range bandSlugs {

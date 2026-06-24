@@ -93,7 +93,7 @@ func (j *importJobs) snapshot(id string) (importJob, bool) {
 }
 
 // running returns a copy of the most-recently-started still-running job, if any.
-// The client uses this to RE-ATTACH after a page refresh, when it no longer holds
+// The client uses this to RE-ATTACH after a page refresh, when it doesn't hold
 // the job id but a bake/download may still be in flight.
 func (j *importJobs) running() (importJob, bool) {
 	j.mu.Lock()

@@ -8,9 +8,8 @@ import (
 )
 
 // Portrayer produces the portrayal passes for one S-57 feature. It is the seam
-// the bake pipeline drives portrayal through: the S-101 rule engine
-// (specs/s101-portrayal-backport.md), selected via SetPortrayer. A portrayer is
-// required — the old S-52 lookup+CSP fallback has been removed.
+// the bake pipeline drives portrayal through: the S-101 rule engine, selected
+// via SetPortrayer. A portrayer is required.
 type Portrayer interface {
 	Passes(f *s57.Feature) []portrayal.FeatureBuildPass
 }
@@ -26,9 +25,8 @@ type BatchPortrayer interface {
 	End()
 }
 
-// SetPortrayer installs an alternative portrayal engine on the Baker. Set the
-// S-101 portrayer (NewS101Portrayer) to bake with S-101 symbology instead of
-// S-52. Set before AddCell.
+// SetPortrayer installs the portrayal engine on the Baker. Set the S-101
+// portrayer (NewS101Portrayer) to bake with S-101 symbology. Set before AddCell.
 func (b *Baker) SetPortrayer(p Portrayer) { b.portrayer = p }
 
 // s101Portrayer adapts portrayal.S101Builder to the Portrayer seam. S-101

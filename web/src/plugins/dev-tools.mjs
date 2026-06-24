@@ -34,7 +34,7 @@ export { STYLE };
 const INSPECT_HINT = "Point at (or tap) a feature to inspect it. Use “Select area” / SHIFT+drag to capture a region.";
 
 // Is this MapLibre source one of our chart vector sources? (realtime "chart" or a
-// legacy per-band "chart-<band>".) Local copy so this module needn't import the shell.
+// per-band "chart-<band>".) Local copy so this module needn't import the shell.
 function isChartSource(s) { return typeof s === "string" && (s === "chart" || s.startsWith("chart-")); }
 
 // Does geometry `g` overlap the lon/lat box [W,S,E,N]? (bbox test; points exact.)
@@ -151,7 +151,7 @@ export class DevTools {
   // cells ALREADY on the server (no NOAA re-download). The CLIENT supplies each
   // district's cell list (from its catalogue) since the server doesn't track
   // membership. Runs the districts one at a time, surfacing progress through the
-  // notification pill. user/import/legacy packs are skipped (no client cell list).
+  // notification pill. user/import/merged packs are skipped (no client cell list).
   async _rebuildAllPerBand(btn) {
     const d = this._d;
     if (this._isBusy()) { if (btn) flashBtn(btn, "busy"); return; }

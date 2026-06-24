@@ -1,9 +1,7 @@
 package bake
 
 // pointInRings reports whether (lon, lat) is inside the even-odd union of the
-// polygon rings (ray-cast). Shared geometry helper used by the bake emit path;
-// the S-52 per-cell spatial index that used to live here (for the now-removed
-// lookup+CSP portrayal) is gone with the S-52 engine.
+// polygon rings (ray-cast). Shared geometry helper used by the bake emit path.
 func pointInRings(lon, lat float64, rings [][][]float64) bool {
 	inside := false
 	for _, ring := range rings {

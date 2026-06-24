@@ -36,9 +36,9 @@ import (
 
 const maxBandZ uint32 = 18
 
-// S-52 display categories (DisplayBase/Standard/Other = 6/7/8). Local copies so
-// the bake path no longer depends on pkg/s52 (the S-101 catalogue is the sole
-// portrayer; these enum values are still carried through for the client filter).
+// Display categories (DisplayBase/Standard/Other = 6/7/8). Local copies so the
+// bake path needn't import pkg/s52; these enum values are carried through for
+// the client filter.
 const (
 	displayCatBase     = 6
 	displayCatStandard = 7
@@ -168,10 +168,10 @@ func BandForScale(cscl uint32) Band {
 //
 // SCAMIN is a PRODUCER scale (a real 1:N paper scale), so denomZ0 is the PHYSICAL
 // display scale at z0 — MapLibre's true 512-tile geometry (78271.517m/px ÷ OGC
-// 0.28mm pixel = 279_541_132), NOT the 256-tile nominal (559M). This matches the
-// client's scaminDisplayZoom so the baked tile floor and the visible cutoff agree,
-// and a 1:N feature survives until the screen truly reads 1:N. (Was the 256 nominal,
-// which made features vanish at ~½ their SCAMIN; see chart-sources.scaminDisplayZoom.)
+// 0.28mm pixel = 279_541_132), NOT the 256-tile nominal (559M, which would make
+// features vanish at ~½ their SCAMIN). This matches the client's scaminDisplayZoom
+// so the baked tile floor and the visible cutoff agree, and a 1:N feature survives
+// until the screen truly reads 1:N (see chart-sources.scaminDisplayZoom).
 func scaminZoom(scamin uint32, lat float64) uint32 {
 	if scamin == 0 {
 		return 0
@@ -300,10 +300,8 @@ type Baker struct {
 	// the full scan (the EmitTile convenience path / tests). Read-only after build.
 	emitIndex  map[uint64][]int32
 	linestyles map[string]*lsInfo // complex-linestyle period geometry, built once (lazily) from the PresLib
-	// portrayer drives portrayal: the S-101 rule engine
-	// (specs/s101-portrayal-backport.md). S-101 is the only renderer now, so a
-	// portrayer is required (the old S-52 lookup+CSP fallback has been removed).
-	// Internal (not a user-facing toggle).
+	// portrayer drives portrayal via the S-101 rule engine. A portrayer is
+	// required. Internal (not a user-facing toggle).
 	portrayer Portrayer
 	bbox      geo.BoundingBox
 	curCell   string // dataset name of the cell currently being added (stamped on each feature)
@@ -626,9 +624,8 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
 		// style live; everything else is one pass tagged bnd=2.
-		// S-101 is the only portrayal engine now; the baker requires a portrayer
-		// (the build-time embedded catalogue, or --s101). The S-52 lookup+CSP
-		// fallback (portrayal.BuildFeaturePasses) has been removed.
+		// The portrayer (the build-time embedded catalogue, or --s101) runs the
+		// S-101 rules to produce the passes.
 		passes := b.portrayer.Passes(f)
 		for _, pass := range passes {
 			fb := pass.Build
@@ -1676,8 +1673,8 @@ func (b *Baker) DebugTilePolyOverlap(coord tile.TileCoord, buffer float64, exten
 // TileDiag, when non-nil, receives one line per EmitTile call with the
 // per-stage primitive counts (eligible → suppressed → empty-geometry → empty).
 // It's the hook for debugging tiles that bake empty: a tile with eligible>0 but
-// empty=true lost everything to suppression or clipping. Off (nil) by default —
-// the wasm baker turns it on via cpSetTileDiag; tests set it directly.
+// empty=true lost everything to suppression or clipping. Off (nil) by default;
+// tests set it directly.
 var TileDiag func(string)
 
 // earthCircumM is the Web-Mercator equatorial circumference (m), used to convert

@@ -8,9 +8,9 @@ import (
 )
 
 // TestMain installs the S-101 portrayer for the package's bake tests. The baker
-// now REQUIRES a portrayer (the S-52 lookup+CSP fallback is gone), and untagged
-// `go test` builds have no embedded catalogue — so load the external dev
-// catalogue if present, else skip the whole package (e.g. CI without it).
+// requires a portrayer, and untagged `go test` builds have no embedded
+// catalogue — so load the external dev catalogue if present, else skip the whole
+// package (e.g. CI without it).
 func TestMain(m *testing.M) {
 	pc := os.Getenv("S101_CATALOG")
 	if pc == "" {

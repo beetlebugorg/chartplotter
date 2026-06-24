@@ -8,12 +8,11 @@ import (
 	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
 )
 
-// This file is the S-101 backport's D→primitive lowering (see
-// specs/s101-portrayal-backport.md): it turns one resolved S-101 drawing
-// command (from pkg/s100/instructions) plus the feature geometry into the same
-// viewport-independent Primitive the S-52 path produces, so everything
-// downstream (projection, MVT bake, client colour resolution) is unchanged.
-// Colour stays a token; line-style refs resolve against the S-101 catalogue.
+// This file is the S-101 drawing-command lowering: it turns one resolved S-101
+// drawing command (from pkg/s100/instructions) plus the feature geometry into a
+// viewport-independent Primitive that everything downstream (projection, MVT
+// bake, client colour resolution) consumes. Colour stays a token; line-style
+// refs resolve against the S-101 catalogue.
 
 // mmPerSymbolUnit-derived conversions. S-101 widths/offsets are millimetres;
 // the engine uses pixels (at DefaultPxPerSymbolUnit) and 0.01-mm symbol units.
@@ -41,7 +40,7 @@ type S101Geometry struct {
 // LowerS101 maps one resolved S-101 draw command onto engine Primitives,
 // attaching geometry and resolving line-style references against the catalogue.
 // It returns a slice because an area-boundary line fans into one line primitive
-// per ring (matching the S-52 path); fills/symbols/text are a single primitive.
+// per ring; fills/symbols/text are a single primitive.
 // An empty slice means nothing to draw (a no-op, an unlowered draw kind, or a
 // draw whose geometry is missing).
 func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Catalog) []Primitive {
@@ -93,7 +92,7 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 			RotationTrueNorth: cmd.RotationTrueNorth,
 			OffsetXUnits:      float32(cmd.Offset[0] * unitsPerMM),
 			OffsetYUnits:      float32(cmd.Offset[1] * unitsPerMM),
-			Scale:             DefaultPxPerSymbolUnit, // same as the S-52 path; matches the sprite atlas px_per_unit
+			Scale:             DefaultPxPerSymbolUnit, // matches the sprite atlas px_per_unit
 			SoundingDepthM:    float32(math.NaN()),
 			DangerDepthM:      float32(math.NaN()),
 		}}

@@ -14,11 +14,10 @@ import (
 	"github.com/beetlebugorg/chartplotter/pkg/s100/catalog"
 )
 
-// EmitS101 writes the client asset files from the S-101 Portrayal Catalogue
-// (specs/s101-portrayal-backport.md): colortables.json from colorProfile.xml,
-// linestyles.json from the LineStyles, the sprite atlas from the S-101 SVG
-// symbols, and the pattern atlas from the AreaFills. Self-contained — no S-52
-// library. portrayalCatalogDir is a PortrayalCatalog directory; cssName selects
+// EmitS101 writes the client asset files from the S-101 Portrayal Catalogue:
+// colortables.json from colorProfile.xml, linestyles.json from the LineStyles,
+// the sprite atlas from the S-101 SVG symbols, and the pattern atlas from the
+// AreaFills. portrayalCatalogDir is a PortrayalCatalog directory; cssName selects
 // the palette stylesheet (e.g. "daySvgStyle.css", under Symbols/).
 func EmitS101(portrayalCatalogDir, cssName, dir string) ([]string, error) {
 	return EmitS101FS(os.DirFS(portrayalCatalogDir), cssName, dir)

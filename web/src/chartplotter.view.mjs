@@ -484,7 +484,7 @@ export const STYLE = `
           /* The bottom-centre data card and the bottom-right button cluster sit at
              the same height and collide on a narrow screen. Lift the card ABOVE the
              44px button row, and move the NOAA attribution to the (free) bottom-left
-             corner so the three no longer overlap. */
+             corner so the three don't overlap. */
           #databox { width:min(96vw, 420px); bottom:calc(var(--botbar-h) + 64px); }
           /* Attribution can't share the bottom row (scale bar left · buttons right ·
              card centred all collide), so float it on its own centred line just

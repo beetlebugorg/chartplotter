@@ -20,10 +20,9 @@ export function loadJSON(key, fallback) {
 // is the single coordinate that SCAMIN gating (chart-sources.mjs / baker), the
 // overscale ×n indication, and go-to-scale all reason in — producer scales (SCAMIN,
 // CSCL) are real 1:N paper scales, so they MUST be compared against this true scale,
-// not a relabelled 2×-coarse one. (There used to be a separate "nominal" 256
-// coordinate for the engine while only the readout was physical; that split was the
-// root of SCAMIN features vanishing at ~½ their stated scale, so it was removed.)
-// The BAND zoom ranges (bands.mjs / baker ZoomRange) are raw integer zooms and are
+// not a relabelled 2×-coarse one. A single physical coordinate (engine and readout
+// alike) keeps SCAMIN features visible to exactly their stated scale, rather than
+// vanishing at ~½ of it. The BAND zoom ranges (bands.mjs / baker ZoomRange) are raw integer zooms and are
 // independent of this constant — they pin each usage band to a tile-pyramid level.
 // scaleDenomPhysical (below) is the same physical scale but with a per-screen,
 // calibratable pixel pitch for an exact ruler-on-glass readout; this OGC-pixel form
@@ -142,7 +141,7 @@ export function fmtLatLon(lat, lng) {
   return dm(lat, 2) + (lat >= 0 ? "N" : "S") + " " + dm(x, 3) + (x >= 0 ? "E" : "W");
 }
 
-// True when the page was opened as a legacy snapshot link (<origin>/#share or
+// True when the page was opened as a snapshot share link (<origin>/#share or
 // ?share) — boot() then reconstructs the publisher's scene from /api/share.
 export function isShareUrl() {
   const h = (location.hash || "").replace(/^#/, "");
@@ -167,7 +166,7 @@ export function parseViewHash() {
 export async function copyText(text) {
   try {
     if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
-  } catch (e) { /* fall through to the legacy path */ }
+  } catch (e) { /* fall through to the textarea fallback */ }
   try {
     const ta = document.createElement("textarea");
     ta.value = text;

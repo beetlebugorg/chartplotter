@@ -28,15 +28,14 @@ const (
 	MVTBuffer float64 = 64
 )
 
-// s101Portrayer, when set via UseS101Catalog, makes every Baker built here use
-// the S-101 portrayal engine instead of the S-52 lookup+CSPs (specs/
-// s101-portrayal-backport.md). Transitional: at the cutover flip this becomes
-// unconditional and the var is removed.
+// s101Portrayer is an optional external-catalogue override set via
+// UseS101Catalog. When set, every Baker built here portrays from that catalogue;
+// otherwise baking uses the build-time embedded catalogue.
 var s101Portrayer bake.Portrayer
 
-// UseS101Catalog switches baking to S-101 portrayal, loading the engine from a
-// PortrayalCatalog directory + a FeatureCatalogue.xml path. Call once before
-// baking. (Transitional until the catalogue is embedded and S-101 is default.)
+// UseS101Catalog overrides the embedded catalogue, loading the S-101 portrayal
+// engine from a PortrayalCatalog directory + a FeatureCatalogue.xml path. Call
+// once before baking.
 func UseS101Catalog(portrayalCatalogDir, featureCataloguePath string) error {
 	p, err := bake.NewS101Portrayer(portrayalCatalogDir, featureCataloguePath)
 	if err != nil {
@@ -75,8 +74,8 @@ func embeddedPortrayer() bake.Portrayer {
 }
 
 func applyPortrayer(b *bake.Baker) {
-	// An explicit --s101 override (UseS101Catalog) wins; otherwise default to the
-	// build-time embedded catalogue; otherwise nil → the S-52 path (transitional).
+	// An explicit --s101 override (UseS101Catalog) wins; otherwise use the
+	// build-time embedded catalogue.
 	p := s101Portrayer
 	if p == nil {
 		p = embeddedPortrayer()

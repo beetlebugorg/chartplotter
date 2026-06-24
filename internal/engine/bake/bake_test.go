@@ -327,12 +327,12 @@ func TestSoundingGrouping(t *testing.T) {
 		if !s.firstFeatureHasStringKey("symbol_names") {
 			t.Error("soundings feature missing symbol_names")
 		}
-		// sym_s/sym_g are the S-52 SNDFRM04 safety-depth palette variants, only
-		// baked when a SymbolCall carries SoundingDepthM. The S-101 lower path
-		// sets SoundingDepthM=NaN, so it does not produce them — asserted S-52
-		// portrayal output; S-52 engine removed — needs an S-101 rewrite.
+		// sym_s/sym_g are the SNDFRM04 safety-depth palette variants, only baked
+		// when a SymbolCall carries SoundingDepthM. The S-101 lower path sets
+		// SoundingDepthM=NaN, so it does not produce them — this assertion needs an
+		// S-101 equivalent.
 		if !s.firstFeatureHasStringKey("sym_s") || !s.firstFeatureHasStringKey("sym_g") {
-			t.Skip("asserted S-52 portrayal output (SNDFRM04 sym_s/sym_g palette variants); S-52 engine removed — needs an S-101 rewrite")
+			t.Skip("SNDFRM04 sym_s/sym_g palette variants not produced by the S-101 lower path; needs an S-101 equivalent assertion")
 		}
 		t.Logf("soundings present at %v: %d features", c, len(s.feats))
 		break

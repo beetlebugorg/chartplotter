@@ -49,7 +49,7 @@ func TestLoadAndBridgeMaps(t *testing.T) {
 }
 
 // TestCoverageVsDAIObjectClasses reports how many of our DAI S-57 object
-// classes the feature catalogue maps — the bridge coverage for Workstream E.
+// classes the feature catalogue maps — the S-57→S-101 bridge coverage.
 func TestCoverageVsDAIObjectClasses(t *testing.T) {
 	c, err := Load(fcPath(t))
 	if err != nil {

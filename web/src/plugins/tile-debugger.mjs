@@ -21,9 +21,8 @@
 // dict that holds those caches moved between majors (`style.sourceCaches` in v4 →
 // `style.tileManagers` in v5), so we DUCK-TYPE it (see `_sourceCaches`) rather
 // than hardcode the property — robust across v4/v5, still tied to the vendored
-// web/vendor/maplibre-gl.js. (The per-tile delivered-bytes correlation was a
-// hook on the retired in-browser cp:// baker; server tiles are inspected via the
-// "inspect this tile" button → /api/tile instead.)
+// web/vendor/maplibre-gl.js. Server tiles are inspected via the "inspect this
+// tile" button → /api/tile.
 
 // Tile box colour + badge by classification. The red EMPTY box is the bug
 // signature: state=loaded but no buckets / no raw bytes.

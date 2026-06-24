@@ -14,9 +14,9 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 )
 
-// bakeCmd bakes S-57 ENC base cells into a PMTiles archive (the same MVT tiles the
-// in-browser wasm baker produces), for hosting a prebaked deployment. Updates
-// (.001+) are NOT applied — cells are baked at their base .000 edition.
+// bakeCmd bakes S-57 ENC base cells into a PMTiles archive of MVT tiles, for
+// hosting a prebaked deployment. Updates (.001+) are NOT applied — cells are
+// baked at their base .000 edition.
 type bakeCmd struct {
 	In       []string `arg:"" type:"path" help:"ENC inputs: .zip bundles, directories (scanned for *.000 and *.zip), and/or .000 files."`
 	Out      string   `short:"o" type:"path" default:"charts.pmtiles" help:"Output PMTiles archive."`
@@ -25,7 +25,7 @@ type bakeCmd struct {
 	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
 	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
 	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
-	S101     string   `name:"s101" type:"existingdir" help:"Portray via the S-101 rule engine using this PortrayalCatalog directory instead of the embedded S-52 PresLib (transitional, until the catalogue is embedded). Requires --s101-fc."`
+	S101     string   `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Requires --s101-fc."`
 	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
 }
 
