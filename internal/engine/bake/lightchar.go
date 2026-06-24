@@ -1,4 +1,4 @@
-package s52
+package bake
 
 import (
 	"fmt"

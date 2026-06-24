@@ -5,7 +5,6 @@ import (
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
 )
 
 // Complex (symbolised) linestyles are tessellated PER ZOOM at emit time, exactly
@@ -42,56 +41,6 @@ type lsInfo struct {
 // lsFeatureScale is screen px per 0.01-mm PresLib unit — the scale the dash/
 // symbol offsets are measured in (matches the assets + portrayal backend).
 const lsFeatureScale = float64(0.01 / 0.35278)
-
-// buildLinestyleTable analyses every PresLib linestyle into its period geometry
-// once (the baker reuses it for every tile). Mirrors assets.analyzeLinestyle but
-// keeps raw (unmerged) on-runs and symbol names — what the tessellator needs.
-func buildLinestyleTable(lib *s52.Library) map[string]*lsInfo {
-	out := make(map[string]*lsInfo)
-	for _, id := range lib.ListLineStyles() {
-		ls, err := lib.GetLineStyle(id)
-		if err != nil || ls.BBoxWidth == 0 {
-			continue
-		}
-		period := float64(ls.BBoxWidth) * lsFeatureScale
-		if period < 0.5 {
-			continue
-		}
-		bboxX := float64(ls.BBoxX)
-		info := &lsInfo{periodPx: period}
-		haveColor := false
-		for i := range ls.VectorCommands {
-			c := &ls.VectorCommands[i]
-			switch {
-			case c.Type == "PD":
-				pts := c.Points
-				for j := 0; j+1 < len(pts); j++ {
-					lo := clampf64((math.Min(pts[j].X, pts[j+1].X)-bboxX)*lsFeatureScale, 0, period)
-					hi := clampf64((math.Max(pts[j].X, pts[j+1].X)-bboxX)*lsFeatureScale, 0, period)
-					if hi-lo < 1e-6 {
-						continue
-					}
-					if !haveColor {
-						info.colorToken = ls.Colors.Roles[c.Role]
-						info.widthPx = float64(c.StrokeWidth) * 32.0 * lsFeatureScale
-						haveColor = true
-					}
-					info.onRuns = append(info.onRuns, lsOnRun{lo: lo, hi: hi})
-				}
-			case c.Type == "SC" && c.SymbolCall != nil:
-				info.symbols = append(info.symbols, lsEmbed{
-					offset: (c.SymbolCall.CallPosition.X - bboxX) * lsFeatureScale,
-					name:   c.SymbolCall.SymbolName,
-				})
-			}
-		}
-		if info.widthPx < 0.6 {
-			info.widthPx = 0.9 // a drawn pen is at least hairline-visible
-		}
-		out[id] = info
-	}
-	return out
-}
 
 // emitComplexLine tessellates one complex-line prim into this tile at coord.Z.
 func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, z uint32, extent uint32, tb *mvt.TileBuilder, scratch *[]tile.FPoint, attrScratch *[]mvt.KeyValue) {

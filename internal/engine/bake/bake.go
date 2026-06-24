@@ -31,11 +31,19 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
 	"github.com/beetlebugorg/chartplotter/pkg/geo"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 const maxBandZ uint32 = 18
+
+// S-52 display categories (DisplayBase/Standard/Other = 6/7/8). Local copies so
+// the bake path no longer depends on pkg/s52 (the S-101 catalogue is the sole
+// portrayer; these enum values are still carried through for the client filter).
+const (
+	displayCatBase     = 6
+	displayCatStandard = 7
+	displayCatOther    = 8
+)
 
 // generalOverzoomMin is the lowest zoom the general band displays at (below its
 // native min of 7) so general charts don't vanish when zoomed out — all the way
@@ -207,7 +215,7 @@ func scaminZoom(scamin uint32, lat float64) uint32 {
 //     best-available point suppression keeps it from doubling up with a coarse cell.
 //   - no SCAMIN: the band min — no over-scale flag ⇒ no display beyond the cell's band.
 func bandZMin(displayCategory int, scamin, bandMin uint32, lat float64) uint32 {
-	if displayCategory == s52.DisplayBase {
+	if displayCategory == displayCatBase {
 		return bandMin
 	}
 	if scamin != 0 {
@@ -423,7 +431,7 @@ func groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, s
 		var lines []string
 		seen := map[string]bool{}
 		for _, i := range idxs {
-			ch := s52.BuildLightCharacteristic(features[i].Attributes())
+			ch := BuildLightCharacteristic(features[i].Attributes())
 			if ch == "" || seen[ch] {
 				continue
 			}
@@ -543,7 +551,7 @@ func (b *Baker) ScaminValues() []uint32 {
 
 // AddCell expands every feature of a parsed cell into routed primitives at the
 // cell's scale band, with per-feature SCAMIN display z-min.
-func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.MarinerSettings) {
+func (b *Baker) AddCell(chart *s57.Chart) {
 	if b.portrayer == nil {
 		panic("bake: no S-101 portrayer set — build with `make` (-tags embed_s101) or pass --s101")
 	}
@@ -555,8 +563,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 	}
 	if b.linestyles == nil {
 		// Complex-line dash/symbol geometry comes from the S-101 catalogue (via the
-		// portrayer) now, not the S-52 PresLib. `lib` is unused here (kept in the
-		// signature until the s52.Library is dropped from the bake path entirely).
+		// portrayer) now, not the S-52 PresLib.
 		if src, ok := b.portrayer.(linestyleSource); ok {
 			b.linestyles = src.LinestyleTable()
 		}
@@ -609,7 +616,7 @@ func (b *Baker) AddCell(chart *s57.Chart, lib *s52.Library, mariner *s52.Mariner
 		b.curLightSkip = false
 		b.curLightText = ""
 		if f.ObjectClass() == "LIGHTS" {
-			b.curLight = s52.BuildLightCharacteristic(f.Attributes())
+			b.curLight = BuildLightCharacteristic(f.Attributes())
 			b.curLightSkip = lightSkip[i]
 			if merged, ok := lightPrimary[i]; ok {
 				b.curLightText = merged
@@ -719,11 +726,11 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 // tests `cat ∈ {0,1,2}`, so the raw enum values would filter every feature out.
 func catRank(displayCategory int) int64 {
 	switch displayCategory {
-	case s52.DisplayBase:
+	case displayCatBase:
 		return 0
-	case s52.DisplayStandard:
+	case displayCatStandard:
 		return 1
-	default: // DisplayOther
+	default: // displayCatOther
 		return 2
 	}
 }

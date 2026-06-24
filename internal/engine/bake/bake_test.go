@@ -9,8 +9,6 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/portrayal"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
 	"github.com/beetlebugorg/chartplotter/pkg/geo"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
@@ -31,17 +29,13 @@ func TestBandForScale(t *testing.T) {
 // TestBakeGoldenCell bakes the Annapolis cell and decodes one populated tile,
 // asserting the expected layers and that colour is a string token.
 func TestBakeGoldenCell(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatalf("load lib: %v", err)
-	}
 	chart, err := s57.Parse(goldenCell)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	b := New()
 	b.SetPortrayer(testS101Portrayer(t))
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 
 	coords := b.TileCoords(mvt.ExtentDefault)
 	if len(coords) == 0 {
@@ -224,17 +218,13 @@ func decodeLayers(data []byte) map[string]*decLayer {
 }
 
 func TestBakePMTilesArchive(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatalf("load lib: %v", err)
-	}
 	chart, err := s57.Parse(goldenCell)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	b := New()
 	b.SetPortrayer(testS101Portrayer(t))
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 	pb := b.BakePMTiles(mvt.ExtentDefault, 64)
 	if pb.Count() == 0 {
 		t.Fatal("archive has no tiles")
@@ -250,10 +240,6 @@ func TestBakePMTilesArchive(t *testing.T) {
 // produces byte-identical tiles to the full-scan fallback for every tile —
 // across two overlapping cells of different bands (so suppression is exercised).
 func TestEmitIndexEquivalence(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatalf("load lib: %v", err)
-	}
 	build := func() *Baker {
 		b := New()
 		b.SetPortrayer(testS101Portrayer(t))
@@ -262,7 +248,7 @@ func TestEmitIndexEquivalence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %s: %v", cell, err)
 			}
-			b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+			b.AddCell(chart)
 		}
 		return b
 	}
@@ -317,17 +303,13 @@ func TestEmitIndexEquivalence(t *testing.T) {
 }
 
 func TestSoundingGrouping(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatalf("load lib: %v", err)
-	}
 	chart, err := s57.Parse(goldenCell)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	b := New()
 	b.SetPortrayer(testS101Portrayer(t))
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 
 	// Find a tile carrying soundings and confirm the grouped attributes.
 	var found bool

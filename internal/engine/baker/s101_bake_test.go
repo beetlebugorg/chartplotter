@@ -7,15 +7,12 @@ import (
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 )
 
 // TestS101BakeProducesTiles bakes a real NOAA cell through the S-101 portrayal
 // engine (the cutover seam) and confirms tiles come out — the first real
 // end-to-end S-101 render in the bake pipeline. Skips without the vendored
-// catalogue. (lib is still loaded transitionally for the complex-linestyle
-// period table + light characteristics; only the portrayal is S-101 here.)
+// catalogue.
 func TestS101BakeProducesTiles(t *testing.T) {
 	pc := os.Getenv("S101_CATALOG")
 	if pc == "" {
@@ -46,14 +43,9 @@ func TestS101BakeProducesTiles(t *testing.T) {
 		t.Fatalf("parse cell: %v", err)
 	}
 
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI) // transitional: linestyle table + light char
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	b := bake.New()
 	b.SetPortrayer(portrayer) // <- S-101 symbology instead of S-52
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 
 	pb := baker.BakeToPMTiles(b, nil)
 	if pb.Count() == 0 {

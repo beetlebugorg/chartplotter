@@ -19,8 +19,6 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
 	"github.com/beetlebugorg/chartplotter/pkg/geo"
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
@@ -105,25 +103,18 @@ func ParseCellBytes(name string, data []byte) (*s57.Chart, error) {
 // This is the real-time wasm path — parsing a single large cell can take seconds
 // in wasm, so loading the set one cell per call lets the host yield between cells
 // (servicing tile requests / reporting progress) rather than blocking on the
-// whole set. The S-52 library + mariner settings are loaded once and reused.
+// whole set.
 type Session struct {
-	Baker   *bake.Baker
-	lib     *s52.Library
-	mariner *s52.MarinerSettings
+	Baker *bake.Baker
 }
 
-// NewSession returns an empty incremental Session (loads the S-52 presentation
-// library once). Add cells with AddCellBytes, then bake tiles off Session.Baker.
+// NewSession returns an empty incremental Session. Add cells with AddCellBytes,
+// then bake tiles off Session.Baker.
 func NewSession() (*Session, error) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		return nil, err
-	}
-	mariner := s52.DefaultMarinerSettings()
 	b := bake.New()
 	applyPortrayer(b)
 	b.OverzoomAllBands = true // realtime/upload path: keep a few uploaded cells visible (skeleton) when zoomed out
-	return &Session{Baker: b, lib: lib, mariner: mariner}, nil
+	return &Session{Baker: b}, nil
 }
 
 // AddCellBytes parses one raw cell and adds it to the session's Baker. The caller
@@ -134,7 +125,7 @@ func (s *Session) AddCellBytes(name string, data []byte) (s57.Bounds, error) {
 	if err != nil {
 		return s57.Bounds{}, err
 	}
-	s.Baker.AddCell(chart, s.lib, s.mariner)
+	s.Baker.AddCell(chart)
 	return chart.Bounds(), nil
 }
 
@@ -143,12 +134,6 @@ func (s *Session) AddCellBytes(name string, data []byte) (s57.Bounds, error) {
 // cell that fails to parse. Returns the Baker and the names successfully added,
 // in sorted order for deterministic output.
 func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		return nil, nil, err
-	}
-	mariner := s52.DefaultMarinerSettings()
-
 	names := make([]string, 0, len(cells))
 	for n := range cells {
 		names = append(names, n)
@@ -166,7 +151,7 @@ func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*
 			}
 			continue
 		}
-		b.AddCell(chart, lib, mariner)
+		b.AddCell(chart)
 		ok = append(ok, name)
 	}
 	return b, ok, nil
@@ -204,12 +189,6 @@ func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (
 // overview cells) stays visible zoomed out; leave it false for a full NOAA bake
 // whose overview/general bands already supply the zoomed-out skeleton.
 func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		return nil, nil, err
-	}
-	mariner := s52.DefaultMarinerSettings()
-
 	names := make([]string, 0, len(cells))
 	for n := range cells {
 		names = append(names, n)
@@ -229,7 +208,7 @@ func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func
 			}
 			continue
 		}
-		b.AddCell(chart, lib, mariner)
+		b.AddCell(chart)
 		ok = append(ok, name)
 	}
 	return b, ok, nil
@@ -324,11 +303,6 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 // builder) is called per band that produced tiles; returns the cell-union bounds
 // and the number of cells parsed.
 func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSkip func(name string, err error), progress func(done, total int), emit func(slug string, pb *pmtiles.Builder) error) (geo.BoundingBox, int, error) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		return geo.BoundingBox{}, 0, err
-	}
-	mariner := s52.DefaultMarinerSettings()
 	b := bake.New()
 	applyPortrayer(b)
 	if maxZoom > 0 {
@@ -375,7 +349,7 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 				}
 				continue
 			}
-			b.AddCell(chart, lib, mariner)
+			b.AddCell(chart)
 		}
 		coords := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max)
 		if len(coords) == 0 {

@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
@@ -25,17 +23,13 @@ func featHasKey(l *decLayer, tags []uint32, key string) bool {
 // §3.1.6 / PresLib §9.2 ROT. The split must be SELECTIVE: an approach cell carries
 // both kinds, so the baked flag must appear on some point symbols and not others.
 func TestRotNorthSelective(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatal(err)
-	}
 	chart, err := s57.Parse(goldenCell)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := New()
 	b.SetPortrayer(testS101Portrayer(t))
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 
 	var total, withNorth int
 	for _, c := range b.TileCoords(mvt.ExtentDefault) {

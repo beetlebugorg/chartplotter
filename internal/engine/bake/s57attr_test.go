@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
@@ -57,17 +55,13 @@ func TestEncodeS57Attrs(t *testing.T) {
 // The pick report needs the s57 attribute blob on real baked features; assert it
 // is emitted on at least one layer of the golden cell.
 func TestS57BlobBaked(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatal(err)
-	}
 	chart, err := s57.Parse(goldenCell)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := New()
 	b.SetPortrayer(testS101Portrayer(t))
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 
 	for _, c := range b.TileCoords(mvt.ExtentDefault) {
 		data := b.EmitTile(c, mvt.ExtentDefault, 64)

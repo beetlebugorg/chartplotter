@@ -4,18 +4,12 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/mvt"
-	"github.com/beetlebugorg/chartplotter/pkg/s52"
-	"github.com/beetlebugorg/chartplotter/pkg/s52/preslib"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 // The inspector's source-cell pill reads a baked `cell` attribute; verify it is
 // emitted on point_symbols (and equals the dataset name).
 func TestCellAttributeBaked(t *testing.T) {
-	lib, err := s52.LoadLibraryFromBytes(preslib.DAI)
-	if err != nil {
-		t.Fatal(err)
-	}
 	chart, err := s57.Parse(goldenCell)
 	if err != nil {
 		t.Fatal(err)
@@ -26,7 +20,7 @@ func TestCellAttributeBaked(t *testing.T) {
 	}
 	b := New()
 	b.SetPortrayer(testS101Portrayer(t))
-	b.AddCell(chart, lib, s52.DefaultMarinerSettings())
+	b.AddCell(chart)
 
 	for _, c := range b.TileCoords(mvt.ExtentDefault) {
 		data := b.EmitTile(c, mvt.ExtentDefault, 64)
