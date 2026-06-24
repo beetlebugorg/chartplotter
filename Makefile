@@ -185,7 +185,11 @@ docs-shots: build ## Regenerate docs UI screenshots from the live app into docs/
 	  curl -fsS "http://127.0.0.1:$(DOCS_SHOTS_PORT)/api/health" >/dev/null 2>&1 && break; \
 	  sleep 0.2; \
 	done; \
-	node scripts/docs-shots.mjs "http://127.0.0.1:$(DOCS_SHOTS_PORT)"
+	node scripts/docs-shots.mjs "http://127.0.0.1:$(DOCS_SHOTS_PORT)"; \
+	if command -v magick >/dev/null 2>&1; then \
+	  magick docs/static/img/ui/annapolis.png -resize 50% docs/static/img/ui/annapolis.png; \
+	  echo "downscaled annapolis.png for GitHub (→ 800x600)"; \
+	fi
 
 test:
 	go test ./...

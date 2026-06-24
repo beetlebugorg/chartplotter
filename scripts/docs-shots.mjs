@@ -43,6 +43,12 @@ const baseURL = process.argv[2] || "http://127.0.0.1:8080";
 const outDir = resolve(repo, process.argv[3] || "docs/static/img/ui");
 mkdirSync(outDir, { recursive: true });
 
+// Optionally capture only a subset, e.g. DOCS_SHOTS_ONLY=annapolis (comma list);
+// empty = all. Each shot below sets up its own state, so any single one is safe
+// to run alone.
+const ONLY = (process.env.DOCS_SHOTS_ONLY || "").split(",").map((s) => s.trim()).filter(Boolean);
+const want = (name) => ONLY.length === 0 || ONLY.includes(name);
+
 // The featured view: Chesapeake Bay near Annapolis (NOAA District 5), the app's
 // own built-in default. Change here and every shot re-frames together.
 const VIEW = { lng: -76.4875, lat: 38.975, zoom: 12 };
@@ -98,39 +104,61 @@ await frame();
 await closeDrawer();
 
 // 1) The clean chart view (hero), Day palette.
-await shot("chart-day");
+if (want("chart-day")) await shot("chart-day");
 
 // 2) Day / Dusk / Night — the same view in each palette.
-await scheme("dusk"); await shot("palette-dusk");
-await scheme("night"); await shot("palette-night");
+if (want("palette-dusk")) { await scheme("dusk"); await shot("palette-dusk"); }
+if (want("palette-night")) { await scheme("night"); await shot("palette-night"); }
 await scheme("day"); // back to day for the rest
 
 // 3) The settings drawer (where you switch palette + mariner options).
-await page.evaluate(() => document.querySelector("chart-plotter").toggleSection("settings"));
-await page.waitForTimeout(700);
-await shot("settings");
-await closeDrawer();
+if (want("settings")) {
+  await page.evaluate(() => document.querySelector("chart-plotter").toggleSection("settings"));
+  await page.waitForTimeout(700);
+  await shot("settings");
+  await closeDrawer();
+}
 
 // 4) The Chart Library / import panel.
-await page.evaluate(() => document.querySelector("chart-plotter").toggleSection("charts"));
-await page.waitForTimeout(900);
-await shot("chart-library");
-await closeDrawer();
+if (want("chart-library")) {
+  await page.evaluate(() => document.querySelector("chart-plotter").toggleSection("charts"));
+  await page.waitForTimeout(900);
+  await shot("chart-library");
+  await closeDrawer();
+}
 
 // 5) Pick report — tap a charted feature near the center and capture the panel.
-await frame();
-const picked = await page.evaluate(() => {
-  const a = document.querySelector("chart-plotter");
-  const m = a._map;
-  const c = { x: m.getCanvas().clientWidth / 2, y: m.getCanvas().clientHeight / 2 };
-  // Find a rendered chart feature nearest center to guarantee a populated report.
-  const feats = m.queryRenderedFeatures().filter((f) => /chart/i.test(f.source || ""));
-  if (!feats.length) return false;
-  a._pickReportAt(c, new MouseEvent("click"));
-  return true;
-});
-if (picked) { await page.waitForTimeout(900); await shot("pick-report"); }
-else console.error("[pick] no chart features under center — skipped pick-report");
+if (want("pick-report")) {
+  await frame();
+  const picked = await page.evaluate(() => {
+    const a = document.querySelector("chart-plotter");
+    const m = a._map;
+    const c = { x: m.getCanvas().clientWidth / 2, y: m.getCanvas().clientHeight / 2 };
+    // Find a rendered chart feature nearest center to guarantee a populated report.
+    const feats = m.queryRenderedFeatures().filter((f) => /chart/i.test(f.source || ""));
+    if (!feats.length) return false;
+    a._pickReportAt(c, new MouseEvent("click"));
+    return true;
+  });
+  if (picked) { await page.waitForTimeout(900); await shot("pick-report"); }
+  else console.error("[pick] no chart features under center — skipped pick-report");
+}
+
+// 6) Close-up of Annapolis / the U.S. Naval Academy at 1:12,000. Captured at
+// 1600x1200 device pixels (800x600 viewport at deviceScaleFactor 2); the make
+// target downscales it for GitHub.
+if (want("annapolis")) {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await scheme("day");
+  await page.evaluate(() => document.querySelector("chart-plotter").setView({ lat: 38.9825, lng: -76.4810, scale: 12000 }));
+  // A big camera jump kicks off async tile loads; one idle can fire before the
+  // harbor tiles arrive, so settle, nudge a repaint, and idle again.
+  await idle(2500);
+  await page.evaluate(() => document.querySelector("chart-plotter")._map.triggerRepaint());
+  await idle(2500);
+  await closeDrawer();
+  await shot("annapolis");
+}
 
 await browser.close();
 console.log("done");
