@@ -3,6 +3,7 @@ package portrayal
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -170,16 +171,86 @@ func textAnchor(g geom) (geo.LatLon, bool) {
 		if len(g.area) == 0 || len(g.area[0]) == 0 {
 			return geo.LatLon{}, false
 		}
-		var sumLat, sumLon float64
-		for _, p := range g.area[0] {
-			sumLat += p.Lat
-			sumLon += p.Lon
-		}
-		n := float64(len(g.area[0]))
-		return geo.LatLon{Lat: sumLat / n, Lon: sumLon / n}, true
+		return areaSurfacePoint(g.area[0])
 	default:
 		return geo.LatLon{}, false
 	}
+}
+
+// areaSurfacePoint returns a point guaranteed to lie inside the polygon ring (a
+// "point on surface"): the area-weighted centroid when that falls inside, else the
+// midpoint of the widest interior span of a horizontal scan line through the
+// centroid's latitude. This keeps an area's symbol/label off land for concave
+// shapes — e.g. an anchorage anchor symbol that the plain vertex average would
+// push outside the water. Falls back to the vertex average for degenerate rings.
+func areaSurfacePoint(ring []geo.LatLon) (geo.LatLon, bool) {
+	if len(ring) == 0 {
+		return geo.LatLon{}, false
+	}
+	var sumLat, sumLon float64
+	for _, p := range ring {
+		sumLat += p.Lat
+		sumLon += p.Lon
+	}
+	mean := geo.LatLon{Lat: sumLat / float64(len(ring)), Lon: sumLon / float64(len(ring))}
+
+	// Area-weighted centroid (shoelace), x=lon, y=lat.
+	var a2, cx, cy float64
+	for i := range ring {
+		j := (i + 1) % len(ring)
+		x0, y0 := ring[i].Lon, ring[i].Lat
+		x1, y1 := ring[j].Lon, ring[j].Lat
+		cross := x0*y1 - x1*y0
+		a2 += cross
+		cx += (x0 + x1) * cross
+		cy += (y0 + y1) * cross
+	}
+	centroid := mean
+	if a2 != 0 {
+		centroid = geo.LatLon{Lat: cy / (3 * a2), Lon: cx / (3 * a2)}
+	}
+	if pointInRing(centroid, ring) {
+		return centroid, true
+	}
+
+	// Concave shape: the centroid is outside. Scan horizontally at the centroid's
+	// latitude, collect where the boundary crosses it, and return the midpoint of
+	// the widest interior interval (which is inside the polygon by construction).
+	y := centroid.Lat
+	var xs []float64
+	for i := range ring {
+		j := (i + 1) % len(ring)
+		y0, y1 := ring[i].Lat, ring[j].Lat
+		if (y0 <= y) != (y1 <= y) {
+			t := (y - y0) / (y1 - y0)
+			xs = append(xs, ring[i].Lon+t*(ring[j].Lon-ring[i].Lon))
+		}
+	}
+	sort.Float64s(xs)
+	bestMid, bestW, found := 0.0, -1.0, false
+	for i := 0; i+1 < len(xs); i += 2 {
+		if w := xs[i+1] - xs[i]; w > bestW {
+			bestW, bestMid, found = w, (xs[i]+xs[i+1])/2, true
+		}
+	}
+	if found {
+		return geo.LatLon{Lat: y, Lon: bestMid}, true
+	}
+	return mean, true
+}
+
+// pointInRing reports whether p is inside the polygon ring (ray casting).
+func pointInRing(p geo.LatLon, ring []geo.LatLon) bool {
+	in := false
+	for i, j := 0, len(ring)-1; i < len(ring); j, i = i, i+1 {
+		yi, yj := ring[i].Lat, ring[j].Lat
+		xi, xj := ring[i].Lon, ring[j].Lon
+		if (yi > p.Lat) != (yj > p.Lat) &&
+			p.Lon < (xj-xi)*(p.Lat-yi)/(yj-yi)+xi {
+			in = !in
+		}
+	}
+	return in
 }
 
 // geometryCode maps an s57 geometry type to the S-52 LUPT geometry code.
@@ -504,14 +575,14 @@ func representativePoint(f *s57.Feature) (geo.LatLon, bool) {
 		}
 	case s57.GeometryTypePolygon:
 		ring := exteriorRing(g)
-		var sx, sy, n float64
+		pts := make([]geo.LatLon, 0, len(ring))
 		for _, c := range ring {
 			if len(c) >= 2 {
-				sx, sy, n = sx+c[0], sy+c[1], n+1
+				pts = append(pts, geo.LatLon{Lat: c[1], Lon: c[0]})
 			}
 		}
-		if n > 0 {
-			return geo.LatLon{Lat: sy / n, Lon: sx / n}, true
+		if len(pts) > 0 {
+			return areaSurfacePoint(pts)
 		}
 	}
 	// Point geometry, or a fallback for any geometry whose first coordinate is set.
