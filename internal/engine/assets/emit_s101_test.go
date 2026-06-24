@@ -24,10 +24,10 @@ func TestEmitS101(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 4 {
-		t.Errorf("wrote %d files, want 4", len(files))
+	if len(files) != 6 {
+		t.Errorf("wrote %d files, want 6", len(files))
 	}
-	for _, name := range []string{"colortables.json", "linestyles.json", "sprite.json", "sprite.png"} {
+	for _, name := range []string{"colortables.json", "linestyles.json", "sprite.json", "sprite.png", "patterns.json", "patterns.png"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("missing %s", name)
 		}

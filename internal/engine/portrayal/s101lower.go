@@ -41,12 +41,7 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 		return FillPolygon{Rings: geom.Rings, ColorToken: cmd.Reference}, true
 
 	case instructions.OpAreaFill:
-		// S-101 area-fill patterns reference S-101 symbol tiles, but the S-101
-		// pattern atlas (patterns.{png,json}) isn't emitted yet — so the client
-		// would resolve these against the S-52 pattern atlas and render garbage
-		// (wrong sprite offsets). Suppress until S-101 patterns are emitted; the
-		// underlying ColorFill still shows. (Tracked gap.)
-		return nil, false
+		return PatternFill{Rings: geom.Rings, PatternName: cmd.Reference}, true
 
 	case instructions.OpLine:
 		if cmd.Reference == "_simple_" && cmd.SimpleLine != nil {

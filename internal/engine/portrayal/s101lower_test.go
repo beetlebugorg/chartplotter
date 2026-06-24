@@ -92,12 +92,12 @@ func TestLowerComplexLineResolvesPenColor(t *testing.T) {
 	}
 }
 
-func TestLowerAreaFillSuppressed(t *testing.T) {
-	// S-101 area-fill patterns are suppressed until the S-101 pattern atlas is
-	// emitted (they'd resolve against the S-52 atlas and render garbage).
+func TestLowerAreaFillReference(t *testing.T) {
 	geom := S101Geometry{Rings: [][]geo.LatLon{{{}, {}}}}
-	if prims := lowerStream(t, "AreaFillReference:DRGARE01", geom, nil); len(prims) != 0 {
-		t.Fatalf("AreaFillReference should be suppressed, got %d primitives", len(prims))
+	prims := lowerStream(t, "AreaFillReference:DRGARE01", geom, nil)
+	pf, ok := prims[0].(PatternFill)
+	if !ok || pf.PatternName != "DRGARE01" || len(pf.Rings) == 0 {
+		t.Fatalf("want PatternFill DRGARE01 on rings, got %#v", prims)
 	}
 }
 

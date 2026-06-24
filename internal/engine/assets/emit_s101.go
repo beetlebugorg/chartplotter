@@ -12,14 +12,10 @@ import (
 
 // EmitS101 writes the client asset files from the S-101 Portrayal Catalogue
 // (specs/s101-portrayal-backport.md): colortables.json from colorProfile.xml,
-// linestyles.json from the LineStyles, and the sprite atlas from the S-101 SVG
-// symbols. Self-contained — no S-52 library. portrayalCatalogDir is a
-// PortrayalCatalog directory; cssName selects the palette stylesheet (e.g.
-// "daySvgStyle.css", under Symbols/).
-//
-// TODO: patterns.{png,json} from the S-101 AreaFills; until then S-101-only
-// area-fill patterns won't render client-side (point symbols, lines, and
-// colours do).
+// linestyles.json from the LineStyles, the sprite atlas from the S-101 SVG
+// symbols, and the pattern atlas from the AreaFills. Self-contained — no S-52
+// library. portrayalCatalogDir is a PortrayalCatalog directory; cssName selects
+// the palette stylesheet (e.g. "daySvgStyle.css", under Symbols/).
 func EmitS101(portrayalCatalogDir, cssName, dir string) ([]string, error) {
 	return EmitS101FS(os.DirFS(portrayalCatalogDir), cssName, dir)
 }
@@ -72,6 +68,17 @@ func EmitS101FS(catalogFS fs.FS, cssName, dir string) ([]string, error) {
 		return nil, err
 	}
 	if err := write("sprite.png", spritePNG); err != nil {
+		return nil, err
+	}
+
+	patJSON, patPNG, err := PatternAtlasS101FS(catalogFS, cssName)
+	if err != nil {
+		return nil, fmt.Errorf("patterns: %w", err)
+	}
+	if err := write("patterns.json", patJSON); err != nil {
+		return nil, err
+	}
+	if err := write("patterns.png", patPNG); err != nil {
 		return nil, err
 	}
 	return written, nil
