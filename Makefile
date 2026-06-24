@@ -187,8 +187,9 @@ docs-shots: build ## Regenerate docs UI screenshots from the live app into docs/
 	done; \
 	node scripts/docs-shots.mjs "http://127.0.0.1:$(DOCS_SHOTS_PORT)"; \
 	if command -v magick >/dev/null 2>&1; then \
-	  magick docs/static/img/ui/annapolis.png -resize 50% docs/static/img/ui/annapolis.png; \
-	  echo "downscaled annapolis.png for GitHub (→ 800x600)"; \
+	  for s in annapolis newyork; do \
+	    [ -f docs/static/img/ui/$$s.png ] && magick docs/static/img/ui/$$s.png -resize 50% docs/static/img/ui/$$s.png && echo "downscaled $$s.png for GitHub (→ 800x600)"; \
+	  done; \
 	fi
 
 test:

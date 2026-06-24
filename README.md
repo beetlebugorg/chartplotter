@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/static/img/ui/annapolis.png" alt="chartplotter rendering the U.S. Naval Academy at Annapolis, ~1:12,000" width="800">
-  <br><sub>The U.S. Naval Academy, Annapolis — NOAA ENC data, S-101 portrayal, ~1:12,000.</sub>
+  <img src="docs/static/img/ui/newyork.png" alt="chartplotter rendering New York Harbor's Upper Bay" width="800">
+  <br><sub>New York Harbor, Upper Bay — NOAA ENC data, S-101 portrayal.</sub>
 </p>
 
 ---
