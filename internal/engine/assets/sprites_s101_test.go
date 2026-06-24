@@ -34,8 +34,8 @@ func TestSpriteAtlasS101(t *testing.T) {
 	if err != nil {
 		t.Fatalf("atlas PNG: %v", err)
 	}
-	if img.Bounds().Dx() != atlasWidth || img.Bounds().Dy() < 1 {
-		t.Errorf("atlas dims = %v", img.Bounds())
+	if img.Bounds().Dx() != s101AtlasWidth || img.Bounds().Dy() < 1 || img.Bounds().Dy() > 4096 {
+		t.Errorf("atlas dims = %v (want %d wide, <=4096 tall)", img.Bounds(), s101AtlasWidth)
 	}
 
 	// JSON parses; _meta present; a known symbol is packed with a sane cell.
