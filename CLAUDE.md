@@ -15,6 +15,9 @@ bathymetric support is planned.
 
 ## Conventions
 
+- **Stay CGO-free.** Builds run with `CGO_ENABLED=0` (the cross-compiled release
+  binaries depend on it). Use pure-Go libraries only — e.g. `modernc.org/sqlite`,
+  not `mattn/go-sqlite3`. Do not add a dependency that needs cgo.
 - Use https://www.openbridge.no/ for design and icons.
 - Match the style of the code around you.
 - Never run `git add -A` or `git add .`. The repo holds large untracked files
