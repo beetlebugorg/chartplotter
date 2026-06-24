@@ -65,7 +65,7 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 			RotationDeg:    float32(cmd.Rotation),
 			OffsetXUnits:   float32(cmd.Offset[0] * unitsPerMM),
 			OffsetYUnits:   float32(cmd.Offset[1] * unitsPerMM),
-			Scale:          1,
+			Scale:          DefaultPxPerSymbolUnit, // same as the S-52 path; matches the sprite atlas px_per_unit
 			SoundingDepthM: float32(math.NaN()),
 			DangerDepthM:   float32(math.NaN()),
 		}, true
