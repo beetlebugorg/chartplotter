@@ -447,11 +447,14 @@ export class ChartPlotter extends HTMLElement {
     }
     const need = packs.length === 1 ? (BAND_MINZOOM[BANDS[finest]] || 12) + 0.3 : 0;
     const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
-    const zoom = Math.min(18, Math.max(cam ? cam.zoom : Math.max(need, 9), need));
+    // Cap the fly target at the destination's scale floor (not a raw z18) so we
+    // never overshoot it and snap back when moveend re-applies the floor.
+    const destLat = cam ? cam.center.lat : (s + n) / 2;
+    const zoom = Math.min(maxZoomForScaleFloor(destLat), Math.max(cam ? cam.zoom : Math.max(need, 9), need));
     // Raise the dynamic zoom cap to the target FIRST — we're flying from open water
-    // (low cap) into the pack's coverage, so without this the fly clamps short and a
-    // berthing-only set wouldn't reach the zoom where it renders. _updateZoomCap
-    // recomputes at the destination (which has the charts) and won't yank back.
+    // (low cap, set at the prior latitude) into the pack's coverage, so without this
+    // the fly clamps short and a berthing-only set wouldn't reach the zoom where it
+    // renders. The moveend handler re-applies the floor at the destination.
     if (map.getMaxZoom() < zoom) map.setMaxZoom(zoom);
     map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
   }
@@ -522,6 +525,11 @@ export class ChartPlotter extends HTMLElement {
       this.addCatalogOverlay(map);
       this._refreshInstalledBounds();
     });
+    // Hold the 1:MIN_DETAIL_SCALE max-zoom floor on EVERY view change. It's
+    // latitude-dependent (recompute as the centre moves), and a fly-to-chart raises
+    // the cap to reach a pack's detail — without re-enforcing here that raised cap
+    // sticks and you can magnify past the floor (the 1:900 over-zoom).
+    map.on("moveend", () => this._applyScaleFloor());
     await this.restoreArchive();
     // Local serve: render every baked pack the server holds (survives reload). Prod
     // already loaded its prebaked archives in restoreArchive() above.
