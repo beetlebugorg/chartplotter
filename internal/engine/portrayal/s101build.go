@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -108,6 +109,17 @@ func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[
 	depthIdx := BuildDepthIndex(features) // underlying DEPARE/DRGARE for danger depths
 	topmarkIdx := buildTopmarkIndex(features)
 	batch := make([]s101.Feature, 0, len(features))
+	// Memoize the rule run by portrayal input. The S-101 rule produces a
+	// geometry-INDEPENDENT instruction stream (the geometry is attached per-feature
+	// in buildFeature), so two features with identical inputs — class, primitive,
+	// simple/derived/topmark attributes, multipoint vertices — yield the same
+	// stream. ENC cells repeat the same inputs across thousands of features
+	// (coastline, land regions, depth areas), and the gopher-lua rule run is the
+	// dominant, allocation-heavy bake cost, so run it once per distinct input and
+	// share the stream. sigRep maps a signature to its representative feature ID;
+	// repID maps every portrayed feature to the representative whose stream it uses.
+	sigRep := make(map[string]string)
+	repID := make(map[int64]string, len(features))
 	for _, f := range features {
 		if include != nil && !include(f) {
 			continue
@@ -135,8 +147,8 @@ func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[
 		// feature.Spatial would otherwise hit the framework's GetSpatial infinite
 		// recursion (it reads self['Spatial'] right after assigning it nil, which
 		// re-fires __index) — the cause of the OBSTRN/WRECKS stack overflows.
-		if f.Geometry().Type == s57.GeometryTypePoint {
-			points = soundingPoints(f.Geometry())
+		if g.Type == s57.GeometryTypePoint {
+			points = soundingPoints(g)
 			if f.ObjectClass() == "SOUNDG" {
 				prim = "MultiPoint"
 			}
@@ -147,7 +159,7 @@ func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[
 				topmark = topmarkIdx[key]
 			}
 		}
-		batch = append(batch, s101.Feature{
+		sf := s101.Feature{
 			ID:          strconv.FormatInt(f.ID(), 10),
 			ObjectClass: f.ObjectClass(),
 			Primitive:   prim,
@@ -155,20 +167,76 @@ func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[
 			Derived:     DerivedAttrs(f, depthIdx),
 			Points:      points,
 			Topmark:     topmark,
-		})
+		}
+		sig := portrayalSignature(&sf)
+		if rep, ok := sigRep[sig]; ok {
+			repID[f.ID()] = rep // identical inputs already portrayed; share its stream
+			continue
+		}
+		sigRep[sig] = sf.ID
+		repID[f.ID()] = sf.ID
+		batch = append(batch, sf)
 	}
 	streams, err := eng.Portray(batch)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int64]FeatureBuild, len(batch))
+	out := make(map[int64]FeatureBuild, len(features))
 	for _, f := range features {
 		if include != nil && !include(f) {
 			continue
 		}
-		out[f.ID()] = b.buildFeature(f, streams[strconv.FormatInt(f.ID(), 10)])
+		// repID[f.ID()] is "" for the skipped (TOPMAR / non-spatial) features, and
+		// streams[""] is "" — buildFeature then suppresses them, as before.
+		out[f.ID()] = b.buildFeature(f, streams[repID[f.ID()]])
 	}
 	return out, nil
+}
+
+// portrayalSignature serializes everything the S-101 rules read from a feature —
+// class, primitive type, simple + derived + topmark attributes, and any
+// multipoint vertices — into a stable key. Features with equal signatures produce
+// the same instruction stream, so the rule runs once per distinct signature. NUL
+// and unit separators keep distinct field layouts from colliding.
+func portrayalSignature(f *s101.Feature) string {
+	var b strings.Builder
+	b.WriteString(f.ObjectClass)
+	b.WriteByte(0)
+	b.WriteString(f.Primitive)
+	b.WriteByte(0)
+	writeSortedAttrs(&b, f.Attributes)
+	b.WriteByte(0)
+	writeSortedAttrs(&b, f.Derived)
+	b.WriteByte(0)
+	writeSortedAttrs(&b, f.Topmark)
+	for _, p := range f.Points {
+		b.WriteByte(0)
+		b.WriteString(strconv.FormatFloat(p[0], 'g', -1, 64))
+		b.WriteByte(',')
+		b.WriteString(strconv.FormatFloat(p[1], 'g', -1, 64))
+		b.WriteByte(',')
+		b.WriteString(strconv.FormatFloat(p[2], 'g', -1, 64))
+	}
+	return b.String()
+}
+
+// writeSortedAttrs appends an attribute map to b in sorted-key order so the
+// signature is stable regardless of map iteration order.
+func writeSortedAttrs(b *strings.Builder, m map[string]string) {
+	if len(m) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(m[k])
+		b.WriteByte('\x1f')
+	}
 }
 
 // Build expands one S-57 feature (convenience wrapper over BuildBatch; the bake
