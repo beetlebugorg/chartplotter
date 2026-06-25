@@ -196,10 +196,18 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 	}
 
 	g := geometryOf(f.Geometry())
-	anchor, _ := textAnchor(g)
-	sg := S101Geometry{Anchor: anchor, Rings: g.area, Lines: strokeRunsFor(g)}
-
 	cmds, _ := instructions.Reduce(instructions.ParseStream(stream))
+
+	// The feature anchor (point symbols / text / sector figures) is consumed only
+	// by anchored draw ops. For an area it's the polylabel representative point — a
+	// pole-of-inaccessibility search over every edge, the single biggest CPU cost
+	// in bake portrayal — yet most area features emit only fills and boundary lines
+	// that never read it. Compute it only when a command actually needs it.
+	var anchor geo.LatLon
+	if commandsNeedAnchor(cmds) {
+		anchor, _ = textAnchor(g)
+	}
+	sg := S101Geometry{Anchor: anchor, Rings: g.area, Lines: strokeRunsFor(g)}
 	var prims []Primitive
 	priority := 0
 	cat := 0 // unset; resolved from the viewing groups the rule emits
@@ -283,6 +291,20 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 		DateEnd:         dateEnd,
 		TimeValid:       timeValid,
 	}
+}
+
+// commandsNeedAnchor reports whether any reduced draw command consumes the
+// feature anchor — the anchored ops emitPrimitives reads geom.Anchor for: point
+// symbols, text, and sector/augmented figures. Fills and boundary lines don't,
+// so an area emitting only those skips the expensive polylabel anchor.
+func commandsNeedAnchor(cmds []instructions.DrawCommand) bool {
+	for _, c := range cmds {
+		switch c.Op {
+		case instructions.OpPoint, instructions.OpText, instructions.OpAugmentedLine:
+			return true
+		}
+	}
+	return false
 }
 
 // strokeRunsFor returns the drawable polylines an S-101 line draw strokes for a
