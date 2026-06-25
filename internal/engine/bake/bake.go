@@ -281,6 +281,9 @@ type sectorPrim struct {
 	zMin     uint32
 	natMax   uint32
 	scamin   uint32 // SCAMIN denominator of the parent LIGHTS (0 = none); emitted as `scamin` so the client's per-SCAMIN bucket layer gates the exact display cutoff, same as point symbols/text
+	// Date validity of the parent LIGHTS (S-52 §10.4.1.1); empty when none. Carried
+	// because sectors tessellate at tile-emit time, after b.curDate* has moved on.
+	dateStart, dateEnd, timeValid string
 	// legNorm is the full-length leg reach (VALNMR nominal range) as a fraction
 	// of the normalized world — a fixed GROUND distance, so zoom-independent
 	// (unlike the 25 mm short leg / arc, which are screen-px). Drives the tile
@@ -311,6 +314,15 @@ type Baker struct {
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
+	// Date dependency (S-52 PresLib §10.4.1.1 / Fig 1): the current feature's
+	// validity period, baked onto every one of its primitives so the client can
+	// apply the MANDATORY date filter — a date-dependent object outside its period
+	// is not displayed for the current date. Empty when the feature has no period.
+	// Values are S-57 date strings: full "YYYYMMDD" (fixed) or partial "--MMDD"
+	// recurring each year (periodic); curTimeValid is the interval kind.
+	curDateStart string
+	curDateEnd   string
+	curTimeValid string
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
 	// position, the first is "primary" (one flare + a merged multi-line label);
 	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
@@ -640,6 +652,9 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 			scamin := intAttr(f.Attributes(), "SCAMIN")
 			b.curScamin = scamin   // baked as the `scamin` tag → client per-SCAMIN bucket layers
 			b.recordScamin(scamin) // publish the band's distinct values (manifest → TileJSON)
+			// Date validity period (S-52 §10.4.1.1) — baked onto each primitive so the
+			// client applies the mandatory current-date filter.
+			b.curDateStart, b.curDateEnd, b.curTimeValid = fb.DateStart, fb.DateEnd, fb.TimeValid
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
@@ -698,6 +713,26 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 			}
 		}
 	}
+}
+
+// appendDateTags adds the feature's date-validity period (S-52 §10.4.1.1) to a
+// tile feature's attrs when it has one, so the client's mandatory current-date
+// filter can hide it outside its period. date_start/date_end are S-57 date
+// strings (full "YYYYMMDD" or recurring "--MMDD"); time_valid is the interval kind.
+func appendDateTags(attrs []mvt.KeyValue, start, end, timeValid string) []mvt.KeyValue {
+	if start == "" && end == "" {
+		return attrs
+	}
+	if start != "" {
+		attrs = append(attrs, mvt.KeyValue{Key: "date_start", Value: mvt.StringVal(start)})
+	}
+	if end != "" {
+		attrs = append(attrs, mvt.KeyValue{Key: "date_end", Value: mvt.StringVal(end)})
+	}
+	if timeValid != "" {
+		attrs = append(attrs, mvt.KeyValue{Key: "time_valid", Value: mvt.StringVal(timeValid)})
+	}
+	return attrs
 }
 
 // routeSoundingGroup emits one soundings feature for a whole sounding number
@@ -861,6 +896,9 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		if b.curAttrs != "" {
 			extra = append(extra, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
 		}
+		// Date validity (S-52 §10.4.1.1): the client's mandatory current-date filter
+		// hides a date-dependent feature outside its period.
+		extra = appendDateTags(extra, b.curDateStart, b.curDateEnd, b.curTimeValid)
 		return extra
 	}
 	r := routed{
@@ -973,7 +1011,8 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		b.sectors = append(b.sectors, sectorPrim{
 			fig: v, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, zMin: zMin, natMax: zr.Max,
-			scamin:  b.curScamin,
+			scamin:    b.curScamin,
+			dateStart: b.curDateStart, dateEnd: b.curDateEnd, timeValid: b.curTimeValid,
 			legNorm: legNorm,
 		})
 	}
@@ -1656,6 +1695,9 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			if sp.scamin != 0 {
 				attrs = append(attrs, mvt.KeyValue{Key: "scamin", Value: mvt.IntVal(int64(sp.scamin))})
 			}
+			// Date validity of the parent light (S-52 §10.4.1.1) — so a seasonal
+			// sector light's figure hides with its flare/text under the date filter.
+			attrs = appendDateTags(attrs, sp.dateStart, sp.dateEnd, sp.timeValid)
 			tb.Layer("sector_lines").AddLines(paths, attrs)
 		}
 	}
