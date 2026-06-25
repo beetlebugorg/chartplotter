@@ -234,6 +234,22 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 			}
 		}
 	}
+	// Centred-area symbol placement (S-52 PresLib §8.5.1): the pivot point is the
+	// area's representative point (sg.Anchor), where the FIRST/primary centred symbol
+	// sits "so it is evident which area the symbol applies to"; ADDITIONAL symbols
+	// keep their catalogue pivot offset to fan out and "prevent overwriting" (the
+	// spec's "a centred traffic arrow and an offset entry-restricted symbol"). The
+	// "…RES" symbols are authored with a corner pivot for that fan-out, which throws
+	// the PRIMARY ~100px off its area; centring the first one restores §8.5.1.
+	if g.kind == geomArea {
+		for i, p := range prims {
+			if sc, ok := p.(SymbolCall); ok && sc.Anchor == sg.Anchor {
+				sc.CentreOnArea = true
+				prims[i] = sc
+				break // only the primary sits on the point; the rest fan out
+			}
+		}
+	}
 	if cat == 0 {
 		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}

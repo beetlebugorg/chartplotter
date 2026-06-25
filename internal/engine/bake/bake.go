@@ -1055,6 +1055,11 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 	if v.RotationTrueNorth {
 		attrs = append(attrs, mvt.KeyValue{Key: "rot_north", Value: mvt.IntVal(1)})
 	}
+	// pivot_center tags the primary centred-area symbol: the client centres the glyph
+	// on the point instead of the catalogue's fan-out pivot (S-52 §8.5.1; CentreOnArea).
+	if v.CentreOnArea {
+		attrs = append(attrs, mvt.KeyValue{Key: "pivot_center", Value: mvt.IntVal(1)})
+	}
 	if !isNaN32(v.DangerDepthM) {
 		attrs = append(attrs,
 			mvt.KeyValue{Key: "danger_depth", Value: mvt.FloatVal(v.DangerDepthM)},

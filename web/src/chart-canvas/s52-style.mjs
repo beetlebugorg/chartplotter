@@ -171,10 +171,17 @@ export function soundingsIconImage(mariner) {
 // changing the safety contour needs no re-bake. Non-danger symbols use `symbol_name`.
 export function pointSymbolImage(mariner) {
   const sfc = mariner.safetyContour ?? 10;
-  return ["case",
+  const name = ["case",
     ["all", ["has", "sym_deep"], [">", ["coalesce", ["get", "danger_depth"], 0], sfc]],
     ["get", "sym_deep"],
     ["get", "symbol_name"]];
+  // pivot_center: the lone centred-area restriction symbol is drawn from the "ctr:"
+  // image variant (glyph centred on the point) instead of the catalogue pivot,
+  // which is at a corner to fan multiple restrictions out (see bake CentreOnArea).
+  return ["case",
+    ["==", ["coalesce", ["get", "pivot_center"], 0], 1],
+    ["concat", "ctr:", name],
+    name];
 }
 
 // The dotted CHBLK foul boundary (OBSTRN/WRECKS) is shown only where the

@@ -1,9 +1,9 @@
 package portrayal
 
 import (
+	"container/heap"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -192,72 +192,148 @@ func textAnchor(g geom) (geo.LatLon, bool) {
 		if len(g.area) == 0 || len(g.area[0]) == 0 {
 			return geo.LatLon{}, false
 		}
-		return areaSurfacePoint(g.area[0])
+		return areaLabelPoint(g.area)
 	default:
 		return geo.LatLon{}, false
 	}
 }
 
-// areaSurfacePoint returns a point guaranteed to lie inside the polygon ring (a
-// "point on surface"): the area-weighted centroid when that falls inside, else the
-// midpoint of the widest interior span of a horizontal scan line through the
-// centroid's latitude. This keeps an area's symbol/label off land for concave
-// shapes — e.g. an anchorage anchor symbol that the plain vertex average would
-// push outside the water. Falls back to the vertex average for degenerate rings.
+// areaSurfacePoint returns a representative interior point for a single ring (no
+// holes). It is a thin wrapper over areaLabelPoint, kept for callers that have
+// only an exterior ring (e.g. the unknown-object question mark).
 func areaSurfacePoint(ring []geo.LatLon) (geo.LatLon, bool) {
-	if len(ring) == 0 {
+	return areaLabelPoint([][]geo.LatLon{ring})
+}
+
+// areaLabelPoint returns the polygon's "pole of inaccessibility" (the Mapbox
+// polylabel algorithm): the interior point farthest from any edge. rings[0] is
+// the exterior boundary; rings[1:] are holes. Containment is the even-odd rule
+// over ALL rings, so the chosen point lies inside the exterior AND outside every
+// hole — keeping a centred symbol (e.g. an anchorage anchor, a restricted-area
+// mark) off an excluded structure, and off the missing limb of a concave (L- or
+// U-shaped) area. This is the S-52 PresLib §8.5.3 "representative point of an
+// area": robust for concave shapes and shapes whose centroid falls outside the
+// area. Falls back to the vertex average for a degenerate (zero-area) ring.
+//
+// Distances are measured with longitude scaled by cos(lat) so "farthest from any
+// edge" is in roughly equal ground units rather than skewed degrees.
+func areaLabelPoint(rings [][]geo.LatLon) (geo.LatLon, bool) {
+	if len(rings) == 0 || len(rings[0]) == 0 {
 		return geo.LatLon{}, false
 	}
+	ext := rings[0]
+	minLat, minLon := math.Inf(1), math.Inf(1)
+	maxLat, maxLon := math.Inf(-1), math.Inf(-1)
 	var sumLat, sumLon float64
-	for _, p := range ring {
-		sumLat += p.Lat
-		sumLon += p.Lon
+	for _, p := range ext {
+		minLat, maxLat = math.Min(minLat, p.Lat), math.Max(maxLat, p.Lat)
+		minLon, maxLon = math.Min(minLon, p.Lon), math.Max(maxLon, p.Lon)
+		sumLat, sumLon = sumLat+p.Lat, sumLon+p.Lon
 	}
-	mean := geo.LatLon{Lat: sumLat / float64(len(ring)), Lon: sumLon / float64(len(ring))}
-
-	// Area-weighted centroid (shoelace), x=lon, y=lat.
-	var a2, cx, cy float64
-	for i := range ring {
-		j := (i + 1) % len(ring)
-		x0, y0 := ring[i].Lon, ring[i].Lat
-		x1, y1 := ring[j].Lon, ring[j].Lat
-		cross := x0*y1 - x1*y0
-		a2 += cross
-		cx += (x0 + x1) * cross
-		cy += (y0 + y1) * cross
+	mean := geo.LatLon{Lat: sumLat / float64(len(ext)), Lon: sumLon / float64(len(ext))}
+	kx := math.Cos((minLat + maxLat) / 2 * math.Pi / 180)
+	if kx < 1e-9 {
+		kx = 1 // near-polar guard; charts don't reach here
 	}
-	centroid := mean
-	if a2 != 0 {
-		centroid = geo.LatLon{Lat: cy / (3 * a2), Lon: cx / (3 * a2)}
-	}
-	if pointInRing(centroid, ring) {
-		return centroid, true
+	// Work in scaled space: X = lon*kx, Y = lat.
+	xMin, xMax := minLon*kx, maxLon*kx
+	w, h := xMax-xMin, maxLat-minLat
+	cellSize := math.Min(w, h)
+	if cellSize <= 0 {
+		return mean, true // zero-area / degenerate ring
 	}
 
-	// Concave shape: the centroid is outside. Scan horizontally at the centroid's
-	// latitude, collect where the boundary crosses it, and return the midpoint of
-	// the widest interior interval (which is inside the polygon by construction).
-	y := centroid.Lat
-	var xs []float64
-	for i := range ring {
-		j := (i + 1) % len(ring)
-		y0, y1 := ring[i].Lat, ring[j].Lat
-		if (y0 <= y) != (y1 <= y) {
-			t := (y - y0) / (y1 - y0)
-			xs = append(xs, ring[i].Lon+t*(ring[j].Lon-ring[i].Lon))
+	// Signed distance (positive inside) from a scaled point to the polygon: the
+	// min distance to any edge of any ring, with the sign from even-odd inclusion.
+	dist := func(px, py float64) float64 {
+		inside := false
+		best := math.Inf(1)
+		for _, ring := range rings {
+			n := len(ring)
+			for i, j := 0, n-1; i < n; j, i = i, i+1 {
+				ax, ay := ring[i].Lon*kx, ring[i].Lat
+				bx, by := ring[j].Lon*kx, ring[j].Lat
+				if (ay > py) != (by > py) && px < (bx-ax)*(py-ay)/(by-ay)+ax {
+					inside = !inside
+				}
+				if d := segDist(px, py, ax, ay, bx, by); d < best {
+					best = d
+				}
+			}
+		}
+		if inside {
+			return best
+		}
+		return -best
+	}
+	mkCell := func(x, y, half float64) plCell {
+		d := dist(x, y)
+		return plCell{x: x, y: y, half: half, d: d, max: d + half*math.Sqrt2}
+	}
+
+	precision := math.Max(w, h) / 200 // ~0.5% of the span: ample for a label point
+	half := cellSize / 2
+	best := mkCell((xMin+xMax)/2, (minLat+maxLat)/2, 0) // bbox-centre seed
+	pq := &plCellHeap{}
+	for x := xMin; x < xMax; x += cellSize {
+		for y := minLat; y < maxLat; y += cellSize {
+			heap.Push(pq, mkCell(x+half, y+half, half))
 		}
 	}
-	sort.Float64s(xs)
-	bestMid, bestW, found := 0.0, -1.0, false
-	for i := 0; i+1 < len(xs); i += 2 {
-		if w := xs[i+1] - xs[i]; w > bestW {
-			bestW, bestMid, found = w, (xs[i]+xs[i+1])/2, true
+	const maxCells = 20000 // safety cap for very large/high-vertex rings
+	for processed := 0; pq.Len() > 0; processed++ {
+		c := heap.Pop(pq).(plCell)
+		if c.d > best.d {
+			best = c
+		}
+		if c.max-best.d <= precision || processed >= maxCells {
+			continue
+		}
+		hh := c.half / 2
+		heap.Push(pq, mkCell(c.x-hh, c.y-hh, hh))
+		heap.Push(pq, mkCell(c.x+hh, c.y-hh, hh))
+		heap.Push(pq, mkCell(c.x-hh, c.y+hh, hh))
+		heap.Push(pq, mkCell(c.x+hh, c.y+hh, hh))
+	}
+	return geo.LatLon{Lat: best.y, Lon: best.x / kx}, true
+}
+
+// plCell is one square candidate region in the polylabel search (scaled space).
+type plCell struct {
+	x, y, half float64 // centre and half-size
+	d          float64 // signed distance from centre to the polygon (+ inside)
+	max        float64 // upper bound on d anywhere in the cell (d + half*√2)
+}
+
+// plCellHeap is a max-heap on plCell.max (most-promising cell first).
+type plCellHeap []plCell
+
+func (h plCellHeap) Len() int           { return len(h) }
+func (h plCellHeap) Less(i, j int) bool { return h[i].max > h[j].max }
+func (h plCellHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *plCellHeap) Push(x any)        { *h = append(*h, x.(plCell)) }
+func (h *plCellHeap) Pop() any {
+	old := *h
+	n := len(old)
+	c := old[n-1]
+	*h = old[:n-1]
+	return c
+}
+
+// segDist returns the Euclidean distance from point (px,py) to segment a–b.
+func segDist(px, py, ax, ay, bx, by float64) float64 {
+	dx, dy := bx-ax, by-ay
+	if dx != 0 || dy != 0 {
+		t := ((px-ax)*dx + (py-ay)*dy) / (dx*dx + dy*dy)
+		switch {
+		case t > 1:
+			ax, ay = bx, by
+		case t > 0:
+			ax, ay = ax+dx*t, ay+dy*t
 		}
 	}
-	if found {
-		return geo.LatLon{Lat: y, Lon: bestMid}, true
-	}
-	return mean, true
+	dx, dy = px-ax, py-ay
+	return math.Sqrt(dx*dx + dy*dy)
 }
 
 // pointInRing reports whether p is inside the polygon ring (ray casting).

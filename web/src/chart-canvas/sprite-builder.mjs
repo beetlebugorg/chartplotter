@@ -20,9 +20,21 @@ export class SpriteBuilder {
   // a synthesized sounding (`snd:…`), a composited glyph list (comma-joined), or
   // a single centred point symbol. Returns ImageData or null.
   imageFor(id) {
-    return id.startsWith("snd:") ? this.synthSounding(id)
+    return id.startsWith("ctr:") ? this.centredGlyph(id.slice(4))
+      : id.startsWith("snd:") ? this.synthSounding(id)
       : id.indexOf(",") >= 0 ? this.compositeSounding(id)
       : this.centredSymbol(id);
+  }
+
+  // centredGlyph centres the GLYPH's bounding box on the point, ignoring the
+  // catalogue pivot — used for a lone centred-area symbol (pivot_center) whose
+  // corner pivot would otherwise throw the glyph far off its area. The rendered
+  // cell is the glyph cropped to its content, so drawing it into a w×h canvas and
+  // letting MapLibre centre that canvas puts the glyph centre on the point.
+  centredGlyph(name) {
+    const c = this.sprite[name];
+    if (!c) return null;
+    return this.rawCell(this.spriteImg, c);
   }
 
   // Build a sounding number in non-metric units from a synthesized name
