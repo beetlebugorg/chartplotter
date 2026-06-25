@@ -229,10 +229,10 @@ type CellData struct {
 	Updates map[string][]byte
 }
 
-// ParseCellWithUpdates parses a base cell with its update files applied. The base
-// + every update are staged on an in-memory filesystem so the parser discovers
-// and applies the .001/.002/… chain (vs ParseCellBytes, which parses base-only).
-func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+// cellParseOpts stages a base cell + its update files on an in-memory filesystem
+// (so the parser discovers and applies the .001/.002/… chain) and returns the
+// path + the baker's standard parse options.
+func cellParseOpts(name string, base []byte, updates map[string][]byte) (string, s57.ParseOptions) {
 	p := "/" + path.Base(name)
 	fsys := iso8211.MemFS{p: base}
 	dir := path.Dir(p)
@@ -243,6 +243,26 @@ func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (
 	opts.Fs = fsys
 	opts.ApplyUpdates = true
 	opts.MaskCoastlineCoincidentBoundaries = true
+	return p, opts
+}
+
+// ParseCellWithUpdates parses a base cell with its update files applied (vs
+// ParseCellBytes, which parses base-only).
+func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+	p, opts := cellParseOpts(name, base, updates)
+	return s57.ParseWithOptions(p, opts)
+}
+
+// ParseCellCoverage parses ONLY a cell's M_COVR coverage features, skipping every
+// other feature's geometry construction (the expensive topology/ring assembly).
+// The streaming bake's coverage pass reads only M_COVR (extractCoverage) and the
+// cell's band comes from the header scale, so this yields the same covMeta far
+// cheaper than a full parse. Updates are still applied (the filter acts after
+// them), so the coverage reflects the cell's current edition.
+func ParseCellCoverage(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+	p, opts := cellParseOpts(name, base, updates)
+	opts.ObjectClassFilter = []string{"M_COVR"}
+	opts.MaskCoastlineCoincidentBoundaries = false // irrelevant to M_COVR rings; skip the coastline-edge setup
 	return s57.ParseWithOptions(p, opts)
 }
 
@@ -375,11 +395,16 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
 	}
 
-	// Pass 1: coverage + band per cell (no routing). Parse in parallel; the
-	// coverage merge (covMeta) stays serial and ordered.
+	// Pass 1: coverage + band per cell (no routing). Parse in parallel — and only
+	// the M_COVR coverage (extractCoverage reads nothing else), so the geometry of
+	// every other feature isn't built here; the full parse happens once, in pass 2.
+	// The coverage merge (covMeta) stays serial and ordered.
 	byBand := map[uint32][]string{}
 	parsed := 0
-	parseInOrder(names, parse,
+	parseInOrder(names, func(name string) (*s57.Chart, error) {
+		cd := cells[name]
+		return ParseCellCoverage(name, cd.Base, cd.Updates)
+	},
 		func(string, *s57.Chart) struct{} { return struct{}{} },
 		func(name string, chart *s57.Chart, _ struct{}) {
 			band := b.AddCellCoverage(chart)
