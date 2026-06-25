@@ -28,23 +28,22 @@ import { PMTilesArchive, MultiArchive } from "./pmtiles-source.mjs";
 // would be pure buffer) and the client overzooms it to fill berth level. MUST
 // match the baker's bandBakeCeil (internal/engine/bake/bake.go).
 export const CHART_BANDS = [
-  { slug: "overview", min: 0, max: 8, bake: 8 },
-  { slug: "general", min: 8, max: 10, bake: 10 },
-  { slug: "coastal", min: 10, max: 12, bake: 14 },
-  { slug: "approach", min: 12, max: 14, bake: 14 },
-  { slug: "harbor", min: 14, max: 16, bake: 16 },
+  { slug: "overview", min: 0, max: 7, bake: 7 },
+  { slug: "general", min: 7, max: 9, bake: 9 },
+  { slug: "coastal", min: 9, max: 11, bake: 13 },
+  { slug: "approach", min: 11, max: 13, bake: 15 },
+  { slug: "harbor", min: 13, max: 16, bake: 16 },
   { slug: "berthing", min: 16, max: 18, bake: 18 },
   { slug: "all", min: 0, max: 18, bake: 18 },
 ];
 
-// Lowest display zoom each band's chart layers actually DRAW at — the scale where
-// that band becomes the best-available chart, per the NOAA ENC scheme (ENC Design
-// Handbook Table 1: two standard scales per usage band ≈ two web-Mercator zooms;
-// e.g. Approach 1:90k/1:45k ⇒ shows ~z12–14 ≈ 1:130k–1:32k at mid-US latitudes).
-// Overview/general draw from z0 so they gap-fill on zoom-out; the finer bands start
-// at their band so they don't appear a full zoom (≈½ band) too coarse. Applied as a
-// LAYER minzoom (the baked source may serve lower) so it works without a re-bake.
-export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16, all: 0 };
+// Lowest display zoom each band's chart layers actually DRAW at — the zoom whose
+// physical scale equals the band's COARSE NOAA standard scale, where the band first
+// becomes the best-available chart (ENC Design Handbook Table 1, at ~40°N):
+// coastal 1:350k≈z9, approach 1:90k≈z11, harbor 1:22k≈z13, berthing 1:4k≈z16.
+// Overview/general draw from z0 so they gap-fill on zoom-out. Must match the baker's
+// Band.ZoomRange() (a re-bake aligns the tiles); applied as a LAYER minzoom.
+export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16, all: 0 };
 
 // Vector SOURCE-LAYERS whose features carry SCAMIN and are split into per-SCAMIN
 // bucket layers (each with a native fractional minzoom) so SCAMIN is honored

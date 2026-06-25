@@ -12,11 +12,11 @@ export const BAND_COLOR = { overview: "#7e57c2", general: "#5c6bc0", coastal: "#
 // Native MIN display zoom per band. Below it a cell's chart detail isn't baked, so
 // the shell draws its coverage outline instead. General is overzoomed out to z0 (it
 // renders where no overview covers — see generalOverzoomMin in the baker).
-export const BAND_MINZOOM = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16 };
+export const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16 };
 // Native MAX display zoom per band. Drives the overscale cap: zooming past a band's
 // native max + OVERSCALE_MARGIN over open water just enlarges blank water, so
 // _updateZoomCap clamps to the finest band that actually covers the view.
-export const BAND_MAXZOOM = { overview: 8, general: 10, coastal: 12, approach: 14, harbor: 16, berthing: 18 };
+export const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
 export const OVERSCALE_MARGIN = 2; // zoom-in levels allowed past the finest covering band
 // Usage bands in coarse→fine order, for the dev band-filter rows.
 export const DEV_BANDS = BANDS;

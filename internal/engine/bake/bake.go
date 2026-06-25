@@ -67,12 +67,12 @@ const generalOverzoomMin uint32 = 0
 //	berthing 18 — finest band, nothing finer to cut against; native detail.
 func bandBakeCeil(bandMax uint32) uint32 {
 	switch bandMax {
-	case 12: // coastal: native max (z12) cuts too coarse; +2 → z14 to sharpen vs approach
-		return 14
+	case 11: // coastal: native max (z11) cuts too coarse; +2 → z13 to sharpen vs approach
+		return 13
+	case 13: // approach: native max (z13) cuts too coarse; +2 → z15 to sharpen vs harbor
+		return 15
 	default: // everyone else bakes to native max:
-		//   overview(8)/general(10) are capped client-side (no overzoom cut to sharpen);
-		//   approach(14) cuts vs harbor — fine, and deeper zooms over a whole district
-		//     are the dominant size/index cost (Alaska approach: ~1.2 GB → ~80 MB);
+		//   overview(7)/general(9) are capped client-side (no overzoom cut to sharpen);
 		//   harbor(16) cuts vs berthing; berthing(18) is the finest band.
 		return bandMax
 	}
@@ -100,15 +100,15 @@ const (
 func (b Band) ZoomRange() ZoomRange {
 	switch b {
 	case BandOverview:
-		return ZoomRange{0, 8}
+		return ZoomRange{0, 7}
 	case BandGeneral:
-		return ZoomRange{8, 10}
+		return ZoomRange{7, 9}
 	case BandCoastal:
-		return ZoomRange{10, 12}
+		return ZoomRange{9, 11}
 	case BandApproach:
-		return ZoomRange{12, 14}
+		return ZoomRange{11, 13}
 	case BandHarbor:
-		return ZoomRange{14, 16}
+		return ZoomRange{13, 16}
 	default: // berthing
 		return ZoomRange{16, 18}
 	}
@@ -126,11 +126,11 @@ type BakeBand struct {
 // chart-<slug> source. Max feeds EmitTileBandInto's band filter (natMax == Max).
 func BakeBands() []BakeBand {
 	return []BakeBand{
-		{"overview", 0, 8},
-		{"general", 8, 10},
-		{"coastal", 10, 12},
-		{"approach", 12, 14},
-		{"harbor", 14, 16},
+		{"overview", 0, 7},
+		{"general", 7, 9},
+		{"coastal", 9, 11},
+		{"approach", 11, 13},
+		{"harbor", 13, 16},
 		{"berthing", 16, 18},
 	}
 }
