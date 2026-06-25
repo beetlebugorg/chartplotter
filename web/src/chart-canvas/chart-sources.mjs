@@ -207,9 +207,11 @@ export class ChartSources {
     // pinned server buckets to the initial/equator latitude).
     if (this._server) {
       if (!latShift) return;
-      this._scaminLat = lat;
+      // The SCAMIN value set is fixed (from each set's TileJSON); latitude drift only
+      // shifts the per-value bucket MINZOOMS — re-gate them in place (no flicker)
+      // rather than a full style rebuild.
       clearTimeout(this._scaminRebuildT);
-      this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+      this._scaminRebuildT = setTimeout(() => this._reapplyScaminMinzooms(), 120);
       return;
     }
     const seen = new Set(this._scaminValues);
@@ -226,12 +228,39 @@ export class ChartSources {
     const grew = seen.size !== before;
     if (!grew && !latShift) return;
     this._scaminValues = [...seen].sort((a, b) => a - b);
-    this._scaminLat = lat;
-    // Debounce the (heavy) style rebuild so a burst of values loaded across several
-    // tiles coalesces into ONE rebuild. Converges: once every value in view is known,
-    // no further growth ⇒ no rebuild, and SCAMIN gating is then fully native.
     clearTimeout(this._scaminRebuildT);
-    this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+    if (grew) {
+      // A genuinely-new SCAMIN value needs new bucket LAYERS, so only this case takes
+      // the full (heavy, flickering) style rebuild — debounced to coalesce a burst of
+      // values across tiles into ONE rebuild. Converges: once every value in view is
+      // known, no further growth ⇒ no rebuild.
+      this._scaminLat = lat;
+      this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+    } else {
+      // Latitude drift only (no new values): re-gate the existing buckets in place.
+      this._scaminRebuildT = setTimeout(() => this._reapplyScaminMinzooms(), 120);
+    }
+  }
+
+  // Re-apply the latitude-dependent SCAMIN bucket minzooms IN PLACE — no style
+  // rebuild, so no flicker / tile reload. Each per-value bucket layer id ends in
+  // "#sm<scamin>"; its native minzoom is scaminDisplayZoom(scamin, lat), which
+  // drifts slightly with the centre latitude (cos-lat). setLayerZoomRange re-gates
+  // each without tearing down sources/sprites (unlike rebuild()'s full setStyle).
+  // A value crossing the band floor into the #no bucket self-corrects on the next
+  // genuine rebuild; for the sub-2° drift this runs on, the error is < 0.05 zoom.
+  _reapplyScaminMinzooms() {
+    const m = this.getMap();
+    if (!m) return;
+    const lat = m.getCenter().lat;
+    let style;
+    try { style = m.getStyle(); } catch (e) { return; }
+    for (const L of (style && style.layers) || []) {
+      const hit = /#sm(\d+(?:\.\d+)?)$/.exec(L.id);
+      if (!hit) continue;
+      try { m.setLayerZoomRange(L.id, scaminDisplayZoom(+hit[1], lat), L.maxzoom != null ? L.maxzoom : 24); } catch (e) { /* layer removed mid-update */ }
+    }
+    this._scaminLat = lat;
   }
 
   // -- runtime chart API (driven by the <chart-plotter-app> shell, via the element) --
