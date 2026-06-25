@@ -474,11 +474,21 @@ export class ChartSources {
   // merged-upload `all` source needs its max synced to the loaded archive (an
   // upload may bake to <18; requesting above its max would read blank).
   _updateSourceZoom() {
-    const map = this.getMap(), all = this._bands.all;
-    const src = map && map.getSource("chart-all");
-    if (src && all && src.maxzoom !== undefined) {
-      src.minzoom = all.minZoom;
-      src.maxzoom = all.maxZoom;
+    const map = this.getMap();
+    if (!map) return;
+    // Hold every loaded band source's maxzoom at its archive's REAL deepest baked
+    // zoom (PMTiles header), in place — so MapLibre overzooms the deepest tile it
+    // has instead of requesting empty tiles past the bake (which read as a blank
+    // band when the static band.bake and the actual archive drift, e.g. after a
+    // band-range change before a re-bake). No restyle. The merged "all" source has
+    // no per-band overzoom so its minzoom tracks the archive too; the per-band
+    // sources keep minzoom 0 for the sub-band SCAMIN features.
+    for (const slug of Object.keys(this._bands)) {
+      const arc = this._bands[slug];
+      const src = map.getSource("chart-" + slug);
+      if (!src || !arc || src.maxzoom === undefined) continue;
+      src.maxzoom = arc.maxZoom;
+      if (slug === "all") src.minzoom = arc.minZoom;
     }
   }
 
@@ -543,12 +553,15 @@ export class ChartSources {
     // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
     // bands resolve to blank tiles (harmless) until an archive is added.
     const sources = {};
-    // Per-band prebaked sources in BOTH modes. The source maxzoom is band.bake —
-    // the top zoom the archive actually contains — so MapLibre serves real tiles up
-    // to there and client-overzooms above it (base fills + the finest band fill the
-    // finer zooms for free; coarser bands' lines/patterns are cut in the bake or
-    // capped on the layer, so they don't bleed into a finer band's area).
+    // Per-band prebaked sources. The source maxzoom is the loaded archive's REAL
+    // deepest baked zoom (from its PMTiles header), NOT the static band.bake — so
+    // MapLibre overzooms the deepest tile it actually has instead of requesting
+    // empty tiles past the bake (which read as a whole blank band when band.bake
+    // and the archive drift, e.g. after a band-range change before a re-bake). The
+    // client overzooms above it (base fills + the finest band fill the finer zooms
+    // for free). Falls back to band.bake until an archive is loaded.
     for (const band of CHART_BANDS) {
+      const archive = this._bands[band.slug];
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
@@ -558,7 +571,7 @@ export class ChartSources {
         // band min), and minzoom only adds requests when the VIEW is coarse (few
         // tiles), so it's cheap. Per-SCAMIN bucket layers gate the exact display scale.
         minzoom: 0,
-        maxzoom: band.bake,
+        maxzoom: (archive && archive.maxZoom) || band.bake,
       };
     }
     if (this._server) {
