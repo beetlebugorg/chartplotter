@@ -15,10 +15,51 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	lua "github.com/yuin/gopher-lua"
+	"github.com/yuin/gopher-lua/parse"
 )
+
+// ProtoCache memoizes compiled Lua chunk prototypes by require name so engines
+// built from the same Rules tree don't re-parse and re-compile the framework
+// (and per-class rule files) from source on every construction. A *FunctionProto
+// is immutable after compilation and safe to instantiate into many independent
+// LStates via NewFunctionFromProto, so one cache is shared across every engine a
+// builder creates. Safe for concurrent use.
+type ProtoCache struct {
+	mu     sync.Mutex
+	protos map[string]*lua.FunctionProto
+}
+
+// NewProtoCache returns an empty prototype cache.
+func NewProtoCache() *ProtoCache { return &ProtoCache{protos: map[string]*lua.FunctionProto{}} }
+
+// proto returns the compiled prototype for <name>.lua under rules, compiling and
+// caching it on first request. The lock is held across compile so a cold cache
+// compiles each chunk once; after warmup it's a single map read.
+func (c *ProtoCache) proto(rules fs.FS, name string) (*lua.FunctionProto, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p, ok := c.protos[name]; ok {
+		return p, nil
+	}
+	data, err := fs.ReadFile(rules, name+".lua")
+	if err != nil {
+		return nil, err
+	}
+	chunk, err := parse.Parse(bytes.NewReader(data), name+".lua")
+	if err != nil {
+		return nil, err
+	}
+	p, err := lua.Compile(chunk, name+".lua")
+	if err != nil {
+		return nil, err
+	}
+	c.protos[name] = p
+	return p, nil
+}
 
 // Feature is one S-57 feature to portray, in S-57 terms.
 type Feature struct {
@@ -99,8 +140,19 @@ func NewEngine(rulesDir string, cat *fc.Catalogue) (*Engine, error) {
 }
 
 // NewEngineFS loads the S-101 framework from an fs.FS rooted at the Rules
-// directory (e.g. an embed.FS sub-tree) and binds host callbacks to cat.
+// directory (e.g. an embed.FS sub-tree) and binds host callbacks to cat. It
+// compiles the framework fresh; reuse a ProtoCache via NewEngineFSCached to share
+// compiled chunks across engines.
 func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
+	return NewEngineFSCached(rules, cat, NewProtoCache())
+}
+
+// NewEngineFSCached is NewEngineFS sharing a caller-owned ProtoCache, so a batch
+// of engines built from the same Rules tree parse + compile each chunk once
+// instead of per engine. Each engine still gets a fresh LState (its per-cell
+// catalogue caches are freed on Close); only the immutable compiled prototypes
+// are shared.
+func NewEngineFSCached(rules fs.FS, cat *fc.Catalogue, cache *ProtoCache) (*Engine, error) {
 	// A growable registry: a single SOUNDG can carry thousands of soundings, and
 	// resolving its multipoint builds one Lua object per point (plus SOUNDG03's
 	// per-point instructions). The default fixed registry overflows on such a
@@ -127,15 +179,14 @@ func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
 			return 0
 		}
 		loaded[name] = true
-		data, err := fs.ReadFile(rules, name+".lua")
+		proto, err := cache.proto(rules, name)
 		if err != nil {
 			s.RaiseError("require(%q): %v", name, err)
 		}
-		fn, err := s.Load(bytes.NewReader(data), name+".lua")
-		if err != nil {
-			s.RaiseError("require(%q): %v", name, err)
-		}
-		s.Push(fn)
+		// A top-level chunk has no upvalues and binds globals via ls.Env, so
+		// NewFunctionFromProto is equivalent to Load here — just without the
+		// re-parse/compile.
+		s.Push(s.NewFunctionFromProto(proto))
 		if err := s.PCall(0, 0, nil); err != nil {
 			s.RaiseError("require(%q): %v", name, err)
 		}

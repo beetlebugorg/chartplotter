@@ -50,13 +50,17 @@ func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Validate the framework loads (fail fast); discard this engine.
-	eng, err := s101.NewEngineFS(rulesFS, cat)
+	// One shared prototype cache for every engine this builder creates — the
+	// framework (and per-class rule chunks) are parsed + compiled once across the
+	// whole bake instead of three times per cell. Validating the framework here
+	// (fail fast) also warms the cache with the framework prototypes.
+	cache := s101.NewProtoCache()
+	eng, err := s101.NewEngineFSCached(rulesFS, cat, cache)
 	if err != nil {
 		return nil, err
 	}
 	eng.Close()
-	return &S101Builder{rulesFS: rulesFS, fcCat: cat, Catalog: draw}, nil
+	return &S101Builder{rulesFS: rulesFS, fcCat: cat, Catalog: draw, protoCache: cache}, nil
 }
 
 // S101Builder is the feature-build seam: it runs the S-101 portrayal rules (via
@@ -64,9 +68,10 @@ func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
 // instruction stream, and emits a primitive for each draw onto the feature
 // geometry to produce the Primitive stream the baker consumes.
 type S101Builder struct {
-	rulesFS fs.FS
-	fcCat   *fc.Catalogue
-	Catalog *catalog.Catalog
+	rulesFS    fs.FS
+	fcCat      *fc.Catalogue
+	Catalog    *catalog.Catalog
+	protoCache *s101.ProtoCache
 }
 
 // BuildBatch portrays a whole cell's features in ONE engine pass (one chunk
@@ -93,7 +98,7 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 // PlainBoundaries varies area boundaries, SimplifiedSymbols varies point symbols —
 // instead of re-portraying every feature and discarding all but the matching type.
 func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[string]string, include func(*s57.Feature) bool) (map[int64]FeatureBuild, error) {
-	eng, err := s101.NewEngineFS(b.rulesFS, b.fcCat)
+	eng, err := s101.NewEngineFSCached(b.rulesFS, b.fcCat, b.protoCache)
 	if err != nil {
 		return nil, err
 	}
