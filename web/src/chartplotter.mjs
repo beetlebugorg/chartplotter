@@ -571,6 +571,7 @@ export class ChartPlotter extends HTMLElement {
       map,
       getDetent: () => this._hud.getDetentZoom(),
       getFloor: () => maxZoomForScaleFloor(map.getCenter().lat), // live 1:MIN_DETAIL_SCALE floor (matches _applyScaleFloor)
+      getAnchor: () => this._zoomAnchor(), // plugins contribute where zoom should anchor (vessel while following, else cursor)
     });
 
     // Compass / orientation control: a round button in the top-right group; tap to
@@ -629,7 +630,7 @@ export class ChartPlotter extends HTMLElement {
       map.on("click", () => tinfo.hide());
       // Own-ship marker + course predictor; follows the vessel (break-out + a
       // re-centre chip mounted in the shell chrome) and streams fixes to the camera.
-      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner, wheelZoom: this._wheelZoom });
+      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
       // AIS targets (other vessels) from the live feed.
       this._ais = new AISOverlay({ map, assets: this._assets, prod: this._prod, onSelect: showInfo, units: () => this._mariner });
     }
@@ -1374,6 +1375,14 @@ export class ChartPlotter extends HTMLElement {
     // over-pull a hair past it and settle back (a stop with give, not a wall).
     const mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
     if (Math.abs(this._map.getMaxZoom() - mz) > 1e-3) this._map.setMaxZoom(mz);
+  }
+
+  // Broker for WheelZoom: the geographic point wheel-zoom should keep fixed while
+  // zooming, composed from the plugins that can contribute one (first non-null
+  // wins; null → cursor-anchored). Today only own-ship anchors on the vessel while
+  // following; future camera plugins slot in here without WheelZoom changing.
+  _zoomAnchor() {
+    return (this._ownShip && this._ownShip.zoomAnchor()) || null;
   }
 
   // List the catalog cells intersecting the current viewport in the coverage

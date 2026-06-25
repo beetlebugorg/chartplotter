@@ -43,7 +43,7 @@ const CHIP_STYLE = `
 const EMPTY = { type: "FeatureCollection", features: [] };
 
 export class OwnShip {
-  constructor({ map, plotter, vessel, host, onSelect, units, wheelZoom, predictMin = 6 } = {}) {
+  constructor({ map, plotter, vessel, host, onSelect, units, predictMin = 6 } = {}) {
     this._map = map;
     this._plotter = plotter;
     this._vessel = vessel;
@@ -78,11 +78,6 @@ export class OwnShip {
     this._onDrag = () => this._setFollow(false);
     map.on("dragstart", this._onDrag);
 
-    // While following, wheel-zoom anchors on the vessel rather than the cursor.
-    // WheelZoom owns the wheel (detent + elastic floor); we just feed it the anchor
-    // so it zooms around the boat whenever we're following a fix. null → cursor.
-    if (wheelZoom) wheelZoom.setAnchorProvider(() => (this._follow && this._fix) ? [this._fix.lng, this._fix.lat] : null);
-
     // Defer layer creation until the style is ready (see _ensureLayers); subscribe
     // first so a not-yet-loaded style can't abort the constructor before we do.
     this._onStyle = () => this._ensureLayers();
@@ -115,6 +110,13 @@ export class OwnShip {
   _setFollow(on) {
     this._follow = on;
     this._syncChip();
+  }
+
+  // Plugin contract (consumed by WheelZoom via the shell): the geographic point
+  // wheel-zoom should keep fixed while zooming — the vessel while we're following
+  // a fix, else null so it falls back to cursor-anchored zoom.
+  zoomAnchor() {
+    return (this._follow && this._fix) ? [this._fix.lng, this._fix.lat] : null;
   }
 
   _syncChip() {

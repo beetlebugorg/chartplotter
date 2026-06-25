@@ -18,11 +18,16 @@
 // gesture) all read the same stale zoom and only the last step per frame survives.
 // A private target adds up every event regardless of frame timing. A fresh gesture
 // (after a quiet gap, or after pinch/flyTo moved the camera) re-bases on the live
-// zoom. Anchored on the cursor by default; a follow plugin (own-ship) can register
-// an anchor provider to zoom around the vessel.
+// zoom.
 //
-//   const wz = new WheelZoom({ map, getDetent: () => hud.getDetentZoom() });
-//   wz.setAnchorProvider(() => following ? [lng, lat] : null);
+// Anchoring is injected, not pushed: getAnchor() returns the geographic point to
+// keep fixed while zooming (e.g. the vessel when a follow plugin is active), or
+// null for cursor-anchored. The shell composes it from whatever plugins contribute
+// (see ChartPlotter), so plugins never reach into WheelZoom — symmetric with
+// getDetent/getFloor.
+//
+//   const wz = new WheelZoom({ map, getDetent: () => hud.getDetentZoom(),
+//                              getFloor: () => floorZoom(), getAnchor: () => anchor() });
 
 import { FLOOR_GIVE } from "../lib/util.mjs";
 
@@ -33,15 +38,15 @@ const SETTLE_MS = 120;           // spring-back ease length
 const ELASTIC = 0.28;            // fraction of a step applied once past the floor (damped over-pull)
 
 export class WheelZoom {
-  constructor({ map, getDetent, getFloor } = {}) {
+  constructor({ map, getDetent, getFloor, getAnchor } = {}) {
     this._map = map;
     this._getDetent = getDetent || (() => null);
+    this._getAnchor = getAnchor || (() => null); // [lng,lat] to keep fixed while zooming, or null → cursor
     // The live 1:MIN_DETAIL_SCALE zoom floor (rest cap). Computed PER EVENT, not read
     // from map.getMaxZoom() — that's only re-applied on moveend, so mid-gesture it can
     // be stale-high (initial z18, or a value a flyTo left raised) and we'd sail past
     // the floor and only snap back on moveend (the "bounce"). A live floor stops dead.
     this._getFloor = getFloor || (() => map.getMaxZoom() - FLOOR_GIVE);
-    this._anchor = null;        // optional () => [lng,lat] | null (follow anchor)
     this._target = null;        // accumulated target zoom; null until the first gesture
     this._lastTs = 0;           // timestamp of the previous wheel event (gesture detection)
     this._detentArmed = true;   // true below the detent; cleared once a fresh gesture releases it
@@ -54,10 +59,6 @@ export class WheelZoom {
     map.scrollZoom.disable();   // we own the wheel now
     this._canvas.addEventListener("wheel", this._onWheel, { passive: false });
   }
-
-  // A follow plugin registers a function returning the geographic point to keep
-  // fixed while zooming (the vessel), or null to fall back to the cursor.
-  setAnchorProvider(fn) { this._anchor = fn; }
 
   destroy() {
     if (this._canvas) this._canvas.removeEventListener("wheel", this._onWheel, { passive: false });
@@ -114,7 +115,7 @@ export class WheelZoom {
     this._target = next;
     if (Math.abs(next - map.getZoom()) < 1e-4) return;
 
-    const around = (this._anchor && this._anchor()) || this._cursorLngLat(e);
+    const around = this._getAnchor() || this._cursorLngLat(e);
     map.easeTo({ zoom: next, around, duration: 0 });
   }
 
