@@ -43,7 +43,7 @@ const CHIP_STYLE = `
 const EMPTY = { type: "FeatureCollection", features: [] };
 
 export class OwnShip {
-  constructor({ map, plotter, vessel, host, onSelect, units, predictMin = 6 } = {}) {
+  constructor({ map, plotter, vessel, host, onSelect, units, wheelZoom, predictMin = 6 } = {}) {
     this._map = map;
     this._plotter = plotter;
     this._vessel = vessel;
@@ -55,7 +55,6 @@ export class OwnShip {
     this._centered = false; // recenter once on the first fix so the boat is on-screen
     this._follow = true; // keep the vessel centred until the user pans away
     this._fix = null; // latest {lng, lat, courseDeg}
-    this._zoomTakeover = false; // whether we've taken over the wheel from native scroll-zoom
     this._last = null; // last predictor GeoJSON (to restore after style reload)
     // Smooth display: the rendered pose is interpolated fix→fix (in step with the
     // camera ease in <chart-canvas>) so the boat glides instead of hopping each fix.
@@ -79,22 +78,10 @@ export class OwnShip {
     this._onDrag = () => this._setFollow(false);
     map.on("dragstart", this._onDrag);
 
-    // While following, zoom anchors on the vessel, not the cursor. We can't just
-    // recentre each zoom frame — that cancels MapLibre's scroll-zoom animation and
-    // makes zooming crawl. Instead, disable native scroll-zoom and handle the wheel
-    // ourselves: an instant zoom around the boat (instant, so rapid scrolls add up).
-    // Panning re-enables native cursor-anchored zoom until re-centre.
-    this._canvas = map.getCanvasContainer();
-    this._onWheel = (e) => {
-      if (!this._follow || !this._fix) return;
-      e.preventDefault();
-      let d = e.deltaY;
-      if (e.deltaMode === 1) d *= 28; // lines → ~pixels
-      else if (e.deltaMode === 2) d *= 400; // pages
-      const z = clamp(map.getZoom() - d * 0.006, map.getMinZoom(), map.getMaxZoom());
-      map.easeTo({ zoom: z, around: [this._fix.lng, this._fix.lat], duration: 0 });
-    };
-    this._applyFollowZoom();
+    // While following, wheel-zoom anchors on the vessel rather than the cursor.
+    // WheelZoom owns the wheel (detent + elastic floor); we just feed it the anchor
+    // so it zooms around the boat whenever we're following a fix. null → cursor.
+    if (wheelZoom) wheelZoom.setAnchorProvider(() => (this._follow && this._fix) ? [this._fix.lng, this._fix.lat] : null);
 
     // Defer layer creation until the style is ready (see _ensureLayers); subscribe
     // first so a not-yet-loaded style can't abort the constructor before we do.
@@ -127,25 +114,7 @@ export class OwnShip {
 
   _setFollow(on) {
     this._follow = on;
-    this._applyFollowZoom();
     this._syncChip();
-  }
-
-  // Take over the wheel only while following AND we have a fix to anchor on;
-  // otherwise leave native (cursor-anchored) scroll-zoom enabled — including before
-  // the first fix, so chart browsing zooms normally. Idempotent.
-  _applyFollowZoom() {
-    if (!this._canvas) return;
-    const takeover = this._follow && !!this._fix;
-    if (takeover === this._zoomTakeover) return;
-    this._zoomTakeover = takeover;
-    if (takeover) {
-      this._map.scrollZoom.disable();
-      this._canvas.addEventListener("wheel", this._onWheel, { passive: false });
-    } else {
-      this._canvas.removeEventListener("wheel", this._onWheel, { passive: false });
-      this._map.scrollZoom.enable();
-    }
   }
 
   _syncChip() {
@@ -235,7 +204,6 @@ export class OwnShip {
         this._plotter.updateFollow(this._fix);
       }
     }
-    this._applyFollowZoom(); // now that we have a fix, take over the wheel if following
     this._syncChip();
   }
 
@@ -303,7 +271,6 @@ export class OwnShip {
     this._last = EMPTY;
     const src = this._map && this._map.getSource(SRC);
     if (src) src.setData(EMPTY);
-    this._applyFollowZoom(); // no fix → hand the wheel back to native scroll-zoom
     this._syncChip();
   }
 
@@ -312,8 +279,6 @@ export class OwnShip {
     if (this._off) this._off();
     if (this._onStyle) this._map.off("style.load", this._onStyle);
     if (this._onDrag) this._map.off("dragstart", this._onDrag);
-    if (this._canvas && this._onWheel) this._canvas.removeEventListener("wheel", this._onWheel, { passive: false });
-    this._map.scrollZoom.enable();
     if (this._marker) this._marker.remove();
     if (this._chip) this._chip.remove();
     this._plotter.removeOverlay([CASING, LINE], SRC);

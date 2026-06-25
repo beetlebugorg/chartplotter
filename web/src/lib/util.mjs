@@ -79,6 +79,11 @@ export function zoomForScalePhysical(scale, lat, pxPitchMm = DEFAULT_PX_PITCH_MM
 // this it's just blocky overzoom). The cap is a PHYSICAL scale — the 1:N a ruler
 // laid on the screen measures (scaleDenomPhysical) — so it matches the HUD readout.
 export const MIN_DETAIL_SCALE = 4000;
+// A sliver of zoom headroom kept above the scale floor (set as the map's real
+// maxZoom in _applyScaleFloor) so the wheel-zoom handler can let a hard-in scroll
+// over-pull a hair past the floor and settle back — a stop with a little give,
+// not a wall that bounces. See WheelZoom.
+export const FLOOR_GIVE = 0.15;
 export function maxZoomForScaleFloor(lat, pxPitchMm = DEFAULT_PX_PITCH_MM) {
   // Inverse of scaleDenomPhysical: the (fractional) zoom whose physical scale at
   // `lat` equals the floor (latitude-dependent). Uses the same px pitch as the
