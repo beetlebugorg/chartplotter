@@ -170,7 +170,12 @@ function buildLayers(mariner, palette, atlasPpu, osm) {
     { id: "drgare-labels", type: "symbol", source: "chart", "source-layer": "areas",
       filter: ["all", ["==", ["get", "class"], "DRGARE"], ["has", "drval1"]],
       layout: { "text-field": S52.drgareLabelField(mariner), "text-font": FONT, "text-size": 10, "text-allow-overlap": false, "text-optional": true },
-      paint: { "text-color": S52.textColor(active, palette), "text-halo-color": S52.textHaloColor(active), "text-halo-width": 1.2 } },
+      // FontColor:CHBLK per the S-101 catalogue DredgedArea rule. NOT textColor:
+      // this layer reads the `areas` source-layer, whose `color_token` is the
+      // dredged-area FILL colour, so textColor painted the depth value that same
+      // light shade (white-on-white). The CHBLK token resolves per palette (light
+      // ink at dusk/night), so it stays legible in every scheme.
+      paint: { "text-color": S52.token("CHBLK", "#000000", palette), "text-halo-color": S52.textHaloColor(active), "text-halo-width": 1.2 } },
     // Light characteristics (LIGHTS06 TX, e.g. "Fl(1)R 3s 4.2m") — their own
     // layer. It precedes the feature-name layers in the style order, so MapLibre
     // places light text FIRST: it wins collisions against plain name labels (a name
