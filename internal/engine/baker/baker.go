@@ -141,19 +141,68 @@ func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*
 
 	b := bake.New()
 	applyPortrayer(b)
-	var ok []string
-	for _, name := range names {
-		chart, err := ParseCellBytes(name, cells[name])
-		if err != nil {
+	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
+		return ParseCellBytes(name, cells[name])
+	}, onSkip)
+	return b, ok, nil
+}
+
+// addCellsParallel parses and portrays cells on a bounded worker pool, then
+// routes them into b serially in `names` order. Parsing and S-101 portrayal are
+// the dominant bake cost and are independent per cell, so they run concurrently;
+// the stateful route/merge stays single-threaded and ordered, so the archive is
+// byte-for-byte identical to the serial path. At most ~NumCPU cells are resident
+// at once (the trade for the speedup — the per-band streaming bake remains the
+// path for memory-bounded huge districts). onSkip fires in `names` order.
+func addCellsParallel(b *bake.Baker, names []string, parse func(name string) (*s57.Chart, error), onSkip func(name string, err error)) []string {
+	workers := runtime.NumCPU()
+	if workers > len(names) {
+		workers = len(names)
+	}
+	if workers < 1 {
+		return nil
+	}
+	type result struct {
+		chart *s57.Chart
+		pc    bake.CellPortrayal
+		err   error
+	}
+	slots := make([]chan result, len(names))
+	for i := range slots {
+		slots[i] = make(chan result, 1)
+	}
+	// sem bounds in-flight cells; a token is acquired before a worker starts and
+	// released by the consumer after that cell is routed, so no more than `workers`
+	// parsed+portrayed cells are resident ahead of the routing goroutine.
+	sem := make(chan struct{}, workers)
+	go func() {
+		for i, name := range names {
+			sem <- struct{}{}
+			go func(i int, name string) {
+				chart, err := parse(name)
+				if err != nil {
+					slots[i] <- result{err: err}
+					return
+				}
+				slots[i] <- result{chart: chart, pc: b.PortrayCell(chart)}
+			}(i, name)
+		}
+	}()
+	ok := make([]string, 0, len(names))
+	for i, name := range names {
+		r := <-slots[i]
+		if r.err != nil {
 			if onSkip != nil {
-				onSkip(name, err)
+				onSkip(name, r.err)
 			}
+			<-sem
 			continue
 		}
-		b.AddCell(chart)
+		b.AddCellPortrayed(r.chart, r.pc)
 		ok = append(ok, name)
+		<-sem
 	}
-	return b, ok, nil
+	return ok
 }
 
 // CellData is a base cell (.000) plus its sequential update files (.001, .002, …)
@@ -197,19 +246,10 @@ func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func
 	b := bake.New()
 	applyPortrayer(b)
 	b.OverzoomAllBands = overzoom
-	var ok []string
-	for _, name := range names {
+	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
 		cd := cells[name]
-		chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
-		if err != nil {
-			if onSkip != nil {
-				onSkip(name, err)
-			}
-			continue
-		}
-		b.AddCell(chart)
-		ok = append(ok, name)
-	}
+		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
+	}, onSkip)
 	return b, ok, nil
 }
 

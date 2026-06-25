@@ -25,6 +25,18 @@ type BatchPortrayer interface {
 	End()
 }
 
+// precomputingPortrayer is a BatchPortrayer that can portray a cell off the
+// routing thread — portray is concurrency-safe and returns an opaque result that
+// install replays onto the active state before that cell's serial routing. This
+// lets the baker portray cells in parallel (the dominant bake cost) while keeping
+// the stateful routing/merge serial and deterministic. The S-101 portrayer
+// implements it; other portrayers fall back to the serial Begin/End path.
+type precomputingPortrayer interface {
+	BatchPortrayer
+	portray(features []*s57.Feature) cellPortrayal
+	install(cp cellPortrayal)
+}
+
 // SetPortrayer installs the portrayal engine on the Baker. Set the S-101
 // portrayer (NewS101Portrayer) to bake with S-101 symbology. Set before AddCell.
 func (b *Baker) SetPortrayer(p Portrayer) { b.portrayer = p }
@@ -76,17 +88,30 @@ func NewS101PortrayerFS(catalogFS fs.FS, featureCatalogueXML []byte) (Portrayer,
 	return &s101Portrayer{builder: bld}, nil
 }
 
+// cellPortrayal is one cell's three portrayal-pass result maps. portray produces
+// it off the routing thread; install replays it onto the active state just before
+// that cell's serial routing — so cells can be portrayed in parallel and merged
+// serially (deterministically).
+type cellPortrayal struct {
+	cache, plain, simplified map[int64]portrayal.FeatureBuild
+}
+
 // Begin portrays the whole cell up front and caches results. It runs the default
 // pass plus the PlainBoundaries / SimplifiedSymbols variant passes so the client
 // can toggle boundary + point-symbol style live. Variant passes are best-effort:
 // if one fails, that axis degrades to the common pass.
-func (p *s101Portrayer) Begin(features []*s57.Feature) {
+func (p *s101Portrayer) Begin(features []*s57.Feature) { p.install(p.portray(features)) }
+
+// portray computes the cell's three portrayal passes WITHOUT touching the
+// portrayer's active state, so different cells can be portrayed concurrently:
+// each pass builds its own Lua engine and the builder is read-only (the proto
+// cache is internally locked). The result is replayed by install.
+func (p *s101Portrayer) portray(features []*s57.Feature) cellPortrayal {
 	m, err := p.builder.BuildBatch(features)
 	if err != nil {
-		p.cache = nil // Passes falls back to per-feature builds
-		return
+		return cellPortrayal{} // empty → Passes falls back to per-feature builds
 	}
-	p.cache = m
+	cp := cellPortrayal{cache: m}
 	// Each override pass portrays ONLY the geometry type whose variant it
 	// contributes — PlainBoundaries varies area boundaries (consumed only for
 	// polygons in Passes), SimplifiedSymbols varies point symbols (consumed only
@@ -94,11 +119,17 @@ func (p *s101Portrayer) Begin(features []*s57.Feature) {
 	// portraying them here is wasted rule evaluation. The predicates mirror the
 	// consumption in Passes exactly, so output is unchanged.
 	if v, err := p.builder.BuildBatchFiltered(features, map[string]string{"PlainBoundaries": "true"}, isAreaFeature); err == nil {
-		p.plain = v
+		cp.plain = v
 	}
 	if v, err := p.builder.BuildBatchFiltered(features, map[string]string{"SimplifiedSymbols": "true"}, isSimplifiablePoint); err == nil {
-		p.simplified = v
+		cp.simplified = v
 	}
+	return cp
+}
+
+// install replays a precomputed portrayal onto the active state Passes reads.
+func (p *s101Portrayer) install(cp cellPortrayal) {
+	p.cache, p.plain, p.simplified = cp.cache, cp.plain, cp.simplified
 }
 
 // isAreaFeature selects Surface features — the only consumers of the
