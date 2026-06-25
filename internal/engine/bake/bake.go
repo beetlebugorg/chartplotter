@@ -283,7 +283,7 @@ type sectorPrim struct {
 	scamin   uint32 // SCAMIN denominator of the parent LIGHTS (0 = none); emitted as `scamin` so the client's per-SCAMIN bucket layer gates the exact display cutoff, same as point symbols/text
 	// Date validity of the parent LIGHTS (S-52 §10.4.1.1); empty when none. Carried
 	// because sectors tessellate at tile-emit time, after b.curDate* has moved on.
-	dateStart, dateEnd, timeValid string
+	dateStart, dateEnd string
 	// legNorm is the full-length leg reach (VALNMR nominal range) as a fraction
 	// of the normalized world — a fixed GROUND distance, so zoom-independent
 	// (unlike the 25 mm short leg / arc, which are screen-px). Drives the tile
@@ -319,10 +319,9 @@ type Baker struct {
 	// apply the MANDATORY date filter — a date-dependent object outside its period
 	// is not displayed for the current date. Empty when the feature has no period.
 	// Values are S-57 date strings: full "YYYYMMDD" (fixed) or partial "--MMDD"
-	// recurring each year (periodic); curTimeValid is the interval kind.
+	// recurring each year (periodic).
 	curDateStart string
 	curDateEnd   string
-	curTimeValid string
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
 	// position, the first is "primary" (one flare + a merged multi-line label);
 	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
@@ -654,7 +653,7 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 			b.recordScamin(scamin) // publish the band's distinct values (manifest → TileJSON)
 			// Date validity period (S-52 §10.4.1.1) — baked onto each primitive so the
 			// client applies the mandatory current-date filter.
-			b.curDateStart, b.curDateEnd, b.curTimeValid = fb.DateStart, fb.DateEnd, fb.TimeValid
+			b.curDateStart, b.curDateEnd = fb.DateStart, fb.DateEnd
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
@@ -717,21 +716,29 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 
 // appendDateTags adds the feature's date-validity period (S-52 §10.4.1.1) to a
 // tile feature's attrs when it has one, so the client's mandatory current-date
-// filter can hide it outside its period. date_start/date_end are S-57 date
-// strings (full "YYYYMMDD" or recurring "--MMDD"); time_valid is the interval kind.
-func appendDateTags(attrs []mvt.KeyValue, start, end, timeValid string) []mvt.KeyValue {
+// filter can hide it outside its period. The period is baked in a filter-friendly
+// form: date_start / date_end are the comparable bound strings — a recurring
+// month-day "MMDD" (from an S-57 "--MMDD" partial) or a full "YYYYMMDD" — each
+// present only when that bound exists (a one-sided range is semi-open); the
+// boolean date_recurring (present iff the feature is dated) tells the client which
+// "today" form to compare against and lexicographic compare does the rest.
+func appendDateTags(attrs []mvt.KeyValue, start, end string) []mvt.KeyValue {
 	if start == "" && end == "" {
 		return attrs
 	}
+	recurring := strings.HasPrefix(start, "--") || strings.HasPrefix(end, "--")
+	norm := func(s string) string { return strings.TrimPrefix(s, "--") }
 	if start != "" {
-		attrs = append(attrs, mvt.KeyValue{Key: "date_start", Value: mvt.StringVal(start)})
+		attrs = append(attrs, mvt.KeyValue{Key: "date_start", Value: mvt.StringVal(norm(start))})
 	}
 	if end != "" {
-		attrs = append(attrs, mvt.KeyValue{Key: "date_end", Value: mvt.StringVal(end)})
+		attrs = append(attrs, mvt.KeyValue{Key: "date_end", Value: mvt.StringVal(norm(end))})
 	}
-	if timeValid != "" {
-		attrs = append(attrs, mvt.KeyValue{Key: "time_valid", Value: mvt.StringVal(timeValid)})
+	rec := int64(0)
+	if recurring {
+		rec = 1
 	}
+	attrs = append(attrs, mvt.KeyValue{Key: "date_recurring", Value: mvt.IntVal(rec)})
 	return attrs
 }
 
@@ -898,7 +905,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		}
 		// Date validity (S-52 §10.4.1.1): the client's mandatory current-date filter
 		// hides a date-dependent feature outside its period.
-		extra = appendDateTags(extra, b.curDateStart, b.curDateEnd, b.curTimeValid)
+		extra = appendDateTags(extra, b.curDateStart, b.curDateEnd)
 		return extra
 	}
 	r := routed{
@@ -1012,7 +1019,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 			fig: v, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, zMin: zMin, natMax: zr.Max,
 			scamin:    b.curScamin,
-			dateStart: b.curDateStart, dateEnd: b.curDateEnd, timeValid: b.curTimeValid,
+			dateStart: b.curDateStart, dateEnd: b.curDateEnd,
 			legNorm: legNorm,
 		})
 	}
@@ -1697,7 +1704,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			}
 			// Date validity of the parent light (S-52 §10.4.1.1) — so a seasonal
 			// sector light's figure hides with its flare/text under the date filter.
-			attrs = appendDateTags(attrs, sp.dateStart, sp.dateEnd, sp.timeValid)
+			attrs = appendDateTags(attrs, sp.dateStart, sp.dateEnd)
 			tb.Layer("sector_lines").AddLines(paths, attrs)
 		}
 	}

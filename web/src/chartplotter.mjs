@@ -75,6 +75,11 @@ const DEFAULT_MARINER = {
   showScaleBoundaries: false, // DATCVR §10.1.9.1 chart scale boundaries — off by default (opt-in)
   // Individually-selectable "Other" items (S-52/IMO), all default on.
   showSoundings: true,
+  // Date-dependent display (S-52 §10.4.1.1, MANDATORY): show a dated feature only
+  // when the viewing date is within its validity period. Default on (spec); set
+  // false to show all dates regardless. dateView ("YYYYMMDD") pins a planning
+  // date; unset = real today.
+  dateDependent: true,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
   // independent of display category (each TX/TE carries a group number, §14.4).
   showLightDescriptions: true, // group 23: light characteristics (e.g. Fl(2)R 10s)

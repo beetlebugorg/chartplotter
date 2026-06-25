@@ -929,7 +929,7 @@ export class ChartCanvas extends HTMLElement {
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
-      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds")) {
+      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds" || k === "dateDependent" || k === "dateView")) {
         this.applyFeatureFilters();
       }
   }
