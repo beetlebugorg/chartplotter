@@ -127,6 +127,14 @@ function buildLayers(mariner, palette, atlasPpu, osm) {
       filter: ["all", ["==", ["get", "class"], "DEPCNT"], ["has", "valdco"]],
       layout: { "symbol-placement": "line", "text-field": S52.contourLabelField(mariner), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "symbol-spacing": 300, "text-allow-overlap": false, "text-optional": true, visibility: mariner.showContourLabels ? "visible" : "none" },
       paint: { "text-color": S52.contourLabelColor(active, palette), "text-halo-color": S52.textHaloColor(active), "text-halo-width": 1.2 } },
+    // Dredged-area depth label (S-52 row 47, client-side): DRVAL1 placed at the
+    // DRGARE centroid, in the chosen depth unit. The baker drops the rule's
+    // fixed-metres "%gm" text so this tracks depthUnit (same pattern as
+    // contour-labels). Reads the `areas` source-layer → SCAMIN-cloned below.
+    { id: "drgare-labels", type: "symbol", source: "chart", "source-layer": "areas",
+      filter: ["all", ["==", ["get", "class"], "DRGARE"], ["has", "drval1"]],
+      layout: { "text-field": S52.drgareLabelField(mariner), "text-font": FONT, "text-size": 10, "text-allow-overlap": false, "text-optional": true },
+      paint: { "text-color": S52.textColor(active, palette), "text-halo-color": S52.textHaloColor(active), "text-halo-width": 1.2 } },
     // Light characteristics (LIGHTS06 TX, e.g. "Fl(1)R 3s 4.2m") — their own
     // layer. It precedes the feature-name layers in the style order, so MapLibre
     // places light text FIRST: it wins collisions against plain name labels (a name
