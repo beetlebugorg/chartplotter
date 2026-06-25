@@ -87,12 +87,31 @@ func (p *s101Portrayer) Begin(features []*s57.Feature) {
 		return
 	}
 	p.cache = m
-	if v, err := p.builder.BuildBatchOverrides(features, map[string]string{"PlainBoundaries": "true"}); err == nil {
+	// Each override pass portrays ONLY the geometry type whose variant it
+	// contributes — PlainBoundaries varies area boundaries (consumed only for
+	// polygons in Passes), SimplifiedSymbols varies point symbols (consumed only
+	// for non-SOUNDG points). Lines and soundings never read either variant, so
+	// portraying them here is wasted rule evaluation. The predicates mirror the
+	// consumption in Passes exactly, so output is unchanged.
+	if v, err := p.builder.BuildBatchFiltered(features, map[string]string{"PlainBoundaries": "true"}, isAreaFeature); err == nil {
 		p.plain = v
 	}
-	if v, err := p.builder.BuildBatchOverrides(features, map[string]string{"SimplifiedSymbols": "true"}); err == nil {
+	if v, err := p.builder.BuildBatchFiltered(features, map[string]string{"SimplifiedSymbols": "true"}, isSimplifiablePoint); err == nil {
 		p.simplified = v
 	}
+}
+
+// isAreaFeature selects Surface features — the only consumers of the
+// PlainBoundaries (plain area-boundary) variant in Passes.
+func isAreaFeature(f *s57.Feature) bool {
+	return f.Geometry().Type == s57.GeometryTypePolygon
+}
+
+// isSimplifiablePoint selects non-SOUNDG point features — the only consumers of
+// the SimplifiedSymbols (simplified point-symbol) variant in Passes. SOUNDG digit
+// glyphs don't vary, so they stay a single common pass.
+func isSimplifiablePoint(f *s57.Feature) bool {
+	return f.Geometry().Type == s57.GeometryTypePoint && f.ObjectClass() != "SOUNDG"
 }
 
 // End drops the per-cell caches so their memory is released before the next cell.

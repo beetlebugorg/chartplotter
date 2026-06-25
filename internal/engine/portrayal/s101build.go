@@ -82,6 +82,17 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 // {"PlainBoundaries":"true"} or {"SimplifiedSymbols":"true"}), so the baker can
 // portray the plain-boundary / simplified-symbol display variants.
 func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map[string]string) (map[int64]FeatureBuild, error) {
+	return b.BuildBatchFiltered(features, overrides, nil)
+}
+
+// BuildBatchFiltered is BuildBatchOverrides that portrays only the features for
+// which include returns true (nil = all). Cross-feature context (danger depths,
+// co-located topmarks) is still derived from the FULL feature set, so filtering
+// the portrayed batch never changes a rule's inputs. The override passes use this
+// to portray only the geometry type whose variant they contribute —
+// PlainBoundaries varies area boundaries, SimplifiedSymbols varies point symbols —
+// instead of re-portraying every feature and discarding all but the matching type.
+func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[string]string, include func(*s57.Feature) bool) (map[int64]FeatureBuild, error) {
 	eng, err := s101.NewEngineFS(b.rulesFS, b.fcCat)
 	if err != nil {
 		return nil, err
@@ -93,6 +104,9 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 	topmarkIdx := buildTopmarkIndex(features)
 	batch := make([]s101.Feature, 0, len(features))
 	for _, f := range features {
+		if include != nil && !include(f) {
+			continue
+		}
 		g := f.Geometry()
 		// Skip non-spatial collection/relationship objects (C_AGGR, C_ASSO) — they
 		// group other features and carry no geometry, so there's nothing to
@@ -142,8 +156,11 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int64]FeatureBuild, len(features))
+	out := make(map[int64]FeatureBuild, len(batch))
 	for _, f := range features {
+		if include != nil && !include(f) {
+			continue
+		}
 		out[f.ID()] = b.buildFeature(f, streams[strconv.FormatInt(f.ID(), 10)])
 	}
 	return out, nil
