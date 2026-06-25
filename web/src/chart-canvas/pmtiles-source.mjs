@@ -152,6 +152,20 @@ export class PMTilesArchive {
     this.bounds = [e7(102), e7(106), e7(110), e7(114)]; // [W,S,E,N]
     const dir = await this._read(rootOff, rootLen);
     this._root = decodeDirectory(this._internalGz ? await gunzip(dir) : dir);
+    // SCAMIN manifest (JSON metadata): the baker publishes this archive's distinct
+    // SCAMIN denominators (pmtiles SetScamin) so the client builds the per-value
+    // bucket layers at LOAD, instead of discovering them from tiles as you zoom
+    // (which forced repeated full style rebuilds — a visible flicker). Best-effort:
+    // absence (older archive) falls back to the runtime-collection path.
+    this.scamin = [];
+    const metaOff = u64(24), metaLen = u64(32);
+    if (metaLen > 0 && metaLen < (1 << 20)) {
+      try {
+        const mb = await this._read(metaOff, metaLen);
+        const md = JSON.parse(new TextDecoder().decode(this._internalGz ? await gunzip(mb) : mb));
+        if (Array.isArray(md.scamin)) this.scamin = md.scamin.map(Number);
+      } catch (e) { /* no / unparseable metadata → runtime fallback */ }
+    }
     return this;
   }
 
@@ -230,6 +244,7 @@ export class MultiArchive {
     this.minZoom = 0;
     this.maxZoom = 16;
     this.bounds = null;
+    this.scamin = []; // union of the packs' published SCAMIN manifests
   }
 
   // Add (open) an archive from a Blob/File or a URL string. Returns the opened
@@ -249,6 +264,7 @@ export class MultiArchive {
 
   _recompute() {
     let mn = 24, mx = 0, b = null;
+    const sc = new Set();
     for (const a of this.archives) {
       mn = Math.min(mn, a.minZoom);
       mx = Math.max(mx, a.maxZoom);
@@ -257,10 +273,12 @@ export class MultiArchive {
           ? [Math.min(b[0], a.bounds[0]), Math.min(b[1], a.bounds[1]), Math.max(b[2], a.bounds[2]), Math.max(b[3], a.bounds[3])]
           : a.bounds.slice();
       }
+      for (const v of a.scamin || []) sc.add(v);
     }
     this.minZoom = this.archives.length ? mn : 0;
     this.maxZoom = this.archives.length ? mx : 16;
     this.bounds = b;
+    this.scamin = [...sc].sort((x, y) => x - y);
   }
 
   get tileCount() { return this.archives.reduce((s, a) => s + a.tileCount, 0); }

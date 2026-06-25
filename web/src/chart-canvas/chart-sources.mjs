@@ -214,30 +214,29 @@ export class ChartSources {
       this._scaminRebuildT = setTimeout(() => this._reapplyScaminMinzooms(), 120);
       return;
     }
-    const seen = new Set(this._scaminValues);
-    const before = seen.size;
-    const srcs = CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
-    for (const src of srcs) {
-      if (!m.getSource(src)) continue;
-      for (const sl of SCAMIN_BUCKET_LAYERS) {
-        let fs;
-        try { fs = m.querySourceFeatures(src, { sourceLayer: sl }); } catch (e) { continue; }
-        for (const f of fs) { const s = f.properties && f.properties.scamin; if (s) seen.add(+s); }
-      }
+    // The SCAMIN value set is PUBLISHED in each PMTiles archive's JSON metadata
+    // (baker SetScamin), so read it from the loaded bands — known at LOAD, not
+    // scanned from tiles per frame. This is the key flicker fix: zooming surfaces
+    // no "new" values, so it never triggers a rebuild. (Older archives without the
+    // manifest publish nothing, so the set stays empty and SCAMIN gating is off —
+    // re-bake to restore it; this never re-introduces the per-zoom rebuild.)
+    const seen = new Set();
+    for (const slug of Object.keys(this._bands)) {
+      for (const v of this._bands[slug].scamin || []) seen.add(+v);
     }
-    const grew = seen.size !== before;
-    if (!grew && !latShift) return;
-    this._scaminValues = [...seen].sort((a, b) => a - b);
+    const next = [...seen].sort((a, b) => a - b);
+    const changed = next.length !== this._scaminValues.length || next.some((v, i) => v !== this._scaminValues[i]);
+    if (!changed && !latShift) return;
+    this._scaminValues = next;
     clearTimeout(this._scaminRebuildT);
-    if (grew) {
-      // A genuinely-new SCAMIN value needs new bucket LAYERS, so only this case takes
-      // the full (heavy, flickering) style rebuild — debounced to coalesce a burst of
-      // values across tiles into ONE rebuild. Converges: once every value in view is
-      // known, no further growth ⇒ no rebuild.
+    if (changed) {
+      // The value set changed (a pack loaded/unloaded) → new bucket LAYERS are
+      // needed, so this case takes the full style rebuild. It fires at pack
+      // load/unload, NOT during zoom, so it doesn't flicker the zoom interaction.
       this._scaminLat = lat;
       this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
     } else {
-      // Latitude drift only (no new values): re-gate the existing buckets in place.
+      // Latitude drift only (same value set): re-gate the existing buckets in place.
       this._scaminRebuildT = setTimeout(() => this._reapplyScaminMinzooms(), 120);
     }
   }
