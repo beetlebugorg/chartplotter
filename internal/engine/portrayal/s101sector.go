@@ -12,15 +12,15 @@ import (
 // lights. The S-101 LightSectored rule expresses sector legs and arcs as
 // AugmentedRay / ArcByRadius geometry-construction instructions whose lengths are
 // fixed display millimetres (LocalCRS) — a fixed SCREEN size that can't be baked
-// into geographic tile geometry. So instead of lowering those instructions, the
+// into geographic tile geometry. So instead of emitting from those instructions, the
 // sector geometry is carried as a SectorLight primitive (anchor + S-52 sector
 // parameters) and tessellated per-zoom at bake time into the screen-space
 // `sector_lines` layer (bake.expandSector), exactly as the former S-52 LIGHTS06
-// path did. The rule's text descriptions still lower normally (OpText).
+// path did. The rule's text descriptions still emit normally (OpText).
 
 // sectorLightPrims returns the SectorLight primitive(s) for a LIGHTS feature, or
 // nil if it carries no sector/directional figure (a plain light is portrayed by
-// its flare symbol, which lowers from the rule's PointInstruction). One S-57
+// its flare symbol, which emits from the rule's PointInstruction). One S-57
 // LIGHTS feature is one sector; multiple sectors at a position are separate
 // co-located features (the baker dedupes identical geometry).
 func sectorLightPrims(f *s57.Feature, anchor geo.LatLon) []Primitive {
@@ -47,7 +47,7 @@ func sectorLightPrims(f *s57.Feature, anchor geo.LatLon) []Primitive {
 
 	// Directional light of long range (≥10 NM) with no sector limits: the rule
 	// draws a full coloured ring (ArcByRadius 0–360). Shorter-range directional
-	// lights fall back to the flare symbol, which lowers from the rule's
+	// lights fall back to the flare symbol, which emits from the rule's
 	// PointInstruction, so they need no SectorLight here.
 	if hasListVal(stringAttr(a, "CATLIT"), 1) && vnr >= 10 {
 		return []Primitive{SectorLight{

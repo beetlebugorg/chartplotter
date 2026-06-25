@@ -33,6 +33,53 @@ func s101Builder(t *testing.T) *S101Builder {
 	return b
 }
 
+// s101BuilderEmbedded builds from the in-repo embedded catalogue (the one the
+// baker ships), so the test runs without an external catalogue checkout.
+func s101BuilderEmbedded(t *testing.T) *S101Builder {
+	t.Helper()
+	pc := "../s101catalog/catalog/PortrayalCatalog"
+	fcPath := "../s101catalog/catalog/FeatureCatalogue.xml"
+	if _, err := os.Stat(filepath.Join(pc, "Rules", "main.lua")); err != nil {
+		t.Skip("no embedded catalogue")
+	}
+	b, err := NewS101Builder(pc, fcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestS101BuildDateDependent: a seasonal buoy (S-57 PERSTA/PEREND) is portrayed
+// date-dependent — buildFeature surfaces the periodic range on the FeatureBuild
+// and the CHDATD01 date-dependent marker symbol is emitted (the S-101
+// ProcessFixedAndPeriodicDates path wired into the engine).
+func TestS101BuildDateDependent(t *testing.T) {
+	b := s101BuilderEmbedded(t)
+	buoy := s57.NewFeature(1, "BOYLAT",
+		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{-76.3, 38.9}}},
+		map[string]interface{}{"CATLAM": 2, "BOYSHP": 2, "COLOUR": "3", "PERSTA": "--0301", "PEREND": "--1201"},
+	)
+	build, ok := b.Build(&buoy)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	if build.DateStart != "--0301" || build.DateEnd != "--1201" {
+		t.Errorf("date range = %q..%q, want --0301..--1201", build.DateStart, build.DateEnd)
+	}
+	if build.TimeValid != "closedInterval" {
+		t.Errorf("TimeValid = %q, want closedInterval", build.TimeValid)
+	}
+	hasMarker := false
+	for _, p := range build.Primitives {
+		if sc, ok := p.(SymbolCall); ok && sc.SymbolName == "CHDATD01" {
+			hasMarker = true
+		}
+	}
+	if !hasMarker {
+		t.Errorf("no CHDATD01 date-dependent marker emitted; got %#v", build.Primitives)
+	}
+}
+
 // TestS101BuildPointSymbol drives a real S-57 feature through the full build
 // seam: S-57 acronyms → S-101 rule → instructions → geometry-placed Primitive.
 func TestS101BuildPointSymbol(t *testing.T) {
@@ -65,7 +112,7 @@ func TestS101BuildPointSymbol(t *testing.T) {
 }
 
 // TestS101BuildAreaFillAndLine drives a polygon feature; the SiloTank surface
-// branch emits ColorFill:CHBRN + a boundary line, lowered onto the rings.
+// branch emits ColorFill:CHBRN + a boundary line, emitted onto the rings.
 func TestS101BuildAreaFillAndLine(t *testing.T) {
 	b := s101Builder(t)
 	ring := [][]float64{{0, 0}, {0, 1}, {1, 1}, {1, 0}, {0, 0}}
@@ -88,7 +135,7 @@ func TestS101BuildAreaFillAndLine(t *testing.T) {
 		t.Fatalf("want FillPolygon CHBRN, got %#v", build.Primitives)
 	}
 	if len(fill.Rings) == 0 || len(fill.Rings[0]) == 0 {
-		t.Errorf("fill not lowered onto geometry: %+v", fill.Rings)
+		t.Errorf("fill not emitted onto geometry: %+v", fill.Rings)
 	}
 }
 

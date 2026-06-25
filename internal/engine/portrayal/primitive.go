@@ -1,6 +1,6 @@
 // Package portrayal turns one S-57 feature into a stream of viewport-independent
-// lat/lon Primitives by running the S-101 portrayal rules and lowering the
-// emitted drawing instructions, stopping short of projection and colour
+// lat/lon Primitives by running the S-101 portrayal rules and emitting a
+// primitive for each drawing instruction, stopping short of projection and colour
 // resolution. Colour stays as *token* strings; the tile engine
 // projects/clips/encodes the Primitives into MVT and the browser resolves
 // Day/Dusk/Night from colortables.json.

@@ -97,6 +97,18 @@ type DrawCommand struct {
 	TextAlignV  string  // "Top" | "Bottom" | "Center"
 	TextVOffset float64
 
+	// Date dependency (S-101 §ProcessFixedAndPeriodicDates): a Date:/TimeValid:
+	// modifier pair the rule emits for a feature with a fixed (DATSTA/DATEND) or
+	// periodic (PERSTA/PEREND) date range. DateStart/DateEnd are S-57 date strings
+	// — full "YYYYMMDD" for a fixed range, or an S-57 partial "--MMDD" recurring
+	// each year for a periodic one (either may be empty for a semi-open interval).
+	// TimeValid is the interval kind ("closedInterval" | "geSemiInterval" |
+	// "leSemiInterval"). Empty when the feature carries no date dependency. Carried
+	// so a date-aware consumer can show/hide the feature against the current date.
+	DateStart string
+	DateEnd   string
+	TimeValid string
+
 	Raw string // the originating draw token, for debugging
 }
 
@@ -122,6 +134,9 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		textAlignH   string
 		textAlignV   string
 		textVOffset  float64
+		dateStart    string
+		dateEnd      string
+		timeValid    string
 		seenUnsup    = map[string]bool{}
 	)
 	noteUnsupported := func(kind string) {
@@ -144,6 +159,7 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			c.FontColor, c.FontSizePx = fontColor, fontSize
 			c.TextAlignH, c.TextAlignV, c.TextVOffset = textAlignH, textAlignV, textVOffset
 		}
+		c.DateStart, c.DateEnd, c.TimeValid = dateStart, dateEnd, timeValid
 		cmds = append(cmds, c)
 	}
 
@@ -194,10 +210,17 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			textAlignV = arg(in, 0)
 		case "TextVerticalOffset":
 			textVOffset = atof(arg(in, 0))
-		// modifiers we intentionally ignore for geometry lowering
-		case "ScaleMinimum", "ScaleMaximum", "Date", "Time", "DateTime", "TimeValid",
+		// --- date-dependency modifiers (annotate subsequent draws) ---
+		case "Date":
+			// "Date:<start>,<end>" (either side may be empty for a semi-open
+			// interval, e.g. "Date:,--1201"). A bare "Date:<start>" sets the start.
+			dateStart, dateEnd = arg(in, 0), arg(in, 1)
+		case "TimeValid":
+			timeValid = arg(in, 0)
+		// modifiers we intentionally ignore when emitting primitives
+		case "ScaleMinimum", "ScaleMaximum", "Time", "DateTime",
 			"AlertReference", "Warning", "Error", "Hover", "SpatialReference":
-			// no-op for primitive lowering
+			// no-op for primitive emission
 
 		// --- draws (consume state) ---
 		case "PointInstruction":

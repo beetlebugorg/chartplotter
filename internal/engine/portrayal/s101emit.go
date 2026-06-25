@@ -2,16 +2,18 @@ package portrayal
 
 import (
 	"math"
+	"strconv"
+	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/geo"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/catalog"
 	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
 )
 
-// This file is the S-101 drawing-command lowering: it turns one resolved S-101
-// drawing command (from pkg/s100/instructions) plus the feature geometry into a
-// viewport-independent Primitive that everything downstream (projection, MVT
-// bake, client colour resolution) consumes. Colour stays a token; line-style
+// This file emits primitives from S-101 drawing commands: it turns one resolved
+// S-101 drawing command (from pkg/s100/instructions) plus the feature geometry
+// into a viewport-independent Primitive that everything downstream (projection,
+// MVT bake, client colour resolution) consumes. Colour stays a token; line-style
 // refs resolve against the S-101 catalogue.
 
 // mmPerSymbolUnit-derived conversions. S-101 widths/offsets are millimetres;
@@ -37,13 +39,13 @@ type S101Geometry struct {
 	Lines [][]geo.LatLon
 }
 
-// LowerS101 maps one resolved S-101 draw command onto engine Primitives,
+// emitPrimitives maps one resolved S-101 draw command onto engine Primitives,
 // attaching geometry and resolving line-style references against the catalogue.
 // It returns a slice because an area-boundary line fans into one line primitive
 // per ring; fills/symbols/text are a single primitive.
-// An empty slice means nothing to draw (a no-op, an unlowered draw kind, or a
+// An empty slice means nothing to draw (a no-op, an unhandled draw kind, or a
 // draw whose geometry is missing).
-func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Catalog) []Primitive {
+func emitPrimitives(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Catalog) []Primitive {
 	switch cmd.Op {
 	case instructions.OpColorFill:
 		if len(geom.Rings) == 0 {
@@ -84,6 +86,12 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 		anchor := geom.Anchor
 		if cmd.HasAnchor { // an AugmentedPoint draw (e.g. one SOUNDG sounding)
 			anchor = geo.LatLon{Lat: cmd.Anchor[1], Lon: cmd.Anchor[0]}
+		} else if p, ok := pointAlongLines(geom.Lines, cmd.LinePlacement); ok {
+			// A point symbol placed at a relative position along a line feature
+			// (LinePlacement:Relative,<frac>) — e.g. a recommended-track / route
+			// arrow or a cable/pipeline marker. Without this every such symbol
+			// collapsed to the feature's midpoint anchor.
+			anchor = p
 		}
 		return []Primitive{SymbolCall{
 			Anchor:            anchor,
@@ -133,6 +141,76 @@ func LowerS101(cmd instructions.DrawCommand, geom S101Geometry, cat *catalog.Cat
 	default: // OpNull, OpOther
 		return nil
 	}
+}
+
+// pointAlongLines returns the point at the LinePlacement position along the line
+// runs, or ok=false when the placement isn't a usable "Relative,<frac>" spec or
+// there's no line geometry (the caller then keeps the feature anchor). frac is
+// clamped to [0,1] and measured by arc length across all runs, with a cos-lat
+// correction so the fraction tracks ground distance rather than raw degrees.
+func pointAlongLines(lines [][]geo.LatLon, placement string) (geo.LatLon, bool) {
+	if placement == "" || len(lines) == 0 {
+		return geo.LatLon{}, false
+	}
+	mode, val, _ := strings.Cut(placement, ",")
+	if !strings.EqualFold(strings.TrimSpace(mode), "Relative") {
+		return geo.LatLon{}, false // Absolute / unknown placement: keep the anchor
+	}
+	frac, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+	if err != nil {
+		return geo.LatLon{}, false
+	}
+	frac = math.Max(0, math.Min(1, frac))
+
+	// Total arc length of all runs (cos-lat corrected planar approximation —
+	// chart line features are short enough that great-circle curvature is
+	// negligible at this placement precision).
+	seg := func(a, b geo.LatLon) float64 {
+		dLat := b.Lat - a.Lat
+		dLon := (b.Lon - a.Lon) * math.Cos((a.Lat+b.Lat)*0.5*math.Pi/180)
+		return math.Hypot(dLat, dLon)
+	}
+	var total float64
+	for _, run := range lines {
+		for i := 1; i < len(run); i++ {
+			total += seg(run[i-1], run[i])
+		}
+	}
+	if total == 0 {
+		// Degenerate (all coincident): fall back to the first vertex.
+		for _, run := range lines {
+			if len(run) > 0 {
+				return run[0], true
+			}
+		}
+		return geo.LatLon{}, false
+	}
+
+	target := frac * total
+	var acc float64
+	for _, run := range lines {
+		for i := 1; i < len(run); i++ {
+			d := seg(run[i-1], run[i])
+			if acc+d >= target {
+				t := 0.0
+				if d > 0 {
+					t = (target - acc) / d
+				}
+				return geo.LatLon{
+					Lat: run[i-1].Lat + t*(run[i].Lat-run[i-1].Lat),
+					Lon: run[i-1].Lon + t*(run[i].Lon-run[i-1].Lon),
+				}, true
+			}
+			acc += d
+		}
+	}
+	// frac == 1 (or rounding): the last vertex of the last non-empty run.
+	for i := len(lines) - 1; i >= 0; i-- {
+		if n := len(lines[i]); n > 0 {
+			return lines[i][n-1], true
+		}
+	}
+	return geo.LatLon{}, false
 }
 
 func hAlign(s string) HAlign {
