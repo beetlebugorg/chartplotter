@@ -564,9 +564,49 @@ func (b *Baker) ScaminValues() []uint32 {
 	return out
 }
 
+// CellPortrayal carries a cell's precomputed portrayal from the parallel
+// PortrayCell step to the serial AddCellPortrayed step. It is opaque to callers,
+// which only shuttle it between the two; supported is false when the portrayer
+// can't precompute (then AddCellPortrayed portrays inline, like AddCell).
+type CellPortrayal struct {
+	cp        cellPortrayal
+	supported bool
+}
+
+// PortrayCell runs a cell's (expensive) S-101 portrayal without mutating the
+// Baker, so callers can do it on a worker pool. The result is replayed by
+// AddCellPortrayed during the serial route/merge. Concurrency-safe: it only reads
+// the read-only portrayer/catalogue and the internally-locked proto cache.
+func (b *Baker) PortrayCell(chart *s57.Chart) CellPortrayal {
+	pp, ok := b.portrayer.(precomputingPortrayer)
+	if !ok {
+		return CellPortrayal{}
+	}
+	return CellPortrayal{cp: pp.portray(featurePtrs(chart.Features())), supported: true}
+}
+
+// featurePtrs adapts a cell's feature slice to the []*Feature the portrayer takes.
+func featurePtrs(features []s57.Feature) []*s57.Feature {
+	fps := make([]*s57.Feature, len(features))
+	for i := range features {
+		fps[i] = &features[i]
+	}
+	return fps
+}
+
 // AddCell expands every feature of a parsed cell into routed primitives at the
-// cell's scale band, with per-feature SCAMIN display z-min.
-func (b *Baker) AddCell(chart *s57.Chart) {
+// cell's scale band, with per-feature SCAMIN display z-min. It portrays the cell
+// inline; use PortrayCell + AddCellPortrayed to portray off-thread in parallel.
+func (b *Baker) AddCell(chart *s57.Chart) { b.addCell(chart, CellPortrayal{}) }
+
+// AddCellPortrayed is AddCell with the cell's portrayal already computed (by
+// PortrayCell, typically on a worker pool). The routing/merge it does is the same
+// serial, deterministic work as AddCell — call it in a fixed cell order.
+func (b *Baker) AddCellPortrayed(chart *s57.Chart, pc CellPortrayal) { b.addCell(chart, pc) }
+
+// addCell is the shared body: portray (replaying pc if precomputed, else inline)
+// then route the cell's features serially.
+func (b *Baker) addCell(chart *s57.Chart, pc CellPortrayal) {
 	if b.portrayer == nil {
 		panic("bake: no S-101 portrayer set — build with `make` (-tags embed_s101) or pass --s101")
 	}
@@ -607,14 +647,20 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 	}
 	// S-101: portray the whole cell in one engine pass (one Lua chunk + context,
 	// fresh Lua state) up front instead of per-feature — the per-feature path
-	// recompiled the chunk and leaked the catalogue's file-local caches.
-	if bp, ok := b.portrayer.(BatchPortrayer); ok {
-		fps := make([]*s57.Feature, len(features))
-		for i := range features {
-			fps[i] = &features[i]
+	// recompiled the chunk and leaked the catalogue's file-local caches. Either
+	// replay a precomputed portrayal (parallel bake) or portray inline now; the
+	// result is released after this cell's features are routed.
+	switch pp := b.portrayer.(type) {
+	case precomputingPortrayer:
+		if pc.supported {
+			pp.install(pc.cp)
+		} else {
+			pp.install(pp.portray(featurePtrs(features)))
 		}
-		bp.Begin(fps)
-		defer bp.End()
+		defer pp.End()
+	case BatchPortrayer:
+		pp.Begin(featurePtrs(features))
+		defer pp.End()
 	}
 
 	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.

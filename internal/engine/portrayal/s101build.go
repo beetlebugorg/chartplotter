@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -50,13 +51,17 @@ func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Validate the framework loads (fail fast); discard this engine.
-	eng, err := s101.NewEngineFS(rulesFS, cat)
+	// One shared prototype cache for every engine this builder creates — the
+	// framework (and per-class rule chunks) are parsed + compiled once across the
+	// whole bake instead of three times per cell. Validating the framework here
+	// (fail fast) also warms the cache with the framework prototypes.
+	cache := s101.NewProtoCache()
+	eng, err := s101.NewEngineFSCached(rulesFS, cat, cache)
 	if err != nil {
 		return nil, err
 	}
 	eng.Close()
-	return &S101Builder{rulesFS: rulesFS, fcCat: cat, Catalog: draw}, nil
+	return &S101Builder{rulesFS: rulesFS, fcCat: cat, Catalog: draw, protoCache: cache}, nil
 }
 
 // S101Builder is the feature-build seam: it runs the S-101 portrayal rules (via
@@ -64,9 +69,10 @@ func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
 // instruction stream, and emits a primitive for each draw onto the feature
 // geometry to produce the Primitive stream the baker consumes.
 type S101Builder struct {
-	rulesFS fs.FS
-	fcCat   *fc.Catalogue
-	Catalog *catalog.Catalog
+	rulesFS    fs.FS
+	fcCat      *fc.Catalogue
+	Catalog    *catalog.Catalog
+	protoCache *s101.ProtoCache
 }
 
 // BuildBatch portrays a whole cell's features in ONE engine pass (one chunk
@@ -82,7 +88,18 @@ func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuil
 // {"PlainBoundaries":"true"} or {"SimplifiedSymbols":"true"}), so the baker can
 // portray the plain-boundary / simplified-symbol display variants.
 func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map[string]string) (map[int64]FeatureBuild, error) {
-	eng, err := s101.NewEngineFS(b.rulesFS, b.fcCat)
+	return b.BuildBatchFiltered(features, overrides, nil)
+}
+
+// BuildBatchFiltered is BuildBatchOverrides that portrays only the features for
+// which include returns true (nil = all). Cross-feature context (danger depths,
+// co-located topmarks) is still derived from the FULL feature set, so filtering
+// the portrayed batch never changes a rule's inputs. The override passes use this
+// to portray only the geometry type whose variant they contribute —
+// PlainBoundaries varies area boundaries, SimplifiedSymbols varies point symbols —
+// instead of re-portraying every feature and discarding all but the matching type.
+func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[string]string, include func(*s57.Feature) bool) (map[int64]FeatureBuild, error) {
+	eng, err := s101.NewEngineFSCached(b.rulesFS, b.fcCat, b.protoCache)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +109,21 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 	depthIdx := BuildDepthIndex(features) // underlying DEPARE/DRGARE for danger depths
 	topmarkIdx := buildTopmarkIndex(features)
 	batch := make([]s101.Feature, 0, len(features))
+	// Memoize the rule run by portrayal input. The S-101 rule produces a
+	// geometry-INDEPENDENT instruction stream (the geometry is attached per-feature
+	// in buildFeature), so two features with identical inputs — class, primitive,
+	// simple/derived/topmark attributes, multipoint vertices — yield the same
+	// stream. ENC cells repeat the same inputs across thousands of features
+	// (coastline, land regions, depth areas), and the gopher-lua rule run is the
+	// dominant, allocation-heavy bake cost, so run it once per distinct input and
+	// share the stream. sigRep maps a signature to its representative feature ID;
+	// repID maps every portrayed feature to the representative whose stream it uses.
+	sigRep := make(map[string]string)
+	repID := make(map[int64]string, len(features))
 	for _, f := range features {
+		if include != nil && !include(f) {
+			continue
+		}
 		g := f.Geometry()
 		// Skip non-spatial collection/relationship objects (C_AGGR, C_ASSO) — they
 		// group other features and carry no geometry, so there's nothing to
@@ -116,8 +147,8 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 		// feature.Spatial would otherwise hit the framework's GetSpatial infinite
 		// recursion (it reads self['Spatial'] right after assigning it nil, which
 		// re-fires __index) — the cause of the OBSTRN/WRECKS stack overflows.
-		if f.Geometry().Type == s57.GeometryTypePoint {
-			points = soundingPoints(f.Geometry())
+		if g.Type == s57.GeometryTypePoint {
+			points = soundingPoints(g)
 			if f.ObjectClass() == "SOUNDG" {
 				prim = "MultiPoint"
 			}
@@ -128,7 +159,7 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 				topmark = topmarkIdx[key]
 			}
 		}
-		batch = append(batch, s101.Feature{
+		sf := s101.Feature{
 			ID:          strconv.FormatInt(f.ID(), 10),
 			ObjectClass: f.ObjectClass(),
 			Primitive:   prim,
@@ -136,7 +167,15 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 			Derived:     DerivedAttrs(f, depthIdx),
 			Points:      points,
 			Topmark:     topmark,
-		})
+		}
+		sig := portrayalSignature(&sf)
+		if rep, ok := sigRep[sig]; ok {
+			repID[f.ID()] = rep // identical inputs already portrayed; share its stream
+			continue
+		}
+		sigRep[sig] = sf.ID
+		repID[f.ID()] = sf.ID
+		batch = append(batch, sf)
 	}
 	streams, err := eng.Portray(batch)
 	if err != nil {
@@ -144,9 +183,60 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 	}
 	out := make(map[int64]FeatureBuild, len(features))
 	for _, f := range features {
-		out[f.ID()] = b.buildFeature(f, streams[strconv.FormatInt(f.ID(), 10)])
+		if include != nil && !include(f) {
+			continue
+		}
+		// repID[f.ID()] is "" for the skipped (TOPMAR / non-spatial) features, and
+		// streams[""] is "" — buildFeature then suppresses them, as before.
+		out[f.ID()] = b.buildFeature(f, streams[repID[f.ID()]])
 	}
 	return out, nil
+}
+
+// portrayalSignature serializes everything the S-101 rules read from a feature —
+// class, primitive type, simple + derived + topmark attributes, and any
+// multipoint vertices — into a stable key. Features with equal signatures produce
+// the same instruction stream, so the rule runs once per distinct signature. NUL
+// and unit separators keep distinct field layouts from colliding.
+func portrayalSignature(f *s101.Feature) string {
+	var b strings.Builder
+	b.WriteString(f.ObjectClass)
+	b.WriteByte(0)
+	b.WriteString(f.Primitive)
+	b.WriteByte(0)
+	writeSortedAttrs(&b, f.Attributes)
+	b.WriteByte(0)
+	writeSortedAttrs(&b, f.Derived)
+	b.WriteByte(0)
+	writeSortedAttrs(&b, f.Topmark)
+	for _, p := range f.Points {
+		b.WriteByte(0)
+		b.WriteString(strconv.FormatFloat(p[0], 'g', -1, 64))
+		b.WriteByte(',')
+		b.WriteString(strconv.FormatFloat(p[1], 'g', -1, 64))
+		b.WriteByte(',')
+		b.WriteString(strconv.FormatFloat(p[2], 'g', -1, 64))
+	}
+	return b.String()
+}
+
+// writeSortedAttrs appends an attribute map to b in sorted-key order so the
+// signature is stable regardless of map iteration order.
+func writeSortedAttrs(b *strings.Builder, m map[string]string) {
+	if len(m) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(m[k])
+		b.WriteByte('\x1f')
+	}
 }
 
 // Build expands one S-57 feature (convenience wrapper over BuildBatch; the bake
@@ -174,10 +264,18 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 	}
 
 	g := geometryOf(f.Geometry())
-	anchor, _ := textAnchor(g)
-	sg := S101Geometry{Anchor: anchor, Rings: g.area, Lines: strokeRunsFor(g)}
-
 	cmds, _ := instructions.Reduce(instructions.ParseStream(stream))
+
+	// The feature anchor (point symbols / text / sector figures) is consumed only
+	// by anchored draw ops. For an area it's the polylabel representative point — a
+	// pole-of-inaccessibility search over every edge, the single biggest CPU cost
+	// in bake portrayal — yet most area features emit only fills and boundary lines
+	// that never read it. Compute it only when a command actually needs it.
+	var anchor geo.LatLon
+	if commandsNeedAnchor(cmds) {
+		anchor, _ = textAnchor(g)
+	}
+	sg := S101Geometry{Anchor: anchor, Rings: g.area, Lines: strokeRunsFor(g)}
 	var prims []Primitive
 	priority := 0
 	cat := 0 // unset; resolved from the viewing groups the rule emits
@@ -261,6 +359,20 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 		DateEnd:         dateEnd,
 		TimeValid:       timeValid,
 	}
+}
+
+// commandsNeedAnchor reports whether any reduced draw command consumes the
+// feature anchor — the anchored ops emitPrimitives reads geom.Anchor for: point
+// symbols, text, and sector/augmented figures. Fills and boundary lines don't,
+// so an area emitting only those skips the expensive polylabel anchor.
+func commandsNeedAnchor(cmds []instructions.DrawCommand) bool {
+	for _, c := range cmds {
+		switch c.Op {
+		case instructions.OpPoint, instructions.OpText, instructions.OpAugmentedLine:
+			return true
+		}
+	}
+	return false
 }
 
 // strokeRunsFor returns the drawable polylines an S-101 line draw strokes for a

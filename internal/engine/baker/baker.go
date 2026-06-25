@@ -141,19 +141,84 @@ func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*
 
 	b := bake.New()
 	applyPortrayer(b)
-	var ok []string
-	for _, name := range names {
-		chart, err := ParseCellBytes(name, cells[name])
-		if err != nil {
+	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
+		return ParseCellBytes(name, cells[name])
+	}, onSkip)
+	return b, ok, nil
+}
+
+// parseInOrder parses cells on a bounded worker pool and delivers each to consume
+// serially in `names` order. parse and precompute run in the worker (concurrent,
+// for the independent per-cell work — S-57 parse + S-101 portrayal); consume runs
+// on the calling goroutine in order, so it may mutate shared baker state and the
+// result stays deterministic. At most ~NumCPU cells are resident at once: a token
+// is taken before a worker starts and released by the consumer after that cell is
+// handled. onSkip fires in `names` order for parse errors.
+func parseInOrder[T any](
+	names []string,
+	parse func(name string) (*s57.Chart, error),
+	precompute func(name string, chart *s57.Chart) T,
+	consume func(name string, chart *s57.Chart, pre T),
+	onSkip func(name string, err error),
+) {
+	workers := runtime.NumCPU()
+	if workers > len(names) {
+		workers = len(names)
+	}
+	if workers < 1 {
+		return
+	}
+	type result struct {
+		chart *s57.Chart
+		pre   T
+		err   error
+	}
+	slots := make([]chan result, len(names))
+	for i := range slots {
+		slots[i] = make(chan result, 1)
+	}
+	sem := make(chan struct{}, workers)
+	go func() {
+		for i, name := range names {
+			sem <- struct{}{}
+			go func(i int, name string) {
+				chart, err := parse(name)
+				if err != nil {
+					slots[i] <- result{err: err}
+					return
+				}
+				slots[i] <- result{chart: chart, pre: precompute(name, chart)}
+			}(i, name)
+		}
+	}()
+	for i, name := range names {
+		r := <-slots[i]
+		if r.err != nil {
 			if onSkip != nil {
-				onSkip(name, err)
+				onSkip(name, r.err)
 			}
+			<-sem
 			continue
 		}
-		b.AddCell(chart)
-		ok = append(ok, name)
+		consume(name, r.chart, r.pre)
+		<-sem
 	}
-	return b, ok, nil
+}
+
+// addCellsParallel parses and portrays cells on a worker pool (parseInOrder), then
+// routes them into b serially in `names` order. Parsing and S-101 portrayal are
+// the dominant bake cost and are independent per cell, so they run concurrently;
+// the stateful route/merge stays single-threaded and ordered, so the archive is
+// byte-for-byte identical to the serial path. Returns the routed cell names.
+func addCellsParallel(b *bake.Baker, names []string, parse func(name string) (*s57.Chart, error), onSkip func(name string, err error)) []string {
+	ok := make([]string, 0, len(names))
+	parseInOrder(names, parse,
+		func(_ string, chart *s57.Chart) bake.CellPortrayal { return b.PortrayCell(chart) },
+		func(name string, chart *s57.Chart, pc bake.CellPortrayal) {
+			b.AddCellPortrayed(chart, pc)
+			ok = append(ok, name)
+		}, onSkip)
+	return ok
 }
 
 // CellData is a base cell (.000) plus its sequential update files (.001, .002, …)
@@ -164,10 +229,10 @@ type CellData struct {
 	Updates map[string][]byte
 }
 
-// ParseCellWithUpdates parses a base cell with its update files applied. The base
-// + every update are staged on an in-memory filesystem so the parser discovers
-// and applies the .001/.002/… chain (vs ParseCellBytes, which parses base-only).
-func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+// cellParseOpts stages a base cell + its update files on an in-memory filesystem
+// (so the parser discovers and applies the .001/.002/… chain) and returns the
+// path + the baker's standard parse options.
+func cellParseOpts(name string, base []byte, updates map[string][]byte) (string, s57.ParseOptions) {
 	p := "/" + path.Base(name)
 	fsys := iso8211.MemFS{p: base}
 	dir := path.Dir(p)
@@ -178,6 +243,26 @@ func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (
 	opts.Fs = fsys
 	opts.ApplyUpdates = true
 	opts.MaskCoastlineCoincidentBoundaries = true
+	return p, opts
+}
+
+// ParseCellWithUpdates parses a base cell with its update files applied (vs
+// ParseCellBytes, which parses base-only).
+func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+	p, opts := cellParseOpts(name, base, updates)
+	return s57.ParseWithOptions(p, opts)
+}
+
+// ParseCellCoverage parses ONLY a cell's M_COVR coverage features, skipping every
+// other feature's geometry construction (the expensive topology/ring assembly).
+// The streaming bake's coverage pass reads only M_COVR (extractCoverage) and the
+// cell's band comes from the header scale, so this yields the same covMeta far
+// cheaper than a full parse. Updates are still applied (the filter acts after
+// them), so the coverage reflects the cell's current edition.
+func ParseCellCoverage(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
+	p, opts := cellParseOpts(name, base, updates)
+	opts.ObjectClassFilter = []string{"M_COVR"}
+	opts.MaskCoastlineCoincidentBoundaries = false // irrelevant to M_COVR rings; skip the coastline-edge setup
 	return s57.ParseWithOptions(p, opts)
 }
 
@@ -197,19 +282,10 @@ func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func
 	b := bake.New()
 	applyPortrayer(b)
 	b.OverzoomAllBands = overzoom
-	var ok []string
-	for _, name := range names {
+	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
 		cd := cells[name]
-		chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
-		if err != nil {
-			if onSkip != nil {
-				onSkip(name, err)
-			}
-			continue
-		}
-		b.AddCell(chart)
-		ok = append(ok, name)
-	}
+		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
+	}, onSkip)
 	return b, ok, nil
 }
 
@@ -314,22 +390,27 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 	}
 	sort.Strings(names)
 
-	// Pass 1: coverage + band per cell (no routing).
+	parse := func(name string) (*s57.Chart, error) {
+		cd := cells[name]
+		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
+	}
+
+	// Pass 1: coverage + band per cell (no routing). Parse in parallel — and only
+	// the M_COVR coverage (extractCoverage reads nothing else), so the geometry of
+	// every other feature isn't built here; the full parse happens once, in pass 2.
+	// The coverage merge (covMeta) stays serial and ordered.
 	byBand := map[uint32][]string{}
 	parsed := 0
-	for _, name := range names {
+	parseInOrder(names, func(name string) (*s57.Chart, error) {
 		cd := cells[name]
-		chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
-		if err != nil {
-			if onSkip != nil {
-				onSkip(name, err)
-			}
-			continue
-		}
-		band := b.AddCellCoverage(chart)
-		byBand[band.ZoomRange().Max] = append(byBand[band.ZoomRange().Max], name)
-		parsed++
-	}
+		return ParseCellCoverage(name, cd.Base, cd.Updates)
+	},
+		func(string, *s57.Chart) struct{} { return struct{}{} },
+		func(name string, chart *s57.Chart, _ struct{}) {
+			band := b.AddCellCoverage(chart)
+			byBand[band.ZoomRange().Max] = append(byBand[band.ZoomRange().Max], name)
+			parsed++
+		}, onSkip)
 	b.SetSkipCoverage(true) // covMeta is now global; don't re-derive it per band
 
 	// Pass 2: per band, re-parse + route + bake + free.
@@ -339,17 +420,10 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 			continue
 		}
 		b.ResetPrims()
-		for _, name := range bandCells {
-			cd := cells[name]
-			chart, err := ParseCellWithUpdates(name, cd.Base, cd.Updates)
-			if err != nil {
-				if onSkip != nil {
-					onSkip(name, err)
-				}
-				continue
-			}
-			b.AddCell(chart)
-		}
+		// Parse + portray this band's cells in parallel; route them serially in
+		// order (deterministic, same as the per-cell loop). Coverage is skipped
+		// (SetSkipCoverage above), so re-parsing is just for this band's geometry.
+		addCellsParallel(b, bandCells, parse, onSkip)
 		coords := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max)
 		if len(coords) == 0 {
 			continue
