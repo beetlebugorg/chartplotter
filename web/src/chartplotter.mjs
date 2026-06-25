@@ -1132,6 +1132,27 @@ export class ChartPlotter extends HTMLElement {
     }
   }
 
+  // Copy a link to the current view to the clipboard. The link carries ONLY the
+  // camera (#v=lon,lat,zoom[,bearing,pitch]) — the cells/tiles already live on the
+  // server (the hub), so the opener (incl. a headless browser used for debugging)
+  // just reopens the same spot. parseViewHash reads it back on boot.
+  _shareView(btn) {
+    const m = this._map;
+    if (!m) return;
+    try {
+      const c = m.getCenter();
+      const parts = [+c.lng.toFixed(6), +c.lat.toFixed(6), +m.getZoom().toFixed(3)];
+      const b = +m.getBearing().toFixed(1), p = +m.getPitch().toFixed(1);
+      if (b || p) { parts.push(b); if (p) parts.push(p); } // omit trailing zeros
+      const url = location.origin + location.pathname + "#v=" + parts.join(",");
+      console.log("[share] view link:", url);
+      copyText(url).then((ok) => { if (btn) flashBtn(btn, ok ? "✓ copied" : "✓"); });
+    } catch (e) {
+      console.warn("[share] link failed:", e);
+      if (btn) flashBtn(btn, "✗");
+    }
+  }
+
   // Fetch the latest shared snapshot and install its cells locally, downloading
   // any not already stored through the server (which serves them from its cache —
   // including bytes the publisher uploaded — or fetches the NOAA url). Returns the
@@ -1760,6 +1781,7 @@ export class ChartPlotter extends HTMLElement {
     $("settings-btn").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
     $("scheme-toggle").onclick = () => this._cycleScheme();
+    $("share-btn").onclick = (e) => this._shareView(e.currentTarget);
     this._syncSchemeUI(); // paint the toggle's initial icon
     // Escape closes the topmost open dialog/overlay (one per press). The
     // cursor-pick report closes itself (its own captured handler runs first).

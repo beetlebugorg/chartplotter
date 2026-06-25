@@ -516,6 +516,9 @@ export const CHROME = `
       <div id="tr-controls" class="ctrl-group"></div>
       <!-- Charts · scheme · settings relocated to a bottom-right cluster. -->
       <div id="br-controls" class="ctrl-group">
+        <button class="rbtn" id="share-btn" type="button" title="Copy a link to this view" aria-label="Share view">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.8 15.7 6.4M8.3 13.2l7.4 4.4"/></svg>
+        </button>
         <button class="rbtn" id="charts-btn" type="button" title="Get &amp; manage charts" aria-label="Charts">${CHART_ICON}</button>
         <button class="rbtn" id="scheme-toggle" type="button" title="Colour scheme — tap to cycle Day · Dusk · Night" aria-label="Colour scheme">
           <svg id="scheme-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg>
