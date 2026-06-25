@@ -38,11 +38,12 @@ import { ChartStore } from "./data/chart-store.mjs";
 import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (categories now in core-settings.mjs)
 import { ChartFinder } from "./plugins/chart-finder.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./plugins/hud.mjs"; // status readout + overscale zoom cap
+import { WheelZoom } from "./plugins/wheel-zoom.mjs"; // scroll-wheel zoom: band detent + elastic floor
 import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { OrientationControl } from "./plugins/orientation-control.mjs"; // compass: north-up / free orientation
 import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
-import { loadJSON, maxZoomForScaleFloor, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
+import { loadJSON, maxZoomForScaleFloor, FLOOR_GIVE, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 import { STYLE, CHROME } from "./chartplotter.view.mjs"; // shell chrome (CSS + static markup)
 
@@ -561,6 +562,16 @@ export class ChartPlotter extends HTMLElement {
       serverSetMetas: () => (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [],
       noChartsEnabled: () => this._noChartsEnabled(),
       getPxPitch: () => this._pxPitch, // calibrated physical CSS-pixel pitch (mm) for the on-screen scale
+    });
+
+    // Scroll-wheel zoom: owns the wheel (native scrollZoom off) to give the band
+    // overscale cap a soft detent and the scale floor a small elastic stop. Reads
+    // the detent from the HUD; own-ship registers a follow anchor below.
+    this._wheelZoom = new WheelZoom({
+      map,
+      getDetent: () => this._hud.getDetentZoom(),
+      getFloor: () => maxZoomForScaleFloor(map.getCenter().lat), // live 1:MIN_DETAIL_SCALE floor (matches _applyScaleFloor)
+      getAnchor: () => this._zoomAnchor(), // plugins contribute where zoom should anchor (vessel while following, else cursor)
     });
 
     // Compass / orientation control: a round button in the top-right group; tap to
@@ -1360,8 +1371,18 @@ export class ChartPlotter extends HTMLElement {
   // latitude — a consistent scale floor rather than a per-location data cap.
   _applyScaleFloor() {
     if (!this._map) return;
-    const mz = maxZoomForScaleFloor(this._map.getCenter().lat);
+    // FLOOR_GIVE headroom above the floor so WheelZoom can let a hard-in scroll
+    // over-pull a hair past it and settle back (a stop with give, not a wall).
+    const mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
     if (Math.abs(this._map.getMaxZoom() - mz) > 1e-3) this._map.setMaxZoom(mz);
+  }
+
+  // Broker for WheelZoom: the geographic point wheel-zoom should keep fixed while
+  // zooming, composed from the plugins that can contribute one (first non-null
+  // wins; null → cursor-anchored). Today only own-ship anchors on the vessel while
+  // following; future camera plugins slot in here without WheelZoom changing.
+  _zoomAnchor() {
+    return (this._ownShip && this._ownShip.zoomAnchor()) || null;
   }
 
   // List the catalog cells intersecting the current viewport in the coverage

@@ -7,7 +7,7 @@
 // root = the shadowRoot (for #cov-readout / #databox / #db-warn); cellMeta(name)
 // → {s:scale, bb:[w,s,e,n]} | undefined; serverSetMetas() → [{band, bounds}].
 
-import { bandForScale, bandForZoom, BANDS, BAND_COLOR, BAND_LABEL, BAND_MAXZOOM, OVERSCALE_MARGIN } from "../lib/bands.mjs";
+import { bandForScale, bandForZoom, BANDS, BAND_COLOR, BAND_LABEL, BAND_MAXZOOM } from "../lib/bands.mjs";
 import { scaleDenomPhysical, zoomForScalePhysical, fmtScale, fmtLatLon } from "../lib/util.mjs";
 
 // Parse a user-typed scale into a denominator. Accepts "40000", "40,000",
@@ -38,6 +38,7 @@ export class HudController {
     // default (CSS reference). The user calibrates it in settings.
     this.getPxPitch = opts.getPxPitch || (() => undefined);
     this.coverScale = 0; // finest covering chart's CSCL — the overscale ×n reference
+    this.detentZoom = null; // finest covering band's overscale cap — the wheel-zoom detent (not a hard maxZoom)
     this._onMove = () => this.updateHud();
     this.map.on("move", this._onMove);
     this.updateHud();
@@ -134,10 +135,12 @@ export class HudController {
     }
   }
 
-  // Overscale cap: limit zoom-IN to the finest band whose chart actually covers the
-  // view centre (+ OVERSCALE_MARGIN) — past that, open water just enlarges blank
-  // sea. Never drops below the current zoom (no camera yank). Also records
-  // coverScale (the centre chart's CSCL) for the overscale indication.
+  // Overscale detent: the native-max zoom of the finest band whose chart actually
+  // covers the view centre — the click where overscale begins. Exposed via
+  // getDetentZoom() so WheelZoom stops zoom-in there briefly (then a sustained
+  // scroll releases past it, on into overscale); it is NOT a hard maxZoom, so other
+  // inputs can still reach the scale floor. Also records coverScale (the centre
+  // chart's CSCL) for the overscale indication.
   updateZoomCap() {
     const map = this.map;
     if (!map) return;
@@ -165,9 +168,17 @@ export class HudController {
     }
     this.coverScale = finestScale;
     const band = finest >= 0 ? BANDS[finest] : "general";
-    const target = Math.min(18, (BAND_MAXZOOM[band] || 9) + OVERSCALE_MARGIN);
-    const cap = Math.max(target, map.getZoom()); // never below current zoom → no yank
-    if (Math.abs(map.getMaxZoom() - cap) > 0.01) map.setMaxZoom(cap);
+    // Detent right where overscale BEGINS for the covering chart: the zoom whose
+    // displayed (physical) scale equals the chart's compilation scale, coverScale.
+    // Zoom past it and dispDenom < coverScale → "Overscale ×N" (same test as the
+    // warning above). Falls back to the band's native-max zoom when no per-chart
+    // scale is known (e.g. server sets without the NOAA catalogue).
+    this.detentZoom = finestScale
+      ? zoomForScalePhysical(finestScale, c.lat, this.getPxPitch())
+      : Math.min(18, BAND_MAXZOOM[band] || 9);
     this.updateHud();
   }
+
+  // The current overscale detent zoom (finest covering band's cap), for WheelZoom.
+  getDetentZoom() { return this.detentZoom; }
 }
