@@ -373,6 +373,38 @@ func TestS101NameLabel(t *testing.T) {
 	}
 }
 
+// TestS101BuildAllAroundLightCharacteristic: an all-around light's description
+// (LITDSN02) must carry its character + period, not collapse to just the colour.
+// LITDSN02 reads these from the rhythmOfLight complex attribute, which the bridge
+// synthesizes from S-57 LITCHR/SIGGRP/SIGPER — without it the text was e.g. "G".
+func TestS101BuildAllAroundLightCharacteristic(t *testing.T) {
+	b := s101BuilderEmbedded(t)
+	lt := s57.NewFeature(1, "LIGHTS",
+		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}},
+		map[string]interface{}{"LITCHR": 4, "COLOUR": "4", "SIGPER": "1"}, // Quick, green, 1s
+	)
+	build, ok := b.Build(&lt)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	var text string
+	for _, p := range build.Primitives {
+		if dt, ok := p.(DrawText); ok && strings.ContainsAny(dt.Text, "QGFlsm") {
+			text = dt.Text
+			break
+		}
+	}
+	if !strings.Contains(text, "Q") {
+		t.Errorf("light text = %q, want the Quick character 'Q' (rhythmOfLight not synthesized?)", text)
+	}
+	if !strings.Contains(text, "G") {
+		t.Errorf("light text = %q, want the green colour 'G'", text)
+	}
+	if !strings.Contains(text, "1s") {
+		t.Errorf("light text = %q, want the 1s period", text)
+	}
+}
+
 // TestS101BuildSectorLight drives an S-57 sectored light through the full build
 // seam and asserts the rule's constructed AugmentedFigure elements come through:
 // the dashed legs (rays, tagged with the nominal range for the full-light-lines

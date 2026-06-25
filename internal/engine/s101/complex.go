@@ -156,7 +156,34 @@ func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name
 	// Light sectors / directional character (LIGHTS routed to LightSectored).
 	e.buildLightSectors(root, objClass, s57)
 
+	// rhythmOfLight — the light-description complex (lightCharacteristic /
+	// signalGroup / signalPeriod) that LITDSN02 reads to build the characteristic
+	// text. Sectored lights carry these inside sectorCharacteristics (above), but
+	// LightAllAround reads them from rhythmOfLight; without it an all-around light's
+	// description collapses to just its colour ("G" instead of "Q G 1s").
+	e.buildRhythmOfLight(root, objClass, s57)
+
 	return root
+}
+
+// buildRhythmOfLight synthesizes the rhythmOfLight complex attribute from the S-57
+// LITCHR / SIGGRP / SIGPER simple attributes, so LITDSN02 can render the full
+// light characteristic for lights that read it from rhythmOfLight (not the
+// sectorCharacteristics complex). Built whenever any of the three is present.
+func (e *Engine) buildRhythmOfLight(root *cnode, objClass string, s57 map[string]string) {
+	if objClass != "LIGHTS" {
+		return
+	}
+	if s57["LITCHR"] == "" && s57["SIGGRP"] == "" && s57["SIGPER"] == "" {
+		return
+	}
+	rol := newCNode()
+	rol.addSimple("lightCharacteristic", s57["LITCHR"])
+	if g := s57["SIGGRP"]; g != "" {
+		rol.simple["signalGroup"] = e.splitValue("signalGroup", g)
+	}
+	rol.addSimple("signalPeriod", s57["SIGPER"])
+	root.addChild("rhythmOfLight", rol)
 }
 
 // buildLightSectors synthesizes the nested sectorCharacteristics → lightSector →
