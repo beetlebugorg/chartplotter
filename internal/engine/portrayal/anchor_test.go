@@ -47,3 +47,21 @@ func TestAreaSurfacePointConvex(t *testing.T) {
 		t.Fatalf("convex anchor %+v ok=%v not inside", p, ok)
 	}
 }
+
+// A square area with a large centred square hole: the area-weighted centroid lands
+// dead-centre — inside the hole (i.e. on the excluded structure). areaLabelPoint
+// must place the symbol in the surrounding ring, off the hole.
+func TestAreaLabelPointHole(t *testing.T) {
+	exterior := []geo.LatLon{{Lat: 0, Lon: 0}, {Lat: 0, Lon: 10}, {Lat: 10, Lon: 10}, {Lat: 10, Lon: 0}}
+	hole := []geo.LatLon{{Lat: 3, Lon: 3}, {Lat: 3, Lon: 7}, {Lat: 7, Lon: 7}, {Lat: 7, Lon: 3}}
+	p, ok := areaLabelPoint([][]geo.LatLon{exterior, hole})
+	if !ok {
+		t.Fatal("areaLabelPoint returned ok=false")
+	}
+	if !pointInRing(p, exterior) {
+		t.Fatalf("anchor %+v is outside the exterior", p)
+	}
+	if pointInRing(p, hole) {
+		t.Fatalf("anchor %+v landed inside the hole (on the excluded structure)", p)
+	}
+}

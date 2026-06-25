@@ -78,9 +78,17 @@ type SymbolHalo struct {
 // split and the OBSTRN/WRECKS shallow/deep swap against the live safety contour
 // without a re-bake. SoundingDepthM / DangerDepthM are NaN for ordinary symbols.
 type SymbolCall struct {
-	Anchor      geo.LatLon
-	SymbolName  string
-	RotationDeg float32
+	Anchor geo.LatLon
+	// CentreOnArea marks the PRIMARY centred-area symbol of an area feature, so the
+	// client centres the glyph on the representative point (S-52 PresLib §8.5.1: the
+	// primary centred symbol sits at the pivot "so it is evident which area the symbol
+	// applies to"). The "…RES" symbols carry a built-in corner-pivot offset meant to
+	// FAN OUT additional symbols ("an offset entry-restricted symbol with a subscript
+	// !"); applying it to the primary throws its glyph ~100px off its area. Set on the
+	// first centred symbol only — additional symbols keep the offset and fan out.
+	CentreOnArea bool
+	SymbolName   string
+	RotationDeg  float32
 	// RotationTrueNorth marks RotationDeg as referenced to TRUE NORTH (S-52 PresLib
 	// Part I §9.2 ROT case 3 — rotation taken from an S-57 attribute like ORIENT), so
 	// the mark must rotate WITH the chart as it turns. False means screen-referenced
