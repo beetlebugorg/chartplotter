@@ -53,8 +53,41 @@ const (
 	OpAreaFill  DrawOp = "AreaFill"  // tiled area fill referencing a fill/pattern
 	OpText      DrawOp = "Text"      // text label
 	OpNull      DrawOp = "Null"      // explicit no-op (suppress)
-	OpOther     DrawOp = "Other"     // recognized draw we don't lower yet (gap)
+	// OpAugmentedLine strokes a screen-space figure the rule CONSTRUCTED via an
+	// AugmentedRay / ArcByRadius instruction (a light-sector leg or arc/ring),
+	// rather than the feature's own geometry. The mm sizes are screen-fixed, so the
+	// figure is carried (see DrawCommand.Augmented) for per-zoom tessellation.
+	OpAugmentedLine DrawOp = "AugmentedLine"
+	OpOther         DrawOp = "Other" // recognized draw we don't emit yet (gap)
 )
+
+// AugGeomKind is the kind of constructed figure element a DrawCommand.Augmented
+// carries.
+type AugGeomKind uint8
+
+const (
+	AugRay AugGeomKind = iota // a straight leg from the anchor (AugmentedRay)
+	AugArc                    // a circular arc/ring centred on the anchor (ArcByRadius)
+)
+
+// AugmentedGeom is one screen-space figure element the rule constructed and a
+// LineInstruction then strokes — a light-sector leg (ray) or its arc/ring. All
+// sizes are display millimetres (the rule emits them in LocalCRS), so the baker
+// tessellates per-zoom; they cannot bake as static geographic geometry.
+type AugmentedGeom struct {
+	Kind AugGeomKind
+	// Ray ("AugmentedRay:<crs>,<bearing>,<lenCRS>,<lenMM>"): a leg from the anchor
+	// at BearingDeg (true-north; the rule has already applied the from-seaward
+	// +180 reversal) of length LengthMM.
+	BearingDeg float64
+	LengthMM   float64
+	// Arc ("ArcByRadius:<cx>,<cy>,<radiusMM>,<startDeg>,<sweepDeg>"): centred on the
+	// anchor, RadiusMM, from StartDeg sweeping SweepDeg degrees clockwise. A full
+	// 360° sweep is an all-round ring.
+	RadiusMM float64
+	StartDeg float64
+	SweepDeg float64
+}
 
 // SimpleLine is an inline "LineStyle:_simple_,<dash>,<width>,<colour>" definition,
 // referenced by a subsequent "LineInstruction:_simple_".
@@ -88,7 +121,11 @@ type DrawCommand struct {
 	RotationTrueNorth bool
 
 	LinePlacement string      // raw, e.g. "Relative,0.5"
-	SimpleLine    *SimpleLine // set when Op==OpLine and Reference=="_simple_"
+	SimpleLine    *SimpleLine // set when Op==OpLine/OpAugmentedLine and Reference=="_simple_"
+
+	// Augmented is set when Op==OpAugmentedLine: the constructed ray/arc this draw
+	// strokes (with the SimpleLine style). The baker tessellates it per-zoom.
+	Augmented *AugmentedGeom
 
 	// Text style (set on OpText): the resolved text is in Reference.
 	FontColor   string  // colour token (e.g. CHBLK)
@@ -137,6 +174,7 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		dateStart    string
 		dateEnd      string
 		timeValid    string
+		curAug       *AugmentedGeom // current constructed figure (ray/arc), if any
 		seenUnsup    = map[string]bool{}
 	)
 	noteUnsupported := func(kind string) {
@@ -159,6 +197,9 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			c.FontColor, c.FontSizePx = fontColor, fontSize
 			c.TextAlignH, c.TextAlignV, c.TextVOffset = textAlignH, textAlignV, textVOffset
 		}
+		if op == OpAugmentedLine {
+			c.SimpleLine, c.Augmented = simple, curAug
+		}
 		c.DateStart, c.DateEnd, c.TimeValid = dateStart, dateEnd, timeValid
 		cmds = append(cmds, c)
 	}
@@ -179,9 +220,22 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			// geographic point (x=lon, y=lat) — SOUNDG emits one per sounding.
 			anchor, hasAnchor = [2]float64{atof(arg(in, 1)), atof(arg(in, 2))}, true
 		case "ClearGeometry":
-			// End of an augmented-geometry run: drop the explicit anchor/offset so
-			// later draws re-attach to the feature geometry.
+			// End of an augmented-geometry run: drop the explicit anchor/offset and
+			// the constructed figure so later draws re-attach to the feature geometry.
 			hasAnchor, anchor, offset = false, [2]float64{}, [2]float64{}
+			curAug = nil
+		// --- geometry construction (screen-space figures the rule builds) ---
+		case "AugmentedRay":
+			// "AugmentedRay:<bearingCRS>,<bearing>,<lenCRS>,<lenMM>" — a leg from the
+			// anchor. The rule emits the bearing already from-seaward-reversed.
+			curAug = &AugmentedGeom{Kind: AugRay, BearingDeg: atof(arg(in, 1)), LengthMM: atof(arg(in, 3))}
+		case "ArcByRadius":
+			// "ArcByRadius:<cx>,<cy>,<radiusMM>,<startDeg>,<sweepDeg>" — an arc/ring
+			// centred on the anchor (the cx,cy offset is 0 for sector figures).
+			curAug = &AugmentedGeom{Kind: AugArc, RadiusMM: atof(arg(in, 2)), StartDeg: atof(arg(in, 3)), SweepDeg: atof(arg(in, 4))}
+		case "AugmentedPath":
+			// Declares the CRS sequence stitching the preceding ray/arc into one path;
+			// each constructed element is already carried by curAug, so this is a no-op.
 		case "Rotation":
 			// S-101 form: "Rotation:<CRS>,<angle>" where CRS is GeographicCRS
 			// (true-north, rotates with the chart) or PortrayalCRS (screen). A
@@ -219,14 +273,25 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			timeValid = arg(in, 0)
 		// modifiers we intentionally ignore when emitting primitives
 		case "ScaleMinimum", "ScaleMaximum", "Time", "DateTime",
-			"AlertReference", "Warning", "Error", "Hover", "SpatialReference":
+			"AlertReference", "Warning", "Error", "Hover", "SpatialReference",
+			// area-placement / scale-factor modifiers: meaningful only for area-fill
+			// placement, not for the point / fill / line / text / augmented draws we
+			// emit. They ride along on the AddDateDependentSymbol geometry-reset
+			// preamble, so ignore them rather than report them as gaps.
+			"AreaPlacement", "AreaCRS", "ScaleFactor":
 			// no-op for primitive emission
 
 		// --- draws (consume state) ---
 		case "PointInstruction":
 			emit(OpPoint, arg(in, 0), in.Raw)
 		case "LineInstruction", "LineInstructionUnsuppressed":
-			emit(OpLine, arg(in, 0), in.Raw)
+			// When a figure (ray/arc) is current, the line strokes THAT (screen-space
+			// sector geometry); otherwise it strokes the feature's own geometry.
+			if curAug != nil {
+				emit(OpAugmentedLine, arg(in, 0), in.Raw)
+			} else {
+				emit(OpLine, arg(in, 0), in.Raw)
+			}
 		case "ColorFill":
 			emit(OpColorFill, arg(in, 0), in.Raw)
 		case "AreaFillReference":
@@ -238,8 +303,8 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 		case "NullInstruction":
 			emit(OpNull, "", in.Raw)
 
-		// recognized-but-not-yet-lowered draws → gap
-		case "AugmentedRay", "AugmentedPath", "ArcByRadius", "CoverageFill":
+		// recognized-but-not-yet-emitted draws → gap
+		case "CoverageFill":
 			emit(OpOther, in.Kind, in.Raw)
 
 		default:

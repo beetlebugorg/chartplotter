@@ -219,10 +219,21 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 	if f.ObjectClass() == "SOUNDG" {
 		attachSoundingDepths(prims, soundingPoints(f.Geometry()))
 	}
-	// Sector / directional light figures: the rule's AugmentedRay / ArcByRadius
-	// geometry is fixed display-mm (screen size) and isn't emitted onto geographic
-	// geometry; emit a SectorLight the baker tessellates per-zoom instead.
-	prims = append(prims, sectorLightPrims(f, anchor)...)
+	// Sector / directional lights: the rule constructs the legs + arc as screen-space
+	// AugmentedFigure elements (emitted above from the AugmentedRay / ArcByRadius
+	// instructions). Tag each leg with the light's nominal range (VALNMR) so the
+	// baker can also emit the "full light lines" leg variant for the client's live
+	// toggle (S-52 LIGHTS06 note 1).
+	if f.ObjectClass() == "LIGHTS" {
+		if vnr, ok := floatAttr(f.Attributes(), "VALNMR"); ok && vnr > 0 {
+			for i := range prims {
+				if fig, ok := prims[i].(AugmentedFigure); ok && fig.Ray {
+					fig.FullLengthNM = vnr
+					prims[i] = fig
+				}
+			}
+		}
+	}
 	if cat == 0 {
 		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}

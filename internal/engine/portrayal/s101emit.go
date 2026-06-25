@@ -138,6 +138,31 @@ func emitPrimitives(cmd instructions.DrawCommand, geom S101Geometry, cat *catalo
 			Group: cmd.ViewingGroup,
 		}}
 
+	case instructions.OpAugmentedLine:
+		// A screen-space sector figure element (ray/arc) the rule constructed; carry
+		// it with the rule's stroke style for the baker to tessellate per-zoom.
+		ag := cmd.Augmented
+		if ag == nil {
+			return nil
+		}
+		fig := AugmentedFigure{Anchor: geom.Anchor}
+		if cmd.SimpleLine != nil {
+			fig.ColorToken = cmd.SimpleLine.Color
+			fig.WidthMM = cmd.SimpleLine.Width
+			fig.Dash = dashFor(cmd.SimpleLine.DashLength)
+		}
+		switch ag.Kind {
+		case instructions.AugRay:
+			fig.Ray = true
+			fig.BearingDeg = ag.BearingDeg
+			fig.LengthMM = ag.LengthMM
+		case instructions.AugArc:
+			fig.RadiusMM = ag.RadiusMM
+			fig.StartDeg = ag.StartDeg
+			fig.SweepDeg = ag.SweepDeg
+		}
+		return []Primitive{fig}
+
 	default: // OpNull, OpOther
 		return nil
 	}

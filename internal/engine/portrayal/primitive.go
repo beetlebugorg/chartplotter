@@ -141,29 +141,37 @@ type TextHalo struct {
 	WidthPx    float32
 }
 
-// SectorLight is LIGHTS06 sector geometry (legs / arc / ring). Only the lat/lon
-// anchor plus the S-52 sector parameters are cached; the screen-space
-// tessellation happens at projection time because radii are display millimetres.
-type SectorLight struct {
+// AugmentedFigure is one stroked element of a screen-space figure the S-101 rule
+// CONSTRUCTED via AugmentedRay / ArcByRadius (a light-sector leg or arc/ring) —
+// driven by the catalogue's own bearings, radii, colours and widths rather than a
+// Go re-derivation from S-57 attributes. One primitive = one stroked element; a
+// sectored light emits several (two dashed legs, then a black-backed coloured
+// arc). The mm sizes are screen-fixed, so the baker tessellates per-zoom into
+// `sector_lines`; it cannot bake as static geographic geometry.
+type AugmentedFigure struct {
 	Anchor geo.LatLon
-	Sector SectorParams
+	Ray    bool // true: a straight leg (Bearing/Length); false: an arc/ring
+	// Ray params (true-north bearing, already from-seaward-reversed by the rule).
+	BearingDeg float64
+	LengthMM   float64
+	// Arc params (centred on Anchor); a full 360° sweep is an all-round ring.
+	RadiusMM float64
+	StartDeg float64
+	SweepDeg float64
+	// Stroke style, from the rule's LineStyle:_simple_.
+	ColorToken string
+	WidthMM    float64
+	Dash       Dash
+	// FullLengthNM is the LIGHTS nominal range (VALNMR); when set on a ray, the
+	// baker also emits the "full light lines" leg variant extended to that range
+	// (S-52 LIGHTS06 note 1), tagged for the client's live toggle. 0 = no variant.
+	FullLengthNM float64
 }
 
-// SectorParams carries the S-52 LIGHTS06 sector parameters. Populated from the
-// s52 SectorInstruction the CS procedure emits.
-type SectorParams struct {
-	StartAngleDeg float64 // SECTR1, 0=North, clockwise
-	EndAngleDeg   float64 // SECTR2, 0=North, clockwise
-	RadiusNM      float64 // VALNMR nominal range, nautical miles
-	ColorToken    string  // LITRD/LITGN/LITYW/...
-	Transparency  int     // 0=opaque..3=75%
-	ShowLegs      bool
-}
-
-func (FillPolygon) isPrimitive() {}
-func (StrokeLine) isPrimitive()  {}
-func (SymbolCall) isPrimitive()  {}
-func (PatternFill) isPrimitive() {}
-func (LinePattern) isPrimitive() {}
-func (DrawText) isPrimitive()    {}
-func (SectorLight) isPrimitive() {}
+func (FillPolygon) isPrimitive()     {}
+func (StrokeLine) isPrimitive()      {}
+func (SymbolCall) isPrimitive()      {}
+func (PatternFill) isPrimitive()     {}
+func (LinePattern) isPrimitive()     {}
+func (DrawText) isPrimitive()        {}
+func (AugmentedFigure) isPrimitive() {}

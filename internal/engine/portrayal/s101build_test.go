@@ -374,11 +374,11 @@ func TestS101NameLabel(t *testing.T) {
 }
 
 // TestS101BuildSectorLight drives an S-57 sectored light through the full build
-// seam and asserts a SectorLight primitive is produced (the fixed-screen-size
-// sector legs/arc the baker tessellates into the sector_lines layer), with the
-// S-57 sector limits/colour carried through unflipped.
+// seam and asserts the rule's constructed AugmentedFigure elements come through:
+// the dashed legs (rays, tagged with the nominal range for the full-light-lines
+// toggle) and the coloured arc — driven by the catalogue, not a Go re-derivation.
 func TestS101BuildSectorLight(t *testing.T) {
-	b := s101Builder(t)
+	b := s101BuilderEmbedded(t)
 
 	lt := s57.NewFeature(1, "LIGHTS",
 		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}},
@@ -391,24 +391,33 @@ func TestS101BuildSectorLight(t *testing.T) {
 	if !ok {
 		t.Fatal("build failed")
 	}
-	var sec *SectorLight
-	for i := range build.Primitives {
-		if s, ok := build.Primitives[i].(SectorLight); ok {
-			sec = &s
-			break
+	var legs, arcs int
+	var arcColor string
+	for _, p := range build.Primitives {
+		fig, ok := p.(AugmentedFigure)
+		if !ok {
+			continue
+		}
+		if fig.Ray {
+			legs++
+			if fig.FullLengthNM != 9 {
+				t.Errorf("leg nominal range = %v, want 9 (from VALNMR)", fig.FullLengthNM)
+			}
+		} else {
+			arcs++
+			if fig.ColorToken == "LITRD" {
+				arcColor = fig.ColorToken
+			}
 		}
 	}
-	if sec == nil {
-		t.Fatalf("no SectorLight emitted; got %#v", build.Primitives)
+	if legs < 2 {
+		t.Errorf("legs = %d, want >=2 (two sector limits)", legs)
 	}
-	if sec.Sector.StartAngleDeg != 45 || sec.Sector.EndAngleDeg != 90 {
-		t.Errorf("angles = %v..%v, want 45..90 (unflipped seaward)", sec.Sector.StartAngleDeg, sec.Sector.EndAngleDeg)
+	if arcs < 1 {
+		t.Errorf("arcs = %d, want >=1 (the sector arc)", arcs)
 	}
-	if sec.Sector.ColorToken != "LITRD" {
-		t.Errorf("colour = %q, want LITRD (red)", sec.Sector.ColorToken)
-	}
-	if sec.Sector.RadiusNM != 9 {
-		t.Errorf("radius = %v, want 9 NM", sec.Sector.RadiusNM)
+	if arcColor != "LITRD" {
+		t.Errorf("no LITRD (red) arc found; COLOUR=3 should portray red")
 	}
 }
 

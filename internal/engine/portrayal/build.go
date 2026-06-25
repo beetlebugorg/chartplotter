@@ -121,6 +121,16 @@ func applyDangerDepth(prims []Primitive, class string, attrs map[string]interfac
 	return prims
 }
 
+// stringAttr returns an attribute's encoded string value, or "" when absent.
+func stringAttr(attrs map[string]interface{}, key string) string {
+	if v, ok := attrs[key]; ok {
+		if s, ok := encodeAttr(v); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
 	v, ok := attrs[key]
 	if !ok || v == nil {
