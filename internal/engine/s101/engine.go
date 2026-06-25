@@ -76,6 +76,29 @@ type Engine struct {
 	// per-run feature data (set by Portray); keyed by feature ID.
 	adapted map[string]*adapted
 	order   []string
+	// coLocated indexes mapped point features by their exact position, so the
+	// host can answer HostSpatialGetAssociatedFeatureIDs — i.e. which features
+	// share a node. Co-located lights use it (S-101 LightFlareAndDescription) to
+	// stack their descriptions (GetColocatedTextCount) and fan their flares.
+	coLocated map[[2]float64][]string
+}
+
+// coLocatedFeatureIDs returns the IDs of mapped point features that share the
+// given feature's node (including the feature itself; the caller filters self).
+// It backs HostSpatialGetAssociatedFeatureIDs for point spatials — the data the
+// S-101 LightFlareAndDescription rule needs to stack co-located light
+// descriptions and fan their flares. Non-point / unknown features yield nil.
+func (e *Engine) coLocatedFeatureIDs(featureID string) []string {
+	a := e.adapted[featureID]
+	if a == nil || a.primitive != "Point" || len(a.points) == 0 {
+		return nil
+	}
+	k := [2]float64{a.points[0][0], a.points[0][1]}
+	ids := e.coLocated[k]
+	if len(ids) < 2 {
+		return nil // only itself: no co-located neighbours
+	}
+	return ids
 }
 
 // SetContextOverrides overrides context-parameter defaults (e.g.
@@ -219,6 +242,7 @@ func (e *Engine) Close() { e.L.Close() }
 func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 	e.adapted = map[string]*adapted{}
 	e.order = nil
+	e.coLocated = map[[2]float64][]string{}
 	results := map[string]string{}
 
 	for _, f := range features {
@@ -242,6 +266,13 @@ func (e *Engine) Portray(features []Feature) (map[string]string, error) {
 		}
 		e.adapted[f.ID] = a
 		e.order = append(e.order, f.ID)
+		// Index point features by exact position for co-location queries. Only
+		// point primitives carry a single resolvable node; lines/areas don't
+		// participate in the LIGHTS06 co-located stacking/fanning.
+		if f.Primitive == "Point" && len(f.Points) > 0 {
+			k := [2]float64{f.Points[0][0], f.Points[0][1]}
+			e.coLocated[k] = append(e.coLocated[k], f.ID)
+		}
 	}
 
 	if len(e.order) > 0 {

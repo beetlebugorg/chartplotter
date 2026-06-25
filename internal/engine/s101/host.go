@@ -2,6 +2,7 @@ package s101
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/s100/fc"
 	lua "github.com/yuin/gopher-lua"
@@ -177,7 +178,25 @@ func (e *Engine) bindHost() {
 	// HostFeatureGetSpatialAssociations + HostGetSpatial are defined in Lua glue
 	// (installSpatialGlue) after the framework loads, so they can use the
 	// framework's CreateSpatialAssociation/CreateSurface constructors.
-	set("HostSpatialGetAssociatedFeatureIDs", emptyArray)
+	//
+	// HostSpatialGetAssociatedFeatureIDs answers "which features share this
+	// spatial?" The glue's point-spatial IDs are "<featureID>#P", so resolve the
+	// feature, then return everything sharing its node — the co-located set the
+	// LIGHTS06 rule needs to stack descriptions + fan flares. Curve/surface
+	// spatials carry no node here, so they fall through to empty.
+	set("HostSpatialGetAssociatedFeatureIDs", func(s *lua.LState) int {
+		t := s.NewTable()
+		spatialID := s.CheckString(1)
+		fid := spatialID
+		if i := strings.LastIndexByte(spatialID, '#'); i >= 0 {
+			fid = spatialID[:i]
+		}
+		for _, id := range e.coLocatedFeatureIDs(fid) {
+			t.Append(lua.LString(id))
+		}
+		s.Push(t)
+		return 1
+	})
 	set("HostSpatialGetAssociatedInformationIDs", emptyArray)
 	set("HostInformationTypeGetCode", func(s *lua.LState) int { s.Push(lua.LString("")); return 1 })
 	set("HostInformationTypeGetSimpleAttribute", emptyArray)
