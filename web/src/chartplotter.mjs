@@ -278,17 +278,18 @@ export class ChartPlotter extends HTMLElement {
   }
 
   async boot() {
-    // Prod (prebaked) mode: enabled by the `prod` attribute OR `?prod` (so a dev
-    // build can be tested without rebuilding). Reflect it as the attribute so the
-    // :host([prod]) styles apply either way.
-    this._prod = this.hasAttribute("prod") || new URLSearchParams(location.search).has("prod");
-    if (this._prod) this.setAttribute("prod", "");
+    // Widget (read-only, prebaked) mode: a static, embeddable chart viewer with no
+    // backend and no in-browser baking. Enabled by the `widget` attribute OR
+    // `?widget` (so a dev build can be tested without rebuilding). Reflect it as the
+    // attribute so the :host([widget]) styles apply either way.
+    this._widget = this.hasAttribute("widget") || new URLSearchParams(location.search).has("widget");
+    if (this._widget) this.setAttribute("widget", "");
     // Display settings (scheme · basemap · mariner toggles · cell-boundary toggle ·
     // bands-off) are persisted SERVER-side so every screen pointed at this boat's
     // server shares them and they survive a restart. Adopt them BEFORE the renderer
     // is configured below, overriding the localStorage values the constructor seeded
-    // (localStorage stays as the offline cache). Prod (offline pmtiles) has no server.
-    if (!this._prod) await this._loadServerSettings();
+    // (localStorage stays as the offline cache). The widget viewer (offline pmtiles) has no server.
+    if (!this._widget) await this._loadServerSettings();
     this.renderChrome();
 
     // What's already stored? We do NOT eagerly load it (that's the slow part on
@@ -331,7 +332,7 @@ export class ChartPlotter extends HTMLElement {
     // .pmtiles archive path (the plotter is shell-owned).
     this._chartLib = this.shadowRoot.getElementById("chart-lib");
     if (this._chartLib) {
-      this._chartLib.configure({ dl: this._dl, api: this._api, notify: this._notify, store: this._store, assets: this._assets, prod: this._prod });
+      this._chartLib.configure({ dl: this._dl, api: this._api, notify: this._notify, store: this._store, assets: this._assets, widget: this._widget });
       this._chartLib.setHiddenCells([...this._hiddenCells]); // seed checkbox state from persisted prefs
       this._chartLib.addEventListener("charts-changed", () => { this._renderInstalledSets().catch(() => {}); });
       // Per-cell show/hide: apply the client filter to the live map + persist.
@@ -352,7 +353,12 @@ export class ChartPlotter extends HTMLElement {
     // themselves as the first NON-core contribution (a DevTools instance built in
     // onReady, once the map exists — see below); plugins will register here too.
     this._settingsRegistry = new SettingsRegistry();
-    for (const c of coreSettingsContributions(this)) this._settingsRegistry.register(c);
+    for (const c of coreSettingsContributions(this)) {
+      // The widget viewer is read-only: drop the Advanced tab (its only entry is the
+      // cell-boundary toggle; the dev tools never register in widget mode anyway).
+      if (this._widget && c.id === "core-advanced") continue;
+      this._settingsRegistry.register(c);
+    }
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
     if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
@@ -385,12 +391,12 @@ export class ChartPlotter extends HTMLElement {
     if (!["coastline", "osm", "osmvec", "none"].includes(this._basemap)) this._basemap = "coastline";
     if (this._basemap === "osmvec" && !this._osmVecUrl) this._basemap = "coastline"; // vector not configured
     plotter.setAttribute("basemap", this._basemap);
-    // Render source. Prod (hosted): prebaked per-region .pmtiles, loaded by
+    // Render source. Widget (hosted): prebaked per-region .pmtiles, loaded by
     // restoreArchive through the renderer's pmtiles path — no tile server needed.
     // Local serve: server-baked MVT from /tiles/{set} (server mode); imported /
     // downloaded cells are baked on the server (POST /api/import) and the renderer
     // is pointed at the resulting set (see _refreshCharts).
-    if (!this._prod) plotter.setAttribute("tiles", "server");
+    if (!this._widget) plotter.setAttribute("tiles", "server");
     this._plotter = plotter;
     this.shadowRoot.getElementById("map").appendChild(plotter);
 
@@ -483,7 +489,7 @@ export class ChartPlotter extends HTMLElement {
     // external files); load it so the pick report can show that content inline.
     this._aux = new AuxStore();
     const dl = this._dl.loadCatalog().then(async (r) => {
-      // Prod/hosted: a companion aux.zip named in the manifest (fetched whole once).
+      // Widget/hosted: a companion aux.zip named in the manifest (fetched whole once).
       // Server: per-file on demand via GET api/aux — the raw zip is never exposed.
       if (this._dl.auxUrl) await this._aux.load(this._dl.auxUrl);
       else await this._aux.loadApi(this._assets);
@@ -532,9 +538,9 @@ export class ChartPlotter extends HTMLElement {
     // sticks and you can magnify past the floor (the 1:900 over-zoom).
     map.on("moveend", () => this._applyScaleFloor());
     await this.restoreArchive();
-    // Local serve: render every baked pack the server holds (survives reload). Prod
+    // Local serve: render every baked pack the server holds (survives reload). The widget viewer
     // already loaded its prebaked archives in restoreArchive() above.
-    if (!this._prod) {
+    if (!this._widget) {
       try { await this._renderInstalledSets(); } catch (e) { console.warn("[charts] initial render", e); }
     }
     this._applyBandsOff(); // re-apply any persisted band on/off now that chart layers exist
@@ -587,7 +593,7 @@ export class ChartPlotter extends HTMLElement {
     // settings registry. A plain class (like the map controllers), built now that
     // the map exists; it registers itself as the Advanced-tab contribution and owns
     // the rebake + feature-inspector tools (and their map listeners). Dev-only.
-    if (!this._prod) {
+    if (!this._widget) {
       this._devTools = new DevTools({
         registry: this._settingsRegistry,
         map,
@@ -614,8 +620,8 @@ export class ChartPlotter extends HTMLElement {
     // connection manager). VesselStateStore streams /api/vessel for the render
     // plugins (own-ship/AIS/HUD); ConnectionsController contributes the
     // Connections settings tab for managing data sources.
-    if (!this._prod) {
-      this._vessel = new VesselStateStore({ assets: this._assets, prod: this._prod });
+    if (!this._widget) {
+      this._vessel = new VesselStateStore({ assets: this._assets, widget: this._widget });
       this._vessel.start();
       this._connections = new ConnectionsController({
         registry: this._settingsRegistry,
@@ -632,7 +638,7 @@ export class ChartPlotter extends HTMLElement {
       // re-centre chip mounted in the shell chrome) and streams fixes to the camera.
       this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
       // AIS targets (other vessels) from the live feed.
-      this._ais = new AISOverlay({ map, assets: this._assets, prod: this._prod, onSelect: showInfo, units: () => this._mariner });
+      this._ais = new AISOverlay({ map, assets: this._assets, widget: this._widget, onSelect: showInfo, units: () => this._mariner });
     }
 
     // Persist the view so a refresh resumes where you were; refresh the coverage
@@ -849,7 +855,7 @@ export class ChartPlotter extends HTMLElement {
     // popup" when entering via the welcome "Browse chart regions" button).
     r.getElementById("drawer").classList.toggle("wide", true);
     r.getElementById("drawer").classList.toggle("set-wide", false);
-    r.getElementById("dtitle").textContent = this._prod ? "Add charts" : "Chart library";
+    r.getElementById("dtitle").textContent = this._widget ? "Add charts" : "Chart library";
     r.getElementById("empty").hidden = true;
     if (this._chartLib) this._chartLib.show(provider); // no default provider — nothing selected until the user picks
     this.setDrawerOpen(true);
@@ -1490,7 +1496,7 @@ export class ChartPlotter extends HTMLElement {
 
   // Re-bake the local OPFS store on the server (the User-Charts import path). The
   // <chart-library> component owns this; the shell's debug tools delegate to it.
-  // Returns a resolved promise when there's no component yet (boot/prod guards).
+  // Returns a resolved promise when there's no component yet (boot/widget guards).
   _refreshCharts() {
     return this._chartLib ? this._chartLib._refreshCharts() : Promise.resolve();
   }
@@ -1536,12 +1542,12 @@ export class ChartPlotter extends HTMLElement {
   _refreshInstalledBounds() {
     if (!this._coverage) return; // coverage overlay not set up yet
     const feats = [];
-    // Per-CELL footprints are the prod (pmtiles) path only. In SERVER mode we draw
+    // Per-CELL footprints are the widget (pmtiles) path only. In SERVER mode we draw
     // one box per ENABLED pack (below) instead — a full NOAA install has thousands
     // of cells, and a box per cell (re-projected to its min on-screen size on every
     // zoom frame) would freeze the map. Per-cell boxes also ignore the enabled flag,
     // so they'd keep showing a disabled district's coverage. Per-pack boxes fix both.
-    if (this._prod) {
+    if (this._widget) {
       for (const name of this._installed) {
         const bb = this._cellLocation(name); // catalog footprint
         if (!bb) continue;
@@ -1697,7 +1703,7 @@ export class ChartPlotter extends HTMLElement {
 
   // Fetch the server-persisted display settings at boot and adopt them over the
   // localStorage values the constructor seeded. Best-effort: an older server, an
-  // offline/prod load, or a malformed blob just keeps the local values.
+  // offline/widget load, or a malformed blob just keeps the local values.
   async _loadServerSettings() {
     let s = null;
     try {
@@ -1717,10 +1723,10 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // Persist the display settings server-side (shared across screens). Debounced so
-  // a flurry of toggles coalesces into one POST. Server mode only — prod has no
+  // a flurry of toggles coalesces into one POST. Server mode only — the widget viewer has no
   // server, and localStorage already holds the per-screen copy.
   _persistSettings() {
-    if (this._prod) return;
+    if (this._widget) return;
     clearTimeout(this._settingsSaveT);
     this._settingsSaveT = setTimeout(() => {
       fetch(`${this._assets}api/settings`, {
@@ -1862,7 +1868,7 @@ export class ChartPlotter extends HTMLElement {
     r.querySelectorAll(".panel").forEach((p) => p.classList.toggle("sel", p.dataset.panel === name));
     r.getElementById("drawer").classList.toggle("wide", name === "charts"); // two-pane list+map
     r.getElementById("drawer").classList.toggle("set-wide", name === "settings"); // rail + content
-    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : (this._prod ? "Add charts" : "Chart library");
+    r.getElementById("dtitle").textContent = name === "settings" ? "Settings" : (this._widget ? "Add charts" : "Chart library");
     // Charts = the <chart-library> panel; open it on its current provider (none
     // selected by default — the user picks a source).
     if (name === "charts" && this._chartLib) this._chartLib.show(this._chartLib._selProvider);
@@ -1943,7 +1949,7 @@ export class ChartPlotter extends HTMLElement {
   _hasInstalledPacks() { return !!(this._installedSets && this._installedSets.size); }
 
   // Installed packs exist but none render (all disabled) → nothing on the map.
-  _noChartsEnabled() { return !this._prod && this._hasInstalledPacks() && !this._hasArchive; }
+  _noChartsEnabled() { return !this._widget && this._hasInstalledPacks() && !this._hasArchive; }
 
   // The archive-list rendering + file-import wiring (renderArchiveList /
   // _wireImport) moved into <chart-library>, which owns the User-Charts import UI.

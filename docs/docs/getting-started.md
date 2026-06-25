@@ -64,6 +64,8 @@ restrictions, light characteristics, depths, source dates, and any attached text
 
 ## Where to go next
 
+- Put a chart on your own page — see [Widget mode](./widget.md) for the read-only,
+  no-server build and how to package and deploy it.
 - Learn how a cell becomes tiles in [Architecture](./architecture.md).
 - See the exact tile layers and fields in the [Tile Schema](./tile-schema.md).
 - Look up the commands in the [CLI Reference](./cli.md) if you want to bake

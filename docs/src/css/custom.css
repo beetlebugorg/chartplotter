@@ -24,3 +24,31 @@
   --ifm-color-primary-lightest: #b3e0f5;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }
+
+/* The <LiveChart/> embed (the read-only widget chart, mounted on the intro page).
+   A fixed-height, rounded frame; the widget fills it and floats its own chrome. */
+.liveChart {
+  height: 68vh;
+  min-height: 440px;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.18);
+  margin: 1.5rem 0 0.5rem;
+  background: #0b1b2b;
+}
+.liveChart chart-plotter {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.liveChart--loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ifm-color-emphasis-600);
+}
+.liveChart__caption {
+  margin: 0 0 1.5rem;
+  font-size: 0.85rem;
+  text-align: right;
+}

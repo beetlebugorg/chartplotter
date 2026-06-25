@@ -30,7 +30,7 @@ import { esc, fmtIssue } from "../lib/util.mjs";
 import { readCentralDirectory, cellEntries, extractEntry } from "../data/zip-import.mjs";
 import { seaColor, landColor, coastColor } from "../chart-canvas/s52-style.mjs"; // our own basemap palette (consistent with the chart)
 import {
-  STYLE, prodBody, libraryBody, packSearch, providersCol, packsHeader,
+  STYLE, widgetBody, libraryBody, packSearch, providersCol, packsHeader,
   packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
   detailEmpty, detailUnknownSet, detailPack, installedActions, previewMapHost,
   importDetail, dataFreshness, agreementModal, archiveList, millerBack, packCellList,
@@ -130,7 +130,7 @@ export class ChartLibrary extends HTMLElement {
     this._previewKey = null;    // pack key the detail preview currently targets
     this._snapEl = null; this._snapMap = null; // in-flight off-screen snapshot map
     this._lightbox = null; this._lightboxKey = null; // tap-to-enlarge overlay
-    this._prod = false;         // prod (prebaked) build: import-only Library
+    this._widget = false;       // widget (prebaked) build: import-only Library
     this._active = false;       // is the charts UI currently shown?
   }
 
@@ -151,15 +151,15 @@ export class ChartLibrary extends HTMLElement {
     if (this._previewMap) { try { this._previewMap.remove(); } catch (e) { /* ignore */ } this._previewMap = null; }
   }
 
-  // Inject dependencies (call once after creation). `prod` flips the Library to
-  // import-only (no NOAA download/region picker), matching the shell's prod mode.
-  configure({ dl, api, notify, store, assets, prod } = {}) {
+  // Inject dependencies (call once after creation). `widget` flips the Library to
+  // import-only (no NOAA download/region picker), matching the shell's widget mode.
+  configure({ dl, api, notify, store, assets, widget } = {}) {
     this._dl = dl || null;
     this._api = api || null;
     this._notify = notify || null;
     this._store = store || null;
     if (assets) this._assets = assets;
-    this._prod = !!prod;
+    this._widget = !!widget;
     return this;
   }
 
@@ -273,13 +273,13 @@ export class ChartLibrary extends HTMLElement {
   }
 
   // -- rendering ------------------------------------------------------------
-  // The whole charts panel. Prod (prebaked) builds get the import-only Library;
+  // The whole charts panel. Widget (prebaked) builds get the import-only Library;
   // otherwise the 3-pane drill-down + search + preview.
   render() {
     const el = this.shadowRoot.getElementById("body");
     if (!el) return;
-    if (this._prod) {
-      el.innerHTML = prodBody();
+    if (this._widget) {
+      el.innerHTML = widgetBody();
       this._wireImport();
       return;
     }

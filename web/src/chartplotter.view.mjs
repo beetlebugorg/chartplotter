@@ -77,11 +77,14 @@ export const STYLE = `
         .rbtn:active { transform:scale(.94); }
         .rbtn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
         .rbtn svg { width:21px; height:21px; display:block; }
-        /* Prod / prebaked deployment: charts load from a configured hosted archive
-           (pmtiles="…" / catalog="…"); there's no NOAA download and no Dev tools.
-           The Charts button stays but its panel becomes import-only (drop your own
-           ENC, baked server-side) — see renderCharts. */
-        :host([prod]) #empty-add, :host([prod]) #empty .welcome-sub { display:none; }
+        /* Widget mode: a read-only, embeddable chart viewer (a "CDN"/widget deploy).
+           Charts load from a configured hosted archive (pmtiles="…" / catalog="…");
+           there's no backend, no NOAA download, no in-browser baking, no Dev tools.
+           It strips the management chrome down to a pure viewer: hide the Charts
+           (library/import) and Share buttons, and the welcome card's add/import
+           affordances. Settings drop the Advanced tab (gated in JS). */
+        :host([widget]) #empty-add, :host([widget]) #empty .welcome-sub { display:none; }
+        :host([widget]) #charts-btn, :host([widget]) #share-btn { display:none; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
