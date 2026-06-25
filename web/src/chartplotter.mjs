@@ -1093,26 +1093,35 @@ export class ChartPlotter extends HTMLElement {
     // pick point (a click runs the cursor pick / district preview). The dev feature
     // inspector (now in DevTools) sets its own cursor + owns the hover/click/
     // SHIFT+drag listeners; its click handler runs only while inspecting.
-    map.getCanvas().style.cursor = "crosshair";
-    // While the user grabs and pans the chart, swap the crosshair for a closed-
-    // hand "grabbing" cursor so the drag reads as a grab; restore the ECDIS
-    // crosshair when the pan ends. The dev inspector owns its own cursor while
-    // armed (SHIFT+drag box-select), so don't fight it then.
-    map.on("dragstart", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "grabbing"; });
-    map.on("dragend", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "crosshair"; });
-    map.on("click", (e) => {
-      // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
-      // it so a pick/coverage tap doesn't fire under an active inspect lock.
-      if (this._devTools && this._devTools.inspecting) return;
-      // (The Charts cell-picker tap-to-preview-a-district branch was removed with
-      // the main-map cell picker; the <chart-library> panel is the chart surface.)
-      // Zoomed out over an installed-chart coverage marker → fly to that chart at
-      // its detail zoom (so you can find + open installed charts without knowing
-      // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
-      if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
-      // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
-      this._pickReportAt(e.point, e.originalEvent);
-    });
+    // Map-level interaction listeners + cursor register ONCE: map events (and the
+    // canvas cursor) SURVIVE a setStyle rebuild, but this method re-runs on every
+    // style.load to restore the style-scoped sources/layers above — so re-adding
+    // them here would leak a duplicate dragstart/dragend/click set per rebuild
+    // (which compounded the SCAMIN-rebuild churn into a CPU sink). The guarded
+    // sources above already no-op on a redundant call; these must too.
+    if (!this._catalogMapWired) {
+      this._catalogMapWired = true;
+      map.getCanvas().style.cursor = "crosshair";
+      // While the user grabs and pans the chart, swap the crosshair for a closed-
+      // hand "grabbing" cursor so the drag reads as a grab; restore the ECDIS
+      // crosshair when the pan ends. The dev inspector owns its own cursor while
+      // armed (SHIFT+drag box-select), so don't fight it then.
+      map.on("dragstart", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "grabbing"; });
+      map.on("dragend", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "crosshair"; });
+      map.on("click", (e) => {
+        // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
+        // it so a pick/coverage tap doesn't fire under an active inspect lock.
+        if (this._devTools && this._devTools.inspecting) return;
+        // (The Charts cell-picker tap-to-preview-a-district branch was removed with
+        // the main-map cell picker; the <chart-library> panel is the chart surface.)
+        // Zoomed out over an installed-chart coverage marker → fly to that chart at
+        // its detail zoom (so you can find + open installed charts without knowing
+        // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
+        if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
+        // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
+        this._pickReportAt(e.point, e.originalEvent);
+      });
+    }
   }
 
   // Fetch the latest shared snapshot and install its cells locally, downloading
