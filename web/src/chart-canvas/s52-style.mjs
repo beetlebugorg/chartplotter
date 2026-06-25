@@ -298,6 +298,11 @@ export function combineFilters(base, mariner) {
   // valve mariner.dateDependent === false shows all dates (only dated features
   // are ever affected; an undated feature always passes dateFilter).
   if (mariner.dateDependent !== false) parts.push(dateFilter(mariner));
+  // Date-dependent indicator (S-52 §10.6.1.1, viewing group 90022 "Highlight date
+  // dependent"): the CHDATD01 marker is an OPTIONAL highlight, OFF by default —
+  // shown only when the mariner enables it. (Out of period it is already gone via
+  // the date filter above; this only governs in-period features.)
+  if (!mariner.highlightDateDependent) parts.push(["!=", ["coalesce", ["get", "symbol_name"], ""], "CHDATD01"]);
   // Meta-object coverage/region boundary lines are gated separately from the
   // "Other" display category (mariner.showMetaBounds, off by default), since
   // they read as cell boundaries and aren't useful alongside other "Other" data.

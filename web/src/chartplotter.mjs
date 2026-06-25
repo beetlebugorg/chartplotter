@@ -80,6 +80,10 @@ const DEFAULT_MARINER = {
   // false to show all dates regardless. dateView ("YYYYMMDD") pins a planning
   // date; unset = real today.
   dateDependent: true,
+  // "Highlight date dependent" (S-52 §10.6.1.1, viewing group 90022): the CHDATD01
+  // marker on in-period date-dependent features — an optional highlight, off by
+  // default (opt-in), like the info/document highlights.
+  highlightDateDependent: false,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
   // independent of display category (each TX/TE carries a group number, §14.4).
   showLightDescriptions: true, // group 23: light characteristics (e.g. Fl(2)R 10s)
