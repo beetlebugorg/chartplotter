@@ -118,6 +118,28 @@ func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name
 		root.addChild("orientation", o)
 	}
 
+	// Date ranges: S-57 stores DATSTA/DATEND (a one-time fixed window) and
+	// PERSTA/PEREND (a recurring seasonal window) as flat simple attributes; S-101
+	// wraps each in a complex attribute (fixedDateRange / periodicDateRange) whose
+	// dateStart/dateEnd the framework's ProcessFixedAndPeriodicDates reads to mark
+	// a feature date-dependent (emit Date:/TimeValid: + the CHDATD01 marker). The
+	// dateStart/dateEnd S-101 codes alias BOTH the fixed and periodic S-57 pairs,
+	// so the wrapping complex attribute — not the alias — carries the distinction;
+	// read the S-57 source pairs directly. (A periodic value is an S-57 partial
+	// date, e.g. "--0315" = March 15 every year.)
+	if s57["DATSTA"] != "" || s57["DATEND"] != "" {
+		fdr := newCNode()
+		fdr.addSimple("dateStart", s57["DATSTA"])
+		fdr.addSimple("dateEnd", s57["DATEND"])
+		root.addChild("fixedDateRange", fdr)
+	}
+	if s57["PERSTA"] != "" || s57["PEREND"] != "" {
+		pdr := newCNode()
+		pdr.addSimple("dateStart", s57["PERSTA"])
+		pdr.addSimple("dateEnd", s57["PEREND"])
+		root.addChild("periodicDateRange", pdr)
+	}
+
 	// Topmark (buoys/beacons): a co-located S-57 TOPMAR feature folded in by the
 	// baker → the S-101 topmark complex attribute the TOPMAR02 CSP reads.
 	if len(topmark) > 0 {
@@ -134,7 +156,34 @@ func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name
 	// Light sectors / directional character (LIGHTS routed to LightSectored).
 	e.buildLightSectors(root, objClass, s57)
 
+	// rhythmOfLight — the light-description complex (lightCharacteristic /
+	// signalGroup / signalPeriod) that LITDSN02 reads to build the characteristic
+	// text. Sectored lights carry these inside sectorCharacteristics (above), but
+	// LightAllAround reads them from rhythmOfLight; without it an all-around light's
+	// description collapses to just its colour ("G" instead of "Q G 1s").
+	e.buildRhythmOfLight(root, objClass, s57)
+
 	return root
+}
+
+// buildRhythmOfLight synthesizes the rhythmOfLight complex attribute from the S-57
+// LITCHR / SIGGRP / SIGPER simple attributes, so LITDSN02 can render the full
+// light characteristic for lights that read it from rhythmOfLight (not the
+// sectorCharacteristics complex). Built whenever any of the three is present.
+func (e *Engine) buildRhythmOfLight(root *cnode, objClass string, s57 map[string]string) {
+	if objClass != "LIGHTS" {
+		return
+	}
+	if s57["LITCHR"] == "" && s57["SIGGRP"] == "" && s57["SIGPER"] == "" {
+		return
+	}
+	rol := newCNode()
+	rol.addSimple("lightCharacteristic", s57["LITCHR"])
+	if g := s57["SIGGRP"]; g != "" {
+		rol.simple["signalGroup"] = e.splitValue("signalGroup", g)
+	}
+	rol.addSimple("signalPeriod", s57["SIGPER"])
+	root.addChild("rhythmOfLight", rol)
 }
 
 // buildLightSectors synthesizes the nested sectorCharacteristics → lightSector →

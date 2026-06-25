@@ -76,14 +76,14 @@ export function zoomForScalePhysical(scale, lat, pxPitchMm = DEFAULT_PX_PITCH_MM
 }
 
 // Finest map scale we allow: don't magnify charts past 1:MIN_DETAIL_SCALE (past
-// this it's just blocky overzoom). Inverse of scaleDenom — the (fractional) zoom
-// whose scale at `lat` equals the floor (latitude-dependent). This is a PHYSICAL
-// scale now that scaleDenom is physical: 1:2000 is the old 1:4000-nominal cap (the
-// engine moved to the true 512-tile scale, ~2× finer), so the max-zoom-IN level the
-// user can reach is unchanged — only the scale NUMBER for the same zoom halved.
-export const MIN_DETAIL_SCALE = 2000;
-export function maxZoomForScaleFloor(lat) {
-  const z = Math.log2(M_PER_PX_Z0 * Math.cos((lat * Math.PI) / 180) / (OGC_PX_M * MIN_DETAIL_SCALE));
+// this it's just blocky overzoom). The cap is a PHYSICAL scale — the 1:N a ruler
+// laid on the screen measures (scaleDenomPhysical) — so it matches the HUD readout.
+export const MIN_DETAIL_SCALE = 4000;
+export function maxZoomForScaleFloor(lat, pxPitchMm = DEFAULT_PX_PITCH_MM) {
+  // Inverse of scaleDenomPhysical: the (fractional) zoom whose physical scale at
+  // `lat` equals the floor (latitude-dependent). Uses the same px pitch as the
+  // scalebar so the cap lands exactly on 1:MIN_DETAIL_SCALE as displayed.
+  const z = Math.log2(M_PER_PX_Z0 * Math.cos((lat * Math.PI) / 180) / ((clampPxPitch(pxPitchMm) / 1000) * MIN_DETAIL_SCALE));
   return Math.max(1, Math.min(18, z));
 }
 

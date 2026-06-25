@@ -163,7 +163,7 @@ func NewEngineFS(rules fs.FS, cat *fc.Catalogue) (*Engine, error) {
 // Surface objects via the framework constructors. We model each feature's
 // geometry as ONE association of its primitive type — enough for the line/area
 // rules to iterate GetFlattenedSpatialAssociations without erroring; the actual
-// boundary/fill geometry is attached by the Go lowering (LowerS101), not read
+// boundary/fill geometry is attached by the Go side when it emits primitives, not read
 // from Lua. Surfaces resolve (HostGetSpatial) to a surface with a single
 // exterior-ring curve. _HostFeaturePrimitive (Go) gives the primitive type.
 const spatialGlue = `
@@ -272,9 +272,10 @@ func (e *Engine) run() error {
 		}
 		fmt.Fprintf(&b, "table.insert(cps, PortrayalCreateContextParameter(%q, %q, %q))\n", p.name, p.typ, def)
 	}
-	// Mirror main.lua's ProcessFeaturePortrayalItem success path (rule + feature
-	// name + nautical info), but on error we suppress the feature rather than
-	// fall back to Default (which would stamp QUESMRK1 everywhere).
+	// Mirror main.lua's ProcessFeaturePortrayalItem success path (date ranges +
+	// rule + feature name + nautical info + date-dependent marker), but on error
+	// we suppress the feature rather than fall back to Default (which would stamp
+	// QUESMRK1 everywhere).
 	b.WriteString(`PortrayalInitializeContextParameters(cps)
 _RESULTS = {}
 local ctx = portrayalContext.ContextParameters
@@ -282,12 +283,19 @@ for _, item in ipairs(portrayalContext.FeaturePortrayalItems) do
 	local feature = item.Feature
 	local fp = item:NewFeaturePortrayal()
 	local ok, err = pcall(function()
+		-- Fixed/periodic date ranges (synthesized from S-57 DATSTA/DATEND +
+		-- PERSTA/PEREND): emit Date:/TimeValid: annotations and report whether the
+		-- feature is date-dependent so the CHDATD01 marker is added below.
+		local dateDependent = ProcessFixedAndPeriodicDates(feature, fp)
 		require(feature.Code)
 		local vg = _G[feature.Code](feature, fp, ctx)
 		if not fp.GetFeatureNameCalled then
 			PortrayFeatureName(feature, fp, ctx, 32, 24, vg, nil, 'TextAlignHorizontal:Center;TextAlignVertical:Top;LocalOffset:0,-3.51;FontColor:CHBLK')
 		end
 		ProcessNauticalInformation(feature, fp, ctx, vg)
+		if dateDependent then
+			AddDateDependentSymbol(feature, fp, ctx, vg)
+		end
 	end)
 	if ok then
 		_RESULTS[feature.ID] = table.concat(fp.DrawingInstructions, ';')

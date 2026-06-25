@@ -60,7 +60,7 @@ func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, 
 	}
 
 	// Screen px -> tile units. The baker lays figures out in 256-px-per-tile space
-	// (see sectorRadiusNorm/expandSector); one tile is `extent` units wide.
+	// (see sectorRadiusNorm/tessellateFigure); one tile is `extent` units wide.
 	pxScale := float64(extent) / 256.0
 	period := info.periodPx * pxScale
 	if period < 1e-6 {

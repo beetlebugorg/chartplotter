@@ -107,3 +107,56 @@ func TestUnsupportedSurfaced(t *testing.T) {
 		t.Fatalf("want [Foo], got %v", unsup)
 	}
 }
+
+// TestSectorAugmentedGeometry: a real LightSectored stream (captured from the
+// S-101 Lua engine) constructs two dashed CHBLK legs and a black-backed coloured
+// arc via AugmentedRay/ArcByRadius. Each LineInstruction must stroke the current
+// figure as an OpAugmentedLine carrying the ray/arc params + the simple-line
+// style — never collapse to an OpLine or land in unsupported.
+func TestSectorAugmentedGeometry(t *testing.T) {
+	stream := "ViewingGroup:27070;DrawingPriority:24;DisplayPlane:UnderRadar;Hover:true;" +
+		"AugmentedRay:GeographicCRS,83,LocalCRS,25;Dash:0,3.6;LineStyle:_simple_,5.4,0.32,CHBLK;LineInstruction:_simple_;" +
+		"AugmentedRay:GeographicCRS,247,LocalCRS,25;LineInstruction:_simple_;" +
+		"ArcByRadius:0,0,20,83,164;AugmentedPath:LocalCRS,GeographicCRS,LocalCRS;" +
+		"LineStyle:_simple_,,1.28,CHBLK;LineInstruction:_simple_;" +
+		"LineStyle:_simple_,,0.64,LITYW;LineInstruction:_simple_;ClearGeometry"
+	cmds, unsup := Reduce(ParseStream(stream))
+	if len(unsup) != 0 {
+		t.Fatalf("unexpected unsupported: %v", unsup)
+	}
+	var aug []DrawCommand
+	for _, c := range cmds {
+		if c.Op == OpAugmentedLine {
+			aug = append(aug, c)
+		} else if c.Op == OpLine {
+			t.Errorf("augmented stroke collapsed to OpLine: %+v", c)
+		}
+	}
+	if len(aug) != 4 {
+		t.Fatalf("want 4 augmented strokes (2 legs + 2 arc), got %d", len(aug))
+	}
+	// Leg 1: ray at 83°, length 25mm, dashed CHBLK.
+	if aug[0].Augmented == nil || aug[0].Augmented.Kind != AugRay ||
+		aug[0].Augmented.BearingDeg != 83 || aug[0].Augmented.LengthMM != 25 {
+		t.Errorf("leg1 ray = %+v", aug[0].Augmented)
+	}
+	if aug[0].SimpleLine == nil || aug[0].SimpleLine.Color != "CHBLK" || aug[0].SimpleLine.DashLength == 0 {
+		t.Errorf("leg1 style = %+v", aug[0].SimpleLine)
+	}
+	// Leg 2: ray at 247°, inherits the same dashed CHBLK style.
+	if aug[1].Augmented == nil || aug[1].Augmented.BearingDeg != 247 {
+		t.Errorf("leg2 ray = %+v", aug[1].Augmented)
+	}
+	// Arc backing: radius 20mm, start 83°, sweep 164°, CHBLK 1.28mm solid.
+	if aug[2].Augmented == nil || aug[2].Augmented.Kind != AugArc ||
+		aug[2].Augmented.RadiusMM != 20 || aug[2].Augmented.StartDeg != 83 || aug[2].Augmented.SweepDeg != 164 {
+		t.Errorf("arc backing = %+v", aug[2].Augmented)
+	}
+	if aug[2].SimpleLine == nil || aug[2].SimpleLine.Color != "CHBLK" || aug[2].SimpleLine.Width != 1.28 {
+		t.Errorf("arc backing style = %+v", aug[2].SimpleLine)
+	}
+	// Arc colour: white light portrayed yellow (LITYW), 0.64mm.
+	if aug[3].SimpleLine == nil || aug[3].SimpleLine.Color != "LITYW" || aug[3].SimpleLine.Width != 0.64 {
+		t.Errorf("arc colour style = %+v", aug[3].SimpleLine)
+	}
+}

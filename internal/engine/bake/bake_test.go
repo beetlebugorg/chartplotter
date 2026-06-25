@@ -15,8 +15,8 @@ import (
 const goldenCell = "../../../testdata/US4MD81M.000"
 
 func TestBandForScale(t *testing.T) {
-	if BandForScale(12_000).ZoomRange() != (ZoomRange{14, 16}) {
-		t.Error("12k should be harbor [14,16]")
+	if BandForScale(12_000).ZoomRange() != (ZoomRange{13, 16}) {
+		t.Error("12k should be harbor [13,16]")
 	}
 	if BandForScale(3_000_000) != BandOverview {
 		t.Error("3M should be overview")
@@ -343,41 +343,40 @@ func TestSoundingGrouping(t *testing.T) {
 }
 
 func TestSectorLights(t *testing.T) {
-	// expandSector: a sector -> 2 short legs (sleg 0) + 2 full-length legs
-	// (sleg 1) + OUTLW underlay + coloured arc (both sleg -1, always shown).
-	anchor := mustLatLon(38.97, -76.49)
-	strokes := expandSector(anchor, sp(0, 90, "LITRD"), 14)
-	if len(strokes) != 6 {
-		t.Fatalf("sector strokes = %d, want 6", len(strokes))
+	// tessellateFigure drives each constructed figure element off the rule's params.
+	// A leg with a nominal range emits the short (sleg 0) + extended full-length
+	// (sleg 1) variants, both dashed in the rule's colour, for the client's toggle.
+	leg := tessellateFigure(legPrim(90, 8), 14)
+	if len(leg) != 2 {
+		t.Fatalf("leg strokes = %d, want 2 (short + full)", len(leg))
 	}
-	if !strokes[0].dashed || strokes[0].colorToken != "CHBLK" || strokes[0].sleg != 0 {
+	if !leg[0].dashed || leg[0].colorToken != "CHBLK" || leg[0].sleg != 0 {
 		t.Error("stroke 0 should be the dashed CHBLK short leg (sleg 0)")
 	}
-	if !strokes[2].dashed || strokes[2].colorToken != "CHBLK" || strokes[2].sleg != 1 {
-		t.Error("stroke 2 should be the dashed CHBLK full-length leg (sleg 1)")
+	if leg[1].sleg != 1 {
+		t.Error("stroke 1 should be the full-length leg (sleg 1)")
 	}
-	if strokes[4].colorToken != "OUTLW" || strokes[4].widthPx != 4 || strokes[4].sleg != -1 {
-		t.Error("stroke 4 should be the 4px OUTLW arc underlay (sleg -1)")
-	}
-	if strokes[5].colorToken != "LITRD" || strokes[5].widthPx != 2 || strokes[5].dashed || strokes[5].sleg != -1 {
-		t.Error("stroke 5 should be the 2px solid LITRD arc (sleg -1)")
-	}
-	// A light with a VALNMR nominal range emits full legs (sleg 1) longer than
-	// the 25 mm short legs (sleg 0) — the toggle's whole point.
-	spR := sp(0, 90, "LITRD")
-	spR.RadiusNM = 8
-	withR := expandSector(anchor, spR, 14)
 	legLen := func(s sectorStroke) float64 {
 		return absf(s.points[1].Lat-s.points[0].Lat) + absf(s.points[1].Lon-s.points[0].Lon)
 	}
-	if legLen(withR[2]) <= legLen(withR[0]) {
-		t.Errorf("full leg (%.6f) should be longer than short leg (%.6f)", legLen(withR[2]), legLen(withR[0]))
+	if legLen(leg[1]) <= legLen(leg[0]) {
+		t.Errorf("full leg (%.6f) should be longer than short leg (%.6f)", legLen(leg[1]), legLen(leg[0]))
 	}
-	// Screen-fixed: lat span ~halves per zoom level.
-	r14 := expandSector(anchor, sp(0, 0, "LITYW"), 14) // ring
-	r15 := expandSector(anchor, sp(0, 0, "LITYW"), 15)
-	span := func(s []sectorStroke) float64 { return absf(s[len(s)-1].points[0].Lat - anchor.Lat) }
-	if ratio := span(r14) / span(r15); ratio < 1.9 || ratio > 2.1 {
+	// A leg with no nominal range is a single always-shown stroke (sleg -1).
+	plain := tessellateFigure(legPrim(90, 0), 14)
+	if len(plain) != 1 || plain[0].sleg != -1 {
+		t.Errorf("plain leg = %+v, want 1 stroke sleg -1", plain)
+	}
+	// An arc/ring is one stroke in the rule's colour (white light → yellow LITYW),
+	// always shown (sleg -1). Screen-fixed: the radius ~halves per zoom level.
+	arc14 := tessellateFigure(arcPrim(26, 0, 360, "LITYW"), 14)
+	if len(arc14) != 1 || arc14[0].colorToken != "LITYW" || arc14[0].sleg != -1 {
+		t.Fatalf("arc = %+v, want 1 LITYW stroke sleg -1", arc14)
+	}
+	arc15 := tessellateFigure(arcPrim(26, 0, 360, "LITYW"), 15)
+	anchor := mustLatLon(38.97, -76.49)
+	span := func(s []sectorStroke) float64 { return absf(s[0].points[0].Lat - anchor.Lat) }
+	if ratio := span(arc14) / span(arc15); ratio < 1.9 || ratio > 2.1 {
 		t.Errorf("ring radius ratio z14/z15 = %.3f, want ~2", ratio)
 	}
 }
@@ -388,8 +387,8 @@ func TestSectorLights(t *testing.T) {
 // suppressed only where a finer prim sits on it. zMax is set > natMax to simulate
 // the overzoomed coarse prim and drive the branch directly.
 func TestUpSuppressionPointOverlap(t *testing.T) {
-	coastal := BandCoastal.ZoomRange() // {10,12}
-	harbor := BandHarbor.ZoomRange()   // {14,16}
+	coastal := BandCoastal.ZoomRange() // {9,11}
+	harbor := BandHarbor.ZoomRange()   // {13,16}
 	base := geo.LatLon{Lat: 38.97, Lon: -76.49}
 	mk := func(b *Baker, ll geo.LatLon, layer string, zr ZoomRange, zMax uint32) {
 		r := routed{layer: layer, kind: mvt.GeomPoint, npoint: normPt(ll),
@@ -419,8 +418,22 @@ func TestUpSuppressionPointOverlap(t *testing.T) {
 }
 
 func mustLatLon(lat, lon float64) geo.LatLon { return geo.LatLon{Lat: lat, Lon: lon} }
-func sp(start, end float64, color string) portrayal.SectorParams {
-	return portrayal.SectorParams{StartAngleDeg: start, EndAngleDeg: end, ColorToken: color}
+
+// legPrim / arcPrim build a one-element sector figure (as the rule emits) at a
+// fixed anchor: a dashed CHBLK leg at the given bearing (fullNM>0 enables the
+// extended variant), or a coloured arc/ring.
+func legPrim(bearingDeg, fullNM float64) *sectorPrim {
+	return &sectorPrim{fig: portrayal.AugmentedFigure{
+		Anchor: mustLatLon(38.97, -76.49), Ray: true, BearingDeg: bearingDeg,
+		LengthMM: 25, ColorToken: "CHBLK", WidthMM: 0.32, Dash: portrayal.DashDashed,
+		FullLengthNM: fullNM,
+	}}
+}
+func arcPrim(radiusMM, startDeg, sweepDeg float64, color string) *sectorPrim {
+	return &sectorPrim{fig: portrayal.AugmentedFigure{
+		Anchor: mustLatLon(38.97, -76.49), RadiusMM: radiusMM,
+		StartDeg: startDeg, SweepDeg: sweepDeg, ColorToken: color, WidthMM: 0.64,
+	}}
 }
 
 func absf(x float64) float64 {

@@ -28,23 +28,22 @@ import { PMTilesArchive, MultiArchive } from "./pmtiles-source.mjs";
 // would be pure buffer) and the client overzooms it to fill berth level. MUST
 // match the baker's bandBakeCeil (internal/engine/bake/bake.go).
 export const CHART_BANDS = [
-  { slug: "overview", min: 0, max: 8, bake: 8 },
-  { slug: "general", min: 8, max: 10, bake: 10 },
-  { slug: "coastal", min: 10, max: 12, bake: 14 },
-  { slug: "approach", min: 12, max: 14, bake: 14 },
-  { slug: "harbor", min: 14, max: 16, bake: 16 },
+  { slug: "overview", min: 0, max: 7, bake: 7 },
+  { slug: "general", min: 7, max: 9, bake: 9 },
+  { slug: "coastal", min: 9, max: 11, bake: 13 },
+  { slug: "approach", min: 11, max: 13, bake: 15 },
+  { slug: "harbor", min: 13, max: 16, bake: 16 },
   { slug: "berthing", min: 16, max: 18, bake: 18 },
   { slug: "all", min: 0, max: 18, bake: 18 },
 ];
 
-// Lowest display zoom each band's chart layers actually DRAW at — the scale where
-// that band becomes the best-available chart, per the NOAA ENC scheme (ENC Design
-// Handbook Table 1: two standard scales per usage band ≈ two web-Mercator zooms;
-// e.g. Approach 1:90k/1:45k ⇒ shows ~z12–14 ≈ 1:130k–1:32k at mid-US latitudes).
-// Overview/general draw from z0 so they gap-fill on zoom-out; the finer bands start
-// at their band so they don't appear a full zoom (≈½ band) too coarse. Applied as a
-// LAYER minzoom (the baked source may serve lower) so it works without a re-bake.
-export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 10, approach: 12, harbor: 14, berthing: 16, all: 0 };
+// Lowest display zoom each band's chart layers actually DRAW at — the zoom whose
+// physical scale equals the band's COARSE NOAA standard scale, where the band first
+// becomes the best-available chart (ENC Design Handbook Table 1, at ~40°N):
+// coastal 1:350k≈z9, approach 1:90k≈z11, harbor 1:22k≈z13, berthing 1:4k≈z16.
+// Overview/general draw from z0 so they gap-fill on zoom-out. Must match the baker's
+// Band.ZoomRange() (a re-bake aligns the tiles); applied as a LAYER minzoom.
+export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 9, approach: 11, harbor: 13, berthing: 16, all: 0 };
 
 // Vector SOURCE-LAYERS whose features carry SCAMIN and are split into per-SCAMIN
 // bucket layers (each with a native fractional minzoom) so SCAMIN is honored
@@ -207,31 +206,59 @@ export class ChartSources {
     // pinned server buckets to the initial/equator latitude).
     if (this._server) {
       if (!latShift) return;
-      this._scaminLat = lat;
+      // The SCAMIN value set is fixed (from each set's TileJSON); latitude drift only
+      // shifts the per-value bucket MINZOOMS — re-gate them in place (no flicker)
+      // rather than a full style rebuild.
       clearTimeout(this._scaminRebuildT);
-      this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+      this._scaminRebuildT = setTimeout(() => this._reapplyScaminMinzooms(), 120);
       return;
     }
-    const seen = new Set(this._scaminValues);
-    const before = seen.size;
-    const srcs = CHART_BANDS.filter((b) => b.slug !== "all").map((b) => "chart-" + b.slug);
-    for (const src of srcs) {
-      if (!m.getSource(src)) continue;
-      for (const sl of SCAMIN_BUCKET_LAYERS) {
-        let fs;
-        try { fs = m.querySourceFeatures(src, { sourceLayer: sl }); } catch (e) { continue; }
-        for (const f of fs) { const s = f.properties && f.properties.scamin; if (s) seen.add(+s); }
-      }
+    // The SCAMIN value set is PUBLISHED in each PMTiles archive's JSON metadata
+    // (baker SetScamin), so read it from the loaded bands — known at LOAD, not
+    // scanned from tiles per frame. This is the key flicker fix: zooming surfaces
+    // no "new" values, so it never triggers a rebuild. (Older archives without the
+    // manifest publish nothing, so the set stays empty and SCAMIN gating is off —
+    // re-bake to restore it; this never re-introduces the per-zoom rebuild.)
+    const seen = new Set();
+    for (const slug of Object.keys(this._bands)) {
+      for (const v of this._bands[slug].scamin || []) seen.add(+v);
     }
-    const grew = seen.size !== before;
-    if (!grew && !latShift) return;
-    this._scaminValues = [...seen].sort((a, b) => a - b);
-    this._scaminLat = lat;
-    // Debounce the (heavy) style rebuild so a burst of values loaded across several
-    // tiles coalesces into ONE rebuild. Converges: once every value in view is known,
-    // no further growth ⇒ no rebuild, and SCAMIN gating is then fully native.
+    const next = [...seen].sort((a, b) => a - b);
+    const changed = next.length !== this._scaminValues.length || next.some((v, i) => v !== this._scaminValues[i]);
+    if (!changed && !latShift) return;
+    this._scaminValues = next;
     clearTimeout(this._scaminRebuildT);
-    this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+    if (changed) {
+      // The value set changed (a pack loaded/unloaded) → new bucket LAYERS are
+      // needed, so this case takes the full style rebuild. It fires at pack
+      // load/unload, NOT during zoom, so it doesn't flicker the zoom interaction.
+      this._scaminLat = lat;
+      this._scaminRebuildT = setTimeout(() => { if (this.getMap()) this.rebuild(); }, 450);
+    } else {
+      // Latitude drift only (same value set): re-gate the existing buckets in place.
+      this._scaminRebuildT = setTimeout(() => this._reapplyScaminMinzooms(), 120);
+    }
+  }
+
+  // Re-apply the latitude-dependent SCAMIN bucket minzooms IN PLACE — no style
+  // rebuild, so no flicker / tile reload. Each per-value bucket layer id ends in
+  // "#sm<scamin>"; its native minzoom is scaminDisplayZoom(scamin, lat), which
+  // drifts slightly with the centre latitude (cos-lat). setLayerZoomRange re-gates
+  // each without tearing down sources/sprites (unlike rebuild()'s full setStyle).
+  // A value crossing the band floor into the #no bucket self-corrects on the next
+  // genuine rebuild; for the sub-2° drift this runs on, the error is < 0.05 zoom.
+  _reapplyScaminMinzooms() {
+    const m = this.getMap();
+    if (!m) return;
+    const lat = m.getCenter().lat;
+    let style;
+    try { style = m.getStyle(); } catch (e) { return; }
+    for (const L of (style && style.layers) || []) {
+      const hit = /#sm(\d+(?:\.\d+)?)$/.exec(L.id);
+      if (!hit) continue;
+      try { m.setLayerZoomRange(L.id, scaminDisplayZoom(+hit[1], lat), L.maxzoom != null ? L.maxzoom : 24); } catch (e) { /* layer removed mid-update */ }
+    }
+    this._scaminLat = lat;
   }
 
   // -- runtime chart API (driven by the <chart-plotter-app> shell, via the element) --
@@ -447,11 +474,21 @@ export class ChartSources {
   // merged-upload `all` source needs its max synced to the loaded archive (an
   // upload may bake to <18; requesting above its max would read blank).
   _updateSourceZoom() {
-    const map = this.getMap(), all = this._bands.all;
-    const src = map && map.getSource("chart-all");
-    if (src && all && src.maxzoom !== undefined) {
-      src.minzoom = all.minZoom;
-      src.maxzoom = all.maxZoom;
+    const map = this.getMap();
+    if (!map) return;
+    // Hold every loaded band source's maxzoom at its archive's REAL deepest baked
+    // zoom (PMTiles header), in place — so MapLibre overzooms the deepest tile it
+    // has instead of requesting empty tiles past the bake (which read as a blank
+    // band when the static band.bake and the actual archive drift, e.g. after a
+    // band-range change before a re-bake). No restyle. The merged "all" source has
+    // no per-band overzoom so its minzoom tracks the archive too; the per-band
+    // sources keep minzoom 0 for the sub-band SCAMIN features.
+    for (const slug of Object.keys(this._bands)) {
+      const arc = this._bands[slug];
+      const src = map.getSource("chart-" + slug);
+      if (!src || !arc || src.maxzoom === undefined) continue;
+      src.maxzoom = arc.maxZoom;
+      if (slug === "all") src.minzoom = arc.minZoom;
     }
   }
 
@@ -516,12 +553,15 @@ export class ChartSources {
     // cache-bust token bumped by setArchive/refresh. Sources for not-yet-loaded
     // bands resolve to blank tiles (harmless) until an archive is added.
     const sources = {};
-    // Per-band prebaked sources in BOTH modes. The source maxzoom is band.bake —
-    // the top zoom the archive actually contains — so MapLibre serves real tiles up
-    // to there and client-overzooms above it (base fills + the finest band fill the
-    // finer zooms for free; coarser bands' lines/patterns are cut in the bake or
-    // capped on the layer, so they don't bleed into a finer band's area).
+    // Per-band prebaked sources. The source maxzoom is the loaded archive's REAL
+    // deepest baked zoom (from its PMTiles header), NOT the static band.bake — so
+    // MapLibre overzooms the deepest tile it actually has instead of requesting
+    // empty tiles past the bake (which read as a whole blank band when band.bake
+    // and the archive drift, e.g. after a band-range change before a re-bake). The
+    // client overzooms above it (base fills + the finest band fill the finer zooms
+    // for free). Falls back to band.bake until an archive is loaded.
     for (const band of CHART_BANDS) {
+      const archive = this._bands[band.slug];
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
@@ -531,7 +571,7 @@ export class ChartSources {
         // band min), and minzoom only adds requests when the VIEW is coarse (few
         // tiles), so it's cheap. Per-SCAMIN bucket layers gate the exact display scale.
         minzoom: 0,
-        maxzoom: band.bake,
+        maxzoom: (archive && archive.maxZoom) || band.bake,
       };
     }
     if (this._server) {

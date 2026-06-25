@@ -21,6 +21,17 @@ type FeatureBuild struct {
 	Primitives      []Primitive
 	DisplayPriority int
 	DisplayCategory int
+	// DateStart/DateEnd/TimeValid carry the feature's date dependency when it has
+	// one (S-57 DATSTA/DATEND fixed window or PERSTA/PEREND periodic window), so the
+	// baker can tag the feature and a date-aware client show/hide it against the
+	// current date. Empty when the feature is not date-dependent. DateStart/DateEnd
+	// are S-57 date strings — full "YYYYMMDD" (fixed) or partial "--MMDD" recurring
+	// each year (periodic); TimeValid is the interval kind (closedInterval /
+	// geSemiInterval / leSemiInterval). The feature also carries the CHDATD01
+	// date-dependent marker symbol among its primitives.
+	DateStart string
+	DateEnd   string
+	TimeValid string
 }
 
 // geom is the portrayal-space geometry handed to the instruction walk. It mirrors
@@ -108,6 +119,16 @@ func applyDangerDepth(prims []Primitive, class string, attrs map[string]interfac
 		prims[i] = sc
 	}
 	return prims
+}
+
+// stringAttr returns an attribute's encoded string value, or "" when absent.
+func stringAttr(attrs map[string]interface{}, key string) string {
+	if v, ok := attrs[key]; ok {
+		if s, ok := encodeAttr(v); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {

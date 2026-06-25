@@ -235,11 +235,74 @@ export function sectorLegFilter(mariner) {
   return ["in", ["coalesce", ["get", "sleg"], 2], ["literal", [2, rank]]];
 }
 
+// Date-dependent display (S-52 PresLib §10.4.1.1 / Fig 1, MANDATORY): a feature
+// with a validity period is shown only when the viewing date falls inside it —
+// the first gate of the ECDIS display pipeline. The baker stamps a filter-ready
+// period: date_recurring (present iff dated; 1 = a recurring month-day range,
+// 0 = a one-off full-date range) plus the comparable bound strings date_start /
+// date_end ("MMDD" or "YYYYMMDD"), each present only when that bound exists (a
+// one-sided range is semi-open). A feature with no date_recurring is undated and
+// always shown. The viewing date is real "today" unless the mariner pins one
+// (mariner.dateView, "YYYYMMDD") for passage planning.
+function _todayParts(mariner) {
+  let ymd = mariner && mariner.dateView;
+  if (!/^\d{8}$/.test(ymd || "")) {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    ymd = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  }
+  return { ymd, mmdd: ymd.slice(4) };
+}
+
+// _inDatePeriod is the plain-JS reference for the dateFilter expression below
+// (kept in lockstep, unit-tested): undated → true; else compare the viewing date
+// (mmdd for recurring, ymd for full) to the bounds, with year-wrap for a
+// recurring range whose start month-day is after its end (e.g. 1101 → 0315).
+export function _inDatePeriod(props, ymd, mmdd) {
+  if (props.date_recurring === undefined || props.date_recurring === null) return true;
+  const T = Number(props.date_recurring) === 1 ? mmdd : ymd;
+  const S = props.date_start, E = props.date_end;
+  const hasS = S !== undefined && S !== null && S !== "";
+  const hasE = E !== undefined && E !== null && E !== "";
+  if (hasS && hasE) return S <= E ? (T >= S && T <= E) : (T >= S || T <= E);
+  if (hasS) return T >= S;
+  if (hasE) return T <= E;
+  return true;
+}
+
+export function dateFilter(mariner) {
+  const { ymd, mmdd } = _todayParts(mariner);
+  const T = ["case", ["==", ["coalesce", ["get", "date_recurring"], 0], 1], mmdd, ymd];
+  const hasS = ["has", "date_start"], hasE = ["has", "date_end"];
+  return ["any",
+    ["!", ["has", "date_recurring"]], // undated → always shown
+    ["let", "T", T, "S", ["coalesce", ["get", "date_start"], ""], "E", ["coalesce", ["get", "date_end"], ""],
+      ["case",
+        ["all", hasS, hasE],
+          ["case",
+            ["<=", ["var", "S"], ["var", "E"]],
+              ["all", [">=", ["var", "T"], ["var", "S"]], ["<=", ["var", "T"], ["var", "E"]]],
+              ["any", [">=", ["var", "T"], ["var", "S"]], ["<=", ["var", "T"], ["var", "E"]]]],
+        hasS, [">=", ["var", "T"], ["var", "S"]],
+        hasE, ["<=", ["var", "T"], ["var", "E"]],
+        true]]];
+}
+
 // Combine a layer's intrinsic (base) filter with the live category +
 // boundary-style filters (the two client-side portrayal axes baked as
 // per-feature `cat`/`bnd`).
 export function combineFilters(base, mariner) {
   const parts = ["all", categoryFilter(mariner), boundaryFilter(mariner), pointStyleFilter(mariner), sectorLegFilter(mariner)];
+  // Date-dependent display (S-52 §10.4.1.1, mandatory + default-on): hide a
+  // dated feature outside its validity period for the viewing date. The escape
+  // valve mariner.dateDependent === false shows all dates (only dated features
+  // are ever affected; an undated feature always passes dateFilter).
+  if (mariner.dateDependent !== false) parts.push(dateFilter(mariner));
+  // Date-dependent indicator (S-52 §10.6.1.1, viewing group 90022 "Highlight date
+  // dependent"): the CHDATD01 marker is an OPTIONAL highlight, OFF by default —
+  // shown only when the mariner enables it. (Out of period it is already gone via
+  // the date filter above; this only governs in-period features.)
+  if (!mariner.highlightDateDependent) parts.push(["!=", ["coalesce", ["get", "symbol_name"], ""], "CHDATD01"]);
   // Meta-object coverage/region boundary lines are gated separately from the
   // "Other" display category (mariner.showMetaBounds, off by default), since
   // they read as cell boundaries and aren't useful alongside other "Other" data.

@@ -9,8 +9,8 @@ import (
 	"github.com/beetlebugorg/chartplotter/pkg/s100/instructions"
 )
 
-// lowerStream parses+reduces an S-101 stream and lowers each draw command.
-func lowerStream(t *testing.T, stream string, geom S101Geometry, cat *catalog.Catalog) []Primitive {
+// emitStream parses+reduces an S-101 stream and emits primitives for each draw command.
+func emitStream(t *testing.T, stream string, geom S101Geometry, cat *catalog.Catalog) []Primitive {
 	t.Helper()
 	cmds, unsup := instructions.Reduce(instructions.ParseStream(stream))
 	if len(unsup) != 0 {
@@ -18,15 +18,15 @@ func lowerStream(t *testing.T, stream string, geom S101Geometry, cat *catalog.Ca
 	}
 	var out []Primitive
 	for _, c := range cmds {
-		out = append(out, LowerS101(c, geom, cat)...)
+		out = append(out, emitPrimitives(c, geom, cat)...)
 	}
 	return out
 }
 
-func TestLowerRapidsCurveToStrokeLine(t *testing.T) {
+func TestEmitRapidsCurveToStrokeLine(t *testing.T) {
 	geom := S101Geometry{Lines: [][]geo.LatLon{{{}, {}}}}
 	stream := "ViewingGroup:32050;DrawingPriority:9;DisplayPlane:UnderRadar;LineStyle:_simple_,,0.96,CHGRD;LineInstruction:_simple_"
-	prims := lowerStream(t, stream, geom, nil)
+	prims := emitStream(t, stream, geom, nil)
 	if len(prims) != 1 {
 		t.Fatalf("want 1 primitive, got %d", len(prims))
 	}
@@ -42,26 +42,26 @@ func TestLowerRapidsCurveToStrokeLine(t *testing.T) {
 	}
 }
 
-func TestLowerRapidsSurfaceToFillPolygon(t *testing.T) {
+func TestEmitRapidsSurfaceToFillPolygon(t *testing.T) {
 	geom := S101Geometry{Rings: [][]geo.LatLon{{{}, {}, {}}}}
-	prims := lowerStream(t, "ViewingGroup:32050;ColorFill:CHGRD", geom, nil)
+	prims := emitStream(t, "ViewingGroup:32050;ColorFill:CHGRD", geom, nil)
 	fp, ok := prims[0].(FillPolygon)
 	if !ok || fp.ColorToken != "CHGRD" || len(fp.Rings) != 1 {
 		t.Fatalf("want FillPolygon CHGRD, got %T %+v", prims[0], prims[0])
 	}
 }
 
-func TestLowerRapidsPointNullSuppressed(t *testing.T) {
-	prims := lowerStream(t, "ViewingGroup:32050;NullInstruction", S101Geometry{}, nil)
+func TestEmitRapidsPointNullSuppressed(t *testing.T) {
+	prims := emitStream(t, "ViewingGroup:32050;NullInstruction", S101Geometry{}, nil)
 	if len(prims) != 0 {
-		t.Fatalf("NullInstruction should lower to nothing, got %d", len(prims))
+		t.Fatalf("NullInstruction should emit nothing, got %d", len(prims))
 	}
 }
 
-func TestLowerPointSymbol(t *testing.T) {
+func TestEmitPointSymbol(t *testing.T) {
 	geom := S101Geometry{Anchor: geo.LatLon{}}
 	stream := "ViewingGroup:25010;LocalOffset:1,-2;Rotation:45;PointInstruction:BCNCAR01"
-	sc, ok := lowerStream(t, stream, geom, nil)[0].(SymbolCall)
+	sc, ok := emitStream(t, stream, geom, nil)[0].(SymbolCall)
 	if !ok {
 		t.Fatalf("want SymbolCall")
 	}
@@ -76,12 +76,12 @@ func TestLowerPointSymbol(t *testing.T) {
 	}
 }
 
-func TestLowerComplexLineResolvesPenColor(t *testing.T) {
+func TestEmitComplexLineResolvesPenColor(t *testing.T) {
 	cat := &catalog.Catalog{LineStyles: map[string]*catalog.LineStyle{
 		"ACHARE51": {ID: "ACHARE51", PenColor: "CHMGD"},
 	}}
 	geom := S101Geometry{Lines: [][]geo.LatLon{{{}, {}}}}
-	lp, ok := lowerStream(t, "LineInstruction:ACHARE51", geom, cat)[0].(LinePattern)
+	lp, ok := emitStream(t, "LineInstruction:ACHARE51", geom, cat)[0].(LinePattern)
 	if !ok {
 		t.Fatalf("want LinePattern")
 	}
@@ -90,25 +90,25 @@ func TestLowerComplexLineResolvesPenColor(t *testing.T) {
 	}
 }
 
-func TestLowerAreaFillReference(t *testing.T) {
+func TestEmitAreaFillReference(t *testing.T) {
 	geom := S101Geometry{Rings: [][]geo.LatLon{{{}, {}}}}
-	prims := lowerStream(t, "AreaFillReference:DRGARE01", geom, nil)
+	prims := emitStream(t, "AreaFillReference:DRGARE01", geom, nil)
 	pf, ok := prims[0].(PatternFill)
 	if !ok || pf.PatternName != "DRGARE01" || len(pf.Rings) == 0 {
 		t.Fatalf("want PatternFill DRGARE01 on rings, got %#v", prims)
 	}
 }
 
-// TestLowerAreaBoundaryLine: a boundary line strokes EACH drawable run, not
+// TestEmitAreaBoundaryLine: a boundary line strokes EACH drawable run, not
 // empty geometry. The regression: an area feature has no Lines unless the
-// builder fills them from its (masked) boundary; lowering onto empty geometry
+// builder fills them from its (masked) boundary; emitting onto empty geometry
 // yielded a NaN/Inf bbox the baker dropped ("skipping prim with implausible
 // bbox"). Here two drawable runs ⇒ two LinePatterns.
-func TestLowerAreaBoundaryLine(t *testing.T) {
+func TestEmitAreaBoundaryLine(t *testing.T) {
 	run1 := []geo.LatLon{{Lat: 0, Lon: 0}, {Lat: 0, Lon: 1}, {Lat: 1, Lon: 1}}
 	run2 := []geo.LatLon{{Lat: 0.2, Lon: 0.2}, {Lat: 0.2, Lon: 0.4}, {Lat: 0.4, Lon: 0.4}}
 	geom := S101Geometry{Lines: [][]geo.LatLon{run1, run2}}
-	prims := lowerStream(t, "LineInstruction:CTNARE51", geom, nil)
+	prims := emitStream(t, "LineInstruction:CTNARE51", geom, nil)
 	if len(prims) != 2 {
 		t.Fatalf("want one line per run (2), got %d: %#v", len(prims), prims)
 	}
@@ -118,15 +118,15 @@ func TestLowerAreaBoundaryLine(t *testing.T) {
 			t.Fatalf("run %d: want LinePattern, got %T", i, p)
 		}
 		if lp.LinestyleName != "CTNARE51" || len(lp.Points) < 2 {
-			t.Errorf("run %d lowered onto empty/wrong geometry: %+v", i, lp)
+			t.Errorf("run %d emitted onto empty/wrong geometry: %+v", i, lp)
 		}
 	}
 }
 
-// TestLowerLineNoGeometry: a line draw with no drawable runs lowers to nothing
+// TestEmitLineNoGeometry: a line draw with no drawable runs emits nothing
 // rather than a degenerate primitive.
-func TestLowerLineNoGeometry(t *testing.T) {
-	if prims := lowerStream(t, "LineInstruction:CTNARE51", S101Geometry{}, nil); len(prims) != 0 {
+func TestEmitLineNoGeometry(t *testing.T) {
+	if prims := emitStream(t, "LineInstruction:CTNARE51", S101Geometry{}, nil); len(prims) != 0 {
 		t.Fatalf("want no primitives for empty geometry, got %d", len(prims))
 	}
 }
@@ -164,10 +164,10 @@ func TestStrokeRunsForMasking(t *testing.T) {
 	}
 }
 
-func TestLowerText(t *testing.T) {
+func TestEmitText(t *testing.T) {
 	geom := S101Geometry{Anchor: geo.LatLon{}}
 	stream := "ViewingGroup:25010;FontColor:CHBLK;TextAlignHorizontal:Center;TextInstruction:Fl.R.4s"
-	dt, ok := lowerStream(t, stream, geom, nil)[0].(DrawText)
+	dt, ok := emitStream(t, stream, geom, nil)[0].(DrawText)
 	if !ok {
 		t.Fatalf("want DrawText")
 	}

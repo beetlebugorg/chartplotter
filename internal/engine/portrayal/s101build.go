@@ -61,8 +61,8 @@ func newS101Builder(catalogFS fs.FS, fcBytes []byte) (*S101Builder, error) {
 
 // S101Builder is the feature-build seam: it runs the S-101 portrayal rules (via
 // the fc-backed Lua engine) for a batch of features, parses each emitted
-// instruction stream, and lowers each draw onto the feature geometry to produce
-// the Primitive stream the baker consumes.
+// instruction stream, and emits a primitive for each draw onto the feature
+// geometry to produce the Primitive stream the baker consumes.
 type S101Builder struct {
 	rulesFS fs.FS
 	fcCat   *fc.Catalogue
@@ -70,7 +70,8 @@ type S101Builder struct {
 }
 
 // BuildBatch portrays a whole cell's features in ONE engine pass (one chunk
-// compile, one portrayal context) and lowers each onto its geometry. A fresh
+// compile, one portrayal context) and emits primitives for each onto its
+// geometry. A fresh
 // Lua state is used and closed here so the per-cell caches don't accumulate.
 // Returns featureID → build for every feature.
 func (b *S101Builder) BuildBatch(features []*s57.Feature) (map[int64]FeatureBuild, error) {
@@ -111,7 +112,7 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 		// resolve a REAL point spatial (HostGetSpatial '#P'/'#M'). SOUNDG is a
 		// multipoint (the Sounding rule iterates each point's depth); other point
 		// features are a single point. This is required even when the geometry is
-		// otherwise attached by the Go lowering: a rule that reads feature.Point /
+		// otherwise attached when the Go side emits primitives: a rule that reads feature.Point /
 		// feature.Spatial would otherwise hit the framework's GetSpatial infinite
 		// recursion (it reads self['Spatial'] right after assigning it nil, which
 		// re-fires __index) — the cause of the OBSTRN/WRECKS stack overflows.
@@ -143,7 +144,7 @@ func (b *S101Builder) BuildBatchOverrides(features []*s57.Feature, overrides map
 	}
 	out := make(map[int64]FeatureBuild, len(features))
 	for _, f := range features {
-		out[f.ID()] = b.lower(f, streams[strconv.FormatInt(f.ID(), 10)])
+		out[f.ID()] = b.buildFeature(f, streams[strconv.FormatInt(f.ID(), 10)])
 	}
 	return out, nil
 }
@@ -158,8 +159,8 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 	return m[f.ID()], true
 }
 
-// lower turns one feature's emitted instruction stream into its FeatureBuild.
-func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
+// buildFeature turns one feature's emitted instruction stream into its FeatureBuild.
+func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
 	// object" mark (S-52 §10.1.1 parity).
 	if strings.HasPrefix(stream, "UNMAPPED:") {
@@ -180,9 +181,15 @@ func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 	var prims []Primitive
 	priority := 0
 	cat := 0 // unset; resolved from the viewing groups the rule emits
+	var dateStart, dateEnd, timeValid string
 	for _, c := range cmds {
 		if c.Priority > priority {
 			priority = c.Priority
+		}
+		// Date dependency is feature-level (one Date:/TimeValid: pair the rule emits
+		// up front, carried onto every draw): capture it once for the FeatureBuild.
+		if timeValid == "" && (c.TimeValid != "" || c.DateStart != "" || c.DateEnd != "") {
+			dateStart, dateEnd, timeValid = c.DateStart, c.DateEnd, c.TimeValid
 		}
 		// The shallow-water pattern (SEABED01 emits AreaFillReference:DIAMOND1 in
 		// viewing group 90000 on every depth area shallower than the safety
@@ -203,19 +210,30 @@ func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 		if dc := displayCategoryForViewingGroup(c.ViewingGroup); dc != 0 && (cat == 0 || dc < cat) {
 			cat = dc
 		}
-		prims = append(prims, LowerS101(c, sg, b.Catalog)...)
+		prims = append(prims, emitPrimitives(c, sg, b.Catalog)...)
 	}
-	// Soundings: tag each lowered glyph with its depth so the baker emits the
+	// Soundings: tag each emitted glyph with its depth so the baker emits the
 	// numeric depth + S/G palette variants. Without this the client's depth-unit
 	// conversion (synthSounding) and SNDFRM04 safety-depth split fall back to the
 	// static metric glyphs and never react to those settings.
 	if f.ObjectClass() == "SOUNDG" {
 		attachSoundingDepths(prims, soundingPoints(f.Geometry()))
 	}
-	// Sector / directional light figures: the rule's AugmentedRay / ArcByRadius
-	// geometry is fixed display-mm (screen size) and isn't lowered onto geographic
-	// geometry; emit a SectorLight the baker tessellates per-zoom instead.
-	prims = append(prims, sectorLightPrims(f, anchor)...)
+	// Sector / directional lights: the rule constructs the legs + arc as screen-space
+	// AugmentedFigure elements (emitted above from the AugmentedRay / ArcByRadius
+	// instructions). Tag each leg with the light's nominal range (VALNMR) so the
+	// baker can also emit the "full light lines" leg variant for the client's live
+	// toggle (S-52 LIGHTS06 note 1).
+	if f.ObjectClass() == "LIGHTS" {
+		if vnr, ok := floatAttr(f.Attributes(), "VALNMR"); ok && vnr > 0 {
+			for i := range prims {
+				if fig, ok := prims[i].(AugmentedFigure); ok && fig.Ray {
+					fig.FullLengthNM = vnr
+					prims[i] = fig
+				}
+			}
+		}
+	}
 	if cat == 0 {
 		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}
@@ -223,6 +241,9 @@ func (b *S101Builder) lower(f *s57.Feature, stream string) FeatureBuild {
 		Primitives:      prims,
 		DisplayPriority: priority,
 		DisplayCategory: cat,
+		DateStart:       dateStart,
+		DateEnd:         dateEnd,
+		TimeValid:       timeValid,
 	}
 }
 
@@ -299,7 +320,7 @@ func soundingPoints(g s57.Geometry) [][3]float64 {
 	return pts
 }
 
-// attachSoundingDepths sets SoundingDepthM on each lowered sounding glyph from the
+// attachSoundingDepths sets SoundingDepthM on each emitted sounding glyph from the
 // SOUNDG multipoint, matching by anchor (the glyphs are placed at their sounding's
 // lon/lat via AugmentedPoint). The depth then reaches the baker, which emits the
 // numeric depth + S/G palette variants the client needs for live depth-unit

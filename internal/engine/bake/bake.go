@@ -67,12 +67,12 @@ const generalOverzoomMin uint32 = 0
 //	berthing 18 — finest band, nothing finer to cut against; native detail.
 func bandBakeCeil(bandMax uint32) uint32 {
 	switch bandMax {
-	case 12: // coastal: native max (z12) cuts too coarse; +2 → z14 to sharpen vs approach
-		return 14
+	case 11: // coastal: native max (z11) cuts too coarse; +2 → z13 to sharpen vs approach
+		return 13
+	case 13: // approach: native max (z13) cuts too coarse; +2 → z15 to sharpen vs harbor
+		return 15
 	default: // everyone else bakes to native max:
-		//   overview(8)/general(10) are capped client-side (no overzoom cut to sharpen);
-		//   approach(14) cuts vs harbor — fine, and deeper zooms over a whole district
-		//     are the dominant size/index cost (Alaska approach: ~1.2 GB → ~80 MB);
+		//   overview(7)/general(9) are capped client-side (no overzoom cut to sharpen);
 		//   harbor(16) cuts vs berthing; berthing(18) is the finest band.
 		return bandMax
 	}
@@ -100,15 +100,15 @@ const (
 func (b Band) ZoomRange() ZoomRange {
 	switch b {
 	case BandOverview:
-		return ZoomRange{0, 8}
+		return ZoomRange{0, 7}
 	case BandGeneral:
-		return ZoomRange{8, 10}
+		return ZoomRange{7, 9}
 	case BandCoastal:
-		return ZoomRange{10, 12}
+		return ZoomRange{9, 11}
 	case BandApproach:
-		return ZoomRange{12, 14}
+		return ZoomRange{11, 13}
 	case BandHarbor:
-		return ZoomRange{14, 16}
+		return ZoomRange{13, 16}
 	default: // berthing
 		return ZoomRange{16, 18}
 	}
@@ -126,11 +126,11 @@ type BakeBand struct {
 // chart-<slug> source. Max feeds EmitTileBandInto's band filter (natMax == Max).
 func BakeBands() []BakeBand {
 	return []BakeBand{
-		{"overview", 0, 8},
-		{"general", 8, 10},
-		{"coastal", 10, 12},
-		{"approach", 12, 14},
-		{"harbor", 14, 16},
+		{"overview", 0, 7},
+		{"general", 7, 9},
+		{"coastal", 9, 11},
+		{"approach", 11, 13},
+		{"harbor", 13, 16},
 		{"berthing", 16, 18},
 	}
 }
@@ -267,12 +267,13 @@ type routed struct {
 	bcBase   bool // attrs is variable-only; rebuild the base from bc* at emit
 }
 
-// sectorPrim is a LIGHTS06 sector light. Its geometry (dashed legs, OUTLW-backed
-// coloured arc / ring) is screen-px sized, so it is tessellated per zoom at emit
-// time into the lines layer rather than stored as fixed lat/lon geometry.
+// sectorPrim is one constructed sector-light figure element (a dashed leg, or a
+// black-backed coloured arc / ring) the S-101 rule emitted via AugmentedRay /
+// ArcByRadius. Its mm sizes are screen-px, so it is tessellated per zoom at emit
+// time into the sector_lines layer rather than stored as fixed lat/lon geometry —
+// driven by the catalogue's bearings/radii/colours, not a Go re-derivation.
 type sectorPrim struct {
-	anchor   geo.LatLon
-	params   portrayal.SectorParams
+	fig      portrayal.AugmentedFigure
 	class    string
 	cell     string
 	drawPrio int
@@ -280,11 +281,14 @@ type sectorPrim struct {
 	zMin     uint32
 	natMax   uint32
 	scamin   uint32 // SCAMIN denominator of the parent LIGHTS (0 = none); emitted as `scamin` so the client's per-SCAMIN bucket layer gates the exact display cutoff, same as point symbols/text
+	// Date validity of the parent LIGHTS (S-52 §10.4.1.1); empty when none. Carried
+	// because sectors tessellate at tile-emit time, after b.curDate* has moved on.
+	dateStart, dateEnd string
 	// legNorm is the full-length leg reach (VALNMR nominal range) as a fraction
 	// of the normalized world — a fixed GROUND distance, so zoom-independent
-	// (unlike the 25 mm short legs / ring, which are screen-px). Drives the tile
+	// (unlike the 25 mm short leg / arc, which are screen-px). Drives the tile
 	// enumeration + emit margin so the long legs aren't culled near tile edges.
-	// 0 when the light has no VALNMR (only the screen-px figure spills).
+	// 0 for an arc, or a leg whose light has no VALNMR (only the screen-px spills).
 	legNorm float64
 }
 
@@ -310,6 +314,14 @@ type Baker struct {
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
+	// Date dependency (S-52 PresLib §10.4.1.1 / Fig 1): the current feature's
+	// validity period, baked onto every one of its primitives so the client can
+	// apply the MANDATORY date filter — a date-dependent object outside its period
+	// is not displayed for the current date. Empty when the feature has no period.
+	// Values are S-57 date strings: full "YYYYMMDD" (fixed) or partial "--MMDD"
+	// recurring each year (periodic).
+	curDateStart string
+	curDateEnd   string
 	// Co-located-light combination (S-52 LIGHTS06): when several LIGHTS share a
 	// position, the first is "primary" (one flare + a merged multi-line label);
 	// the rest are suppressed (flare + text dropped, sectors kept). seenSector
@@ -387,10 +399,15 @@ type covMeta struct {
 	rings            [][][]float64
 }
 
-// sectorKey identifies a sector light's geometry (anchor + params) for dedup.
+// sectorKey identifies one constructed sector-figure element (anchor + ray/arc
+// params + stroke) for dedup — co-located lights often repeat identical sectors.
 type sectorKey struct {
-	lat, lon, s1, s2, r int64
-	col                 string
+	lat, lon   int64
+	ray        bool
+	p1, p2, p3 int64 // ray: bearing, length, 0 — arc: radius, start, sweep
+	col        string
+	w          int64
+	dashed     bool
 }
 
 func quantDeg(f float64) int64 { return int64(math.Round(f * 1e6)) }
@@ -634,6 +651,9 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 			scamin := intAttr(f.Attributes(), "SCAMIN")
 			b.curScamin = scamin   // baked as the `scamin` tag → client per-SCAMIN bucket layers
 			b.recordScamin(scamin) // publish the band's distinct values (manifest → TileJSON)
+			// Date validity period (S-52 §10.4.1.1) — baked onto each primitive so the
+			// client applies the mandatory current-date filter.
+			b.curDateStart, b.curDateEnd = fb.DateStart, fb.DateEnd
 			zMin := bandZMin(fb.DisplayCategory, scamin, dr.Min, cellLat)
 			class := f.ObjectClass()
 			drval1, drval2 := depthVals(f.Attributes(), class)
@@ -692,6 +712,34 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 			}
 		}
 	}
+}
+
+// appendDateTags adds the feature's date-validity period (S-52 §10.4.1.1) to a
+// tile feature's attrs when it has one, so the client's mandatory current-date
+// filter can hide it outside its period. The period is baked in a filter-friendly
+// form: date_start / date_end are the comparable bound strings — a recurring
+// month-day "MMDD" (from an S-57 "--MMDD" partial) or a full "YYYYMMDD" — each
+// present only when that bound exists (a one-sided range is semi-open); the
+// boolean date_recurring (present iff the feature is dated) tells the client which
+// "today" form to compare against and lexicographic compare does the rest.
+func appendDateTags(attrs []mvt.KeyValue, start, end string) []mvt.KeyValue {
+	if start == "" && end == "" {
+		return attrs
+	}
+	recurring := strings.HasPrefix(start, "--") || strings.HasPrefix(end, "--")
+	norm := func(s string) string { return strings.TrimPrefix(s, "--") }
+	if start != "" {
+		attrs = append(attrs, mvt.KeyValue{Key: "date_start", Value: mvt.StringVal(norm(start))})
+	}
+	if end != "" {
+		attrs = append(attrs, mvt.KeyValue{Key: "date_end", Value: mvt.StringVal(norm(end))})
+	}
+	rec := int64(0)
+	if recurring {
+		rec = 1
+	}
+	attrs = append(attrs, mvt.KeyValue{Key: "date_recurring", Value: mvt.IntVal(rec)})
+	return attrs
 }
 
 // routeSoundingGroup emits one soundings feature for a whole sounding number
@@ -855,6 +903,9 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		if b.curAttrs != "" {
 			extra = append(extra, mvt.KeyValue{Key: "s57", Value: mvt.StringVal(b.curAttrs)})
 		}
+		// Date validity (S-52 §10.4.1.1): the client's mandatory current-date filter
+		// hides a date-dependent feature outside its period.
+		extra = appendDateTags(extra, b.curDateStart, b.curDateEnd)
 		return extra
 	}
 	r := routed{
@@ -939,10 +990,20 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		b.add(r, ptBbox(v.Anchor))
 	case portrayal.SymbolCall:
 		b.routeSymbol(v, common, r)
-	case portrayal.SectorLight:
-		// Dedupe identical sector geometry (co-located lights often repeat sectors).
-		k := sectorKey{quantDeg(v.Anchor.Lat), quantDeg(v.Anchor.Lon),
-			quantDeg(v.Sector.StartAngleDeg), quantDeg(v.Sector.EndAngleDeg), quantDeg(v.Sector.RadiusNM), v.Sector.ColorToken}
+	case portrayal.AugmentedFigure:
+		// One constructed sector-figure element (leg / arc). Dedupe identical
+		// elements (co-located lights often repeat sectors).
+		var p1, p2, p3 int64
+		if v.Ray {
+			p1, p2 = quantDeg(v.BearingDeg), quantDeg(v.LengthMM)
+		} else {
+			p1, p2, p3 = quantDeg(v.RadiusMM), quantDeg(v.StartDeg), quantDeg(v.SweepDeg)
+		}
+		k := sectorKey{
+			lat: quantDeg(v.Anchor.Lat), lon: quantDeg(v.Anchor.Lon),
+			ray: v.Ray, p1: p1, p2: p2, p3: p3,
+			col: v.ColorToken, w: quantDeg(v.WidthMM), dashed: v.Dash == portrayal.DashDashed,
+		}
 		if b.seenSector != nil {
 			if _, dup := b.seenSector[k]; dup {
 				return
@@ -950,11 +1011,16 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 			b.seenSector[k] = struct{}{}
 		}
 		b.bbox.ExtendPoint(v.Anchor)
+		var legNorm float64
+		if v.Ray && v.FullLengthNM > 0 {
+			legNorm = sectorLegFullNorm(v.Anchor.Lat, v.FullLengthNM)
+		}
 		b.sectors = append(b.sectors, sectorPrim{
-			anchor: v.Anchor, params: v.Sector, class: class, cell: b.curCell,
+			fig: v, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, zMin: zMin, natMax: zr.Max,
-			scamin:  b.curScamin,
-			legNorm: sectorLegFullNorm(v.Anchor.Lat, v.Sector.RadiusNM),
+			scamin:    b.curScamin,
+			dateStart: b.curDateStart, dateEnd: b.curDateEnd,
+			legNorm: legNorm,
 		})
 	}
 }
@@ -1132,7 +1198,7 @@ func (b *Baker) TileCoords(extent uint32) []tile.TileCoord {
 	// the arc is clipped dead at the tile boundary.
 	for i := range b.sectors {
 		sp := &b.sectors[i]
-		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		ax, ay := normX(sp.fig.Anchor.Lon), normY(sp.fig.Anchor.Lat)
 		for z := sp.zMin; z <= b.clampZMax(sp.natMax); z++ {
 			// Full-length legs (sp.legNorm, a fixed ground distance) can reach far
 			// past the screen-px figure, so enumerate every tile they cross.
@@ -1180,7 +1246,7 @@ func (b *Baker) TileCoordsBand(extent, bandMin, bandMax uint32) []tile.TileCoord
 		if sp.natMax != bandMax {
 			continue
 		}
-		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		ax, ay := normX(sp.fig.Anchor.Lon), normY(sp.fig.Anchor.Lat)
 		// Like the flare prim (see lo := r.zMin above), a SCAMIN-bearing sector may
 		// sit BELOW bandMin — keep it AVAILABLE down to its SCAMIN scale so the
 		// client's per-SCAMIN bucket gates the exact cutoff. Non-SCAMIN sectors have
@@ -1305,10 +1371,10 @@ func primTileSpan(r *routed, z uint32, bufFrac float64) int64 {
 	return (xMax - xMin + 1) * (yMax - yMin + 1)
 }
 
-// sectorRadiusNorm is the LIGHTS06 sector figure's maximum extent (the 26 mm
-// ring) in normalized-world units at zoom z. The geometry is laid out in a
-// 256-px-per-tile space (see expandSector's worldPx), so the spill is a fixed
-// fraction of a tile at every zoom: 26 mm × px/mm ÷ 256 ÷ 2^z.
+// sectorRadiusNorm is the sector figure's maximum screen-px extent (the 26 mm
+// all-round ring) in normalized-world units at zoom z. The geometry is laid out
+// in a 256-px-per-tile space (see tessellateFigure's worldPx), so the spill is a
+// fixed fraction of a tile at every zoom: 26 mm × px/mm ÷ 256 ÷ 2^z.
 func sectorRadiusNorm(z uint32) float64 {
 	return 26.0 * float64(portrayal.DefaultPxPerSymbolUnit) * 100.0 / 256.0 / math.Pow(2, float64(z))
 }
@@ -1595,11 +1661,11 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			continue
 		}
 		margin := math.Max(sectorRadiusNorm(coord.Z), sp.legNorm) + spill
-		ax, ay := normX(sp.anchor.Lon), normY(sp.anchor.Lat)
+		ax, ay := normX(sp.fig.Anchor.Lon), normY(sp.fig.Anchor.Lat)
 		if ax < tnx0-margin || ax > tnx1+margin || ay < tny0-margin || ay > tny1+margin {
 			continue
 		}
-		for _, st := range expandSector(sp.anchor, sp.params, coord.Z) {
+		for _, st := range tessellateFigure(sp, coord.Z) {
 			runs := tile.ClipLine(projectRing(st.points, proj), rect)
 			paths := make([][]mvt.IPoint, 0, len(runs))
 			for _, run := range runs {
@@ -1636,6 +1702,9 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			if sp.scamin != 0 {
 				attrs = append(attrs, mvt.KeyValue{Key: "scamin", Value: mvt.IntVal(int64(sp.scamin))})
 			}
+			// Date validity of the parent light (S-52 §10.4.1.1) — so a seasonal
+			// sector light's figure hides with its flare/text under the date filter.
+			attrs = appendDateTags(attrs, sp.dateStart, sp.dateEnd)
 			tb.Layer("sector_lines").AddLines(paths, attrs)
 		}
 	}
@@ -1724,44 +1793,72 @@ type sectorStroke struct {
 	sleg       int
 }
 
-// expandSector tessellates a LIGHTS06 sector at anchor into lat/lon line strokes
-// sized for integer zoom z (screen-px radii). A ring is one OUTLW-backed
-// coloured circle (26 mm); a sector is two dashed CHBLK
-// legs (25 mm) plus an OUTLW-backed coloured arc (20 mm). SECTR1/2 are from
-// seaward, so bearings are reversed +180.
-func expandSector(anchor geo.LatLon, p portrayal.SectorParams, z uint32) []sectorStroke {
+// tessellateFigure tessellates one constructed sector-figure element (sp.fig) at
+// integer zoom z into lat/lon line strokes, screen-px sized (the mm sizes are
+// fixed display millimetres, hence per-zoom). A leg (ray) becomes one stroke from
+// the anchor along its bearing; when the light has a nominal range it also emits
+// the extended "full light lines" leg, the two tagged sleg 0/1 for the client's
+// live toggle. An arc/ring becomes one polyline stroke. Colour, width and dash
+// all come from the rule's LineStyle — including the black backing under a
+// coloured arc and a white light's yellow (LITYW) arc — not a Go re-derivation.
+// The rule has already applied the from-seaward +180 bearing reversal, so the
+// bearings/angles are used as-is.
+func tessellateFigure(sp *sectorPrim, z uint32) []sectorStroke {
 	worldPx := 256.0 * math.Pow(2, float64(z))
-	ax, ay := normX(anchor.Lon)*worldPx, normY(anchor.Lat)*worldPx
+	ax, ay := normX(sp.fig.Anchor.Lon)*worldPx, normY(sp.fig.Anchor.Lat)*worldPx
 	pxPerMM := float64(portrayal.DefaultPxPerSymbolUnit) * 100.0
-	color := p.ColorToken
-	if color == "" {
-		color = "LITRD"
+	widthPx := sp.fig.WidthMM * pxPerMM
+	dashed := sp.fig.Dash == portrayal.DashDashed
+
+	if !sp.fig.Ray { // arc / ring
+		radius := sp.fig.RadiusMM * pxPerMM
+		if radius <= 0 {
+			return nil
+		}
+		sweep := sp.fig.SweepDeg
+		if sweep == 0 {
+			sweep = 360 // a zero sweep is a full all-round ring
+		}
+		n := int(math.Ceil(math.Abs(sweep) / 3.0))
+		if n < 8 {
+			n = 8
+		}
+		pts := make([]geo.LatLon, n+1)
+		for i := range pts {
+			brg := sp.fig.StartDeg + sweep*float64(i)/float64(n)
+			dx, dy := bearingToScreen(brg)
+			pts[i] = sunproject(ax+dx*radius, ay+dy*radius, worldPx)
+		}
+		// One stroke; the rule emits the black backing and the coloured arc as
+		// separate figures, so the double-stroke is preserved by draw order. Arcs/
+		// rings carry no leg tag (sleg -1) — always shown, regardless of the toggle.
+		return []sectorStroke{{points: pts, colorToken: sp.fig.ColorToken, widthPx: float32(widthPx), dashed: dashed, sleg: -1}}
 	}
 
-	sweep := p.EndAngleDeg - p.StartAngleDeg
-	isRing := math.Abs(sweep) < 1e-6 || math.Abs(math.Abs(sweep)-360) < 1e-6
-	if isRing {
-		return emitArc(nil, ax, ay, worldPx, 26.0, color, 0, 360, pxPerMM)
+	// Leg (ray): the rule's length, plus the extended full-length variant when a
+	// nominal range is known.
+	emit := func(out []sectorStroke, lenPx float64, sleg int) []sectorStroke {
+		if lenPx <= 0 {
+			return out
+		}
+		dx, dy := bearingToScreen(sp.fig.BearingDeg)
+		pts := []geo.LatLon{
+			sunproject(ax, ay, worldPx),
+			sunproject(ax+dx*lenPx, ay+dy*lenPx, worldPx),
+		}
+		return append(out, sectorStroke{points: pts, colorToken: sp.fig.ColorToken, widthPx: float32(widthPx), dashed: dashed, sleg: sleg})
 	}
-	a1 := p.StartAngleDeg + 180.0
-	a2 := p.EndAngleDeg + 180.0
-	if a2 <= a1 {
-		a2 += 360.0
+	legShort := sp.fig.LengthMM * pxPerMM
+	if sp.fig.FullLengthNM <= 0 {
+		return emit(nil, legShort, -1) // can't extend: the leg is always shown
 	}
-	legShort := 25.0 * pxPerMM
-	// Full leg extends to the VALNMR nominal range (S-52 LIGHTS06 note 1). Never
-	// shorter than the 25 mm default, so the "full length" toggle only ever grows
-	// the leg. Both variants are baked (tagged sleg 0/1); the client shows one.
-	legFull := sectorLegFullNorm(anchor.Lat, p.RadiusNM) * worldPx
+	legFull := sectorLegFullNorm(sp.fig.Anchor.Lat, sp.fig.FullLengthNM) * worldPx
 	if legFull < legShort {
 		legFull = legShort
 	}
 	var out []sectorStroke
-	out = emitLeg(out, ax, ay, worldPx, a1, legShort, 0)
-	out = emitLeg(out, ax, ay, worldPx, a2, legShort, 0)
-	out = emitLeg(out, ax, ay, worldPx, a1, legFull, 1)
-	out = emitLeg(out, ax, ay, worldPx, a2, legFull, 1)
-	out = emitArc(out, ax, ay, worldPx, 20.0, color, a1, a2, pxPerMM)
+	out = emit(out, legShort, 0)
+	out = emit(out, legFull, 1)
 	return out
 }
 
@@ -1772,43 +1869,6 @@ func bearingToScreen(deg float64) (float64, float64) {
 
 func sunproject(x, y, worldPx float64) geo.LatLon {
 	return geo.LatLon{Lat: unnormY(y / worldPx), Lon: x/worldPx*360 - 180}
-}
-
-func emitLeg(out []sectorStroke, ax, ay, worldPx, bearingDeg, lenPx float64, sleg int) []sectorStroke {
-	if lenPx <= 0 {
-		return out
-	}
-	dx, dy := bearingToScreen(bearingDeg)
-	pts := []geo.LatLon{
-		sunproject(ax, ay, worldPx),
-		sunproject(ax+dx*lenPx, ay+dy*lenPx, worldPx),
-	}
-	return append(out, sectorStroke{points: pts, colorToken: "CHBLK", widthPx: 1, dashed: true, sleg: sleg})
-}
-
-func emitArc(out []sectorStroke, ax, ay, worldPx, radiusMM float64, color string, a1, a2, pxPerMM float64) []sectorStroke {
-	radius := radiusMM * pxPerMM
-	sweep := a2 - a1
-	if radius <= 0 || sweep <= 0 {
-		return out
-	}
-	n := int(math.Ceil(sweep / 3.0))
-	if n < 8 {
-		n = 8
-	}
-	pts := make([]geo.LatLon, n+1)
-	for i := range pts {
-		brg := a1 + sweep*float64(i)/float64(n)
-		dx, dy := bearingToScreen(brg)
-		pts[i] = sunproject(ax+dx*radius, ay+dy*radius, worldPx)
-	}
-	// OUTLW underlay (4 px) beneath, then the coloured arc (2 px) on top. Arcs/
-	// rings carry no leg tag (sleg -1) — always shown, regardless of the toggle.
-	pts2 := make([]geo.LatLon, len(pts))
-	copy(pts2, pts)
-	out = append(out, sectorStroke{points: pts, colorToken: "OUTLW", widthPx: 4, dashed: false, sleg: -1})
-	out = append(out, sectorStroke{points: pts2, colorToken: color, widthPx: 2, dashed: false, sleg: -1})
-	return out
 }
 
 // anyCoarserOverlaps reports whether a strictly-coarser-band eligible primitive's

@@ -75,6 +75,15 @@ const DEFAULT_MARINER = {
   showScaleBoundaries: false, // DATCVR §10.1.9.1 chart scale boundaries — off by default (opt-in)
   // Individually-selectable "Other" items (S-52/IMO), all default on.
   showSoundings: true,
+  // Date-dependent display (S-52 §10.4.1.1, MANDATORY): show a dated feature only
+  // when the viewing date is within its validity period. Default on (spec); set
+  // false to show all dates regardless. dateView ("YYYYMMDD") pins a planning
+  // date; unset = real today.
+  dateDependent: true,
+  // "Highlight date dependent" (S-52 §10.6.1.1, viewing group 90022): the CHDATD01
+  // marker on in-period date-dependent features — an optional highlight, off by
+  // default (opt-in), like the info/document highlights.
+  highlightDateDependent: false,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
   // independent of display category (each TX/TE carries a group number, §14.4).
   showLightDescriptions: true, // group 23: light characteristics (e.g. Fl(2)R 10s)
@@ -438,11 +447,14 @@ export class ChartPlotter extends HTMLElement {
     }
     const need = packs.length === 1 ? (BAND_MINZOOM[BANDS[finest]] || 12) + 0.3 : 0;
     const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
-    const zoom = Math.min(18, Math.max(cam ? cam.zoom : Math.max(need, 9), need));
+    // Cap the fly target at the destination's scale floor (not a raw z18) so we
+    // never overshoot it and snap back when moveend re-applies the floor.
+    const destLat = cam ? cam.center.lat : (s + n) / 2;
+    const zoom = Math.min(maxZoomForScaleFloor(destLat), Math.max(cam ? cam.zoom : Math.max(need, 9), need));
     // Raise the dynamic zoom cap to the target FIRST — we're flying from open water
-    // (low cap) into the pack's coverage, so without this the fly clamps short and a
-    // berthing-only set wouldn't reach the zoom where it renders. _updateZoomCap
-    // recomputes at the destination (which has the charts) and won't yank back.
+    // (low cap, set at the prior latitude) into the pack's coverage, so without this
+    // the fly clamps short and a berthing-only set wouldn't reach the zoom where it
+    // renders. The moveend handler re-applies the floor at the destination.
     if (map.getMaxZoom() < zoom) map.setMaxZoom(zoom);
     map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
   }
@@ -513,6 +525,11 @@ export class ChartPlotter extends HTMLElement {
       this.addCatalogOverlay(map);
       this._refreshInstalledBounds();
     });
+    // Hold the 1:MIN_DETAIL_SCALE max-zoom floor on EVERY view change. It's
+    // latitude-dependent (recompute as the centre moves), and a fly-to-chart raises
+    // the cap to reach a pack's detail — without re-enforcing here that raised cap
+    // sticks and you can magnify past the floor (the 1:900 over-zoom).
+    map.on("moveend", () => this._applyScaleFloor());
     await this.restoreArchive();
     // Local serve: render every baked pack the server holds (survives reload). Prod
     // already loaded its prebaked archives in restoreArchive() above.
@@ -1084,26 +1101,56 @@ export class ChartPlotter extends HTMLElement {
     // pick point (a click runs the cursor pick / district preview). The dev feature
     // inspector (now in DevTools) sets its own cursor + owns the hover/click/
     // SHIFT+drag listeners; its click handler runs only while inspecting.
-    map.getCanvas().style.cursor = "crosshair";
-    // While the user grabs and pans the chart, swap the crosshair for a closed-
-    // hand "grabbing" cursor so the drag reads as a grab; restore the ECDIS
-    // crosshair when the pan ends. The dev inspector owns its own cursor while
-    // armed (SHIFT+drag box-select), so don't fight it then.
-    map.on("dragstart", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "grabbing"; });
-    map.on("dragend", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "crosshair"; });
-    map.on("click", (e) => {
-      // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
-      // it so a pick/coverage tap doesn't fire under an active inspect lock.
-      if (this._devTools && this._devTools.inspecting) return;
-      // (The Charts cell-picker tap-to-preview-a-district branch was removed with
-      // the main-map cell picker; the <chart-library> panel is the chart surface.)
-      // Zoomed out over an installed-chart coverage marker → fly to that chart at
-      // its detail zoom (so you can find + open installed charts without knowing
-      // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
-      if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
-      // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
-      this._pickReportAt(e.point, e.originalEvent);
-    });
+    // Map-level interaction listeners + cursor register ONCE: map events (and the
+    // canvas cursor) SURVIVE a setStyle rebuild, but this method re-runs on every
+    // style.load to restore the style-scoped sources/layers above — so re-adding
+    // them here would leak a duplicate dragstart/dragend/click set per rebuild
+    // (which compounded the SCAMIN-rebuild churn into a CPU sink). The guarded
+    // sources above already no-op on a redundant call; these must too.
+    if (!this._catalogMapWired) {
+      this._catalogMapWired = true;
+      map.getCanvas().style.cursor = "crosshair";
+      // While the user grabs and pans the chart, swap the crosshair for a closed-
+      // hand "grabbing" cursor so the drag reads as a grab; restore the ECDIS
+      // crosshair when the pan ends. The dev inspector owns its own cursor while
+      // armed (SHIFT+drag box-select), so don't fight it then.
+      map.on("dragstart", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "grabbing"; });
+      map.on("dragend", () => { if (!(this._devTools && this._devTools.inspecting)) map.getCanvas().style.cursor = "crosshair"; });
+      map.on("click", (e) => {
+        // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
+        // it so a pick/coverage tap doesn't fire under an active inspect lock.
+        if (this._devTools && this._devTools.inspecting) return;
+        // (The Charts cell-picker tap-to-preview-a-district branch was removed with
+        // the main-map cell picker; the <chart-library> panel is the chart surface.)
+        // Zoomed out over an installed-chart coverage marker → fly to that chart at
+        // its detail zoom (so you can find + open installed charts without knowing
+        // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
+        if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
+        // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
+        this._pickReportAt(e.point, e.originalEvent);
+      });
+    }
+  }
+
+  // Copy a link to the current view to the clipboard. The link carries ONLY the
+  // camera (#v=lon,lat,zoom[,bearing,pitch]) — the cells/tiles already live on the
+  // server (the hub), so the opener (incl. a headless browser used for debugging)
+  // just reopens the same spot. parseViewHash reads it back on boot.
+  _shareView(btn) {
+    const m = this._map;
+    if (!m) return;
+    try {
+      const c = m.getCenter();
+      const parts = [+c.lng.toFixed(6), +c.lat.toFixed(6), +m.getZoom().toFixed(3)];
+      const b = +m.getBearing().toFixed(1), p = +m.getPitch().toFixed(1);
+      if (b || p) { parts.push(b); if (p) parts.push(p); } // omit trailing zeros
+      const url = location.origin + location.pathname + "#v=" + parts.join(",");
+      console.log("[share] view link:", url);
+      copyText(url).then((ok) => { if (btn) flashBtn(btn, ok ? "✓ copied" : "✓"); });
+    } catch (e) {
+      console.warn("[share] link failed:", e);
+      if (btn) flashBtn(btn, "✗");
+    }
   }
 
   // Fetch the latest shared snapshot and install its cells locally, downloading
@@ -1734,6 +1781,7 @@ export class ChartPlotter extends HTMLElement {
     $("settings-btn").onclick = () => this.toggleSection("settings");
     $("close").onclick = () => this.closeDrawer();
     $("scheme-toggle").onclick = () => this._cycleScheme();
+    $("share-btn").onclick = (e) => this._shareView(e.currentTarget);
     this._syncSchemeUI(); // paint the toggle's initial icon
     // Escape closes the topmost open dialog/overlay (one per press). The
     // cursor-pick report closes itself (its own captured handler runs first).

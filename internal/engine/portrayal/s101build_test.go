@@ -33,6 +33,53 @@ func s101Builder(t *testing.T) *S101Builder {
 	return b
 }
 
+// s101BuilderEmbedded builds from the in-repo embedded catalogue (the one the
+// baker ships), so the test runs without an external catalogue checkout.
+func s101BuilderEmbedded(t *testing.T) *S101Builder {
+	t.Helper()
+	pc := "../s101catalog/catalog/PortrayalCatalog"
+	fcPath := "../s101catalog/catalog/FeatureCatalogue.xml"
+	if _, err := os.Stat(filepath.Join(pc, "Rules", "main.lua")); err != nil {
+		t.Skip("no embedded catalogue")
+	}
+	b, err := NewS101Builder(pc, fcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestS101BuildDateDependent: a seasonal buoy (S-57 PERSTA/PEREND) is portrayed
+// date-dependent — buildFeature surfaces the periodic range on the FeatureBuild
+// and the CHDATD01 date-dependent marker symbol is emitted (the S-101
+// ProcessFixedAndPeriodicDates path wired into the engine).
+func TestS101BuildDateDependent(t *testing.T) {
+	b := s101BuilderEmbedded(t)
+	buoy := s57.NewFeature(1, "BOYLAT",
+		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{-76.3, 38.9}}},
+		map[string]interface{}{"CATLAM": 2, "BOYSHP": 2, "COLOUR": "3", "PERSTA": "--0301", "PEREND": "--1201"},
+	)
+	build, ok := b.Build(&buoy)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	if build.DateStart != "--0301" || build.DateEnd != "--1201" {
+		t.Errorf("date range = %q..%q, want --0301..--1201", build.DateStart, build.DateEnd)
+	}
+	if build.TimeValid != "closedInterval" {
+		t.Errorf("TimeValid = %q, want closedInterval", build.TimeValid)
+	}
+	hasMarker := false
+	for _, p := range build.Primitives {
+		if sc, ok := p.(SymbolCall); ok && sc.SymbolName == "CHDATD01" {
+			hasMarker = true
+		}
+	}
+	if !hasMarker {
+		t.Errorf("no CHDATD01 date-dependent marker emitted; got %#v", build.Primitives)
+	}
+}
+
 // TestS101BuildPointSymbol drives a real S-57 feature through the full build
 // seam: S-57 acronyms → S-101 rule → instructions → geometry-placed Primitive.
 func TestS101BuildPointSymbol(t *testing.T) {
@@ -65,7 +112,7 @@ func TestS101BuildPointSymbol(t *testing.T) {
 }
 
 // TestS101BuildAreaFillAndLine drives a polygon feature; the SiloTank surface
-// branch emits ColorFill:CHBRN + a boundary line, lowered onto the rings.
+// branch emits ColorFill:CHBRN + a boundary line, emitted onto the rings.
 func TestS101BuildAreaFillAndLine(t *testing.T) {
 	b := s101Builder(t)
 	ring := [][]float64{{0, 0}, {0, 1}, {1, 1}, {1, 0}, {0, 0}}
@@ -88,7 +135,7 @@ func TestS101BuildAreaFillAndLine(t *testing.T) {
 		t.Fatalf("want FillPolygon CHBRN, got %#v", build.Primitives)
 	}
 	if len(fill.Rings) == 0 || len(fill.Rings[0]) == 0 {
-		t.Errorf("fill not lowered onto geometry: %+v", fill.Rings)
+		t.Errorf("fill not emitted onto geometry: %+v", fill.Rings)
 	}
 }
 
@@ -326,12 +373,44 @@ func TestS101NameLabel(t *testing.T) {
 	}
 }
 
+// TestS101BuildAllAroundLightCharacteristic: an all-around light's description
+// (LITDSN02) must carry its character + period, not collapse to just the colour.
+// LITDSN02 reads these from the rhythmOfLight complex attribute, which the bridge
+// synthesizes from S-57 LITCHR/SIGGRP/SIGPER — without it the text was e.g. "G".
+func TestS101BuildAllAroundLightCharacteristic(t *testing.T) {
+	b := s101BuilderEmbedded(t)
+	lt := s57.NewFeature(1, "LIGHTS",
+		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}},
+		map[string]interface{}{"LITCHR": 4, "COLOUR": "4", "SIGPER": "1"}, // Quick, green, 1s
+	)
+	build, ok := b.Build(&lt)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	var text string
+	for _, p := range build.Primitives {
+		if dt, ok := p.(DrawText); ok && strings.ContainsAny(dt.Text, "QGFlsm") {
+			text = dt.Text
+			break
+		}
+	}
+	if !strings.Contains(text, "Q") {
+		t.Errorf("light text = %q, want the Quick character 'Q' (rhythmOfLight not synthesized?)", text)
+	}
+	if !strings.Contains(text, "G") {
+		t.Errorf("light text = %q, want the green colour 'G'", text)
+	}
+	if !strings.Contains(text, "1s") {
+		t.Errorf("light text = %q, want the 1s period", text)
+	}
+}
+
 // TestS101BuildSectorLight drives an S-57 sectored light through the full build
-// seam and asserts a SectorLight primitive is produced (the fixed-screen-size
-// sector legs/arc the baker tessellates into the sector_lines layer), with the
-// S-57 sector limits/colour carried through unflipped.
+// seam and asserts the rule's constructed AugmentedFigure elements come through:
+// the dashed legs (rays, tagged with the nominal range for the full-light-lines
+// toggle) and the coloured arc — driven by the catalogue, not a Go re-derivation.
 func TestS101BuildSectorLight(t *testing.T) {
-	b := s101Builder(t)
+	b := s101BuilderEmbedded(t)
 
 	lt := s57.NewFeature(1, "LIGHTS",
 		s57.Geometry{Type: s57.GeometryTypePoint, Coordinates: [][]float64{{12.5, 55.7}}},
@@ -344,24 +423,33 @@ func TestS101BuildSectorLight(t *testing.T) {
 	if !ok {
 		t.Fatal("build failed")
 	}
-	var sec *SectorLight
-	for i := range build.Primitives {
-		if s, ok := build.Primitives[i].(SectorLight); ok {
-			sec = &s
-			break
+	var legs, arcs int
+	var arcColor string
+	for _, p := range build.Primitives {
+		fig, ok := p.(AugmentedFigure)
+		if !ok {
+			continue
+		}
+		if fig.Ray {
+			legs++
+			if fig.FullLengthNM != 9 {
+				t.Errorf("leg nominal range = %v, want 9 (from VALNMR)", fig.FullLengthNM)
+			}
+		} else {
+			arcs++
+			if fig.ColorToken == "LITRD" {
+				arcColor = fig.ColorToken
+			}
 		}
 	}
-	if sec == nil {
-		t.Fatalf("no SectorLight emitted; got %#v", build.Primitives)
+	if legs < 2 {
+		t.Errorf("legs = %d, want >=2 (two sector limits)", legs)
 	}
-	if sec.Sector.StartAngleDeg != 45 || sec.Sector.EndAngleDeg != 90 {
-		t.Errorf("angles = %v..%v, want 45..90 (unflipped seaward)", sec.Sector.StartAngleDeg, sec.Sector.EndAngleDeg)
+	if arcs < 1 {
+		t.Errorf("arcs = %d, want >=1 (the sector arc)", arcs)
 	}
-	if sec.Sector.ColorToken != "LITRD" {
-		t.Errorf("colour = %q, want LITRD (red)", sec.Sector.ColorToken)
-	}
-	if sec.Sector.RadiusNM != 9 {
-		t.Errorf("radius = %v, want 9 NM", sec.Sector.RadiusNM)
+	if arcColor != "LITRD" {
+		t.Errorf("no LITRD (red) arc found; COLOUR=3 should portray red")
 	}
 }
 
