@@ -131,6 +131,18 @@ export function contourLabelField(mariner) {
   return ["case", ["has", "valdco"], ["to-string", v], ""];
 }
 
+// DredgedArea depth label (S-52 row 47 / S-101 DredgedArea.lua): the dredged
+// depth (DRVAL1) with a unit suffix, e.g. "1.8m" / "6ft". Drawn client-side from
+// the baked `drval1` so it tracks the mariner's depth unit — the baker no longer
+// bakes the rule's fixed-metres "%gm" text. Feet round to whole (chart
+// convention); metres keep one decimal (DRVAL1 is often fractional, e.g. 1.8).
+export function drgareLabelField(mariner) {
+  const ft = mariner.depthUnit === "ft";
+  const val = ft ? ["*", ["get", "drval1"], M_TO_FT] : ["get", "drval1"];
+  const num = ["number-format", val, { "max-fraction-digits": ft ? 0 : 1 }];
+  return ["case", ["has", "drval1"], ["concat", num, ft ? "ft" : "m"], ""];
+}
+
 // SNDFRM04 (S-52 §13.2.16): a sounding ≤ the live safety depth uses the bold
 // SOUNDS glyphs, else the faint SOUNDG glyphs — picked client-side from the
 // baked depth + both name variants. Falls back to the baked names if a tile

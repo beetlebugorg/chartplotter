@@ -498,6 +498,10 @@ export class ChartCanvas extends HTMLElement {
   // the mariner picks imperial units), shown only when "contour labels" is on.
   contourLabelField() { return S52.contourLabelField(this._mariner); }
 
+  // Dredged-area depth label (S-52 row 47): DRVAL1 at the DRGARE centroid in the
+  // chosen depth unit — see s52-style.drgareLabelField.
+  drgareLabelField() { return S52.drgareLabelField(this._mariner); }
+
   // SNDFRM04 (S-52 §13.2.16): a sounding ≤ the live safety depth uses the bold
   // SOUNDS glyphs, else the faint SOUNDG glyphs — picked client-side from the
   // baked depth + both name variants. Falls back to the baked names if a tile
@@ -612,6 +616,8 @@ export class ChartCanvas extends HTMLElement {
     setIf("danger-boundary", "line-color", this.token("CHBLK", "#000000"));
     setIf("contour-labels", "text-color", this.contourLabelColor());
     setIf("contour-labels", "text-halo-color", this.textHaloColor());
+    setIf("drgare-labels", "text-color", this.textColor());
+    setIf("drgare-labels", "text-halo-color", this.textHaloColor());
     setIf("complex-lines", "line-color", this.colorExpr("color_token"));
     setIf("text", "text-color", this.textColor());
     setIf("text", "text-halo-color", this.textHaloColor());
@@ -875,6 +881,7 @@ export class ChartCanvas extends HTMLElement {
       if (keys.includes("depthUnit")) {
         this._eachLayer("soundings", (id) => map.setLayoutProperty(id, "icon-image", this.soundingsIconImage()));
         this._eachLayer("contour-labels", (id) => map.setLayoutProperty(id, "text-field", this.contourLabelField()));
+        this._eachLayer("drgare-labels", (id) => map.setLayoutProperty(id, "text-field", this.drgareLabelField()));
       }
       // Distance unit: the S-52 scalebar reads in NM / km / mi — redraw it.
       if (keys.includes("distanceUnit")) this._renderScalebar();

@@ -708,6 +708,15 @@ func (b *Baker) AddCell(chart *s57.Chart) {
 						continue
 					}
 				}
+				// DRGARE dredged depth is emitted by the rule as a fixed-metres text
+				// label ("%gm", DredgedArea.lua). Drop it; the client labels the
+				// dredged area from the baked `drval1` (carried on the area below),
+				// converting to the chosen depth unit — same pattern as DEPCNT/valdco.
+				if class == "DRGARE" {
+					if _, ok := p.(portrayal.DrawText); ok {
+						continue
+					}
+				}
 				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts, drval1, drval2, valdco)
 			}
 		}
