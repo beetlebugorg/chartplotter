@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b1b2b" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <title>chartplotter — live demo (Annapolis)</title>
+  <style>
+    html {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: #0b1b2b;
+    }
+    body {
+      margin: 0;
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: #0b1b2b;
+      touch-action: manipulation;
+    }
+    chart-plotter {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #splash {
+      position: fixed; inset: 0; z-index: 9999;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 14px; background: #0b1b2b; color: #cfe3f5;
+      font: 15px/1.4 system-ui, -apple-system, sans-serif;
+      transition: opacity .4s ease;
+    }
+    #splash.hide { opacity: 0; pointer-events: none; }
+    #splash .spinner {
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 4px solid #1d3a52; border-top-color: #4aa3df;
+      animation: cp-spin .9s linear infinite;
+    }
+    @keyframes cp-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { #splash .spinner { animation: none; } }
+  </style>
+  <!-- Live demo: the read-only "widget" mode. A self-contained, static viewer —
+       no backend, no NOAA download, no in-browser baking. Charts load from the
+       per-band `.pmtiles` archives listed in charts-index.json (sitting beside this
+       page), streamed by HTTP range requests, so this runs on any static host / CDN.
+       The `widget` attribute strips the shell to a pure viewer: no chart library,
+       no share link, no Advanced settings, no connections — only the client-side
+       display settings (General · Text · Units · Depths), all local.
+       Build it with `make demo`; preview locally with `make serve-demo`. -->
+  <script type="module" src="./src/chartplotter.mjs"></script>
+</head>
+<body>
+  <div id="splash"><div class="spinner"></div><div>Loading charts…</div></div>
+  <script>
+    (function () {
+      var done = false;
+      function hide() {
+        if (done) return; done = true;
+        var s = document.getElementById("splash");
+        if (!s) return;
+        s.classList.add("hide");
+        setTimeout(function () { s.remove(); }, 500);
+      }
+      addEventListener("ready", hide, { once: true });
+      setTimeout(hide, 20000);
+    })();
+  </script>
+
+  <!-- `widget` → read-only viewer; no `pmtiles=` attribute, so the per-band archives
+       are discovered from charts-index.json in this directory. Centred on Annapolis
+       Harbor; zoom out to the whole bay and back in to the docks. -->
+  <chart-plotter widget center="-76.482,38.978" zoom="13"></chart-plotter>
+</body>
+</html>

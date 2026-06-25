@@ -51,6 +51,11 @@ const config = {
         title: 'chartplotter',
         items: [
           {
+            href: 'https://beetlebugorg.github.io/chartplotter/demo/',
+            label: 'Live demo',
+            position: 'right',
+          },
+          {
             href: 'https://github.com/beetlebugorg/chartplotter',
             label: 'GitHub',
             position: 'right',

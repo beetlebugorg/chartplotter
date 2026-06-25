@@ -49,9 +49,15 @@ export class ChartDownloader {
     const man = fetch(manUrl)
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
-        this.districts = (j && j.districts) || [];
-        // The aux zip sits beside the manifest; resolve its basename against manUrl.
-        this.auxUrl = j && j.aux ? manUrl.replace(/[^/]*$/, j.aux) : "";
+        // Manifest paths (the district archives and the aux zip) are relative to the
+        // MANIFEST, not to the page. Resolve them against manUrl so a widget embedded
+        // on a page in a DIFFERENT directory (assets ≠ the page's dir, e.g. a chart
+        // dropped onto a docs page) still finds the .pmtiles — otherwise the renderer
+        // resolves the bare filenames against the page URL and 404s.
+        const manAbs = new URL(manUrl, location.href);
+        this.districts = ((j && j.districts) || []).map((d) =>
+          d && d.file ? { ...d, file: new URL(d.file, manAbs).href } : d);
+        this.auxUrl = j && j.aux ? new URL(j.aux, manAbs).href : "";
       })
       .catch(() => { this.districts = []; this.auxUrl = ""; });
     return Promise.all([cat, man]);

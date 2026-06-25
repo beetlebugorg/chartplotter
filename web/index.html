@@ -62,7 +62,7 @@
        `.000`; the cells are uploaded and the server bakes them (POST /api/import)
        into a tile set the renderer reads from /tiles/{set}. Every S-52 mariner
        setting is then applied client-side. A hosted deployment can instead serve
-       prebaked per-region `.pmtiles` (the `prod` mode / `pmtiles=` attribute).
+       prebaked per-region `.pmtiles` (the `widget` mode / `pmtiles=` attribute).
        Prereqs in this dir:
        colortables/sprite/linestyles/patterns + glyphs (`chartplotter --emit-assets web`),
        vendor/maplibre-gl.*, basemap/coastline.geojson (`scripts/fetch-basemap.sh`),

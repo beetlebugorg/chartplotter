@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-prod
+.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo serve-demo
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -146,10 +146,11 @@ noaa-d%.stamp: $(NOAA_CACHE)/%CGD_ENCs.zip | $(BIN)
 	@touch "$@"
 
 # Serve the per-district NOAA archives + the baked IENC archive TOGETHER,
-# prebaked, in production mode on 0.0.0.0:8080. Every .pmtiles lives at the project
-# root; they're symlinked into web/ (the served asset dir) and listed in a combined
-# charts-index.json manifest the prod app loads via ?catalog=. Open the printed URL.
-serve-prod: build bake-noaa ## Serve per-district per-band NOAA + IENC prebaked pmtiles together, prod mode, on 0.0.0.0:8080
+# prebaked, in read-only widget mode on 0.0.0.0:8080. Every .pmtiles lives at the
+# project root; they're symlinked into web/ (the served asset dir) and listed in a
+# combined charts-index.json manifest the widget app loads via ?catalog=. Open the
+# printed URL.
+serve-widget: build bake-noaa ## Serve per-district per-band NOAA + IENC prebaked pmtiles together, read-only widget mode, on 0.0.0.0:8080
 	@ln -sf "$(abspath $(IENC_PMTILES))" web/ienc.pmtiles
 	@for d in $(DISTRICTS); do for s in $(NOAA_BANDS); do \
 	  f="noaa-d$$d-$$s.pmtiles"; [ -f "$$f" ] && ln -sf "$(abspath .)/$$f" "web/$$f" || true; \
@@ -162,11 +163,44 @@ serve-prod: build bake-noaa ## Serve per-district per-band NOAA + IENC prebaked 
 	  printf '    { "file": "ienc.pmtiles", "band": "all" }\n  ]\n}\n'; \
 	} > web/charts-index.json
 	@echo
-	@echo "  Prebaked prod test server — open:"
-	@echo "    http://localhost:8080/?prod&catalog=/charts-index.json"
-	@echo "  (binds 0.0.0.0 — reachable from the LAN at http://<this-host>:8080/?prod&catalog=/charts-index.json)"
+	@echo "  Prebaked widget test server — open:"
+	@echo "    http://localhost:8080/?widget&catalog=/charts-index.json"
+	@echo "  (binds 0.0.0.0 — reachable from the LAN at http://<this-host>:8080/?widget&catalog=/charts-index.json)"
 	@echo
 	$(BIN) serve --host 0.0.0.0 --port 8080 --assets web
+
+# ---- read-only demo bundle (the `widget` mode, packaged for static hosting) ----
+# A self-contained, no-backend chart viewer over ONE location (Annapolis) with all
+# the bands NOAA publishes there, so a visitor can zoom from the whole bay down to
+# the docks on a few MB of tiles. `make demo` assembles dist/demo/ (override with
+# DEMO_OUT, e.g. DEMO_OUT=docs/static/demo in CI): the per-band .pmtiles + manifest,
+# the generated S-101 client assets, and the committed static frontend (demo.html
+# as index.html). Serve it from ANY static host / CDN — no server logic required.
+DEMO_CELLS   ?= US2EC03M US3EC08M US4MD1DC US5MD1MC
+DEMO_CACHE   ?= $(CACHE)/demo
+DEMO_OUT     ?= dist/demo
+DEMO_MAXZOOM ?= 16
+
+demo: build ## Assemble the read-only Annapolis widget demo bundle into $(DEMO_OUT)
+	DEMO_CACHE="$(DEMO_CACHE)" DEMO_CELLS="$(DEMO_CELLS)" NOAA_URL_BASE="$(NOAA_URL_BASE)" scripts/fetch-demo-cells.sh
+	@mkdir -p "$(DEMO_OUT)"
+	$(BIN) bake "$(DEMO_CACHE)" -o "$(DEMO_OUT)/demo.pmtiles" --bands --max-zoom $(DEMO_MAXZOOM) --manifest "$(DEMO_OUT)/charts-index.json"
+	$(BIN) emit-assets "$(DEMO_OUT)" $(if $(wildcard $(S101_PC)),--s101 "$(S101_PC)")
+	@echo "assembling static frontend → $(DEMO_OUT)"
+	@cp web/demo.html "$(DEMO_OUT)/index.html"
+	@cp web/manifest.webmanifest web/catalog.json web/icon-192.png web/icon-512.png web/apple-touch-icon.png "$(DEMO_OUT)/"
+	@cp -R web/src web/vendor web/glyphs web/basemap "$(DEMO_OUT)/"
+	@echo "  demo bundle ready: $(DEMO_OUT)/ — host it on any static server / CDN"
+
+# LOCAL PREVIEW ONLY. The bundle is pure static files — deploy it to ANY
+# range-capable static host (GitHub Pages, S3/CloudFront, nginx, `npx serve`); it
+# needs no backend. PMTiles are read with HTTP Range, which python's http.server
+# does NOT support, so we preview with the chartplotter binary acting purely as a
+# range-capable static file server (the widget page makes no /api calls).
+serve-demo: demo ## Preview the static demo bundle locally (range-capable static serve; HOST/PORT overridable)
+	@echo "  Read-only widget demo — open: http://$(HOST):$(PORT)/"
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets "$(DEMO_OUT)" \
+	  $(if $(wildcard $(S101_PC)),--s101 "$(S101_PC)" --s101-fc "$(S101_FC)" --cache "$(S101_CACHE)")
 
 docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
 	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)

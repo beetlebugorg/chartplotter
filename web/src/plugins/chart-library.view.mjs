@@ -163,9 +163,9 @@ export const STYLE = `
   }
 `;
 
-// The prod (prebaked) Library body: import-only — no NOAA download / region
+// The widget (prebaked) Library body: import-only — no NOAA download / region
 // picker. Wired by _wireImport via #file/#drop/#pick.
-export function prodBody() {
+export function widgetBody() {
   return `
         <p class="add-hint">Add your own charts — drop a NOAA <code>.zip</code> / <code>.000</code>, or a baked <code>.pmtiles</code>. They're baked right here in your browser and kept offline alongside the prebaked charts.</p>
         <div id="drop" class="drop"><span class="drop-hint">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br></span><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
@@ -174,7 +174,7 @@ export function prodBody() {
         <div id="archive-list"></div>`;
 }
 
-// The full (non-prod) Library body: search box + 3-pane miller + freshness
+// The full (non-widget) Library body: search box + 3-pane miller + freshness
 // footer. The three columns are passed in pre-rendered (the logic computes the
 // data they need).
 export function libraryBody({ searchHtml, providersCol, packsCol, detailCol, freshnessHtml, level, backLabel }) {

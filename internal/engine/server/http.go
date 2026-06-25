@@ -30,13 +30,14 @@ import (
 // embedded copy. Downloaded raw cells are cached under cacheDir/ENC_ROOT. The
 // zero value is not usable; use New.
 type Server struct {
-	assetsDir   string // optional on-disk asset override (dev); "" → embedded only
-	cacheDir    string // XDG cache root: REGENERABLE baked tile sets (NOAA/<d>/*.pmtiles)
-	dataDir     string // XDG data root: SOURCE ENC (district zips, raw cells) — safe, not auto-deleted
-	allowRemote bool
-	share       shareStore    // latest "share my view" snapshot (camera + cell list)
-	settings    settingsStore // persisted client display settings (<data>/client-settings.json)
-	Version     string        // build version
+	assetsDir      string // optional on-disk asset override (dev); "" → embedded only
+	assetsFallback string // secondary on-disk asset root (emitted S-101 assets), searched after assetsDir, before embedded
+	cacheDir       string // XDG cache root: REGENERABLE baked tile sets (NOAA/<d>/*.pmtiles)
+	dataDir        string // XDG data root: SOURCE ENC (district zips, raw cells) — safe, not auto-deleted
+	allowRemote    bool
+	share          shareStore    // latest "share my view" snapshot (camera + cell list)
+	settings       settingsStore // persisted client display settings (<data>/client-settings.json)
+	Version        string        // build version
 
 	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
 	imports *importJobs       // background server-side bake jobs (POST /api/import)
@@ -361,8 +362,15 @@ func isCellName(s string) bool {
 	return true
 }
 
+// SetAssetFallback registers a secondary on-disk asset root, searched AFTER the
+// primary --assets dir and BEFORE the embedded bundle. Used to serve the freshly
+// emitted S-101 client assets (sprite/colortables/…) from a temp dir without
+// shadowing an explicit --assets directory (e.g. a prebaked widget bundle that
+// already carries its own copies). Pass "" to disable.
+func (s *Server) SetAssetFallback(dir string) { s.assetsFallback = dir }
+
 // serveAsset serves a static web asset: an on-disk --assets override (if set and
-// present) or the embedded bundle.
+// present), then the emitted S-101 asset fallback, then the embedded bundle.
 func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Path
 	if rel == "" || rel == "/" {
@@ -379,6 +387,17 @@ func (s *Server) serveAsset(w http.ResponseWriter, r *http.Request) {
 	// present on disk; otherwise fall back to the embedded copy.
 	if s.assetsDir != "" {
 		full := filepath.Join(s.assetsDir, filepath.FromSlash(name))
+		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
+			s.serveFile(w, r, full, rel)
+			return
+		}
+	}
+	// Secondary on-disk root: the freshly-emitted S-101 client assets (sprite/
+	// colortables/…). Searched only after the primary --assets dir so an explicit
+	// bundle's own files win, and before the embedded copy so a `make`-less serve
+	// still gets the generated assets.
+	if s.assetsFallback != "" {
+		full := filepath.Join(s.assetsFallback, filepath.FromSlash(name))
 		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
 			s.serveFile(w, r, full, rel)
 			return

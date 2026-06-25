@@ -5,6 +5,8 @@ slug: /
 sidebar_position: 1
 ---
 
+import LiveChart from '@site/src/components/LiveChart';
+
 # chartplotter
 
 :::warning Not for navigation
@@ -19,7 +21,12 @@ real-world navigation.**
 **chartplotter** is a marine chart engine written in Go. It turns official NOAA
 nautical charts into fast, offline map tiles that you can view in a web browser.
 
-![A chartplotter chart of Chesapeake Bay](/img/ui/chart-day.png)
+The chart below is **live** — official NOAA charts of Annapolis, Maryland, running
+right here in your browser. Pan, zoom from the whole Chesapeake to the docks, and
+switch Day / Dusk / Night. It is the read-only [**widget**](./widget.md) build:
+static, embeddable, no server.
+
+<LiveChart />
 
 It reads **S-57** electronic navigational chart (ENC) cells, draws them with the
 **S-101 Portrayal Catalogue** — the modern IHO standard for how charts look — and

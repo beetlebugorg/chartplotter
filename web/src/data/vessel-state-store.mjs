@@ -5,13 +5,13 @@
 // no DOM and renders nothing — mirroring the server-side "a source, not a
 // renderer" split.
 //
-// The feed requires the Go server, so in prod (server-less, prebaked) mode it
+// The feed requires the Go server, so in widget (server-less, prebaked) mode it
 // stays idle. Where EventSource is unavailable it falls back to polling.
 
 export class VesselStateStore {
-  constructor({ assets = "/", prod = false } = {}) {
+  constructor({ assets = "/", widget = false } = {}) {
     this._assets = assets;
-    this._prod = prod;
+    this._widget = widget;
     this._state = {};
     this._listeners = new Set();
     this._es = null;
@@ -39,9 +39,9 @@ export class VesselStateStore {
     }
   }
 
-  /** Begin streaming. No-op in prod (no server feed) or if already started. */
+  /** Begin streaming. No-op in widget (no server feed) or if already started. */
   start() {
-    if (this._prod || this._es || this._polling) return;
+    if (this._widget || this._es || this._polling) return;
     if (!window.EventSource) {
       this._poll();
       return;

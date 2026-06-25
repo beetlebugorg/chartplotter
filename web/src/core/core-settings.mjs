@@ -144,8 +144,8 @@ export function coreSettingsContributions(app) {
   // inspector / coverage / bands / diagnostics) are rendered by the SHELL in its
   // own shadow (#dev-region) because _renderDevPanel / _renderInspect reach into
   // the shell's shadow by id; keeping them there avoids a risky refactor (option
-  // B). The shell reveals #dev-region only when this tab is active. In prod there
-  // are no dev tools, so the tab is just the toggle.
+  // B). The shell reveals #dev-region only when this tab is active. In the widget
+  // viewer there are no dev tools, so the tab is just the toggle.
   const advanced = {
     id: "core-advanced",
     tab: { id: "advanced", label: "Advanced" },

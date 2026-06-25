@@ -13,12 +13,16 @@
 </p>
 
 <p align="center">
+  ▶ <b><a href="https://beetlebugorg.github.io/chartplotter/demo/">Try the live demo</a></b>
+  &nbsp;·&nbsp;
   📚 <b><a href="https://beetlebugorg.github.io/chartplotter/">Read the docs →</a></b>
 </p>
 
 <p align="center">
-  <img src="docs/static/img/ui/cape-lookout.png" alt="chartplotter rendering the North Carolina coast off Cape Lookout" width="800">
-  <br><sub>The North Carolina coast off Cape Lookout — NOAA ENC data, S-101 portrayal, ~1:700,000.</sub>
+  <a href="https://beetlebugorg.github.io/chartplotter/demo/" title="Open the live, interactive chart viewer">
+    <img src="docs/static/img/ui/annapolis.png" alt="chartplotter rendering NOAA charts of Annapolis — click to open the live demo" width="800">
+  </a>
+  <br><sub>▶ <b><a href="https://beetlebugorg.github.io/chartplotter/demo/">Open the live, interactive demo</a></b> — official NOAA charts of Annapolis, rendered in your browser. No install, no server.</sub>
 </p>
 
 ---

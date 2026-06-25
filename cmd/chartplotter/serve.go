@@ -35,6 +35,7 @@ func (c serveCmd) Run() error {
 	// on its own (baker.applyPortrayer); here we emit the matching client assets
 	// (colortables/sprite/patterns/linestyles) into a temp dir and serve them.
 	var catalogFS fs.FS
+	var s101AssetDir string // freshly-emitted S-101 client assets (temp dir), or ""
 	switch {
 	case c.S101 != "":
 		if c.S101FC == "" {
@@ -63,7 +64,12 @@ func (c serveCmd) Run() error {
 		if _, err := assets.EmitS101FS(catalogFS, "daySvgStyle.css", assetDir); err != nil {
 			return fmt.Errorf("emit S-101 assets: %w", err)
 		}
-		c.Assets = assetDir // override colortables/linestyles/sprite; rest falls back to embedded
+		// The emitted S-101 client assets (colortables/linestyles/sprite/patterns)
+		// are a FALLBACK, not a replacement: an explicit --assets dir stays primary
+		// (so a prebaked widget bundle serves its own index.html / charts-index.json /
+		// .pmtiles), this temp dir fills in the generated S-101 files it lacks, and the
+		// embedded bundle backs the rest. Registered on the Server below.
+		s101AssetDir = assetDir
 	}
 
 	cacheDir := c.Cache
@@ -87,6 +93,7 @@ func (c serveCmd) Run() error {
 	// other bind means the operator opted into network exposure.
 	allowRemote := !(c.Host == "127.0.0.1" || c.Host == "localhost" || c.Host == "::1")
 	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote)
+	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
 	srv.ReportStaleCache() // loud warning if any served pack predates this binary
 

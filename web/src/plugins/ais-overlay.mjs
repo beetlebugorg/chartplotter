@@ -27,10 +27,10 @@ const GLYPH_STYLE =
   "filter:drop-shadow(0 0 1px var(--ais-halo,#fff)) drop-shadow(0 0 1px var(--ais-halo,#fff));";
 
 export class AISOverlay {
-  constructor({ map, assets = "/", prod = false, onSelect, units } = {}) {
+  constructor({ map, assets = "/", widget = false, onSelect, units } = {}) {
     this._map = map;
     this._assets = assets;
-    this._prod = prod;
+    this._widget = widget;
     this._units = units; // () => mariner prefs, for SOG/CPA/draught units (live)
     this._onSelect = onSelect; // tap → info picker
     this._markers = new Map(); // mmsi -> {marker, el, hasDir}
@@ -40,7 +40,7 @@ export class AISOverlay {
   }
 
   start() {
-    if (this._prod || this._es || this._polling) return; // AIS feed needs the server
+    if (this._widget || this._es || this._polling) return; // AIS feed needs the server
     if (!window.EventSource) {
       this._poll();
       return;

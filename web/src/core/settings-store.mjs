@@ -6,7 +6,7 @@
 // app's own display settings and each plugin's settings live side by side in one
 // store without colliding:
 //
-//   const settings = new SettingsStore({ assets, prod });
+//   const settings = new SettingsStore({ assets, widget });
 //   settings.load();                          // overlay the server copy at boot
 //   const core = settings.ns("core");         // the app's display settings
 //   const ais  = settings.ns("ais");          // a plugin's settings
@@ -22,19 +22,19 @@
 const LS_KEY = "chartplotter:settings";
 
 export class SettingsStore {
-  constructor({ assets = "", prod = false } = {}) {
+  constructor({ assets = "", widget = false } = {}) {
     this._assets = assets;
-    this._prod = prod;
+    this._widget = widget;
     this._saveT = 0;
     // Seed instantly from the localStorage mirror so boot has values before the
-    // server responds (and so prod, which has no server, works at all).
+    // server responds (and so widget, which has no server, works at all).
     this._blob = readLocal();
   }
 
   // Overlay the server-persisted copy (server mode). Best-effort: offline / older
-  // server / prod just keeps the local values. Returns the merged blob.
+  // server / widget just keeps the local values. Returns the merged blob.
   async load() {
-    if (this._prod) return this._blob;
+    if (this._widget) return this._blob;
     try {
       const r = await fetch(`${this._assets}api/settings`, { cache: "no-store" });
       if (r.ok) {
@@ -67,7 +67,7 @@ export class SettingsStore {
   // Mirror locally now; debounce the server POST so a flurry of toggles coalesces.
   _dirty() {
     writeLocal(this._blob);
-    if (this._prod) return; // no server in prod; localStorage is the store
+    if (this._widget) return; // no server in widget; localStorage is the store
     clearTimeout(this._saveT);
     this._saveT = setTimeout(() => {
       fetch(`${this._assets}api/settings`, {

@@ -1,7 +1,7 @@
 // Render an S-64 test cell headlessly with explicit mariner settings, for
 // comparing our portrayal against the S-64 reference plots. Presets localStorage
 // (mariner settings, day scheme, NOAA agreement) BEFORE the app boots, points the
-// app at a single-cell catalog (?prod&catalog=…) which auto-frames the cell, then
+// app at a single-cell catalog (?widget&catalog=…) which auto-frames the cell, then
 // screenshots the clean map after the wasm baker settles.
 //
 // Usage: node scripts/shot-s64.mjs <url> <out.png> <marinerJSON> [w] [h] [settle-ms]

@@ -6,6 +6,15 @@ on:
     paths:
       - "docs/**"
       - ".github/workflows/docs.yml"
+      # The live demo is built from the app + bake pipeline and deployed under the
+      # docs site, so redeploy when any of those change too.
+      - "web/**"
+      - "cmd/**"
+      - "internal/**"
+      - "scripts/fetch-demo-cells.sh"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
   workflow_dispatch:
 
 permissions:
@@ -21,20 +30,49 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: docs
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # Cache the curated NOAA demo-cell downloads (one per band over Annapolis),
+      # keyed on the cell list / fetch script so a change re-downloads. Lets the
+      # bake reuse the same cells across runs.
+      - name: Cache demo ENC cells
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/demo-cells
+          key: demo-cells-${{ hashFiles('scripts/fetch-demo-cells.sh', 'Makefile') }}
+
+      # Build the read-only widget demo bundle into docs/static/demo so Docusaurus
+      # copies it into the published site at /chartplotter/demo/. Needs the S-101
+      # catalogue (IHO material kept out of the repo): clone it and let `make build`
+      # (a dep of `make demo`) embed it. The bundle is pure static files — no backend.
+      - name: Build live demo bundle (docs/static/demo)
+        run: |
+          git clone --depth 1 https://github.com/iho-ohi/S-101_Portrayal-Catalogue.git "$RUNNER_TEMP/s101-pc"
+          git clone --depth 1 https://github.com/iho-ohi/S-101-Documentation-and-FC.git "$RUNNER_TEMP/s101-fc"
+          make demo \
+            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
+            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml" \
+            DEMO_CACHE="$RUNNER_TEMP/demo-cells" \
+            DEMO_OUT="docs/static/demo"
+
       - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: docs/package-lock.json
       - name: Install
+        working-directory: docs
         run: npm ci
       - name: Build
+        working-directory: docs
         run: npm run build
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/build
