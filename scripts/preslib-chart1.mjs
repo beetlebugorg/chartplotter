@@ -57,6 +57,21 @@ const PANELS = [
   { page: 253, slug: "colourtest-WOO-dusk", b: [-5.0331, 15.0362, -5.0026, 15.0657], cscl: HARBOR, scheme: "dusk" },
 ];
 
+// Mariner display state matching the IHO PresLib reference plots: ALL symbology
+// shown. Display category Other on (INFORM01 callouts, "other marks", magnetic
+// variation…); data-quality overlay on (the CATZOC "quality of data" panels);
+// metres (IHO depths, not NOAA feet); 25 mm short sector legs and symbolized
+// boundaries (both the S-52 defaults the reference uses). Everything else
+// (soundings, text groups, light descriptions) is default-on.
+const MARINER = {
+  displayBase: true, displayStandard: true, displayOther: true,
+  dataQuality: true,
+  depthUnit: "m",
+  showFullSectorLines: false,
+  boundaryStyle: "symbolized",
+  simplifiedPoints: false,
+};
+
 mkdirSync(outDir, { recursive: true });
 const { chromium } = findPlaywright();
 const browser = await chromium.launch({ executablePath: findChromium(), args: ["--no-sandbox", "--hide-scrollbars"] });
@@ -77,11 +92,9 @@ for (const p of PANELS) {
     localStorage.setItem("chartplotter:scheme", a.scheme);
     localStorage.setItem("chartplotter:basemap", "coastline");
     localStorage.setItem("chartplotter:enc-agreement", "1");
-    // The reference plots are all-categories-on, so enable the "Other" display
-    // category — that's where the SY(INFORM01) additional-info callouts live (§10.6.1.1).
-    localStorage.setItem("chartplotter:mariner", JSON.stringify({ displayOther: true }));
+    localStorage.setItem("chartplotter:mariner", JSON.stringify(a.mariner));
     localStorage.setItem("chartplotter:view", JSON.stringify({ center: a.center, zoom: a.zoom }));
-  }, { scheme: p.scheme, center, zoom });
+  }, { scheme: p.scheme, center, zoom, mariner: MARINER });
   try { await page.goto(baseURL + "/?prod&spec", { waitUntil: "domcontentloaded", timeout: 45000 }); }
   catch (err) { console.error(`[page ${p.page}] nav: ${err.message} — continuing`); }
   await page.waitForTimeout(+settle);
