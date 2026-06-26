@@ -197,10 +197,10 @@ export class ChartLibrary extends HTMLElement {
   // Notify the shell that installed/enabled state changed (it reconciles the map).
   _changed() { this._emit("charts-changed"); }
 
-  // An onStatus handler for a job that drives a NotificationCenter task: the
-  // phase-aware label ("Generating NOAA · Northeast tiles…") AND the numeric
-  // sub-line both update as the server moves through download → bake → finish.
-  _jobStatus(t) { return (p) => { if (!t) return; if (p.label) t.label(p.label); t.progress(p.frac, p.sub); }; }
+  // An onStatus handler for a job that drives a NotificationCenter task: the region
+  // title, the live action line, and the count-with-unit all update as the server
+  // moves through download → prepare → generate → finish.
+  _jobStatus(t) { return (p) => { if (!t) return; if (p.label) t.label(p.label); t.progress(p.frac, p.sub, p.detail); }; }
 
   // Refresh the installed/disabled/installed-cell snapshot from the server, so the
   // panel's pack badges + counts are current. Called before a (re-)render that
@@ -828,7 +828,7 @@ export class ChartLibrary extends HTMLElement {
     this._activeDistrict = cg;
     const set = "noaa-d" + cg;
     const name = d ? `NOAA · ${d.region}` : "NOAA";
-    const t = this._notify ? this._notify.task("download:" + set, { label: `Preparing ${name}…` }) : null;
+    const t = this._notify ? this._notify.task("download:" + set, { label: name }) : null;
     const onStatus = this._jobStatus(t);
     if (this._active) this.render();
     let ok = false;
@@ -1018,7 +1018,7 @@ export class ChartLibrary extends HTMLElement {
     try {
       const local = await this._store.list().catch(() => []);
       if (local.length) {
-        t = this._notify ? this._notify.task("import:user", { label: "Preparing your charts…" }) : null;
+        t = this._notify ? this._notify.task("import:user", { label: "Your charts" }) : null;
         for (const name of local) {
           try {
             const bytes = await this._store.getBytes(name);
@@ -1026,7 +1026,7 @@ export class ChartLibrary extends HTMLElement {
           } catch (e) { console.warn("[charts] upload", name, e); }
         }
         const { job } = await this._api.importCells("import", local);
-        await this._api.pollJob(job, { name: "your", onStatus: this._jobStatus(t) });
+        await this._api.pollJob(job, { name: "Your charts", onStatus: this._jobStatus(t) });
         if (t) t.done();
       }
       await this._syncRegistry();
@@ -1049,7 +1049,7 @@ export class ChartLibrary extends HTMLElement {
     let done = 0;
     const t = this._notify ? this._notify.task("import:archive", { label: "Importing charts" }) : null;
     for (const name of names) {
-      if (t) t.progress(done / names.length, `${name} · ${done + 1} of ${names.length}`);
+      if (t) t.progress(done / names.length, name, `${done + 1} / ${names.length} charts`);
       try {
         const { blob, entry } = this._archive.get(name);
         const bytes = await extractEntry(blob, entry);
@@ -1060,7 +1060,7 @@ export class ChartLibrary extends HTMLElement {
         imported.push(name);
       } catch (err) {
         console.error("[import]", name, err);
-        if (t) t.progress(done / names.length, `${name}: ${err.message}`);
+        if (t) t.progress(done / names.length, `${name}: ${err.message}`, "");
       }
       done++;
     }
@@ -1075,8 +1075,8 @@ export class ChartLibrary extends HTMLElement {
   async rebakeArchive() {
     const names = [...this._installed];
     if (!names.length) return;
-    const t = this._notify ? this._notify.task("rebake:user", { label: "Baking charts…" }) : null;
-    if (t) t.progress(null, `${names.length} chart${names.length > 1 ? "s" : ""}`);
+    const t = this._notify ? this._notify.task("rebake:user", { label: "Baking charts" }) : null;
+    if (t) t.progress(null, "", `${names.length} chart${names.length > 1 ? "s" : ""}`);
     try { await this._refreshCharts(); if (t) t.done(); }
     catch (e) { console.error("[bake]", e); if (t) t.fail(e); }
   }

@@ -7,11 +7,11 @@
 // rather than something every plugin re-implements.
 //
 //   const notify = new NotificationCenter({
-//     onProgress: (p) => shell._setNotification(p),   // p = {label, sub, frac, error} | null
+//     onProgress: (p) => shell._setNotification(p),   // p = {label, sub, detail, frac, error} | null
 //     onMessage:  (m) => shell._toast(m),             // m = {level, msg}
 //   });
-//   const t = notify.task("download:noaa-d5", { label: "Downloading Mid-Atlantic" });
-//   t.progress(0.4, "12 / 30 cells");                 // frac 0..1, optional detail
+//   const t = notify.task("download:noaa-d5", { label: "NOAA · Mid-Atlantic" });
+//   t.progress(0.4, "Generating coastal…", "12 / 30 tiles");  // frac, action, count
 //   t.done();                                          // or t.fail(err)
 //   notify.warn("No charts are enabled");
 //
@@ -30,7 +30,7 @@ export class NotificationCenter {
   // Begin (or re-open) a task; returns a handle. The handle's methods are the
   // only way to drive the progress surface — callers never format the payload.
   task(id, { label = "" } = {}) {
-    const t = { id, label, frac: null, sub: "", error: null, done: false };
+    const t = { id, label, frac: null, sub: "", detail: "", error: null, done: false };
     this._tasks.set(id, t);
     this._lastFailed = false;
     this._render(t);
@@ -40,15 +40,16 @@ export class NotificationCenter {
       this._render(t);
     };
     return {
-      // frac: 0..1 or null (indeterminate); sub: optional one-line detail.
-      progress: (frac, sub) => update({ frac, sub: sub == null ? t.sub : sub }),
+      // frac: 0..1 or null (indeterminate); sub: the live action line; detail: the
+      // count-with-unit beside it. Pass null to leave either unchanged.
+      progress: (frac, sub, detail) => update({ frac, sub: sub == null ? t.sub : sub, detail: detail == null ? t.detail : detail }),
       label: (l) => update({ label: l }),
       done: () => { t.frac = 1; t.done = true; this._render(t); this._end(id, false); },
       fail: (err) => { t.error = err ? String((err && err.message) || err) : "Failed"; t.done = true; this._render(t); this._end(id, true); },
     };
   }
 
-  _render(t) { this._onProgress({ label: t.label, sub: t.sub, frac: t.frac, error: t.error }); }
+  _render(t) { this._onProgress({ label: t.label, sub: t.sub, detail: t.detail, frac: t.frac, error: t.error }); }
 
   _end(id, failed) {
     this._tasks.delete(id);

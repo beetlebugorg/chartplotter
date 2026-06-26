@@ -150,13 +150,17 @@ func (c bakeCmd) runBands(cells map[string]baker.CellData, aux map[string][]byte
 		func(name string, err error) {
 			fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
 		},
-		func(done, total int) {
+		func(stage string, done, total int, band string) {
 			if total == 0 {
 				return
 			}
 			if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
 				lastPct = pct
-				fmt.Fprintf(os.Stderr, "\r  tiles %d/%d (%d%%)", done, total, pct)
+				where := band
+				if where == "" {
+					where = "coverage"
+				}
+				fmt.Fprintf(os.Stderr, "\r  %-9s %-8s %d/%d (%d%%)   ", where, stage, done, total, pct)
 			}
 		},
 		func(slug string, pb *pmtiles.Builder) error {

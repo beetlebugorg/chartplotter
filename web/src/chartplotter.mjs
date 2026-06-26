@@ -1625,10 +1625,12 @@ export class ChartPlotter extends HTMLElement {
 
   // Job progress (download / import / bake) lives in a row ABOVE the live nav
   // readout inside the bottom status card — one box, no separate pill or pop-out.
-  // `p` carries { label, pill, sub, frac, error }; null clears the row. The label
-  // and detail are packed onto one line so all the context (region · cell · count
-  // · size) is visible at a glance; the bar shows the fraction (indeterminate when
-  // unknown). Spacing is handled by the card's flex gap + the divider rule.
+  // `p` carries { label, pill, sub, detail, frac, error }; null clears the row.
+  // Three stacked pieces: the region TITLE (label) on top; beneath it the live
+  // ACTION (sub, incl. the band being baked) on the left with the COUNT (detail,
+  // unit spelled out) pinned right. There's no percentage — the bar alone carries
+  // the proportion, so the count is the only moving number (a single slow sweep
+  // when the fraction is unknown — no spinner). Spacing is the card's flex gap.
   _setNotification(p) {
     const r = this.shadowRoot;
     const box = r.getElementById("databox");
@@ -1636,21 +1638,23 @@ export class ChartPlotter extends HTMLElement {
     if (!box || !prog) return;
     if (!p) {
       prog.hidden = true;
-      prog.classList.remove("busy", "error");
+      prog.classList.remove("error");
       return;
     }
     box.hidden = false; // a job can finish before the map readout first paints
     const done = p.frac === 1 || !!p.error;
     prog.hidden = false;
-    prog.classList.toggle("busy", !done); // spinner while working
     prog.classList.toggle("error", !!p.error);
-    const detail = p.sub && p.sub.trim() ? p.sub.trim() : "";
-    const label = p.label || p.pill || "";
-    r.getElementById("db-prog-label").textContent = detail ? `${label} · ${detail}` : label;
-    r.getElementById("db-prog-pct").textContent = p.frac != null ? `${Math.round(p.frac * 100)}%` : "";
+    // On error the reason takes the action line and the count is cleared.
+    const title = p.label || p.pill || "";
+    const action = p.error ? String(p.error) : (p.sub || "");
+    const count = p.error ? "" : (p.detail || "");
+    r.getElementById("db-prog-title").textContent = title;
+    r.getElementById("db-prog-action").textContent = action;
+    r.getElementById("db-prog-count").textContent = count;
     const fill = r.getElementById("db-prog-fill");
     fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
-    fill.classList.toggle("indet", p.frac == null && !done); // sweeping bar when no fraction
+    fill.classList.toggle("indet", p.frac == null && !done); // slow sweep when no fraction
   }
 
   // Frame to the union bounds of the installed region archives (from the manifest).

@@ -37,6 +37,7 @@ type importJob struct {
 	Set     string `json:"set"`
 	State   string `json:"state"` // "running" | "done" | "error"
 	Phase   string `json:"phase"` // "download" | "extract" | "bake"
+	Band    string `json:"band"`  // usage band being baked (e.g. "coastal"); "" outside the bake phase
 	Note    string `json:"note"`  // human-readable current step (e.g. "downloading US5MD1MC")
 	Done    int    `json:"done"`  // phase units done (bytes/cells downloaded, then tiles emitted)
 	Total   int    `json:"total"` // phase total (0 until known)
@@ -496,7 +497,9 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 	}
 	_ = overzoom // the per-band streaming bake has no all-bands-to-z0 overzoom mode
 	s.imports.update(jobID, func(j *importJob) {
-		j.Phase, j.Unit, j.Note, j.Done, j.Total = "bake", "tiles", fmt.Sprintf("Baking %d cell(s)", len(cells)), 0, 0
+		// Open on the "prepare" stage (unit "cells"): the bake starts by parsing
+		// cells for coverage, well before the first tile emits.
+		j.Phase, j.Unit, j.Band, j.Note, j.Done, j.Total = "bake", "cells", "", fmt.Sprintf("Baking %d cell(s)", len(cells)), 0, 0
 	})
 
 	// Drop any STALE merged archive named exactly `set` from a prior (pre-per-band)
@@ -509,8 +512,15 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 	bands, tiles, first := 0, 0, true
 	_, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, 0,
 		func(name string, e error) { log.Printf("import %s: skip %s: %v", jobID, name, e) },
-		func(done, total int) {
-			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total = done, total })
+		func(stage string, done, total int, band string) {
+			// "prepare" = parsing + portraying a band's cells (the gap before any
+			// tile emits); "tiles" = emitting that band's tiles. The unit lets the
+			// client name the stage (Preparing … charts vs Generating … tiles).
+			unit := "tiles"
+			if stage == "prepare" {
+				unit = "cells"
+			}
+			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total, j.Band, j.Unit = done, total, band, unit })
 		},
 		func(slug string, pb *pmtiles.Builder) error {
 			bandSet := set + "-" + slug
@@ -633,8 +643,8 @@ func (j importJob) statusJSON() string {
 		pct = j.Done * 100 / j.Total
 	}
 	return fmt.Sprintf(
-		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"note":%q,"done":%d,"total":%d,"unit":%q,"percent":%d,"cells":%d,"error":%q}`,
-		j.ID, j.Set, j.State, j.Phase, j.Note, j.Done, j.Total, j.Unit, pct, j.Cells, j.Err)
+		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"band":%q,"note":%q,"done":%d,"total":%d,"unit":%q,"percent":%d,"cells":%d,"error":%q}`,
+		j.ID, j.Set, j.State, j.Phase, j.Band, j.Note, j.Done, j.Total, j.Unit, pct, j.Cells, j.Err)
 }
 
 // importStatus returns a job's state as JSON (one-shot poll).
