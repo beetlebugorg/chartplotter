@@ -394,6 +394,20 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 			}
 		}
 	}
+	// Low-accuracy geometry (QUAPOS not surveyed/precise) is drawn DASHED — the S-52
+	// approximate-position line style (DEPCNT03 dashes a low-accuracy depth contour;
+	// the same applies to coastline, rivers, tracks, …). The S-101 rules read this
+	// from a per-edge spatial-quality association we don't model, so apply it here
+	// from the parsed per-feature QUAPOS aggregate: switch the feature's solid simple
+	// strokes to dashed. Complex line styles and point symbols keep their look.
+	if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 {
+		for i, p := range prims {
+			if sl, ok := p.(StrokeLine); ok && sl.Dash == DashSolid {
+				sl.Dash = DashDashed
+				prims[i] = sl
+			}
+		}
+	}
 	// Centred-area symbol placement (S-52 PresLib §8.5.1): the pivot point is the
 	// area's representative point (sg.Anchor), where the FIRST/primary centred symbol
 	// sits "so it is evident which area the symbol applies to"; ADDITIONAL symbols
