@@ -81,6 +81,10 @@ type AugmentedGeom struct {
 	// +180 reversal) of length LengthMM.
 	BearingDeg float64
 	LengthMM   float64
+	// LengthGroundM is the leg length when the rule gave it in GeographicCRS — a
+	// fixed GROUND distance in metres (a sectorLineLength or full-VALNMR leg),
+	// rendered zoom-dependently. Mutually exclusive with LengthMM (display mm).
+	LengthGroundM float64
 	// Arc ("ArcByRadius:<cx>,<cy>,<radiusMM>,<startDeg>,<sweepDeg>"): centred on the
 	// anchor, RadiusMM, from StartDeg sweeping SweepDeg degrees clockwise. A full
 	// 360° sweep is an all-round ring.
@@ -226,9 +230,19 @@ func Reduce(ins []Instruction) (cmds []DrawCommand, unsupported []string) {
 			curAug = nil
 		// --- geometry construction (screen-space figures the rule builds) ---
 		case "AugmentedRay":
-			// "AugmentedRay:<bearingCRS>,<bearing>,<lenCRS>,<lenMM>" — a leg from the
-			// anchor. The rule emits the bearing already from-seaward-reversed.
-			curAug = &AugmentedGeom{Kind: AugRay, BearingDeg: atof(arg(in, 1)), LengthMM: atof(arg(in, 3))}
+			// "AugmentedRay:<bearingCRS>,<bearing>,<lenCRS>,<len>" — a leg from the
+			// anchor. The rule emits the bearing already from-seaward-reversed. The
+			// LENGTH's CRS (arg 2) decides its unit: LocalCRS ⇒ display mm (the 25 mm
+			// short sector leg); GeographicCRS ⇒ ground metres (a sectorLineLength /
+			// full-VALNMR leg — a fixed ground distance, NOT mm). Conflating the two
+			// rendered geographic legs at metres-as-mm, ~10× too long ("shooting out").
+			ar := &AugmentedGeom{Kind: AugRay, BearingDeg: atof(arg(in, 1))}
+			if arg(in, 2) == "GeographicCRS" {
+				ar.LengthGroundM = atof(arg(in, 3))
+			} else {
+				ar.LengthMM = atof(arg(in, 3))
+			}
+			curAug = ar
 		case "ArcByRadius":
 			// "ArcByRadius:<cx>,<cy>,<radiusMM>,<startDeg>,<sweepDeg>" — an arc/ring
 			// centred on the anchor (the cx,cy offset is 0 for sector figures).

@@ -167,6 +167,10 @@ type AugmentedFigure struct {
 	// Ray params (true-north bearing, already from-seaward-reversed by the rule).
 	BearingDeg float64
 	LengthMM   float64
+	// LengthGroundM is a ray leg's length when given as a GROUND distance (metres,
+	// from a GeographicCRS sectorLineLength / full-VALNMR leg) rather than display
+	// mm — drawn zoom-dependently. 0 ⇒ use LengthMM (display mm). See tessellateFigure.
+	LengthGroundM float64
 	// Arc params (centred on Anchor); a full 360° sweep is an all-round ring.
 	RadiusMM float64
 	StartDeg float64

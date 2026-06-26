@@ -2007,7 +2007,15 @@ func tessellateFigure(sp *sectorPrim, z uint32) []sectorStroke {
 		}
 		return append(out, sectorStroke{points: pts, colorToken: sp.fig.ColorToken, widthPx: float32(widthPx), dashed: dashed, sleg: sleg})
 	}
+	// Short leg: display mm by default, but a GeographicCRS leg length is a fixed
+	// GROUND distance (metres) — convert it to px at this zoom (like the full leg),
+	// not metres-as-mm (which rendered legs ~10× too long, "shooting out").
 	legShort := sp.fig.LengthMM * pxPerMM
+	if sp.fig.LengthGroundM > 0 {
+		if cosLat := math.Cos(sp.fig.Anchor.Lat * math.Pi / 180.0); cosLat > 1e-6 {
+			legShort = sp.fig.LengthGroundM / (cosLat * earthCircumM) * worldPx
+		}
+	}
 	if sp.fig.FullLengthNM <= 0 {
 		return emit(nil, legShort, -1) // can't extend: the leg is always shown
 	}
