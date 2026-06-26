@@ -754,6 +754,38 @@ func newObjectBuild(f *s57.Feature) FeatureBuild {
 // so it errors and would be suppressed. The S-52 PresLib reference (page 243)
 // draws a dashed boundary around the area plus a "swept to <DRVAL1>" depth label,
 // so emit that.
+// navSystemBuild draws an M_NSYS (navigational system of marks) area boundary —
+// the S-52 NAVARE51 complex line (dashes + EMAREGR1 triangle markers) around the
+// IALA-A / IALA-B / other-system region. The S-101 NavigationalSystemOfMarks rule
+// is an unofficial stub (NullInstruction), so reproduce the S-52 lookup here. The
+// boundary is the same regardless of MARSYS — the system only governs the buoy
+// colours inside, not the region outline.
+func navSystemBuild(f *s57.Feature) FeatureBuild {
+	g := f.Geometry()
+	if g.Type != s57.GeometryTypePolygon {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	var prims []Primitive
+	for _, r := range g.Rings {
+		pts := make([]geo.LatLon, 0, len(r.Coordinates))
+		for _, c := range r.Coordinates {
+			if len(c) >= 2 {
+				pts = append(pts, geo.LatLon{Lat: c[1], Lon: c[0]})
+			}
+		}
+		if len(pts) > 1 && pts[0] != pts[len(pts)-1] {
+			pts = append(pts, pts[0]) // close the ring
+		}
+		if len(pts) >= 2 {
+			prims = append(prims, LinePattern{Points: pts, LinestyleName: "NAVARE51", ColorToken: "CHGRD"})
+		}
+	}
+	if len(prims) == 0 {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	return FeatureBuild{Primitives: prims, DisplayPriority: 12, DisplayCategory: displayStandard}
+}
+
 func sweptAreaBuild(f *s57.Feature) FeatureBuild {
 	g := f.Geometry()
 	if g.Type != s57.GeometryTypePolygon {

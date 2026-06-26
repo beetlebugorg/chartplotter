@@ -300,6 +300,15 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 			return fb
 		}
 	}
+	// M_NSYS (navigational system of marks): the S-101 NavigationalSystemOfMarks
+	// rule is an UNOFFICIAL stub (NullInstruction only), so draw the S-52 boundary
+	// here — the NAVARE51 dashed triangle line around the IALA-A / IALA-B / other
+	// region. Bypasses the stub stream entirely.
+	if f.ObjectClass() == "M_NSYS" {
+		if nb := navSystemBuild(f); len(nb.Primitives) > 0 {
+			return nb
+		}
+	}
 	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
 	// object" mark (S-52 §10.1.1 parity).
 	if strings.HasPrefix(stream, "UNMAPPED:") {
