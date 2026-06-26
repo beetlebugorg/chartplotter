@@ -181,6 +181,10 @@ func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[
 	if err != nil {
 		return nil, err
 	}
+	// M_NSYS system-boundary index: which boundary segments are shared between an
+	// IALA-A and an IALA-B region (drawn with the MARSYS51 A-B line, vs NAVARE51 for
+	// the rest). Built from the FULL feature set so adjacency is seen in every pass.
+	nsysIdx := buildNsysIndex(features)
 	out := make(map[int64]FeatureBuild, len(features))
 	for _, f := range features {
 		if include != nil && !include(f) {
@@ -188,7 +192,7 @@ func (b *S101Builder) BuildBatchFiltered(features []*s57.Feature, overrides map[
 		}
 		// repID[f.ID()] is "" for the skipped (TOPMAR / non-spatial) features, and
 		// streams[""] is "" — buildFeature then suppresses them, as before.
-		out[f.ID()] = b.buildFeature(f, streams[repID[f.ID()]])
+		out[f.ID()] = b.buildFeature(f, streams[repID[f.ID()]], nsysIdx)
 	}
 	return out, nil
 }
@@ -252,8 +256,8 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 // buildFeature turns one feature's emitted instruction stream into its FeatureBuild,
 // then adds the S-52 §10.6.1.1 additional-information indicator when the object
 // carries it (see addInformSymbol).
-func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
-	fb := b.buildFeatureBody(f, stream)
+func (b *S101Builder) buildFeature(f *s57.Feature, stream string, nsysIdx *nsysIndex) FeatureBuild {
+	fb := b.buildFeatureBody(f, stream, nsysIdx)
 	return addInformSymbol(fb, f)
 }
 
@@ -290,7 +294,7 @@ func hasAdditionalInfo(attrs map[string]any) bool {
 }
 
 // buildFeatureBody turns one feature's emitted instruction stream into its FeatureBuild.
-func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBuild {
+func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string, nsysIdx *nsysIndex) FeatureBuild {
 	// NEWOBJ with a SYMINS attribute: portray the producer's explicit symbol
 	// instruction (S-52 SYMINS02) rather than the S-101 V-AIS alias the engine
 	// emitted — SYMINS carries the real symbols, TX/TE labels, boundaries and fills
@@ -305,7 +309,7 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	// here — the NAVARE51 dashed triangle line around the IALA-A / IALA-B / other
 	// region. Bypasses the stub stream entirely.
 	if f.ObjectClass() == "M_NSYS" {
-		if nb := navSystemBuild(f); len(nb.Primitives) > 0 {
+		if nb := navSystemBuild(f, nsysIdx); len(nb.Primitives) > 0 {
 			return nb
 		}
 	}
