@@ -41,6 +41,7 @@ func TestCellIndexBuild(t *testing.T) {
 
 	ci := newCellIndex(dir)
 	ci.build()
+	ci.wait()
 	bb, ok := ci.get(cell)
 	if !ok {
 		t.Fatal("cell not indexed after build")
@@ -72,6 +73,7 @@ func TestCellIndexFreshness(t *testing.T) {
 	}
 	ci := newCellIndex(dir)
 	ci.build()
+	ci.wait()
 	if _, ok := ci.get(cell); !ok {
 		t.Fatal("not indexed")
 	}
@@ -81,6 +83,7 @@ func TestCellIndexFreshness(t *testing.T) {
 		t.Fatal("forget did not drop the entry")
 	}
 	ci.rebuild()
+	ci.wait()
 	if _, ok := ci.get(cell); !ok {
 		t.Fatal("rebuild did not re-index after forget")
 	}
@@ -89,6 +92,7 @@ func TestCellIndexFreshness(t *testing.T) {
 		t.Fatal(err)
 	}
 	ci.rebuild()
+	ci.wait()
 	if _, ok := ci.get(cell); ok {
 		t.Error("rebuild did not prune a removed cell")
 	}

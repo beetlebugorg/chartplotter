@@ -336,7 +336,7 @@ func (s *Server) cacheCells(cells map[string]baker.CellData) {
 			stems = append(stems, strings.TrimSuffix(name, ".000"))
 		}
 		s.cellIdx.forget(stems) // re-imported cells: drop stale bounds so the rebuild re-parses
-		go s.cellIdx.rebuild()  // index the (re-)cached cells' bounds in the background
+		s.cellIdx.rebuild()     // re-index in the background (kick spawns its own goroutine; dirty re-run picks up a reindex that lands mid-scan)
 	}
 }
 

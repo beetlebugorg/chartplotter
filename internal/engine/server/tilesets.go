@@ -171,9 +171,15 @@ func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
 		dir := s.setDir(name)
 		_ = os.Remove(filepath.Join(dir, name+".pmtiles"))
 		_ = os.Remove(filepath.Join(dir, name+".aux.zip"))
-		_ = os.Remove(dir) // best-effort: drop the pack dir if now empty
+		_ = os.Remove(filepath.Join(dir, name+".cells.json")) // the per-set cell manifest
+		_ = os.Remove(dir)                                    // best-effort: drop the pack dir if now empty
 	}
 	s.auxIdx.invalidate() // a district's companion aux.zip is gone — re-index /api/aux
+	// The active search (?active=1) now drops these cells: packDel removed the pack and
+	// we deleted its manifest, so enabledPackCells() no longer counts them. The source
+	// cells stay in ENC_ROOT, so the raw index keeps their bounds for a future re-bake;
+	// reconcile here only prunes cells whose source is actually gone.
+	s.cellIdx.rebuild()
 	w.Header().Set("Content-Type", jsonCT)
 	io.WriteString(w, `{"ok":true}`)
 }
