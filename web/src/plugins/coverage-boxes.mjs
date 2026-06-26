@@ -44,6 +44,23 @@ export class CoverageBoxes {
       const f = ["==", ["get", "band"], band];
       if (!map.getLayer(`inst-fill-${band}`)) map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: vis }, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
       if (!map.getLayer(`inst-line-${band}`)) map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: vis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
+      // Cell-name label at the footprint centroid, so on a blank (no-basemap) map you
+      // can SEE which chart is where (and tap it). Capped at the band's render zoom
+      // (same as the fill/line) so it vanishes once the chart itself draws — not
+      // obtrusive when you're already there. Decluttered (drops on overlap).
+      if (!map.getLayer(`inst-label-${band}`)) map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: {
+        visibility: vis,
+        "symbol-placement": "point",
+        "text-field": ["coalesce", ["get", "name"], ""],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": 12,
+        "text-allow-overlap": false,
+        "text-optional": true,
+      }, paint: {
+        "text-color": BAND_COLOR[band],
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1.8,
+      } });
     }
     // Always-on footprint outline (NOT maxzoom-capped): when SCAMIN suppresses every
     // feature in a cell the tiles render blank, so keep a thin dashed outline at ALL
@@ -71,7 +88,7 @@ export class CoverageBoxes {
   setVisible(on) {
     this._visible = !!on;
     const map = this.map, vis = on ? "visible" : "none";
-    for (const band of BANDS) for (const pre of ["inst-fill-", "inst-line-"]) if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
+    for (const band of BANDS) for (const pre of ["inst-fill-", "inst-line-", "inst-label-"]) if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
     if (map.getLayer("inst-outline")) map.setLayoutProperty("inst-outline", "visibility", vis);
   }
 
