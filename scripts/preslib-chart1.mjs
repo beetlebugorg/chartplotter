@@ -77,6 +77,9 @@ for (const p of PANELS) {
     localStorage.setItem("chartplotter:scheme", a.scheme);
     localStorage.setItem("chartplotter:basemap", "coastline");
     localStorage.setItem("chartplotter:enc-agreement", "1");
+    // The reference plots are all-categories-on, so enable the "Other" display
+    // category — that's where the SY(INFORM01) additional-info callouts live (§10.6.1.1).
+    localStorage.setItem("chartplotter:mariner", JSON.stringify({ displayOther: true }));
     localStorage.setItem("chartplotter:view", JSON.stringify({ center: a.center, zoom: a.zoom }));
   }, { scheme: p.scheme, center, zoom });
   try { await page.goto(baseURL + "/?prod&spec", { waitUntil: "domcontentloaded", timeout: 45000 }); }

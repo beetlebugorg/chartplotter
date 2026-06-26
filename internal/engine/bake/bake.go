@@ -846,7 +846,15 @@ func (b *Baker) addCell(chart *s57.Chart, pc CellPortrayal) {
 						continue
 					}
 				}
-				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts, drval1, drval2, valdco)
+				// SY(INFORM01) is the S-52 §10.6.1.1 "additional information available"
+				// marker — always display priority 8, category Other, regardless of the
+				// host feature's category (so it clears Standard display and only shows
+				// when the mariner enables Other).
+				cat, prio := fb.DisplayCategory, fb.DisplayPriority
+				if sc, ok := p.(portrayal.SymbolCall); ok && sc.SymbolName == "INFORM01" {
+					cat, prio = displayCatOther, 8
+				}
+				b.route(p, class, prio, cat, zr, zMin, dr.Max, bnd, pts, drval1, drval2, valdco)
 			}
 		}
 	}
