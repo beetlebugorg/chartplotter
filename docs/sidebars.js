@@ -6,6 +6,7 @@ const sidebars = {
     'intro',
     'installation',
     'getting-started',
+    'chart1',
     'widget',
     'cli',
     'architecture',

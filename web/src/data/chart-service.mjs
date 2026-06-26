@@ -148,6 +148,17 @@ export class ChartService {
     catch (e) { return null; }
   }
 
+  // GET /api/cells?active=1 — the ACTIVE (enabled-pack) cells that are indexed,
+  // as search-catalog entries {n,l,bb}: so a cell can be found by name and flown
+  // to its footprint. Only cells with known bounds (indexed) are returned.
+  async activeCells() {
+    try {
+      const j = await fetch(this._url("api/cells?active=1")).then((r) => (r.ok ? r.json() : null));
+      const bb = (j && j.bbox) || {};
+      return Object.keys(bb).map((n) => ({ n, l: n, bb: bb[n] }));
+    } catch (e) { return []; }
+  }
+
   // POST /api/set/{enable,disable} — toggle a pack's rendering (data is kept).
   async setEnabled(set, on) {
     await fetch(this._url(`api/set/${on ? "enable" : "disable"}?set=${encodeURIComponent(set)}`), { method: "POST" });

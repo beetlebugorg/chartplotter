@@ -52,3 +52,125 @@
   font-size: 0.85rem;
   text-align: right;
 }
+
+/* The <Chart1Tests/> symbol-compliance checker: a live widget over the S-52 ECDIS
+   Chart 1 sheet, with the reference-panel list beside it so the whole thing fits
+   one screen. Click a panel → the widget fitBounds() to it (chrome-aware padding). */
+.chart1 {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  margin: 1.5rem 0;
+}
+.chart1--poster {
+  display: block;
+}
+.chart1__panel {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  max-height: 78vh;
+  min-height: 520px;
+}
+.chart1__title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ifm-color-emphasis-700);
+  padding: 0 0.3rem 0.4rem;
+}
+.chart1__sub {
+  display: block;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.72rem;
+  color: var(--ifm-color-emphasis-500);
+}
+.chart1__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chart1__test {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  text-align: left;
+  cursor: pointer;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  transition: background 0.12s, border-color 0.12s;
+}
+.chart1__test:hover {
+  background: var(--ifm-color-emphasis-100);
+}
+.chart1__test--active {
+  background: var(--ifm-color-primary-lightest);
+  border-left-color: var(--ifm-color-primary);
+}
+.chart1__page {
+  min-width: 2.7em;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ifm-color-emphasis-600);
+  white-space: nowrap;
+}
+.chart1__label {
+  flex: 1;
+  font-size: 0.85rem;
+  line-height: 1.25;
+}
+.chart1__map {
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
+  height: 78vh;
+  min-height: 520px;
+}
+.chart1__poster {
+  width: 100%;
+  border-radius: 12px;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.18);
+}
+.chart1__hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+/* Narrow screens (Docusaurus drops the right TOC < 997px): stack, map first. */
+@media (max-width: 996px) {
+  .chart1 {
+    grid-template-columns: 1fr;
+  }
+  .chart1__map {
+    grid-column: 1;
+    grid-row: 1;
+    height: 58vh;
+    min-height: 340px;
+  }
+  .chart1__panel {
+    grid-column: 1;
+    grid-row: 2;
+    max-height: none;
+    min-height: 0;
+  }
+  .chart1__list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+}

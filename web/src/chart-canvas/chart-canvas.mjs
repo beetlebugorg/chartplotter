@@ -369,6 +369,9 @@ export class ChartCanvas extends HTMLElement {
     // since 1 NM ≡ 1 arcminute of latitude. Re-rendered on every move.
     this._scaleEl = document.createElement("div");
     this._scaleEl.className = "s52-scalebar maplibregl-ctrl";
+    // Spec mode (chrome-free capture, see chartplotter.mjs) hides the scalebar too —
+    // it lives in this element's shadow root, out of reach of the app's :host([spec]) CSS.
+    if (document.querySelector("chart-plotter-app[spec], chart-plotter[spec]")) this._scaleEl.style.display = "none";
     map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
     map.on("move", () => this._renderScalebar());
 

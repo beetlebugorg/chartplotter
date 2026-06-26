@@ -42,35 +42,53 @@ export class SearchBox {
     if (!el) return;
     const raw = (q || "").trim();
     const needle = raw.toLowerCase();
-    if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._hits = []; this.position(); return; }
-    // 0) A typed coordinate (any common notation) → a "Go to" hit pinned on top,
-    // so Enter jumps straight there. Other matches still list below.
-    const coord = parseLatLon(raw);
-    // 1) Catalog cells (chart titles / numbers), fuzzy-matched. Best score wins;
-    // ties break to the coarser chart (overview before an arbitrary harbour inset).
+    // BROWSE mode: nothing typed yet (or too short to fuzzy-match). Instead of a
+    // blank box, list the active charts — so you can find one without knowing its
+    // name. Ordered NEAREST-to-view first (most relevant to where you're looking),
+    // capped, with a "type to narrow" footer when there are more.
+    const browse = needle.length < 2;
+    const BROWSE_LIMIT = 40;
+    let center = null;
+    try { const c = this._getMap().getCenter(); center = [c.lng, c.lat]; } catch {}
+    // A typed coordinate (any common notation) → a "Go to" hit pinned on top, so
+    // Enter jumps straight there. Only when something is typed (browse has no query).
+    const coord = browse ? null : parseLatLon(raw);
+    // 1) Catalog cells (active installed charts), fuzzy-matched — or all, in browse.
     const cells = [];
     for (const c of this._getCatalog()) {
       if (!Array.isArray(c.bb) || c.bb.length !== 4) continue;
+      if (browse) { cells.push({ c, score: 0 }); continue; }
       const score = Math.max(fuzzyScore(needle, (c.l || "").toLowerCase()), fuzzyScore(needle, c.n.toLowerCase()));
       if (score >= 0) cells.push({ c, score });
     }
-    cells.sort((a, b) => (b.score - a.score) || ((b.c.s || 0) - (a.c.s || 0)));
-    // 2) Every loaded chart feature, fuzzy-matched across its attribute data.
-    const feats = this._searchFeatures(needle);
+    if (browse) {
+      const d2 = (c) => center ? ((c.bb[0] + c.bb[2]) / 2 - center[0]) ** 2 + ((c.bb[1] + c.bb[3]) / 2 - center[1]) ** 2 : 0;
+      cells.sort((a, b) => (d2(a.c) - d2(b.c)) || (a.c.n < b.c.n ? -1 : 1)); // nearest first, then by name
+    } else {
+      cells.sort((a, b) => (b.score - a.score) || ((b.c.s || 0) - (a.c.s || 0))); // best match; ties → coarser chart
+    }
+    // 2) Loaded chart features (skip in browse — there's no query to match).
+    const feats = browse ? [] : this._searchFeatures(needle);
+    const more = browse && cells.length > BROWSE_LIMIT;
+    // A typed coordinate pins a "Go to" hit on top; cells then features below.
     const hits = [
       ...(coord ? [{ type: "coord", lat: coord.lat, lng: coord.lng }] : []),
-      ...cells.slice(0, 5).map(({ c }) => ({ type: "cell", c })),
+      ...cells.slice(0, browse ? BROWSE_LIMIT : 5).map(({ c }) => ({ type: "cell", c })),
       ...feats.slice(0, 8),
     ];
     this._hits = hits;
-    el.innerHTML = hits.length
-      ? hits.map((h, i) => {
-          const sel = i === 0 ? " sel" : "";
-          if (h.type === "coord") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(fmtLatLon(h.lat, h.lng))}</div><div class="s">Go to coordinate</div></div>`;
-          if (h.type === "cell") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">Chart · ${esc(h.c.n)} · 1:${(h.c.s || 0).toLocaleString()}</div></div>`;
-          return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.label)}</div><div class="s">${esc(h.sub)}</div></div>`;
-        }).join("")
-      : `<div class="sr-item"><span class="muted">No matches in view</span></div>`;
+    const rows = hits.map((h, i) => {
+      const sel = i === 0 ? " sel" : "";
+      if (h.type === "coord") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(fmtLatLon(h.lat, h.lng))}</div><div class="s">Go to coordinate</div></div>`;
+      if (h.type === "cell") { const sub = h.c.s ? `Chart · ${esc(h.c.n)} · 1:${h.c.s.toLocaleString()}` : `Chart · ${esc(h.c.n)}`; return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">${sub}</div></div>`; }
+      return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.label)}</div><div class="s">${esc(h.sub)}</div></div>`;
+    });
+    if (hits.length) {
+      if (more) rows.push(`<div class="sr-item"><span class="muted">${cells.length} charts — type to narrow</span></div>`);
+      el.innerHTML = rows.join("");
+    } else {
+      el.innerHTML = `<div class="sr-item"><span class="muted">${browse ? "No installed charts" : "No matches in view"}</span></div>`;
+    }
     el.hidden = false;
     el.querySelectorAll(".sr-item[data-i]").forEach((d) => (d.onmousedown = (e) => { e.preventDefault(); this.gotoHit(+d.dataset.i); }));
     this.position(); // re-align to the search tab as the result count changes the height

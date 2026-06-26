@@ -156,6 +156,7 @@ func emitPrimitives(cmd instructions.DrawCommand, geom S101Geometry, cat *catalo
 			fig.Ray = true
 			fig.BearingDeg = ag.BearingDeg
 			fig.LengthMM = ag.LengthMM
+			fig.LengthGroundM = ag.LengthGroundM
 		case instructions.AugArc:
 			fig.RadiusMM = ag.RadiusMM
 			fig.StartDeg = ag.StartDeg

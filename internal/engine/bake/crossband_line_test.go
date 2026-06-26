@@ -82,7 +82,7 @@ func TestCrossBandLineNoDoubleDraw(t *testing.T) {
 		ctrLat := unnormY((float64(c.Y) + 0.5) / n)
 		// A strictly-finer cell covers this tile's centre, yet a coarse line was
 		// kept here AND the finer band also drew one: an interior double-draw.
-		if s := b.coverageScaleAt(ctrLat, ctrLon, z); s != 0 && s < approachCscl {
+		if s := b.coverageScaleAt(ctrLat, ctrLon, z, false); s != 0 && s < approachCscl {
 			interior++
 			t.Errorf("interior line double-draw at %v: tile centre covered by finer cell (cscl %d < approach %d)", c, s, approachCscl)
 		}

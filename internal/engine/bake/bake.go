@@ -397,6 +397,14 @@ type covMeta struct {
 	displayMin       uint32 // lowest zoom this cell's data is shown at (0 for overview/general which overzoom down)
 	bb               geo.BoundingBox
 	rings            [][][]float64
+	// derived is true when these rings were synthesised from the cell's geometry
+	// extent because it carried no M_COVR (see extractCoverage). A derived rectangle
+	// marks where the cell IS, not where it actually has area data — so it is trusted
+	// only for POINT suppression (a finer cell's footprint supersedes a coarser cell's
+	// point symbol), NOT for area/line FILL suppression, where it would punch nodata
+	// holes wherever the finer cell's extent has no fill (a sparse legend cell, an
+	// inter-cell gap). Always false for conformant cells, where M_COVR == data extent.
+	derived bool
 }
 
 // sectorKey identifies one constructed sector-figure element (anchor + ray/arc
@@ -485,7 +493,8 @@ func (b *Baker) groupCoLocatedLights(features []s57.Feature) (primaryText map[in
 // extractCoverage records a cell's M_COVR (CATCOV=1) data-coverage polygons into
 // covMeta (keyed to the cell's native band [zr]) — the input to best-available
 // suppression and DATCVR scale boundaries.
-func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell string, cscl, displayMin uint32) {
+func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell string, cscl, displayMin uint32) int {
+	added := 0
 	for i := range features {
 		f := &features[i]
 		if f.ObjectClass() != "M_COVR" || intAttr(f.Attributes(), "CATCOV") != 1 {
@@ -507,7 +516,59 @@ func (b *Baker) extractCoverage(features []s57.Feature, zr ZoomRange, cell strin
 		b.coverage = append(b.coverage, cov)
 		b.covMeta = append(b.covMeta, cm)
 		b.bbox.ExtendBox(cm.bb) // so the streaming bake has full bounds after pass 1
+		added++
 	}
+	// Fallback for a cell with no M_COVR(CATCOV=1) coverage (S-57 requires it, but
+	// synthetic/test cells — e.g. the S-52 PresLib ECDIS Chart 1 — omit it): derive a
+	// rectangular coverage from the bounding box of all the cell's geometry. Without
+	// this the cell contributes NO covMeta, so best-available suppression and DATCVR
+	// scale boundaries have nothing to test against and a coarser cell's symbols
+	// double-draw over a finer cell covering the same ground. Real NOAA cells always
+	// carry M_COVR, so this never triggers for them (no behaviour change).
+	if added == 0 {
+		if rect, bb, ok := cellExtentRect(features); ok {
+			b.coverage = append(b.coverage, CellCoverage{Cell: cell, Rings: [][][]float64{rect}})
+			b.covMeta = append(b.covMeta, covMeta{bandMin: zr.Min, bandMax: zr.Max, cscl: cscl, displayMin: displayMin, bb: bb, rings: [][][]float64{rect}, derived: true})
+			b.bbox.ExtendBox(bb)
+			added++
+		}
+	}
+	return added
+}
+
+// cellExtentRect returns a closed rectangular ring ([lon,lat] points, CW from the
+// SW corner) spanning the bounding box of every feature's geometry in a cell, plus
+// that box. Used as a coverage fallback for cells lacking M_COVR (see
+// extractCoverage). ok is false when the cell has no spatial geometry at all.
+func cellExtentRect(features []s57.Feature) ([][]float64, geo.BoundingBox, bool) {
+	bb := geo.EmptyBox()
+	any := false
+	ext := func(pt []float64) {
+		if len(pt) >= 2 {
+			bb.ExtendPoint(geo.LatLon{Lon: pt[0], Lat: pt[1]})
+			any = true
+		}
+	}
+	for i := range features {
+		g := features[i].Geometry()
+		for _, pt := range g.Coordinates {
+			ext(pt)
+		}
+		for _, r := range g.Rings {
+			for _, pt := range r.Coordinates {
+				ext(pt)
+			}
+		}
+	}
+	if !any || bb.MinLon > bb.MaxLon || bb.MinLat > bb.MaxLat {
+		return nil, bb, false
+	}
+	rect := [][]float64{
+		{bb.MinLon, bb.MinLat}, {bb.MaxLon, bb.MinLat},
+		{bb.MaxLon, bb.MaxLat}, {bb.MinLon, bb.MaxLat},
+		{bb.MinLon, bb.MinLat},
+	}
+	return rect, bb, true
 }
 
 // cellStem is a cell's dataset name without the .000/.NNN extension.
@@ -521,12 +582,14 @@ func cellStem(name string) string {
 // AddCellCoverage extracts ONLY a cell's coverage + native band (no feature
 // routing) — the streaming bake's first pass, building the global covMeta once so
 // each later per-band routing pass can suppress against finer bands without
-// re-deriving coverage. Returns the cell's native band.
-func (b *Baker) AddCellCoverage(chart *s57.Chart) Band {
+// re-deriving coverage. Returns the cell's native band and how many coverage
+// polygons it contributed (0 ⇒ the cell had no M_COVR and the extent fallback found
+// no geometry — e.g. an M_COVR-only filtered parse; the caller re-parses fully).
+func (b *Baker) AddCellCoverage(chart *s57.Chart) (Band, int) {
 	band := BandForScale(uint32(chart.CompilationScale()))
 	cscl := uint32(chart.CompilationScale())
-	b.extractCoverage(chart.Features(), band.ZoomRange(), cellStem(chart.DatasetName()), cscl, cellDisplayMin(band, band.ZoomRange()))
-	return band
+	n := b.extractCoverage(chart.Features(), band.ZoomRange(), cellStem(chart.DatasetName()), cscl, cellDisplayMin(band, band.ZoomRange()))
+	return band, n
 }
 
 // cellDisplayMin is the lowest zoom a band's cells are actually drawn at (matches
@@ -783,7 +846,15 @@ func (b *Baker) addCell(chart *s57.Chart, pc CellPortrayal) {
 						continue
 					}
 				}
-				b.route(p, class, fb.DisplayPriority, fb.DisplayCategory, zr, zMin, dr.Max, bnd, pts, drval1, drval2, valdco)
+				// SY(INFORM01) is the S-52 §10.6.1.1 "additional information available"
+				// marker — always display priority 8, category Other, regardless of the
+				// host feature's category (so it clears Standard display and only shows
+				// when the mariner enables Other).
+				cat, prio := fb.DisplayCategory, fb.DisplayPriority
+				if sc, ok := p.(portrayal.SymbolCall); ok && sc.SymbolName == "INFORM01" {
+					cat, prio = displayCatOther, 8
+				}
+				b.route(p, class, prio, cat, zr, zMin, dr.Max, bnd, pts, drval1, drval2, valdco)
 			}
 		}
 	}
@@ -1251,7 +1322,7 @@ func (b *Baker) addScaleBoundary(pts []geo.LatLon, zMin, zMax uint32) {
 		attrs: []mvt.KeyValue{
 			{Key: "class", Value: mvt.StringVal("SCLBDY")},
 			{Key: "color_token", Value: mvt.StringVal("CHGRD")},
-			{Key: "width_px", Value: mvt.IntVal(2)},
+			{Key: "width_px", Value: mvt.IntVal(1)}, // S-52 §10.1.9.1 LS(SOLD,1,CHGRD)
 		},
 	}
 	b.add(r, bb)
@@ -1643,7 +1714,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			case r.kind == mvt.GeomPoint:
 				// A point tests its OWN position — a boundary tile keeps coarse points
 				// that fall outside the finer coverage.
-				if s := b.coverageScaleAt(unnormY(r.wMinY), r.wMinX*360-180, bandZ); s != 0 && s < r.cscl {
+				if s := b.coverageScaleAt(unnormY(r.wMinY), r.wMinX*360-180, bandZ, true); s != 0 && s < r.cscl {
 					suppressed = true
 				}
 			case r.kind == mvt.GeomLineString:
@@ -1658,7 +1729,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				// coarse line by the tile CENTRE (a line spans the tile, so the centre is
 				// its representative point): it yields only where the centre has no finer
 				// cell — best-available where the finer cell genuinely carries no data.
-				if s := b.coverageScaleAt(ctrLat, ctrLon, bandZ); s != 0 && s < r.cscl {
+				if s := b.coverageScaleAt(ctrLat, ctrLon, bandZ, false); s != 0 && s < r.cscl {
 					suppressed = true
 				}
 			default:
@@ -1676,7 +1747,7 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				nLat, sLat := unnormY(float64(coord.Y)/n), unnormY(float64(coord.Y+1)/n)
 				suppressed = true
 				for _, pt := range [...][2]float64{{ctrLat, ctrLon}, {nLat, wLon}, {nLat, eLon}, {sLat, wLon}, {sLat, eLon}} {
-					if s := b.coverageScaleAt(pt[0], pt[1], bandZ); s == 0 || s >= r.cscl {
+					if s := b.coverageScaleAt(pt[0], pt[1], bandZ, false); s == 0 || s >= r.cscl {
 						suppressed = false // part of the tile has no finer cell — keep the coarse prim
 						break
 					}
@@ -1944,7 +2015,15 @@ func tessellateFigure(sp *sectorPrim, z uint32) []sectorStroke {
 		}
 		return append(out, sectorStroke{points: pts, colorToken: sp.fig.ColorToken, widthPx: float32(widthPx), dashed: dashed, sleg: sleg})
 	}
+	// Short leg: display mm by default, but a GeographicCRS leg length is a fixed
+	// GROUND distance (metres) — convert it to px at this zoom (like the full leg),
+	// not metres-as-mm (which rendered legs ~10× too long, "shooting out").
 	legShort := sp.fig.LengthMM * pxPerMM
+	if sp.fig.LengthGroundM > 0 {
+		if cosLat := math.Cos(sp.fig.Anchor.Lat * math.Pi / 180.0); cosLat > 1e-6 {
+			legShort = sp.fig.LengthGroundM / (cosLat * earthCircumM) * worldPx
+		}
+	}
 	if sp.fig.FullLengthNM <= 0 {
 		return emit(nil, legShort, -1) // can't extend: the leg is always shown
 	}
@@ -2008,8 +2087,8 @@ func (b *Baker) coverageBandAt(lat, lon float64) uint32 {
 	p := geo.LatLon{Lat: lat, Lon: lon}
 	for i := range b.covMeta {
 		cm := &b.covMeta[i]
-		if cm.bandMax <= best || !cm.bb.Contains(p) {
-			continue
+		if cm.derived || cm.bandMax <= best || !cm.bb.Contains(p) {
+			continue // derived extents gate point suppression only, not area/line fills (see covMeta.derived)
 		}
 		if pointInRings(lon, lat, cm.rings) {
 			best = cm.bandMax
@@ -2025,13 +2104,16 @@ func (b *Baker) coverageBandAt(lat, lon float64) uint32 {
 // across bands AND between cells of different scale that fall in the SAME band (the
 // per-band coverageBandAt above can't distinguish those). bandZ-gated so a finer
 // cell that isn't shown yet at this zoom doesn't punch a hole in the coarser one.
-func (b *Baker) coverageScaleAt(lat, lon float64, bandZ uint32) uint32 {
+func (b *Baker) coverageScaleAt(lat, lon float64, bandZ uint32, pointQuery bool) uint32 {
 	var best uint32 // 0 = none found yet; otherwise the finest (smallest) cscl
 	p := geo.LatLon{Lat: lat, Lon: lon}
 	for i := range b.covMeta {
 		cm := &b.covMeta[i]
 		if cm.cscl == 0 || cm.displayMin > bandZ {
 			continue // unscaled, or this cell isn't drawn at this zoom
+		}
+		if cm.derived && !pointQuery {
+			continue // a derived extent rectangle suppresses points, not fills (see covMeta.derived)
 		}
 		if best != 0 && cm.cscl >= best {
 			continue // not finer than the best so far — skip the costly point test

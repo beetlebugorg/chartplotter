@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo serve-demo
+.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -192,6 +192,24 @@ demo: build ## Assemble the read-only Annapolis widget demo bundle into $(DEMO_O
 	@cp -R web/src web/vendor web/glyphs web/basemap "$(DEMO_OUT)/"
 	@echo "  demo bundle ready: $(DEMO_OUT)/ — host it on any static server / CDN"
 
+# ---- live "ECDIS Chart 1" tiles for the docs symbol-compliance page ----
+# The S-52 PresLib "ECDIS Chart 1" reference sheet, baked to tiles so the docs
+# Chart-1 page embeds it LIVE: one <chart-plotter> widget that reuses the demo
+# bundle's frontend assets ($(DEMO_OUT)) and points its tile manifest here via
+# catalog="…". So this target emits ONLY the tiles + manifest (~1 MB) — no second
+# frontend copy. The whole sheet is one contiguous synthetic ENC, so a click in the
+# page's test list just setView()s the widget to that panel at its compilation scale.
+# Source cells come from the IHO PresLib draft (fetched + cached; see the script).
+PRESLIB_CACHE    ?= $(CACHE)/preslib
+DEMO_CHART1_OUT  ?= dist/chart1
+CHART1_MAXZOOM   ?= 16
+
+demo-chart1: build ## Bake the S-52 ECDIS Chart 1 sheet to tiles for the docs (into $(DEMO_CHART1_OUT))
+	PRESLIB_CACHE="$(PRESLIB_CACHE)" scripts/fetch-preslib-cells.sh
+	@mkdir -p "$(DEMO_CHART1_OUT)"
+	$(BIN) bake "$(PRESLIB_CACHE)/cells" -o "$(DEMO_CHART1_OUT)/chart1.pmtiles" --bands --max-zoom $(CHART1_MAXZOOM) --manifest "$(DEMO_CHART1_OUT)/charts-index.json"
+	@echo "  chart1 tiles ready: $(DEMO_CHART1_OUT)/ — served beside the demo bundle as /chart1/"
+
 # LOCAL PREVIEW ONLY. The bundle is pure static files — deploy it to ANY
 # range-capable static host (GitHub Pages, S3/CloudFront, nginx, `npx serve`); it
 # needs no backend. PMTiles are read with HTTP Range, which python's http.server
@@ -204,6 +222,22 @@ serve-demo: demo ## Preview the static demo bundle locally (range-capable static
 
 docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
 	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)
+
+# Render the S-52 PresLib "ECDIS Chart 1" panels (one PNG per reference-plot page)
+# with our implementation, for visual diffing against the spec's reference plots
+# (PresLib e4.0.0 Part I §16). Self-contained: extracts the cells, bakes+serves via
+# the import path, screenshots each panel, tears down. Needs the PresLib zip in
+# testdata/ + a headless Chromium. Output → testdata/preslib-chart1-out/ (gitignored).
+preslib-chart1: ## Render PresLib "ECDIS Chart 1" panels for spec comparison (one PNG per reference page)
+	scripts/preslib-chart1.sh
+
+# Render the IHO S-64 ENC test dataset's rendering pages (one PNG per test section)
+# for diffing against the S-64 reference plots. Same self-contained flow as
+# preslib-chart1, but the S-64 tests vary the mariner settings per page (§3.1 renders
+# Base/Standard/Other). Needs the S-64 zip in testdata/ + a headless Chromium.
+# Output → testdata/s64-pages-out/ (gitignored).
+s64-pages: ## Render S-64 ENC test pages for spec comparison (one PNG per test section)
+	scripts/s64-pages.sh
 
 # Regenerate the documentation UI screenshots (docs/static/img/ui/*.png) from the
 # live app, so they stay in sync when the UI changes. Needs baked charts in the

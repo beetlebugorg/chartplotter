@@ -249,8 +249,57 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 	return m[f.ID()], true
 }
 
-// buildFeature turns one feature's emitted instruction stream into its FeatureBuild.
+// buildFeature turns one feature's emitted instruction stream into its FeatureBuild,
+// then adds the S-52 §10.6.1.1 additional-information indicator when the object
+// carries it (see addInformSymbol).
 func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
+	fb := b.buildFeatureBody(f, stream)
+	return addInformSymbol(fb, f)
+}
+
+// addInformSymbol appends SY(INFORM01) at the object's position when it carries
+// additional information (INFORM/NINFOM, or TXTDSC/NTXTDS/PICREP) — S-52 §10.6.1.1.
+// INFORM01 is a box-on-a-leader "info available" marker; it's baked display-category
+// Other (the bake routes it so, overriding the host feature's category), so it
+// clears Standard display and only shows when the mariner enables Other. The pivot
+// goes at a point's position / a line's midpoint / an area's centre.
+func addInformSymbol(fb FeatureBuild, f *s57.Feature) FeatureBuild {
+	if !hasAdditionalInfo(f.Attributes()) {
+		return fb
+	}
+	anchor, ok := representativePoint(f)
+	if !ok {
+		return fb
+	}
+	fb.Primitives = append(fb.Primitives, SymbolCall{
+		Anchor: anchor, SymbolName: "INFORM01", Scale: DefaultPxPerSymbolUnit,
+		SoundingDepthM: nan32, DangerDepthM: nan32,
+	})
+	return fb
+}
+
+// hasAdditionalInfo reports whether an object carries S-52 §10.6.1.1 ancillary
+// information (a non-empty INFORM/NINFOM/TXTDSC/NTXTDS/PICREP attribute).
+func hasAdditionalInfo(attrs map[string]any) bool {
+	for _, k := range [...]string{"INFORM", "NINFOM", "TXTDSC", "NTXTDS", "PICREP"} {
+		if s, _ := attrs[k].(string); strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// buildFeatureBody turns one feature's emitted instruction stream into its FeatureBuild.
+func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBuild {
+	// NEWOBJ with a SYMINS attribute: portray the producer's explicit symbol
+	// instruction (S-52 SYMINS02) rather than the S-101 V-AIS alias the engine
+	// emitted — SYMINS carries the real symbols, TX/TE labels, boundaries and fills
+	// (the bulk of the ECDIS-Chart-1 test content). See parseSYMINS.
+	if f.ObjectClass() == "NEWOBJ" {
+		if fb, ok := parseSYMINS(f); ok {
+			return fb
+		}
+	}
 	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
 	// object" mark (S-52 §10.1.1 parity).
 	if strings.HasPrefix(stream, "UNMAPPED:") {
@@ -260,6 +309,19 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 	// chart with placeholders. (Most current errors are line/area rules needing
 	// the S-57 spatial topology the host doesn't model yet — a tracked gap.)
 	if stream == "" || strings.HasPrefix(stream, "ERROR:") {
+		// NEWOBJ aliases to the POINT-only VirtualAISAidToNavigation rule, so its
+		// line/area variants always error here; draw the S-52 dashed magenta new-object
+		// boundary instead of dropping them (the missing boxes/lines around things).
+		switch f.ObjectClass() {
+		case "NEWOBJ":
+			if nb := newObjectBuild(f); len(nb.Primitives) > 0 {
+				return nb
+			}
+		case "SWPARE":
+			if sb := sweptAreaBuild(f); len(sb.Primitives) > 0 {
+				return sb
+			}
+		}
 		return FeatureBuild{DisplayCategory: displayStandard}
 	}
 

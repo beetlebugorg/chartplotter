@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -289,22 +290,68 @@ func (s *Server) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
 // serveCells returns the names of cells currently in the server's ENC_ROOT source
 // store. The client uses this so its installed-set (and the persisted baked sets)
 // survive a page reload — the cells live server-side in the XDG data dir.
+// serveCells returns the installed source cells. The "cells" array is every
+// cached cell name (back-compat: the installed list). "bbox" maps each INDEXED
+// cell to its [W,S,E,N] footprint (fills in as the background index backfills),
+// so the client can search a cell by name and fly to it. With ?active=1 the
+// result is restricted to cells whose footprint overlaps an ENABLED pack — i.e.
+// charts actually on the map right now (and only those that are indexed, since an
+// un-indexed cell has no footprint to test or fly to).
 func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
+	active := r.URL.Query().Get("active") == "1"
+	var enabled [][4]float64
+	if active {
+		enabled = s.enabledPackBounds()
+	}
+	_, idx := s.cellIdx.snapshot()
 	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "ENC_ROOT"))
 	names := make([]string, 0, len(entries))
+	boxes := make(map[string][4]float64)
 	for _, e := range entries {
-		if e.IsDir() && isCellName(e.Name()) {
-			names = append(names, e.Name())
+		if !e.IsDir() || !isCellName(e.Name()) {
+			continue
+		}
+		n := e.Name()
+		box, has := idx[n]
+		if active && (!has || !bboxOverlapsAny(box, enabled)) {
+			continue
+		}
+		names = append(names, n)
+		if has {
+			boxes[n] = box
 		}
 	}
 	sort.Strings(names)
 	w.Header().Set("Content-Type", jsonCT)
-	fmt.Fprint(w, `{"cells":[`)
-	for i, n := range names {
-		if i > 0 {
-			fmt.Fprint(w, ",")
+	_ = json.NewEncoder(w).Encode(struct {
+		Cells []string              `json:"cells"`
+		BBox  map[string][4]float64 `json:"bbox"`
+	}{names, boxes})
+}
+
+// enabledPackBounds is each enabled pack's [W,S,E,N] (read from its archive),
+// used by the ?active filter to test which cells are currently on the map.
+func (s *Server) enabledPackBounds() [][4]float64 {
+	var out [][4]float64
+	for _, name := range sortedKeys(s.packs) {
+		if s.prefs.isDisabled(name) {
+			continue
 		}
-		fmt.Fprintf(w, "%q", n)
+		if src, err := tilesource.Open(s.packs[name]); err == nil {
+			m := src.Meta()
+			_ = tilesource.Close(src)
+			out = append(out, [4]float64{m.W, m.S, m.E, m.N})
+		}
 	}
-	fmt.Fprint(w, "]}")
+	return out
+}
+
+// bboxOverlapsAny reports whether [W,S,E,N] box intersects any of the rects.
+func bboxOverlapsAny(b [4]float64, rects [][4]float64) bool {
+	for _, r := range rects {
+		if b[0] <= r[2] && b[2] >= r[0] && b[1] <= r[3] && b[3] >= r[1] {
+			return true
+		}
+	}
+	return false
 }

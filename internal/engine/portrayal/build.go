@@ -657,6 +657,92 @@ func unknownObjectBuild(f *s57.Feature) FeatureBuild {
 	}
 }
 
+// newObjectBuild portrays an S-57 NEWOBJ whose primitive the S-101 alias rule
+// (VirtualAISAidToNavigation) rejects: that rule is POINT-only, so a line or area
+// NEWOBJ errors and would otherwise be suppressed (drawing nothing). The S-52
+// PresLib reference (§10.3.3.8, "Default symbol for NEWOBJ") draws line/area new
+// objects with a dashed magenta boundary, so emit that. Point NEWOBJ never reaches
+// here — it portrays through the V-AIS rule, which is correct for real S-101 data
+// (V-AIS is encoded as a point NEWOBJ).
+func newObjectBuild(f *s57.Feature) FeatureBuild {
+	g := f.Geometry()
+	toLL := func(cs [][]float64) []geo.LatLon {
+		out := make([]geo.LatLon, 0, len(cs))
+		for _, c := range cs {
+			if len(c) >= 2 {
+				out = append(out, geo.LatLon{Lat: c[1], Lon: c[0]})
+			}
+		}
+		return out
+	}
+	dashed := func(pts []geo.LatLon, closed bool) Primitive {
+		if closed && len(pts) > 1 && pts[0] != pts[len(pts)-1] {
+			pts = append(pts, pts[0]) // close the ring
+		}
+		return StrokeLine{Points: pts, ColorToken: "CHMGF", WidthPx: 1.5, Dash: DashDashed}
+	}
+	var prims []Primitive
+	switch g.Type {
+	case s57.GeometryTypeLineString:
+		if pts := toLL(g.Coordinates); len(pts) >= 2 {
+			prims = append(prims, dashed(pts, false))
+		}
+	case s57.GeometryTypePolygon:
+		for _, r := range g.Rings {
+			if pts := toLL(r.Coordinates); len(pts) >= 2 {
+				prims = append(prims, dashed(pts, true))
+			}
+		}
+	}
+	if len(prims) == 0 {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	return FeatureBuild{Primitives: prims, DisplayPriority: 6, DisplayCategory: displayStandard}
+}
+
+// sweptAreaBuild portrays an S-57 SWPARE (swept area). Its S-101 class is
+// SweptArea, but the Portrayal Catalogue ships no SweptArea.lua rule (an IHO gap),
+// so it errors and would be suppressed. The S-52 PresLib reference (page 243)
+// draws a dashed boundary around the area plus a "swept to <DRVAL1>" depth label,
+// so emit that.
+func sweptAreaBuild(f *s57.Feature) FeatureBuild {
+	g := f.Geometry()
+	if g.Type != s57.GeometryTypePolygon {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	ringLL := func(cs [][]float64) []geo.LatLon {
+		out := make([]geo.LatLon, 0, len(cs))
+		for _, c := range cs {
+			if len(c) >= 2 {
+				out = append(out, geo.LatLon{Lat: c[1], Lon: c[0]})
+			}
+		}
+		if len(out) > 1 && out[0] != out[len(out)-1] {
+			out = append(out, out[0]) // close the ring
+		}
+		return out
+	}
+	var prims []Primitive
+	for _, r := range g.Rings {
+		if pts := ringLL(r.Coordinates); len(pts) >= 2 {
+			prims = append(prims, StrokeLine{Points: pts, ColorToken: "CHGRD", WidthPx: 1, Dash: DashDashed})
+		}
+	}
+	if len(prims) == 0 {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	// "swept to <DRVAL1>" depth label at the area's representative point.
+	if d, ok := floatAttr(f.Attributes(), "DRVAL1"); ok {
+		if a, ok := areaSurfacePoint(ringLL(exteriorRing(g))); ok {
+			prims = append(prims, DrawText{
+				Anchor: a, Text: "swept to " + strconv.FormatFloat(d, 'f', -1, 64),
+				FontSizePx: 11, ColorToken: "CHBLK", HAlign: HAlignCenter, VAlign: VAlignMiddle,
+			})
+		}
+	}
+	return FeatureBuild{Primitives: prims, DisplayPriority: 6, DisplayCategory: displayStandard}
+}
+
 // representativePoint returns a single lat/lon to anchor a point symbol on a
 // feature of any geometry: the point itself, a line's midpoint vertex, or an
 // area's exterior-ring centroid. ok is false when the geometry carries no usable

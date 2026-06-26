@@ -205,6 +205,7 @@ export class ChartPlotter extends HTMLElement {
     // NOAA catalogue/discovery lives in this._dl (ChartDownloader, created in
     // boot); _catalog/_byName/_districts/_catalogDate are proxy getters onto it.
     this._installed = new Set();        // all stored cell names
+    this._activeCells = [];             // active (enabled-pack) cells {n,l,bb} — the search catalog
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
     this._cellBounds = new Map();       // name -> [w,s,e,n] footprint (from the baker), to locate uploaded cells
     this._cellScale = new Map();        // name -> compilation scale (CSCL) of uploaded cells, for picking a detail zoom
@@ -284,6 +285,10 @@ export class ChartPlotter extends HTMLElement {
     // attribute so the :host([widget]) styles apply either way.
     this._widget = this.hasAttribute("widget") || new URLSearchParams(location.search).has("widget");
     if (this._widget) this.setAttribute("widget", "");
+    // Spec mode (?spec / [spec]): a clean, chrome-free full-bleed map — every
+    // floating control + readout hidden — for capturing reference-style plots (the
+    // S-52 PresLib "ECDIS Chart 1" panels diff against the spec). See :host([spec]).
+    if (this.hasAttribute("spec") || new URLSearchParams(location.search).has("spec")) this.setAttribute("spec", "");
     // Display settings (scheme · basemap · mariner toggles · cell-boundary toggle ·
     // bands-off) are persisted SERVER-side so every screen pointed at this boat's
     // server shares them and they survive a restart. Adopt them BEFORE the renderer
@@ -528,7 +533,10 @@ export class ChartPlotter extends HTMLElement {
       try { this._plotter.setHiddenCells([...this._hiddenCells]); } catch (e) { console.warn(e); }
     }
     await this._catalogReady;
-    this.addCatalogOverlay(map);
+    // Best-effort: if the style is mid-rebuild this no-ops (or throws on older
+    // maps) — either way the style.load handler below re-adds the overlay once the
+    // fresh style is ready, so never let it skip registering that listener.
+    try { this.addCatalogOverlay(map); } catch (e) { console.warn("[overlay] deferring to style.load:", e); }
     // The plotter rebuilds the whole style (setStyle) when server sets load or the
     // SCAMIN buckets refresh, wiping every app-added overlay (coverage boxes, pick &
     // inspect highlights). Re-apply them after each rebuild, and repopulate the
@@ -1065,6 +1073,13 @@ export class ChartPlotter extends HTMLElement {
     return this._plotter ? this._plotter.setView(opts) : null;
   }
 
+  // Public: the underlying MapLibre map, once ready (null before the first paint).
+  // Lets embedders frame a region with the library's own camera helpers, e.g.
+  //   app.map?.fitBounds([[w, s], [e, n]], { padding: 56 })
+  get map() {
+    return this._map || null;
+  }
+
   saveView() {
     // The cell-picker "charts mode" (whose zoomed-out framing we used to skip
     // persisting) was removed; the live view is always the one to save.
@@ -1082,6 +1097,12 @@ export class ChartPlotter extends HTMLElement {
     // layers. A style.load handler (see onReady) re-invokes this against the fresh
     // style; the guard makes a redundant call (when the overlay is still present) a
     // no-op so we never double-add.
+    //
+    // The style may still be REBUILDING when this first runs from onReady (a
+    // setStyle for the physical-scale restage / SCAMIN buckets can be in flight
+    // after the awaited catalog load) — addSource would throw "Style is not done
+    // loading". Bail; the onReady style.load handler re-invokes us once it's ready.
+    if (!map.isStyleLoaded()) return;
     if (map.getSource("focus")) return;
     const empty = { type: "FeatureCollection", features: [] };
     map.addSource("focus", { type: "geojson", data: empty });
@@ -1482,6 +1503,9 @@ export class ChartPlotter extends HTMLElement {
     if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
     const cells = await this._api.cells();
     if (cells) this._installed = cells; // null → keep current view
+    // Active (enabled-pack) cells WITH bounds — the search catalog, so you can find
+    // an installed chart by name and fly to it (esp. on a blank/no-basemap map).
+    this._activeCells = await this._api.activeCells();
     // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
     // district and the server fans to its band-sets.
     this._installedSets = new Set(packs.map((p) => p.name));
@@ -1848,14 +1872,14 @@ export class ChartPlotter extends HTMLElement {
       getInput: () => $("search-input"),
       getSearchPop: () => $("search"),
       getSearchTab: () => $("search-tab"),
-      getCatalog: () => this._catalog,
+      getCatalog: () => this._activeCells || [], // search ACTIVE installed charts (name → fly to footprint)
       isChartSource,
       classLabel: (acr) => S57_CLASS[acr],
       layerLabel: (srcLayer) => INSPECT_LAYER_LABEL[srcLayer],
       positionCaret: (pop, tab) => this._positionCaret(pop, tab),
     });
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
-    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); this._search.doSearch(si.value); /* show the browse list (active charts) right away */ };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
     si.oninput = () => this._search.doSearch(si.value);
     si.onkeydown = (e) => {
