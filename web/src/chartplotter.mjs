@@ -1065,6 +1065,13 @@ export class ChartPlotter extends HTMLElement {
     return this._plotter ? this._plotter.setView(opts) : null;
   }
 
+  // Public: the underlying MapLibre map, once ready (null before the first paint).
+  // Lets embedders frame a region with the library's own camera helpers, e.g.
+  //   app.map?.fitBounds([[w, s], [e, n]], { padding: 56 })
+  get map() {
+    return this._map || null;
+  }
+
   saveView() {
     // The cell-picker "charts mode" (whose zoomed-out framing we used to skip
     // persisting) was removed; the live view is always the one to save.

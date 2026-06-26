@@ -77,6 +77,17 @@ static binary** for any platform with `GOOS`/`GOARCH` and nothing else to instal
 - **Live position and AIS (early).** Point a **NMEA 0183** feed at the server (over
   TCP) and it shows your **own ship** and **basic AIS targets** on the chart. A
   built-in `simulate` command generates traffic for testing.
+- **Draws the whole symbol set.** It renders the complete S-52 Presentation Library
+  **ECDIS "Chart 1"** reference sheet — every symbol, line style, area fill, and
+  colour — drawn by the same pipeline that bakes real NOAA charts and diffed against
+  the spec's own plots. [See the rendered sheet →](https://beetlebugorg.github.io/chartplotter/chart1)
+
+<p align="center">
+  <a href="https://beetlebugorg.github.io/chartplotter/chart1" title="How chartplotter renders the S-52 ECDIS Chart 1 symbol sheet">
+    <img src="docs/static/img/chart1/page-238-overview.png" alt="chartplotter's render of the full S-52 ECDIS Chart 1 symbol sheet" width="640">
+  </a>
+  <br><sub>The S-52 PresLib <b>ECDIS Chart 1</b> symbol sheet, rendered by chartplotter — <code>make preslib-chart1</code>.</sub>
+</p>
 
 ## 🧩 Beyond the chart
 
