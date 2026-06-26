@@ -251,6 +251,15 @@ func (b *S101Builder) Build(f *s57.Feature) (FeatureBuild, bool) {
 
 // buildFeature turns one feature's emitted instruction stream into its FeatureBuild.
 func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
+	// NEWOBJ with a SYMINS attribute: portray the producer's explicit symbol
+	// instruction (S-52 SYMINS02) rather than the S-101 V-AIS alias the engine
+	// emitted — SYMINS carries the real symbols, TX/TE labels, boundaries and fills
+	// (the bulk of the ECDIS-Chart-1 test content). See parseSYMINS.
+	if f.ObjectClass() == "NEWOBJ" {
+		if fb, ok := parseSYMINS(f); ok {
+			return fb
+		}
+	}
 	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
 	// object" mark (S-52 §10.1.1 parity).
 	if strings.HasPrefix(stream, "UNMAPPED:") {
@@ -260,6 +269,19 @@ func (b *S101Builder) buildFeature(f *s57.Feature, stream string) FeatureBuild {
 	// chart with placeholders. (Most current errors are line/area rules needing
 	// the S-57 spatial topology the host doesn't model yet — a tracked gap.)
 	if stream == "" || strings.HasPrefix(stream, "ERROR:") {
+		// NEWOBJ aliases to the POINT-only VirtualAISAidToNavigation rule, so its
+		// line/area variants always error here; draw the S-52 dashed magenta new-object
+		// boundary instead of dropping them (the missing boxes/lines around things).
+		switch f.ObjectClass() {
+		case "NEWOBJ":
+			if nb := newObjectBuild(f); len(nb.Primitives) > 0 {
+				return nb
+			}
+		case "SWPARE":
+			if sb := sweptAreaBuild(f); len(sb.Primitives) > 0 {
+				return sb
+			}
+		}
 		return FeatureBuild{DisplayCategory: displayStandard}
 	}
 
