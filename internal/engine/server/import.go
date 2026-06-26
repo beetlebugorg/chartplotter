@@ -330,7 +330,12 @@ func (s *Server) cacheCells(cells map[string]baker.CellData) {
 		}
 	}
 	if s.cellIdx != nil {
-		go s.cellIdx.rebuild() // index the newly-cached cells' bounds in the background
+		stems := make([]string, 0, len(cells))
+		for name := range cells {
+			stems = append(stems, strings.TrimSuffix(name, ".000"))
+		}
+		s.cellIdx.forget(stems) // re-imported cells: drop stale bounds so the rebuild re-parses
+		go s.cellIdx.rebuild()  // index the (re-)cached cells' bounds in the background
 	}
 }
 

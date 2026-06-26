@@ -102,14 +102,16 @@ func (ci *cellIndex) build() {
 		ci.mu.Unlock()
 		return
 	}
-	n, added := 0, 0
+	present := make(map[string]bool, len(entries))
+	added := 0
 	for _, e := range entries {
 		if !e.IsDir() || !isCellName(e.Name()) {
 			continue
 		}
 		name := e.Name()
+		present[name] = true
 		if _, ok := ci.get(name); ok {
-			continue // already indexed
+			continue // already indexed (forget() drops a re-imported cell so it re-parses)
 		}
 		data, err := os.ReadFile(filepath.Join(ci.encRoot, name, name+".000"))
 		if err != nil {
@@ -127,10 +129,30 @@ func (ci *cellIndex) build() {
 		if added%200 == 0 {
 			ci.save() // periodic checkpoint for a long backfill
 		}
-		n++
 	}
-	if added > 0 {
+	// Reconcile: drop entries for cells no longer on disk (removed packs/cells), so
+	// the index never reports a chart that isn't installed anymore.
+	removed := 0
+	ci.mu.Lock()
+	for name := range ci.bbox {
+		if !present[name] {
+			delete(ci.bbox, name)
+			removed++
+		}
+	}
+	ci.mu.Unlock()
+	if added > 0 || removed > 0 {
 		ci.save()
-		log.Printf("cell index: backfilled %d cell bound(s) → %s", added, ci.path)
+		log.Printf("cell index: +%d / -%d cell bound(s) → %s", added, removed, ci.path)
 	}
+}
+
+// forget drops cells from the index so the next build re-parses them — used when
+// an import re-caches a cell whose bounds may have changed.
+func (ci *cellIndex) forget(names []string) {
+	ci.mu.Lock()
+	for _, n := range names {
+		delete(ci.bbox, n)
+	}
+	ci.mu.Unlock()
 }

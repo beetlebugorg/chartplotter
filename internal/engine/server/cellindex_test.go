@@ -53,3 +53,43 @@ func TestCellIndexBuild(t *testing.T) {
 		t.Errorf("reload mismatch: %v vs %v (ok=%v)", bb2, bb, ok)
 	}
 }
+
+// TestCellIndexFreshness: rebuild prunes a removed cell, and forget() drops one so
+// it re-indexes — the add/update/remove freshness contract.
+func TestCellIndexFreshness(t *testing.T) {
+	const cell = "US4MD81M"
+	data, err := os.ReadFile("../../../testdata/" + cell + ".000")
+	if err != nil {
+		t.Skipf("testdata cell absent: %v", err)
+	}
+	dir := t.TempDir()
+	cdir := filepath.Join(dir, "ENC_ROOT", cell)
+	if err := os.MkdirAll(cdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cdir, cell+".000"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ci := newCellIndex(dir)
+	ci.build()
+	if _, ok := ci.get(cell); !ok {
+		t.Fatal("not indexed")
+	}
+	// forget → re-build re-parses it (update path).
+	ci.forget([]string{cell})
+	if _, ok := ci.get(cell); ok {
+		t.Fatal("forget did not drop the entry")
+	}
+	ci.rebuild()
+	if _, ok := ci.get(cell); !ok {
+		t.Fatal("rebuild did not re-index after forget")
+	}
+	// remove the cell on disk → rebuild prunes it (remove path).
+	if err := os.RemoveAll(cdir); err != nil {
+		t.Fatal(err)
+	}
+	ci.rebuild()
+	if _, ok := ci.get(cell); ok {
+		t.Error("rebuild did not prune a removed cell")
+	}
+}
