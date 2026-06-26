@@ -50,7 +50,7 @@
 // Baking runs server-side; the client only renders tiles.
 import { PMTilesArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 import { convertDistance, unitSuffix } from "../lib/units.mjs";
-import { zoomForScale } from "../lib/util.mjs"; // shared scale↔zoom (512-tile MapLibre resolution)
+import { zoomForScale, DEFAULT_PX_PITCH_MM, clampPxPitch } from "../lib/util.mjs"; // shared scale↔zoom (512-tile MapLibre resolution)
 import * as S52 from "./s52-style.mjs";
 import { SpriteBuilder } from "./sprite-builder.mjs";
 // Chart SOURCE / ARCHIVE management lives in its own stateful collaborator now (the
@@ -68,6 +68,12 @@ import {
 import { buildChartLayers, PAT_PREFIX } from "./chart-style.mjs";
 
 const FEATURE_SCALE = 0.01 / 0.35278;
+// The baker emits feature pixel sizes (icon `scale`, `width_px`, `font_size_px`,
+// pattern raster) as if 1 px = 1 typographic point = 0.35278 mm (72 DPI). To render
+// at TRUE physical size we multiply every size by 0.35278/pxPitch (see _scaleSizes
+// in chart-style.mjs / _featureSizeScale below). On the default CSS pixel (0.2645 mm)
+// that is ≈1.333×; a calibrated screen pitch makes it exact.
+const BAKED_FEATURE_PITCH_MM = 0.35278;
 // Linear (constant-velocity) easing for the follow camera — see updateFollow. The
 // default ease-in/out would stall at each fix boundary, reading as a step.
 const LINEAR = (t) => t;
@@ -128,6 +134,7 @@ export class ChartCanvas extends HTMLElement {
     this._sprite = {};
     this._patterns = {};
     this._atlasPpu = 0.08;
+    this._pxPitch = undefined; // calibrated CSS-pixel pitch (mm); undefined → CSS reference. Drives _featureSizeScale.
     this._active = "day";
     this._spriteImg = null;
     this._patternsImg = null;
@@ -178,6 +185,7 @@ export class ChartCanvas extends HTMLElement {
       assets,
       getMap: () => this._map,
       rebuild: () => this._map && this._map.setStyle(this.buildStyle(), { diff: false, validate: false }),
+      getPxPitch: () => this._pxPitch, // SCAMIN gates on the calibrated physical scale (in-place re-gate)
     });
 
     // Shadow DOM: MapLibre CSS must live inside the shadow root, plus a sized
@@ -636,6 +644,23 @@ export class ChartCanvas extends HTMLElement {
     for (const k in osmPaint) setIf("osm", k, osmPaint[k]);
   }
 
+  // Feature-size multiplier that renders baked (point-pixel) sizes at true physical
+  // size on this screen: 0.35278 mm/baked-px ÷ the (calibrated) CSS-pixel pitch. On
+  // the default CSS pixel (0.2645 mm) ≈1.333×; calibration makes it exact.
+  _featureSizeScale() {
+    return BAKED_FEATURE_PITCH_MM / clampPxPitch(this._pxPitch || DEFAULT_PX_PITCH_MM);
+  }
+
+  // Set the calibrated CSS-pixel pitch (mm) and rebuild the style so every feature
+  // size (icons/lines/text/halos/patterns) re-renders at true physical size. Driven
+  // by the shell's screen-calibration setting, mirroring the scale-readout path.
+  setPxPitch(mm) {
+    const v = (typeof mm === "number" && mm > 0) ? mm : undefined;
+    if (v === this._pxPitch) return;
+    this._pxPitch = v;
+    if (this._map && this._sources) this._map.setStyle(this.buildStyle(), { diff: false, validate: false });
+  }
+
   // Switch the basemap live: "coastline" (offline GSHHG land/lakes), "osm"
   // (online OpenStreetMap raster), or "osmvec" (hosted OSM vector .pmtiles).
   // Rebuilds the style from buildStyle() so the basemap sources/layers swap
@@ -768,6 +793,15 @@ export class ChartCanvas extends HTMLElement {
     const duration = (!gap || reduce) ? 0 : Math.max(200, Math.min(1200, gap));
 
     const cam = { center: [fix.lng, fix.lat], duration, easing: LINEAR };
+
+    // Look-ahead offset: in course-/head-up the chart rotates so the vessel's
+    // direction points up, so we sit the vessel ⅓ up from the bottom — most of the
+    // screen is water *ahead*. Screen y is down, so a positive y-offset drops the
+    // centre (the vessel) below the container middle; ⅓-from-bottom is ⅙ of the
+    // height below centre. North-up stays centred (offset 0).
+    const h = (this._followLookAhead !== false && (this._cameraMode === "course-up" || this._cameraMode === "head-up"))
+      ? (map.getContainer() && map.getContainer().clientHeight) || 0 : 0;
+    if (h) cam.offset = [0, h / 6];
 
     // Hold the mode's bearing on every fix; otherwise this centre-only ease would
     // cancel the one-shot bearing reset from setCameraMode (north-up gets stuck at
@@ -1109,12 +1143,17 @@ export class ChartCanvas extends HTMLElement {
     // setScheme/setMariner) keep reading them unchanged.
     const scaminLat = this._sources.scaminLat != null ? this._sources.scaminLat
                       : (this._map ? this._map.getCenter().lat : 0);
+    // True-physical feature sizing: scale the baked (point-pixel) sizes to this
+    // screen. Recompute the pattern raster ratio to match, so AP fills register at
+    // the same physical size when styleimagemissing re-fires after setStyle.
+    const sizeScale = this._featureSizeScale();
+    this._patternPixelRatio = (0.08 / FEATURE_SCALE) / sizeScale;
     const { layers: chartLayers, layerBase, variants, layerVis } = buildChartLayers({
       mariner: this._mariner, palette: this._palette(), atlasPpu: this._atlasPpu, osm: this._osmBasemap(),
       scheme: this._active,
       server: this._sources.server, serverSets: this._sources.sets,
       scaminValues: this._sources.scaminValues, scaminLat, bandsHidden: this._bandsHidden,
-      ignoreScamin: this._ignoreScamin,
+      ignoreScamin: this._ignoreScamin, sizeScale, pxPitch: this._pxPitch,
     });
     this._layerBase = layerBase; this._variants = variants; this._layerVis = layerVis;
 

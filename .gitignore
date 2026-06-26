@@ -23,6 +23,9 @@ web/charts-user.*
 web/charts-index.json
 web/chartplotter.wasm
 
+# Working design notes / specs (kept local, never committed)
+/specs/
+
 # Editor / OS
 .DS_Store
 .idea/

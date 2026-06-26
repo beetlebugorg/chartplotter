@@ -560,7 +560,7 @@ export const CHROME = `
         <label>Go to scale&nbsp;1:<input id="scale-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="40000"></label>
         <button id="scale-go" type="button">Go</button>
       </div>
-      <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts & features…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
+      <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts, features, or a coordinate…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
       <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
       <!-- The NOAA ENC User Agreement modal moved into <chart-library> (it owns the
            download flow); the "Terms" link reaches into it. -->

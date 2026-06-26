@@ -146,6 +146,68 @@ export function fmtLatLon(lat, lng) {
   return dm(lat, 2) + (lat >= 0 ? "N" : "S") + " " + dm(x, 3) + (x >= 0 ? "E" : "W");
 }
 
+// parseLatLon — the lenient inverse of fmtLatLon: turn a typed coordinate into
+// { lat, lng }, or null if it doesn't look like one. Forgiving about notation so
+// users can paste whatever their other kit prints:
+//   • decimal degrees           "-32.4943, 60.931"   "32.4943 S 60.931 E"
+//   • degrees-decimal-minutes   "32°29.66'S, 060°55.86'E"   "39°27.6′N 104°39.6′W"
+//   • degrees-minutes-seconds   "32 29 40 S  60 55 52 E"
+// °/′/″ marks optional (plain ' and " accepted), hemisphere by N/S/E/W (either
+// case) or a leading −; lat,lon separated by comma/semicolon or whitespace. The
+// first value is latitude. Returns null on anything out of range or ambiguous.
+export function parseLatLon(input) {
+  if (typeof input !== "string") return null;
+  // Normalise degree/minute/second marks to spaces; keep digits, signs, NSEW, separators.
+  const s = input.trim()
+    .replace(/[°º∘]/g, " ")
+    .replace(/[’′ʹ`']/g, " ")
+    .replace(/[”″"]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return null;
+
+  // Candidate splits into [latToken, lonToken], tried in order of confidence.
+  const tries = [];
+  const csv = s.split(/\s*[,;]\s*/);
+  if (csv.length === 2) tries.push(csv); // explicit separator
+  const hemi = s.match(/^(.*?[NSns])\s+(.*)$/); // split after the latitude hemisphere
+  if (hemi && /[EWew]/.test(hemi[2])) tries.push([hemi[1], hemi[2]]);
+  if (!/[NSEWnsew]/.test(s)) { // no letters: split the numbers down the middle
+    const nums = s.match(/[+-]?\d+(?:\.\d+)?/g) || [];
+    if (nums.length >= 2 && nums.length % 2 === 0) {
+      const h = nums.length / 2;
+      tries.push([nums.slice(0, h).join(" "), nums.slice(h).join(" ")]);
+    }
+  }
+
+  for (const [a, b] of tries) {
+    const lat = parseCoordComponent(a, "NS");
+    const lng = parseCoordComponent(b, "EW");
+    if (lat != null && lng != null && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+      return { lat, lng };
+    }
+  }
+  return null;
+}
+
+// Parse one coordinate value (already mark-normalised to spaces) into a signed
+// decimal degree. `axis` is "NS" (latitude) or "EW" (longitude); a hemisphere
+// letter for the wrong axis rejects. Numbers are taken in order as deg[, min[,
+// sec]] so decimal/DMM/DMS all fall out of the same path.
+function parseCoordComponent(token, axis) {
+  if (!token) return null;
+  const hemiMatch = token.match(/[NSEWnsew]/);
+  const hemi = hemiMatch ? hemiMatch[0].toUpperCase() : null;
+  if (hemi && !axis.includes(hemi)) return null; // e.g. an E in the latitude slot
+  const nums = token.match(/[+-]?\d+(?:\.\d+)?/g);
+  if (!nums || nums.length === 0 || nums.length > 3) return null;
+  let val = Math.abs(parseFloat(nums[0]));
+  if (nums.length >= 2) val += Math.abs(parseFloat(nums[1])) / 60;
+  if (nums.length >= 3) val += Math.abs(parseFloat(nums[2])) / 3600;
+  const negative = hemi === "S" || hemi === "W" || /^-/.test(nums[0]);
+  return negative ? -val : val;
+}
+
 // True when the page was opened as a snapshot share link (<origin>/#share or
 // ?share) — boot() then reconstructs the publisher's scene from /api/share.
 export function isShareUrl() {

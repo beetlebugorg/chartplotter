@@ -25,21 +25,25 @@ import (
 type simulateCmd struct {
 	Host      string  `default:"127.0.0.1" help:"Bind host."`
 	Port      int     `default:"10110" help:"Bind port (IANA NMEA-0183-over-IP)."`
-	Center    string  `default:"38.978,-76.478" help:"Own-ship start as lat,lon."`
+	Scenario  string  `help:"Named Annapolis preset (sets start/route/traffic). Use 'list' to print them."`
+	Center    string  `default:"38.978,-76.478" help:"Own-ship start as lat,lon (ignored when --scenario is set)."`
 	Course    float64 `default:"45" help:"Own-ship course (degrees true)."`
 	Speed     float64 `default:"6" help:"Own-ship speed (knots)."`
 	Targets   int     `default:"6" help:"Number of AIS targets."`
 	Collision bool    `default:"true" negatable:"" help:"Put one target on a collision course."`
+	Sailing   bool    `help:"Own-ship tacks (COG weaves) with a varying leeway so heading ≠ COG."`
+	DropGPS   int     `name:"drop-gps" help:"Stop own-ship position fixes after N seconds (test stale/lost GPS); 0 = never."`
 	Seed      int64   `default:"1" help:"RNG seed (reproducible scenarios)."`
 	Cell      string  `type:"existingfile" help:"S-57 cell (.000 or exchange .zip) to keep traffic in navigable water."`
 	MinDepth  float64 `name:"min-depth" default:"2" help:"Minimum charted depth (DRVAL1, m) for navigable water when --cell is set."`
 }
 
 func (c simulateCmd) Run() error {
-	lat, lon, err := parseLatLon(c.Center)
-	if err != nil {
-		return err
+	if strings.EqualFold(c.Scenario, "list") {
+		fmt.Print("Annapolis scenarios (--scenario <name>):\n", sim.ScenarioList())
+		return nil
 	}
+
 	var water *sim.WaterMask
 	if c.Cell != "" {
 		chart, err := loadCell(c.Cell)
@@ -50,10 +54,30 @@ func (c simulateCmd) Run() error {
 			fmt.Println("warning: no navigable depth areas (DEPARE ≥ min-depth) in cell; placing traffic unconstrained")
 		}
 	}
-	s := sim.New(sim.Options{
-		Lat: lat, Lon: lon, Course: c.Course, Speed: c.Speed,
-		Targets: c.Targets, Collision: c.Collision, Seed: c.Seed, Water: water,
-	})
+
+	// A scenario fully defines the world's start/route/traffic; otherwise build it
+	// from the position/motion flags.
+	var opts sim.Options
+	desc := ""
+	if c.Scenario != "" {
+		sc, ok := sim.ScenarioByName(c.Scenario)
+		if !ok {
+			return fmt.Errorf("unknown scenario %q; --scenario list to see options", c.Scenario)
+		}
+		opts = sc.Options(c.Seed, water)
+		desc = sc.Desc
+	} else {
+		lat, lon, err := parseLatLon(c.Center)
+		if err != nil {
+			return err
+		}
+		opts = sim.Options{
+			Lat: lat, Lon: lon, Course: c.Course, Speed: c.Speed,
+			Targets: c.Targets, Collision: c.Collision, Sailing: c.Sailing,
+			Seed: c.Seed, Water: water,
+		}
+	}
+	s := sim.New(opts)
 
 	addr := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	ln, err := net.Listen("tcp", addr)
@@ -61,9 +85,13 @@ func (c simulateCmd) Run() error {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	defer ln.Close()
-	fmt.Printf("nmea0183 simulator → tcp://%s  (own-ship %.4f,%.4f @ %.0f° %.0fkn, %d AIS targets%s%s)\n",
-		addr, s.Own.Lat, s.Own.Lon, c.Course, c.Speed, c.Targets,
-		ifStr(c.Collision, ", 1 on collision course", ""),
+	if desc != "" {
+		fmt.Printf("scenario %q — %s\n", c.Scenario, desc)
+	}
+	fmt.Printf("nmea0183 simulator → tcp://%s  (own-ship %.4f,%.4f @ %.0f° %.0fkn, %d AIS targets%s%s%s)\n",
+		addr, s.Own.Lat, s.Own.Lon, s.Own.Course, opts.Speed, opts.Targets,
+		ifStr(opts.Collision, ", 1 on collision course", ""),
+		ifStr(c.DropGPS > 0, fmt.Sprintf(", GPS drops at %ds", c.DropGPS), ""),
 		ifStr(water != nil, ", in navigable water from "+filepath.Base(c.Cell), ""))
 	fmt.Println("point a Connection at this host:port; Ctrl-C to stop")
 
@@ -86,7 +114,14 @@ func (c simulateCmd) Run() error {
 	for tick := 0; ; tick++ {
 		<-ticker.C
 		s.Step(1)
-		lines := s.OwnSentences()
+		// After --drop-gps seconds, withhold the position/motion fixes (depth/wind
+		// keep flowing) so the client sees a frozen-then-lost GPS.
+		var lines []string
+		if c.DropGPS > 0 && tick >= c.DropGPS {
+			lines = s.EnvSentences()
+		} else {
+			lines = s.OwnSentences()
+		}
 		if tick%3 == 0 {
 			lines = append(lines, s.AISPositions()...)
 		}
