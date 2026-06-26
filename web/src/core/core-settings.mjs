@@ -169,6 +169,10 @@ export function coreSettingsContributions(app) {
         key: "highlightDateDependent", type: "toggle", label: "Highlight date-dependent",
         desc: "Mark features that carry date conditions with the “d” symbol",
       },
+      {
+        key: "dateView", type: "date", label: "Viewing date",
+        desc: "Evaluate date-dependent features against this date for passage planning (blank = today)",
+      },
     ],
   };
 
