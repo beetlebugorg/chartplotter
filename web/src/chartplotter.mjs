@@ -533,7 +533,10 @@ export class ChartPlotter extends HTMLElement {
       try { this._plotter.setHiddenCells([...this._hiddenCells]); } catch (e) { console.warn(e); }
     }
     await this._catalogReady;
-    this.addCatalogOverlay(map);
+    // Best-effort: if the style is mid-rebuild this no-ops (or throws on older
+    // maps) — either way the style.load handler below re-adds the overlay once the
+    // fresh style is ready, so never let it skip registering that listener.
+    try { this.addCatalogOverlay(map); } catch (e) { console.warn("[overlay] deferring to style.load:", e); }
     // The plotter rebuilds the whole style (setStyle) when server sets load or the
     // SCAMIN buckets refresh, wiping every app-added overlay (coverage boxes, pick &
     // inspect highlights). Re-apply them after each rebuild, and repopulate the
@@ -1094,6 +1097,12 @@ export class ChartPlotter extends HTMLElement {
     // layers. A style.load handler (see onReady) re-invokes this against the fresh
     // style; the guard makes a redundant call (when the overlay is still present) a
     // no-op so we never double-add.
+    //
+    // The style may still be REBUILDING when this first runs from onReady (a
+    // setStyle for the physical-scale restage / SCAMIN buckets can be in flight
+    // after the awaited catalog load) — addSource would throw "Style is not done
+    // loading". Bail; the onReady style.load handler re-invokes us once it's ready.
+    if (!map.isStyleLoaded()) return;
     if (map.getSource("focus")) return;
     const empty = { type: "FeatureCollection", features: [] };
     map.addSource("focus", { type: "geojson", data: empty });
