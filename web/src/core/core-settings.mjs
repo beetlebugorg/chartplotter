@@ -82,6 +82,7 @@ export function coreSettingsContributions(app) {
       { key: "showFullSectorLines", type: "toggle", label: "Full sector lines", desc: "Draw light sectors to full range, not short stubs" },
       { key: "showIsolatedDangersShallow", type: "toggle", label: "Isolated dangers (shallow)", desc: "Only flag isolated dangers in shallow water" },
       { key: "dataQuality", type: "toggle", label: "Data quality", desc: "Survey zones-of-confidence overlay" },
+      { key: "showInformCallouts", type: "toggle", label: "Information callouts", desc: "“Additional information available” (i) markers on features that carry notes" },
       { key: "showMetaBounds", type: "toggle", label: "Metadata boundaries", desc: "Chart coverage & region indicator lines" },
       { key: "showScaleBoundaries", type: "toggle", label: "Scale boundaries", desc: "Outline where more detailed charts exist", default: true },
       {

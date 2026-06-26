@@ -22,11 +22,13 @@ import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts li
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
 import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
+import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { OwnShip } from "./plugins/own-ship.mjs"; // own-ship marker + course predictor + follow camera
 import { AISOverlay } from "./plugins/ais-overlay.mjs"; // AIS targets (other vessels) from the live feed
+import { InfoCallouts } from "./plugins/info-callouts.mjs"; // precise DOM tap pads on INFORM01 info-callout boxes
 import "./plugins/target-info.mjs"; // defines <target-info> (own-ship / AIS tap-info picker)
 import { PALETTE_DAY_ICON, PALETTE_DUSK_ICON, PALETTE_NIGHT_ICON } from "./lib/openbridge-icons.mjs"; // OpenBridge scheme glyphs
 import { DISTRICTS, NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
@@ -84,6 +86,12 @@ const DEFAULT_MARINER = {
   // marker on in-period date-dependent features — an optional highlight, off by
   // default (opt-in), like the info/document highlights.
   highlightDateDependent: false,
+  // "Information callouts" (S-52 §10.6.1.1 INFORM01 / viewing group 31030): the
+  // box-on-a-leader "additional information available" marker on features carrying
+  // INFORM/TXTDSC/etc. Baked display-category Other, but given its own opt-in toggle
+  // (OFF by default) so enabling Other isn't buried under (i) markers on dense
+  // charts — same treatment as highlightDateDependent. See combineFilters.
+  showInformCallouts: false,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
   // independent of display category (each TX/TE carries a group number, §14.4).
   showLightDescriptions: true, // group 23: light characteristics (e.g. Fl(2)R 10s)
@@ -362,6 +370,8 @@ export class ChartPlotter extends HTMLElement {
       if (this._widget && c.id === "core-advanced") continue;
       this._settingsRegistry.register(c);
     }
+    // Display calibration (ruler-measure the 5 mm check box → true physical scale).
+    this._settingsRegistry.register(calibrationContribution(this));
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
     if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
@@ -534,15 +544,18 @@ export class ChartPlotter extends HTMLElement {
     // Best-effort: if the style is mid-rebuild this no-ops (or throws on older
     // maps) — either way the style.load handler below re-adds the overlay once the
     // fresh style is ready, so never let it skip registering that listener.
-    try { this.addCatalogOverlay(map); } catch (e) { console.warn("[overlay] deferring to style.load:", e); }
-    // The plotter rebuilds the whole style (setStyle) when server sets load or the
-    // SCAMIN buckets refresh, wiping every app-added overlay (coverage boxes, pick &
-    // inspect highlights). Re-apply them after each rebuild, and repopulate the
-    // coverage boxes — otherwise they vanish the moment a set renders.
-    map.on("style.load", () => {
-      this.addCatalogOverlay(map);
-      this._refreshInstalledBounds();
-    });
+    // Add the app overlay (focus/inspect/pick sources + coverage) AND wire the map
+    // interaction listeners (crosshair cursor, click → ECDIS pick). addSource throws
+    // if the style isn't loaded, so call it only WHEN the style is ready: now if it
+    // already is, plus on every style.load (the plotter rebuilds the whole style on
+    // server-set load + SCAMIN refresh, wiping app-added overlays — re-apply each
+    // time). This avoids the "Style is not done loading" throw WITHOUT ever skipping
+    // the wiring — an earlier isStyleLoaded()-guard-and-RETURN inside addCatalogOverlay
+    // left the cursor/pick/coverage permanently unwired whenever the first call hit a
+    // mid-rebuild style and no later style.load re-fired.
+    const ensureOverlay = () => { this.addCatalogOverlay(map); this._refreshInstalledBounds(); };
+    if (map.isStyleLoaded()) ensureOverlay();
+    map.on("style.load", ensureOverlay);
     // Hold the 1:MIN_DETAIL_SCALE max-zoom floor on EVERY view change. It's
     // latitude-dependent (recompute as the centre moves), and a fly-to-chart raises
     // the cap to reach a pack's detail — without re-enforcing here that raised cap
@@ -650,6 +663,15 @@ export class ChartPlotter extends HTMLElement {
       this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
       // AIS targets (other vessels) from the live feed.
       this._ais = new AISOverlay({ map, assets: this._assets, widget: this._widget, onSelect: showInfo, units: () => this._mariner });
+      // Precise DOM tap pads on the INFORM01 "additional information" callout boxes
+      // (the box floats offset from the feature, so the fuzzy symbol pick can't own
+      // it). Sparse by nature — only info-bearing features — so DOM markers are fine.
+      this._infoCallouts = new InfoCallouts({
+        map,
+        getSizeScale: () => (this._plotter && this._plotter._featureSizeScale ? this._plotter._featureSizeScale() : 1),
+        atlasPpu: (this._plotter && this._plotter._atlasPpu) || 0.08,
+        onSelect: (f) => this.showInfoForFeature(f),
+      });
     }
 
     // Persist the view so a refresh resumes where you were; refresh the coverage
@@ -1094,13 +1116,10 @@ export class ChartPlotter extends HTMLElement {
     // change and SCAMIN-bucket refresh, which drops all these app-added sources/
     // layers. A style.load handler (see onReady) re-invokes this against the fresh
     // style; the guard makes a redundant call (when the overlay is still present) a
-    // no-op so we never double-add.
-    //
-    // The style may still be REBUILDING when this first runs from onReady (a
-    // setStyle for the physical-scale restage / SCAMIN buckets can be in flight
-    // after the awaited catalog load) — addSource would throw "Style is not done
-    // loading". Bail; the onReady style.load handler re-invokes us once it's ready.
-    if (!map.isStyleLoaded()) return;
+    // no-op so we never double-add. The caller (onReady) only invokes this on a
+    // LOADED style — directly if ready, else on style.load — so addSource never
+    // throws "Style is not done loading"; do NOT add an isStyleLoaded()-guard return
+    // here (it silently skipped the cursor/pick/coverage wiring at the tail).
     if (map.getSource("focus")) return;
     const empty = { type: "FeatureCollection", features: [] };
     map.addSource("focus", { type: "geojson", data: empty });
@@ -1288,6 +1307,20 @@ export class ChartPlotter extends HTMLElement {
     el.setAux(this._aux);
     el.setUnits(this._mariner); // heights/ranges/speeds in the mariner's chosen units
     el.show(uniq, ev ? { x: ev.clientX, y: ev.clientY } : null);
+  }
+
+  // Open the pick report for ONE feature — the info-callout pads (InfoCallouts) call
+  // this when their box is tapped, so a callout surfaces exactly its own object's
+  // additional information rather than a cursor-pick of whatever's under the box.
+  showInfoForFeature(f) {
+    if (!f) return;
+    const el = this._ensurePickEl();
+    if (!el) return;
+    f._hiGeom = f.geometry;
+    el.setCatalogue(this._s57cat);
+    el.setAux(this._aux);
+    el.setUnits(this._mariner);
+    el.show([f], null);
   }
 
   // Create the cursor-pick panel on first use and bridge it to the map highlight.

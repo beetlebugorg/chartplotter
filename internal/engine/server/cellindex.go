@@ -19,11 +19,13 @@ import (
 // deliberately simple — a flat JSON map, not a database; the data is tiny (a few
 // floats per cell) and read-mostly.
 type cellIndex struct {
-	mu      sync.RWMutex
-	bbox    map[string][4]float64 // cell stem → [W,S,E,N]
-	path    string                // cells-index.json
-	encRoot string                // <dataDir>/ENC_ROOT
-	built   bool                  // backfill scan finished
+	mu       sync.RWMutex
+	cond     *sync.Cond            // broadcast when a scan finishes (for wait())
+	bbox     map[string][4]float64 // cell stem → [W,S,E,N]
+	path     string                // cells-index.json
+	encRoot  string                // <dataDir>/ENC_ROOT
+	scanning bool                  // a scan goroutine is running
+	dirty    bool                  // a (re)build was requested during a scan → scan again
 }
 
 func newCellIndex(dataDir string) *cellIndex {
@@ -32,6 +34,7 @@ func newCellIndex(dataDir string) *cellIndex {
 		path:    filepath.Join(dataDir, "cells-index.json"),
 		encRoot: filepath.Join(dataDir, "ENC_ROOT"),
 	}
+	ci.cond = sync.NewCond(&ci.mu)
 	if data, err := os.ReadFile(ci.path); err == nil {
 		_ = json.Unmarshal(data, &ci.bbox)
 	}
@@ -74,32 +77,60 @@ func (ci *cellIndex) save() {
 	_ = os.Rename(tmp, ci.path)
 }
 
-// rebuild re-opens the backfill (e.g. after an import added new cached cells) and
-// indexes any not already present. Run in a goroutine.
-func (ci *cellIndex) rebuild() {
-	ci.mu.Lock()
-	ci.built = false
-	ci.mu.Unlock()
-	ci.build()
-}
+// build kicks the initial backfill; rebuild requests a fresh pass after the cache
+// changed (import added cells, a set was deleted). Both funnel through kick().
+func (ci *cellIndex) build()   { ci.kick() }
+func (ci *cellIndex) rebuild() { ci.kick() }
 
-// build backfills the index by reading every cached cell's header once. Runs in a
-// background goroutine (started once) so it never blocks a request; queries see
-// the index grow as it fills, and it's a no-op after the first complete pass.
-func (ci *cellIndex) build() {
+// kick ensures the index is (re)scanned. Single-flight with a dirty re-run: if a
+// scan is already running it just marks the index dirty so that scan loops once
+// more when it finishes — so a (re)build requested mid-scan is never lost (the old
+// built-flag reset/claim could drop a concurrent reindex, leaving the index stale).
+func (ci *cellIndex) kick() {
 	ci.mu.Lock()
-	if ci.built {
+	ci.dirty = true
+	if ci.scanning {
 		ci.mu.Unlock()
 		return
 	}
-	ci.built = true // claim the build; reset only if the scan can't start
+	ci.scanning = true
 	ci.mu.Unlock()
+	go ci.run()
+}
 
+func (ci *cellIndex) run() {
+	for {
+		ci.mu.Lock()
+		ci.dirty = false
+		ci.mu.Unlock()
+		ci.scan()
+		ci.mu.Lock()
+		if !ci.dirty { // nothing changed during the scan — done
+			ci.scanning = false
+			ci.cond.Broadcast() // wake any wait()ers
+			ci.mu.Unlock()
+			return
+		}
+		ci.mu.Unlock() // a (re)build arrived mid-scan — scan again
+	}
+}
+
+// wait blocks until no scan is in flight — for tests and any caller that needs the
+// index settled. kick() sets scanning before it returns, so a build()/rebuild()
+// immediately followed by wait() always observes the in-flight scan and its re-runs.
+func (ci *cellIndex) wait() {
+	ci.mu.Lock()
+	for ci.scanning {
+		ci.cond.Wait()
+	}
+	ci.mu.Unlock()
+}
+
+// scan reads every cached cell's header once (bbox cached so repeat scans skip the
+// already-indexed) and reconciles: drops index entries for cells no longer on disk.
+func (ci *cellIndex) scan() {
 	entries, err := os.ReadDir(ci.encRoot)
 	if err != nil {
-		ci.mu.Lock()
-		ci.built = false
-		ci.mu.Unlock()
 		return
 	}
 	present := make(map[string]bool, len(entries))

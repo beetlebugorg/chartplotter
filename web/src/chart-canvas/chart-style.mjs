@@ -84,7 +84,7 @@ function textLayers(mariner, palette) {
   const notLight = ["!=", ["get", "class"], "LIGHTS"];
   return [{
     id: "text", type: "symbol", source: "chart", "source-layer": "text",
-    filter: ["all", notLight, S52.textGroupFilter(mariner)],
+    filter: ["all", notLight, ["!=", ["get", "class"], "NEWOBJ"], S52.textGroupFilter(mariner)],
     layout: {
       "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
       "text-size": ["coalesce", ["get", "font_size_px"], 11],
@@ -100,6 +100,30 @@ function textLayers(mariner, palette) {
     },
     paint: {
       // Legible at dusk/night (bright ink + dark halo) — see textColor.
+      "text-color": S52.textColor(active, palette),
+      "text-halo-color": S52.textHaloColor(active),
+      "text-halo-width": 1.4,
+      "text-halo-blur": 0.5,
+    },
+  }, {
+    // Producer-placed text (NEWOBJ + SYMINS TX/TE, S-52 §10.3.3.8 — e.g. the PresLib
+    // "ECDIS Chart 1" legend captions): the producer's EXPLICIT instruction, which
+    // must always render. Two-line captions ("restricted area," + "anchoring
+    // prohibited") are TWO separate point features stacked one line apart; the
+    // general collidable layer above declutters them and drops the lower line. Honour
+    // them on their OWN always-on layer (text-allow-overlap), mirroring "light-text".
+    // text-max-width 40 is unchanged, so genuine single-line labels still never wrap.
+    id: "placed-text", type: "symbol", source: "chart", "source-layer": "text",
+    filter: ["all", ["==", ["get", "class"], "NEWOBJ"], S52.textGroupFilter(mariner)],
+    layout: {
+      "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
+      "text-size": ["coalesce", ["get", "font_size_px"], 11],
+      "text-anchor": TEXT_ANCHOR,
+      "text-max-width": 40,
+      "text-allow-overlap": true, "text-ignore-placement": true,
+      visibility: "visible",
+    },
+    paint: {
       "text-color": S52.textColor(active, palette),
       "text-halo-color": S52.textHaloColor(active),
       "text-halo-width": 1.4,
@@ -138,7 +162,16 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
   // see buildStyle.)
   const notLand = ["match", ["get", "color_token"], ["LANDA", "CHBRN"], false, true];
   const base = [
-    { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}), paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
+    // Paint area fills in S-52 display-priority order (DrawingPriority, baked as
+    // draw_prio: DEPARE=3, LNDARE=12…) so a higher-priority fill draws ON TOP — e.g.
+    // land over water. Real ENCs tile their areas (no overlap, so order is moot), but
+    // a cell with OVERLAPPING areas (the PresLib "ECDIS Chart 1" inset: one deep-water
+    // polygon under the shallow water + land) would otherwise paint last-in-tile on
+    // top, hiding land/shallow under deep water. Tiebreak by -drval1 so shallower
+    // water draws over deeper within the same priority.
+    { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}),
+      layout: { "fill-sort-key": ["-", ["*", ["coalesce", ["get", "draw_prio"], 0], 1000], ["coalesce", ["get", "drval1"], 0]] },
+      paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
     { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
     // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
     // the shallow side of the live safety contour, shown only when the

@@ -65,7 +65,7 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 		dataDir = cacheDir
 	}
 	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex(), cellIdx: newCellIndex(dataDir)}
-	go s.cellIdx.build() // backfill cell bounds once, in the background (never blocks a request)
+	s.cellIdx.build() // backfill cell bounds in the background (kick spawns its own goroutine)
 	// Discover every baked pack on disk (provider trees + flat tiles/), then
 	// register the ENABLED ones (disabled packs stay on disk but off the map). State
 	// lives in <data>/prefs.json so it survives restarts and is shared across clients.

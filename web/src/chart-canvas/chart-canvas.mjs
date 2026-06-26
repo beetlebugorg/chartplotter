@@ -67,13 +67,17 @@ import {
 // the layer builder AND this element's registerPattern — and imported back here.
 import { buildChartLayers, PAT_PREFIX } from "./chart-style.mjs";
 
-const FEATURE_SCALE = 0.01 / 0.35278;
+const FEATURE_SCALE = 0.01 / 0.26458;
 // The baker emits feature pixel sizes (icon `scale`, `width_px`, `font_size_px`,
-// pattern raster) as if 1 px = 1 typographic point = 0.35278 mm (72 DPI). To render
-// at TRUE physical size we multiply every size by 0.35278/pxPitch (see _scaleSizes
-// in chart-style.mjs / _featureSizeScale below). On the default CSS pixel (0.2645 mm)
-// that is ≈1.333×; a calibrated screen pitch makes it exact.
-const BAKED_FEATURE_PITCH_MM = 0.35278;
+// pattern raster) at the 1/96-inch CSS reference pixel = 0.26458 mm — the SAME
+// reference as portrayal.DefaultPxPerSymbolUnit (0.01/0.26458). To render at TRUE
+// physical size we multiply every size by 0.26458/pxPitch (see _scaleSizes in
+// chart-style.mjs / _featureSizeScale below): on a screen whose real CSS-pixel pitch
+// is 0.26458 mm that is 1×, and the Calibration panel sets pxPitch from a ruler
+// measurement of the 5 mm check box for any other screen. (Was 0.35278, the 1/72"
+// typographic point — a reference the baker does NOT use, which rendered the whole
+// chart 0.35278/0.26458 = 1.333× too big.)
+const BAKED_FEATURE_PITCH_MM = 0.26458;
 // Linear (constant-velocity) easing for the follow camera — see updateFollow. The
 // default ease-in/out would stall at each fix boundary, reading as a step.
 const LINEAR = (t) => t;
@@ -970,7 +974,7 @@ export class ChartCanvas extends HTMLElement {
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
-      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds" || k === "dateDependent" || k === "dateView" || k === "highlightDateDependent")) {
+      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds" || k === "dateDependent" || k === "dateView" || k === "highlightDateDependent" || k === "showInformCallouts")) {
         this.applyFeatureFilters();
       }
   }
