@@ -1729,7 +1729,12 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				// coarse line by the tile CENTRE (a line spans the tile, so the centre is
 				// its representative point): it yields only where the centre has no finer
 				// cell — best-available where the finer cell genuinely carries no data.
-				if s := b.coverageScaleAt(ctrLat, ctrLon, bandZ, false); s != 0 && s < r.cscl {
+				// includeDerived=true: a coarse line over a finer cell with only a derived
+				// extent (no M_COVR, e.g. the PresLib Chart-1 cells) still double-draws
+				// across bands and must be suppressed (S-52 §10.1.4 largest-scale wins).
+				// Lines never punch no-data fill holes, so this is hole-safe for a derived
+				// rect too — and it removes the live cross-band line bleed on Chart 1.
+				if s := b.coverageScaleAt(ctrLat, ctrLon, bandZ, true); s != 0 && s < r.cscl {
 					suppressed = true
 				}
 			default:
@@ -2104,7 +2109,7 @@ func (b *Baker) coverageBandAt(lat, lon float64) uint32 {
 // across bands AND between cells of different scale that fall in the SAME band (the
 // per-band coverageBandAt above can't distinguish those). bandZ-gated so a finer
 // cell that isn't shown yet at this zoom doesn't punch a hole in the coarser one.
-func (b *Baker) coverageScaleAt(lat, lon float64, bandZ uint32, pointQuery bool) uint32 {
+func (b *Baker) coverageScaleAt(lat, lon float64, bandZ uint32, includeDerived bool) uint32 {
 	var best uint32 // 0 = none found yet; otherwise the finest (smallest) cscl
 	p := geo.LatLon{Lat: lat, Lon: lon}
 	for i := range b.covMeta {
@@ -2112,8 +2117,18 @@ func (b *Baker) coverageScaleAt(lat, lon float64, bandZ uint32, pointQuery bool)
 		if cm.cscl == 0 || cm.displayMin > bandZ {
 			continue // unscaled, or this cell isn't drawn at this zoom
 		}
-		if cm.derived && !pointQuery {
-			continue // a derived extent rectangle suppresses points, not fills (see covMeta.derived)
+		if cm.derived && !includeDerived {
+			// A derived rectangle marks where a cell IS, not where it has DATA, so it
+			// over-claims coverage. Per S-52 §10.1.4 a coarser FILL must remain to fill
+			// genuine gaps in the finer data (the finer fill occludes it on top where it
+			// has data) — so derived coverage must NOT suppress fills, or it would punch
+			// no-data holes inside the finer cell's sparse interior. POINTS and LINES are
+			// different: a coarse point/line drawn where a finer chart covers violates the
+			// "largest-scale data takes precedence" rule and double-draws across bands (no
+			// opaque fill hides it), so callers pass includeDerived=true for those. NB: the
+			// per-cell preslib harness can't show this (it frames one cell, one band), but
+			// it IS visible live when bands overlap — don't be fooled by a 0-pixel diff.
+			continue
 		}
 		if best != 0 && cm.cscl >= best {
 			continue // not finer than the best so far — skip the costly point test
