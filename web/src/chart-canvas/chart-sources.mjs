@@ -15,6 +15,7 @@
 // Where a method used to do `this._map.setStyle(this.buildStyle(), …)` it calls
 // `this.rebuild()`; where it needs the map it calls `this.getMap()`.
 import { PMTilesArchive, MultiArchive } from "./pmtiles-source.mjs";
+import { zoomForScalePhysical } from "../lib/util.mjs";
 
 // NOAA ENC navigational-purpose bands (the rescheming standard) → one vector
 // source each, baked over [min,max] and overzoomed above max (see bake.zig
@@ -71,22 +72,26 @@ export const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text
 const SCAMIN_LAT_REBUILD_DEG = 2;
 
 // The display zoom at which a 1:N (scamin) feature first becomes visible at the
-// given latitude: the zoom whose display-scale denominator equals scamin. FRACTIONAL
-// — used directly as a MapLibre layer minzoom, which gives the exact S-52 §8.4
-// cutoff (display scale ≤ SCAMIN ⇒ shown) with no client-side per-zoom computation.
+// given latitude: the zoom whose PHYSICAL display-scale denominator equals scamin.
+// FRACTIONAL — used directly as a MapLibre layer minzoom, which gives the exact
+// S-52 cutoff with no client-side per-zoom computation.
 //
-// SCAMIN is a PRODUCER scale (a real 1:N paper scale), so it is gated against the
-// PHYSICAL display scale — MapLibre's true 512-tile geometry (z0 denom 279541132 =
-// M_PER_PX_Z0_PHYS / OGC_PX_M), NOT the band-pyramid's nominal 256 coordinate. That
-// is exactly half the nominal denom, so the cutoff sits ~1 zoom lower: a 1:59999
-// feature now survives until the screen truly reads ~1:59999 instead of ~1:30000.
-// The deterministic OGC pixel (0.28mm) is used (not the calibratable HUD px-pitch)
-// so this matches the baker's scaminZoom tile floor, which has no screen to measure.
-export function scaminDisplayZoom(scamin, lat) {
+// SCAMIN is "the minimum scale at which the object may be displayed" (S-57 attr
+// 133); S-57 Appendix B.1 §2.2.7 defines it as "the display scale below which the
+// object is no longer displayed", and S-52 6.1.1 defines Display Scale as the TRUE
+// on-glass ratio [distance on display]/[distance on earth]. So we gate against the
+// physical display scale at the (calibrated) screen pixel pitch — the SAME scale the
+// HUD readout and over-scale use — NOT a fixed web/OGC pixel. zoomForScalePhysical is
+// the inverse of that scale, so a SCAMIN 1:N feature vanishes exactly when the screen
+// reads 1:N. pxPitch omitted → the CSS-reference pixel (util default).
+//
+// The baker floors each SCAMIN feature into tiles at floor(scaminZoom) using the
+// deterministic OGC pixel (it has no screen). Real screens are FINER than that pixel,
+// so this client gate lands at/above the baked floor — the tile always carries the
+// feature where we reveal it (gating later than the floor is the safe direction).
+export function scaminDisplayZoom(scamin, lat, pxPitch) {
   if (!scamin) return 0;
-  const denomZ0 = 279541132.0 * Math.cos((lat * Math.PI) / 180);
-  if (denomZ0 <= scamin) return 0;
-  return Math.max(0, Math.min(24, Math.log2(denomZ0 / scamin)));
+  return zoomForScalePhysical(scamin, lat, pxPitch);
 }
 
 // Server sets are baked PER BAND, named "<district>-<band>" (e.g. noaa-d5-general).
@@ -105,10 +110,11 @@ export function bandOfSet(name) {
 }
 
 export class ChartSources {
-  constructor({ assets, getMap, rebuild }) {
+  constructor({ assets, getMap, rebuild, getPxPitch }) {
     this.assets = assets;     // resolved assets base URL (trailing "/")
     this.getMap = getMap;     // () => live MapLibre map (or null)
     this.rebuild = rebuild;   // () => map.setStyle(buildStyle(), {diff:false,validate:false})
+    this.getPxPitch = getPxPitch || (() => undefined); // () => calibrated CSS-pixel pitch (mm); drives SCAMIN gating
     this._ver = 0;            // chart-tile cache-bust token (see refresh)
     this._bands = {};         // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
     this._scaminValues = [];  // distinct SCAMIN denominators seen in tiles → per-SCAMIN bucket layers
@@ -251,12 +257,13 @@ export class ChartSources {
     const m = this.getMap();
     if (!m) return;
     const lat = m.getCenter().lat;
+    const pitch = this.getPxPitch();
     let style;
     try { style = m.getStyle(); } catch (e) { return; }
     for (const L of (style && style.layers) || []) {
       const hit = /#sm(\d+(?:\.\d+)?)$/.exec(L.id);
       if (!hit) continue;
-      try { m.setLayerZoomRange(L.id, scaminDisplayZoom(+hit[1], lat), L.maxzoom != null ? L.maxzoom : 24); } catch (e) { /* layer removed mid-update */ }
+      try { m.setLayerZoomRange(L.id, scaminDisplayZoom(+hit[1], lat, pitch), L.maxzoom != null ? L.maxzoom : 24); } catch (e) { /* layer removed mid-update */ }
     }
     this._scaminLat = lat;
   }
