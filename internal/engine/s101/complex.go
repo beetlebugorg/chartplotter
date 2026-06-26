@@ -140,6 +140,24 @@ func (e *Engine) buildRoot(objClass string, s57, derived map[string]string, name
 		root.addChild("periodicDateRange", pdr)
 	}
 
+	// Zone of confidence (S-57 M_QUAL CATZOC → the S-101 zoneOfConfidence complex
+	// attribute). QualityOfBathymetricData iterates feature.zoneOfConfidence and reads
+	// each instance's categoryOfZoneOfConfidenceInData (+ optional fixedDateRange) to
+	// pick the DQUAL data-quality fill; S-57 stores CATZOC as a flat simple, so wrap it
+	// in one zoneOfConfidence instance (one M_QUAL feature carries one CATZOC). Without
+	// this the rule sees no zones and the data-quality symbology never draws.
+	if objClass == "M_QUAL" && s57["CATZOC"] != "" {
+		zoc := newCNode()
+		zoc.addSimple("categoryOfZoneOfConfidenceInData", s57["CATZOC"])
+		if s57["DATSTA"] != "" || s57["DATEND"] != "" {
+			fdr := newCNode()
+			fdr.addSimple("dateStart", s57["DATSTA"])
+			fdr.addSimple("dateEnd", s57["DATEND"])
+			zoc.addChild("fixedDateRange", fdr)
+		}
+		root.addChild("zoneOfConfidence", zoc)
+	}
+
 	// Topmark (buoys/beacons): a co-located S-57 TOPMAR feature folded in by the
 	// baker → the S-101 topmark complex attribute the TOPMAR02 CSP reads.
 	if len(topmark) > 0 {
