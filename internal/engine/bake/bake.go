@@ -418,12 +418,30 @@ func New() *Baker { return &Baker{bbox: geo.EmptyBox()} }
 // Bounds is the union lat/lon bbox of every ingested cell's primitives.
 func (b *Baker) Bounds() geo.BoundingBox { return b.bbox }
 
+// lightCharText returns the light-characteristic label the S-101 rule (LITDSN02,
+// via LightFlareAndDescription) produced for a LIGHTS feature — the first DrawText
+// in its portrayal. The catalogue is the single source of truth for the
+// characteristic string (S-52 LITDSN is a CSP), so the inspector and the
+// co-located merge harvest THIS rather than re-deriving it in Go.
+func lightCharText(passes []portrayal.FeatureBuildPass) string {
+	for _, pass := range passes {
+		for _, p := range pass.Build.Primitives {
+			if t, ok := p.(portrayal.DrawText); ok {
+				return t.Text
+			}
+		}
+	}
+	return ""
+}
+
 // groupCoLocatedLights finds LIGHTS features that share an exact position and,
 // for each such group, returns the merged multi-line characteristic keyed by the
 // first (primary) feature index, plus the set of non-primary indices to suppress.
 // S-52 PresLib §LIGHTS06: co-located lights combine into one flare + one stacked
 // characteristic label rather than drawing N flares/labels on top of each other.
-func groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, skip map[int]bool) {
+// Each light's characteristic comes from the catalogue (lightCharText), not a
+// second Go reimplementation.
+func (b *Baker) groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, skip map[int]bool) {
 	type pos struct{ lat, lon float64 }
 	groups := map[pos][]int{}
 	for i := range features {
@@ -446,7 +464,7 @@ func groupCoLocatedLights(features []s57.Feature) (primaryText map[int]string, s
 		var lines []string
 		seen := map[string]bool{}
 		for _, i := range idxs {
-			ch := BuildLightCharacteristic(features[i].Attributes())
+			ch := lightCharText(b.portrayer.Passes(&features[i]))
 			if ch == "" || seen[ch] {
 				continue
 			}
@@ -664,7 +682,7 @@ func (b *Baker) addCell(chart *s57.Chart, pc CellPortrayal) {
 	}
 
 	// Combine co-located lights (S-52 LIGHTS06): one flare + one merged label.
-	lightPrimary, lightSkip := groupCoLocatedLights(features)
+	lightPrimary, lightSkip := b.groupCoLocatedLights(features)
 	b.seenSector = make(map[sectorKey]struct{})
 	for i := range features {
 		f := &features[i]
@@ -676,20 +694,22 @@ func (b *Baker) addCell(chart *s57.Chart, pc CellPortrayal) {
 		b.curLight = ""
 		b.curLightSkip = false
 		b.curLightText = ""
-		if f.ObjectClass() == "LIGHTS" {
-			b.curLight = BuildLightCharacteristic(f.Attributes())
-			b.curLightSkip = lightSkip[i]
-			if merged, ok := lightPrimary[i]; ok {
-				b.curLightText = merged
-				b.curLight = merged // inspector shows the combined characteristic
-			}
-		}
 		// Boundary symbolization (S-52 §8.6.1): a style-variant area is built
 		// twice (plain bnd=0 / symbolized bnd=1) so the client toggles boundary
 		// style live; everything else is one pass tagged bnd=2.
 		// The portrayer (the build-time embedded catalogue, or --s101) runs the
 		// S-101 rules to produce the passes.
 		passes := b.portrayer.Passes(f)
+		if f.ObjectClass() == "LIGHTS" {
+			// The characteristic string comes from the catalogue rule (LITDSN02),
+			// harvested from the portrayal — not re-derived in Go.
+			b.curLight = lightCharText(passes)
+			b.curLightSkip = lightSkip[i]
+			if merged, ok := lightPrimary[i]; ok {
+				b.curLightText = merged
+				b.curLight = merged // inspector shows the combined characteristic
+			}
+		}
 		for _, pass := range passes {
 			fb := pass.Build
 			bnd := int64(pass.Bnd)
