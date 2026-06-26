@@ -322,6 +322,11 @@ export function combineFilters(base, mariner) {
   // shown only when the mariner enables it. (Out of period it is already gone via
   // the date filter above; this only governs in-period features.)
   if (!mariner.highlightDateDependent) parts.push(["!=", ["coalesce", ["get", "symbol_name"], ""], "CHDATD01"]);
+  // Information callouts (S-52 §10.6.1.1 INFORM01, viewing group 31030): the
+  // "additional information available" box-on-a-leader marker is baked category
+  // Other, but its own opt-in toggle (OFF by default) — so enabling Other doesn't
+  // bury a dense chart under (i) markers. Hidden unless showInformCallouts is on.
+  if (!mariner.showInformCallouts) parts.push(["!=", ["coalesce", ["get", "symbol_name"], ""], "INFORM01"]);
   // Meta-object coverage/region boundary lines are gated separately from the
   // "Other" display category (mariner.showMetaBounds, off by default), since
   // they read as cell boundaries and aren't useful alongside other "Other" data.

@@ -85,6 +85,12 @@ const DEFAULT_MARINER = {
   // marker on in-period date-dependent features — an optional highlight, off by
   // default (opt-in), like the info/document highlights.
   highlightDateDependent: false,
+  // "Information callouts" (S-52 §10.6.1.1 INFORM01 / viewing group 31030): the
+  // box-on-a-leader "additional information available" marker on features carrying
+  // INFORM/TXTDSC/etc. Baked display-category Other, but given its own opt-in toggle
+  // (OFF by default) so enabling Other isn't buried under (i) markers on dense
+  // charts — same treatment as highlightDateDependent. See combineFilters.
+  showInformCallouts: false,
   // S-52 PresLib §14.5 text groupings — the mariner toggles text by group,
   // independent of display category (each TX/TE carries a group number, §14.4).
   showLightDescriptions: true, // group 23: light characteristics (e.g. Fl(2)R 10s)
