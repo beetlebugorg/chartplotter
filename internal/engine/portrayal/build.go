@@ -705,9 +705,13 @@ func navSystemBuild(f *s57.Feature) FeatureBuild {
 			arrow = "DIRBOYB1"
 		}
 		if a, ok := areaSurfacePoint(coordsToLatLon(exteriorRing(g))); ok {
+			// Centre the arrow on the area's representative point: DIRBOY's catalogue
+			// pivot sits at the arrow's tail (SVG 0,0, bottom-centre), so honouring it
+			// would push the whole arrow ~30 mm north of the centre and out of a small
+			// region. CentreOnArea centres the glyph instead (S-52 §8.5.1).
 			prims = append(prims, SymbolCall{
 				Anchor: a, SymbolName: arrow, RotationDeg: float32(orient), RotationTrueNorth: true,
-				Scale: DefaultPxPerSymbolUnit, SoundingDepthM: nan32, DangerDepthM: nan32,
+				CentreOnArea: true, Scale: DefaultPxPerSymbolUnit, SoundingDepthM: nan32, DangerDepthM: nan32,
 			})
 		}
 	}
