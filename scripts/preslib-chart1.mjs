@@ -67,6 +67,8 @@ const MARINER = {
   displayBase: true, displayStandard: true, displayOther: true,
   dataQuality: true,
   depthUnit: "m",
+  showContourLabels: true, // spec plots label every depth contour (the "0" drying line, "5", "10", "30")
+  shallowContour: 5, safetyContour: 10, deepContour: 30, // the depth-shading demo's contours (DEPCNT VALDCO 0/5/10/30)
   showFullSectorLines: false,
   boundaryStyle: "symbolized",
   simplifiedPoints: false,

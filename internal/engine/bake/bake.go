@@ -2454,11 +2454,12 @@ func contourValdco(attrs map[string]interface{}, class string) float32 {
 	if class != "DEPCNT" {
 		return nan32f
 	}
-	// Only label contours deeper than chart datum. The 0 m contour is the
-	// shoreline/drying line; labelling it "0" all along the coast is clutter (the
-	// "0 by the shore" the mariner doesn't want), and a missing VALDCO is unknown,
-	// not zero.
-	if v, ok := floatAttr(attrs, "VALDCO"); ok && v > 0 {
+	// Bake the value whenever VALDCO is explicitly present — INCLUDING 0, the
+	// drying line / chart-datum contour, which the spec plots label "0". A missing
+	// VALDCO is unknown (not zero), so it's left unlabelled. Whether any of these
+	// actually draw is the mariner's "contour labels" toggle (off by default, so
+	// the "0 by the shore" stays decluttered until the mariner asks for labels).
+	if v, ok := floatAttr(attrs, "VALDCO"); ok {
 		return float32(v)
 	}
 	return nan32f
