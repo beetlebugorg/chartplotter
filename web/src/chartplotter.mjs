@@ -1856,7 +1856,7 @@ export class ChartPlotter extends HTMLElement {
       positionCaret: (pop, tab) => this._positionCaret(pop, tab),
     });
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
-    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); this._search.doSearch(si.value); /* show the browse list (active charts) right away */ };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
     si.oninput = () => this._search.doSearch(si.value);
     si.onkeydown = (e) => {
