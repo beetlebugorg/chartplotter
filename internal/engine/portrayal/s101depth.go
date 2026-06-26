@@ -87,12 +87,25 @@ func DerivedAttrs(f *s57.Feature, idx *DepthIndex) map[string]string {
 		return nil
 	}
 	depth := 0.0
+	surrounding := ""
 	if pt, ok := representativePoint(f); ok {
 		if d, ok := idx.shoalestDRVAL1(pt.Lat, pt.Lon); ok {
 			depth = d
+			// surroundingDepth is the depth of the area the danger sits in (S-52
+			// DEPVAL). UDWHAZ05 reads it: a sub-safety-contour danger whose
+			// surrounding water is itself shallow is NOT an isolated danger and
+			// must not get ISODGR01 unless "isolated dangers in shallow water" is
+			// on. Supply it ONLY when a containing depth area is found — leaving it
+			// absent (the no-area case) keeps the rule's conservative "unknown ⇒
+			// dangerous" default, so deep/unknown dangers still flag.
+			surrounding = strconv.FormatFloat(d, 'f', -1, 64)
 		}
 	}
-	return map[string]string{"defaultClearanceDepth": strconv.FormatFloat(depth, 'f', -1, 64)}
+	out := map[string]string{"defaultClearanceDepth": strconv.FormatFloat(depth, 'f', -1, 64)}
+	if surrounding != "" {
+		out["surroundingDepth"] = surrounding
+	}
+	return out
 }
 
 // polygonRings returns a polygon's rings as [lon,lat] lists (Rings field first,
