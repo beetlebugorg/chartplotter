@@ -26,14 +26,13 @@
 //                               client-side archive path (plotter-coupled, so it
 //                               stays in the shell; see chartplotter.mjs).
 
-import { esc, fmtIssue } from "../lib/util.mjs";
-import { readCentralDirectory, cellEntries, extractEntry } from "../data/zip-import.mjs";
+import { esc, fmtIssue, fmtScale } from "../lib/util.mjs";
 import { seaColor, landColor, coastColor } from "../chart-canvas/s52-style.mjs"; // our own basemap palette (consistent with the chart)
 import {
   STYLE, widgetBody, libraryBody, packSearch, providersCol, packsHeader,
   packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
   detailEmpty, detailUnknownSet, detailPack, installedActions, previewMapHost,
-  importDetail, dataFreshness, agreementModal, archiveList, millerBack, packCellList,
+  importDetail, dataFreshness, agreementModal, millerBack, packCellList,
 } from "./chart-library.view.mjs";
 
 // NOAA ENC User Agreement acceptance (localStorage). Exported so the shell can
@@ -86,7 +85,6 @@ export class ChartLibrary extends HTMLElement {
     this._dl = null;       // ChartDownloader (NOAA catalogue/discovery)
     this._api = null;      // ChartService (server import/bake + pack registry)
     this._notify = null;   // NotificationCenter (task progress + banners)
-    this._store = null;    // ChartStore (OPFS local cell store, for User imports)
     this._assets = "./";
 
     // Selection state for the 3-pane drill-down.
@@ -116,14 +114,12 @@ export class ChartLibrary extends HTMLElement {
     this._disabled = new Set();
     this._installed = new Set(); // installed cell names (for the NOAA pack counts)
     this._hiddenCells = new Set(); // cell names hidden from the map (per-cell toggle); owned by the shell, mirrored here for render
+    this._packMeta = new Map();   // pack name → /api/packs entry (title/agency/scale/cellCount/imported/bounds)
+    this._packDetail = new Map(); // pack name → /api/pack/<name> detail (per-cell list), fetched lazily on select
 
     // NOAA ENC agreement acceptance (persisted).
     this._agreed = localStorage.getItem(LS_AGREE) === "1";
     this._agreeResolve = null;
-
-    // Local-file import scratch (the User-Charts path).
-    this._archive = new Map();  // cell name -> {blob, entry, updates} from opened zips
-    this._selected = new Set(); // cell names ticked for import
 
     this._previewMap = null;    // live preview map (unused; kept for safe teardown)
     this._previewCache = new Map(); // pack key → coverage snapshot dataURL (rendered once)
@@ -153,11 +149,10 @@ export class ChartLibrary extends HTMLElement {
 
   // Inject dependencies (call once after creation). `widget` flips the Library to
   // import-only (no NOAA download/region picker), matching the shell's widget mode.
-  configure({ dl, api, notify, store, assets, widget } = {}) {
+  configure({ dl, api, notify, assets, widget } = {}) {
     this._dl = dl || null;
     this._api = api || null;
     this._notify = notify || null;
-    this._store = store || null;
     if (assets) this._assets = assets;
     this._widget = !!widget;
     return this;
@@ -211,6 +206,9 @@ export class ChartLibrary extends HTMLElement {
       const packs = await this._api.packs();
       this._installedSets = new Set(packs.map((p) => p.name));
       this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
+      // Keep each pack's extracted metadata (title/agency/scale/cellCount/imported/
+      // bounds) for the User-Charts rows + detail — the per-upload info display.
+      this._packMeta = new Map(packs.map((p) => [p.name, p]));
     } catch (e) { /* keep last */ }
     try { const cells = await this._api.cells(); if (cells) this._installed = cells; } catch (e) { /* keep last */ }
   }
@@ -243,8 +241,26 @@ export class ChartLibrary extends HTMLElement {
       }).filter(Boolean);
     }
     if (id === "ienc") return this._iencPacks() || [];
-    // user: locally-imported packs (anything not NOAA/IENC).
-    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => ({ key: n, kind: "user", title: this._setLabel(n), sub: "installed", installed: true }));
+    // user: uploaded packs (anything not NOAA/IENC), with extracted metadata.
+    return [...sets].filter((n) => !/^(noaa-d\d+|ienc-)/.test(n)).sort().map((n) => {
+      const m = this._packMeta.get(n) || {};
+      return {
+        key: n, kind: "user", installed: true,
+        title: m.title || this._setLabel(n),
+        sub: this._userPackSub(m),
+        bbox: Array.isArray(m.bounds) ? m.bounds : null,
+        meta: m,
+      };
+    });
+  }
+
+  // One-line summary for a user pack row: chart count, scale (range), agency.
+  _userPackSub(m) {
+    const parts = [];
+    if (m.cellCount) parts.push(`${m.cellCount} chart${m.cellCount > 1 ? "s" : ""}`);
+    if (m.scaleMin) parts.push(m.scaleMax && m.scaleMax !== m.scaleMin ? `1:${fmtScale(m.scaleMin)}–1:${fmtScale(m.scaleMax)}` : `1:${fmtScale(m.scaleMin)}`);
+    if (m.agency) parts.push(m.agency);
+    return parts.join(" · ") || "installed";
   }
 
   // USACE Inland ENC catalogue (server-fetched + parsed). Cached here once via
@@ -545,16 +561,25 @@ export class ChartLibrary extends HTMLElement {
       sub = d ? `${esc(d.name)} · ${esc(d.blurb)}` : "";
       meta = `${pk.sub} · outlined area below is the coverage`;
     } else if (pk.kind === "user") {
+      const m = pk.meta || this._packMeta.get(key) || {};
       title = pk.title || this._setLabel(key);
-      sub = "Imported charts — baked on the server, kept under User Charts.";
-      meta = "";
+      sub = this._userPackSub(m);
+      const det = this._packDetail.get(key);
+      const ed = det && det.cells && det.cells[0]; // single-cell editions/dates, when applicable
+      const ymd = (s) => (/^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : s); // S-57 YYYYMMDD → ISO
+      const bits = [];
+      if (m.imported) bits.push(`imported ${fmtIssue(m.imported.slice(0, 10))}`);
+      if (ed && ed.edition) bits.push(`ed. ${ed.edition}${ed.update && ed.update !== "0" ? `/${ed.update}` : ""}`);
+      if (ed && ed.issueDate) bits.push(`issued ${fmtIssue(ymd(ed.issueDate))}`);
+      meta = [bits.join(" · "), "outlined area below is the coverage"].filter(Boolean).join(" — ");
     } else { // ienc
       title = `${pk.title} River`;
       sub = `USACE Inland ENC · ${pk.cells.length} chart${pk.cells.length > 1 ? "s" : ""}`;
       meta = "outlined area below is the coverage";
     }
-    // User packs have no coverage map; everything else shows the preview.
-    const previewMap = pk.kind === "user" ? "" : previewMapHost();
+    // Every pack now shows the coverage preview (user packs get per-cell bboxes
+    // from the server metadata).
+    const previewMap = previewMapHost();
     // Per-cell show/hide list, only for an installed & active pack (a fully
     // disabled pack is already hidden, so per-cell control is moot there).
     let extra = "";
@@ -569,6 +594,13 @@ export class ChartLibrary extends HTMLElement {
   // { name, title, shown }. Cells come from the pack's catalogue membership
   // intersected with what's actually installed; titles from the NOAA catalogue.
   _packCellItems(pk) {
+    // User packs: the per-cell list comes from the server detail (its own titles +
+    // compilation scale), already exactly the baked set — no catalogue intersect.
+    if (pk.kind === "user") {
+      const cells = (this._packDetail.get(pk.key) || {}).cells || [];
+      return cells.map((c) => ({ name: c.name, title: c.title || "", scale: c.scale || 0, shown: !this._hiddenCells.has(c.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
     let names = [];
     if (pk.kind === "noaa") names = this._districtCellNames(pk.cg) || [];
     else if (pk.cells) names = pk.cells.map((c) => c.name);
@@ -611,14 +643,25 @@ export class ChartLibrary extends HTMLElement {
     return { fc: { type: "FeatureCollection", features: feats }, bounds: feats.length && w <= e ? [w, s, e, n] : null };
   }
 
-  // Coverage {fc, bounds} for any pack: NOAA cells (catalog bb) or IENC cells.
+  // Coverage {fc, bounds} for any pack: NOAA cells (catalog bb), IENC cells, or a
+  // user pack (per-cell bboxes from the server detail, else the pack's union bbox).
   _packCoverage(pk) {
     if (!pk) return { fc: { type: "FeatureCollection", features: [] }, bounds: null };
     if (pk.kind === "noaa") return this._districtCoverage(pk.cg);
+    const box = (w, s, e, n) => ({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
     const feats = [];
+    if (pk.kind === "user") {
+      const cells = (this._packDetail.get(pk.key) || {}).cells || [];
+      for (const c of cells) {
+        const [w, s, e, n] = c.bbox || [];
+        if ([w, s, e, n].every(Number.isFinite)) feats.push(box(w, s, e, n));
+      }
+      if (!feats.length && Array.isArray(pk.bbox) && pk.bbox.every(Number.isFinite)) feats.push(box(...pk.bbox));
+      return { fc: { type: "FeatureCollection", features: feats }, bounds: pk.bbox || null };
+    }
     for (const c of pk.cells || []) {
       const [w, s, e, n] = c.bbox || [];
-      if ([w, s, e, n].every(Number.isFinite)) feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] } });
+      if ([w, s, e, n].every(Number.isFinite)) feats.push(box(w, s, e, n));
     }
     return { fc: { type: "FeatureCollection", features: feats }, bounds: pk.bbox || null };
   }
@@ -644,6 +687,19 @@ export class ChartLibrary extends HTMLElement {
     this.shadowRoot.querySelectorAll(".m-row[data-pack]").forEach((el) => el.classList.toggle("sel", el.dataset.pack === key));
     this._updateDetail();
     this._setPhoneLevel("detail"); // phone: advance packs → detail
+    this._ensurePackDetail(key); // user packs: lazy-load per-cell detail, then re-render
+  }
+
+  // Fetch a user pack's per-cell detail (GET /api/pack/<name>) once and cache it,
+  // re-rendering the detail pane when it arrives. NOAA/IENC packs derive their cell
+  // list from their catalogue, so they're skipped.
+  async _ensurePackDetail(key) {
+    if (!key || !this._api || this._packDetail.has(key)) return;
+    if (/^(noaa-d\d+|ienc-)/.test(key)) return;
+    const detail = await this._api.packDetail(key);
+    if (!detail) return;
+    this._packDetail.set(key, detail);
+    if (this._active && this._selPack === key) this._updateDetail();
   }
 
   // Rebuild only the detail column (+ its buttons + preview map), leaving the list
@@ -963,32 +1019,37 @@ export class ChartLibrary extends HTMLElement {
     return !!(host && host.querySelector("#agree"));
   }
 
-  // -- User-Charts local-file import (drop a .zip / .000 / .pmtiles) ---------
-  // .zip → list its cells for selection; .000 → store + bake; .pmtiles → handed to
-  // the shell (it owns the client-side plotter archive path). After a store/bake
-  // we dispatch charts-changed so the shell reconciles the map.
+  // -- User-Charts import (drop a .zip / .000 / .pmtiles) --------------------
+  // .zip → upload the whole exchange set; the server parses CATALOG.031, names the
+  // pack from its identity, bakes it, and writes the metadata sidecar (one pack per
+  // upload). .000 → upload the lone cell + auto-bake. .pmtiles → handed to the shell
+  // (its client-side plotter archive path). After each, charts-changed lets the
+  // shell reconcile the map.
   async openFiles(fileList) {
     const log = this.shadowRoot.getElementById("import-log");
-    const rawInstalled = [];
     for (const file of fileList) {
       const lower = file.name.toLowerCase();
       try {
         if (lower.endsWith(".zip")) {
-          const cells = cellEntries(await readCentralDirectory(file));
-          let added = 0;
-          for (const rec of cells) {
-            this._archive.set(rec.name, { blob: file, entry: rec.base, updates: rec.updateCount });
-            this._selected.add(rec.name);
-            added++;
-          }
-          if (log) log.textContent = `${file.name}: ${added} cell(s) found`;
+          const t = this._notify ? this._notify.task("import:zip", { label: `Importing ${file.name}…` }) : null;
+          try {
+            const { set } = await this._api.importZipAndWait(file, { name: file.name.replace(/\.zip$/i, ""), onStatus: this._jobStatus(t) });
+            if (t) t.done();
+            if (log) log.textContent = `imported ${file.name}`;
+            this._selProvider = "user"; this._selPack = set; // reveal the new pack
+          } catch (e) { if (t) t.fail(e); throw e; }
         } else if (lower.endsWith(".000")) {
-          // Raw cell: persist it; it gets baked into the archive below.
+          // Lone base cell: upload to the server cache, then bake an auto-named pack.
           const name = file.name.replace(/\.000$/i, "");
-          await this._store.put(name, new Uint8Array(await file.arrayBuffer()));
-          this._installed.add(name);
-          rawInstalled.push(name);
-          if (log) log.textContent = `imported ${name}`;
+          const t = this._notify ? this._notify.task("import:cell", { label: `Importing ${name}…` }) : null;
+          try {
+            await this._api.uploadCell(name, new Uint8Array(await file.arrayBuffer()));
+            const { job, set } = await this._api.importCells("auto", [name]);
+            await this._api.pollJob(job, { name, onStatus: this._jobStatus(t) });
+            if (t) t.done();
+            if (log) log.textContent = `imported ${name}`;
+            this._selProvider = "user"; this._selPack = set;
+          } catch (e) { if (t) t.fail(e); throw e; }
         } else if (lower.endsWith(".pmtiles")) {
           // A prebaked archive — the plotter is shell-owned, so hand the file to the
           // shell's client-side archive path (addArchive + persist).
@@ -1002,103 +1063,9 @@ export class ChartLibrary extends HTMLElement {
         if (log) log.textContent = `${file.name}: ${err.message}`;
       }
     }
-    this.renderArchiveList();
-    // Re-bake the now-larger stored cell set on the server.
-    await this._refreshCharts();
-  }
-
-  // Bake the LOCALLY-imported cells (the OPFS store) into the "import" set: upload
-  // each cell to the server, then kick the import job. On completion dispatch
-  // charts-changed (the shell reconciles the map). Coalesces concurrent rebakes.
-  async _refreshCharts() {
-    if (!this._store || !this._api) return;
-    if (this._charting) { this._chartingAgain = true; return; }
-    this._charting = true;
-    let t = null;
-    try {
-      const local = await this._store.list().catch(() => []);
-      if (local.length) {
-        t = this._notify ? this._notify.task("import:user", { label: "Preparing your charts…" }) : null;
-        for (const name of local) {
-          try {
-            const bytes = await this._store.getBytes(name);
-            if (bytes && bytes.length) await this._api.uploadCell(name, bytes);
-          } catch (e) { console.warn("[charts] upload", name, e); }
-        }
-        const { job } = await this._api.importCells("import", local);
-        await this._api.pollJob(job, { name: "your", onStatus: this._jobStatus(t) });
-        if (t) t.done();
-      }
-      await this._syncRegistry();
-      this._changed();
-    } catch (e) {
-      console.warn("[charts] import bake", e);
-      if (t) t.fail(e);
-    } finally {
-      this._charting = false;
-      if (this._chartingAgain) { this._chartingAgain = false; this._refreshCharts(); }
-    }
-  }
-
-  // Bake the selected archive cells into the "import" set: extract each from its zip,
-  // store it, then bake (via _refreshCharts). Mirrors the old shell importSelected.
-  async importSelected() {
-    const names = [...this._selected].filter((n) => this._archive.has(n));
-    if (!names.length) return;
-    const imported = [];
-    let done = 0;
-    const t = this._notify ? this._notify.task("import:archive", { label: "Importing charts" }) : null;
-    for (const name of names) {
-      if (t) t.progress(done / names.length, `${name} · ${done + 1} of ${names.length}`);
-      try {
-        const { blob, entry } = this._archive.get(name);
-        const bytes = await extractEntry(blob, entry);
-        await this._store.put(name, bytes); // persist only
-        this._installed.add(name);
-        this._archive.delete(name);
-        this._selected.delete(name);
-        imported.push(name);
-      } catch (err) {
-        console.error("[import]", name, err);
-        if (t) t.progress(done / names.length, `${name}: ${err.message}`);
-      }
-      done++;
-    }
-    if (t) t.done();
-    this.renderArchiveList();
-    // New cells stored → bake them on the server.
-    if (imported.length) await this._refreshCharts();
-  }
-
-  // Re-bake every installed cell into the server "user" set and render it (the
-  // bake runs server-side; see _refreshCharts).
-  async rebakeArchive() {
-    const names = [...this._installed];
-    if (!names.length) return;
-    const t = this._notify ? this._notify.task("rebake:user", { label: "Baking charts…" }) : null;
-    if (t) t.progress(null, `${names.length} chart${names.length > 1 ? "s" : ""}`);
-    try { await this._refreshCharts(); if (t) t.done(); }
-    catch (e) { console.error("[bake]", e); if (t) t.fail(e); }
-  }
-
-  // The "from archive" selectable cell list (after a .zip is opened).
-  renderArchiveList() {
-    const el = this.shadowRoot.getElementById("archive-list");
-    if (!el) return;
-    const names = [...this._archive.keys()].sort();
-    if (!names.length) { el.innerHTML = ""; return; }
-    const nSel = [...this._selected].filter((n) => this._archive.has(n)).length;
-    const items = names.map((name) => ({ name, label: this._byName.get(name)?.l || "", checked: this._selected.has(name) }));
-    el.innerHTML = archiveList({ items, nSel });
-    el.querySelectorAll("input[type=checkbox]").forEach((cb) => (cb.onchange = () => this.toggleSelect(cb.dataset.name)));
-    const ib = this.shadowRoot.getElementById("import-btn");
-    if (ib) ib.onclick = () => this.importSelected();
-  }
-
-  toggleSelect(name) {
-    if (this._selected.has(name)) this._selected.delete(name);
-    else this._selected.add(name);
-    this.renderArchiveList();
+    await this._syncRegistry();
+    this._changed();
+    if (this._active) this.render();
   }
 
   // Wire the file-import controls (the drop zone is re-rendered, so bound each render).

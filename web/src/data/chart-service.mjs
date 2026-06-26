@@ -73,6 +73,27 @@ export class ChartService {
     return this.pollJob(job, opts);
   }
 
+  // POST /api/import?set=auto (multipart) — upload a whole ENC exchange-set zip;
+  // the server parses its CATALOG.031, names the pack from its identity, bakes it,
+  // and writes the metadata sidecar. Returns {job, set} (the server-derived name).
+  // `set` defaults to "auto"; pass a name to override.
+  async importZip(file, { set = "auto" } = {}) {
+    const form = new FormData();
+    form.append("file", file, file.name || "upload.zip");
+    const res = await fetch(this._url(`api/import?set=${encodeURIComponent(set)}`), { method: "POST", body: form });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
+    return j; // {ok, job, set}
+  }
+
+  // upload a zip and wait for the bake. Resolves with { status, set } so the
+  // caller knows the server-derived pack name.
+  async importZipAndWait(file, opts) {
+    const { job, set } = await this.importZip(file, opts);
+    const status = await this.pollJob(job, opts);
+    return { status, set };
+  }
+
   // Wait for a job, surfacing UI-ready progress via opts.onStatus({label,sub,frac}).
   // Prefers a single SSE stream; falls back to 500ms polling (~20min ceiling).
   async pollJob(job, { name, onStatus = () => {} } = {}) {
@@ -132,6 +153,15 @@ export class ChartService {
   async packs() {
     try { const j = await fetch(this._url("api/packs")).then((r) => (r.ok ? r.json() : null)); return (j && j.packs) || []; }
     catch (e) { return []; }
+  }
+
+  // GET /api/pack/<name> — one pack's full extracted metadata, incl. the per-cell
+  // list (title/scale/edition/date/agency/bbox). null when the pack has no sidecar
+  // (built-in packs, or one baked before metadata extraction). Used for the
+  // per-upload detail view.
+  async packDetail(name) {
+    try { return await fetch(this._url(`api/pack/${encodeURIComponent(name)}`)).then((r) => (r.ok ? r.json() : null)); }
+    catch (e) { return null; }
   }
 
   // GET /api/cells — the set of installed cell names. Returns a Set; null on failure

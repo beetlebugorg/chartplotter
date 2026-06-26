@@ -14,7 +14,7 @@
 //             (offline GSHHG); "none" disables the underlay (test charts)
 //
 // Everything is driven through the renderer's public API (bakePmtiles/setArchive/
-// listCharts/setScheme/setMariner and its `map` handle) plus the shared ChartStore.
+// listCharts/setScheme/setMariner and its `map` handle) plus the server chart API.
 
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
 import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
@@ -34,7 +34,6 @@ import { ChartDownloader } from "./data/chart-downloader.mjs"; // chart discover
 import { NotificationCenter } from "./core/notification-center.mjs"; // app-level task-progress + banner bus
 import { ChartService } from "./data/chart-service.mjs"; // server import/bake jobs + pack registry
 import { AuxStore } from "./data/aux-store.mjs"; // TXTDSC/PICREP external files (companion aux zip)
-import { ChartStore } from "./data/chart-store.mjs";
 import { UNIT_DEFAULTS } from "./lib/units.mjs"; // configurable display units (categories now in core-settings.mjs)
 import { ChartFinder } from "./plugins/chart-finder.mjs"; // off-screen installed-chart edge pointers
 import { HudController } from "./plugins/hud.mjs"; // status readout + overscale zoom cap
@@ -296,11 +295,11 @@ export class ChartPlotter extends HTMLElement {
     // a device with many charts) — the renderer boots with an empty `charts`
     // attribute so the map/basemap paints immediately, then we ingest cells
     // lazily by viewport (see ingestViewport).
-    this._store = new ChartStore();
-    // Installed cells/sets are SERVER-side now (the XDG data/cache); onReady() calls
-    // _renderInstalledSets() to load them (GET /tiles/ + /api/cells), so the map
-    // survives a reload. Seed from the local OPFS store for the first paint.
-    this._installed = new Set(await this._store.list().catch(() => []));
+    // Installed cells/sets are SERVER-side (the XDG data/cache). onReady() calls
+    // _renderInstalledSets(), which loads the registry (GET /api/packs) and the
+    // installed-cell set (GET /api/cells) and renders them — so it survives a reload.
+    // Starts empty for the first paint; _renderInstalledSets fills it.
+    this._installed = new Set();
     this._installedSets = new Set();
     this._disabled = new Set(); // packs hidden from the map (server-side; loaded in _renderInstalledSets)
     // Chart discovery/acquisition domain (NOAA catalogue, packs, download, import).
@@ -308,7 +307,6 @@ export class ChartPlotter extends HTMLElement {
     this._dl = new ChartDownloader({
       assets: this._assets,
       cfg: (n) => this._cfg(n),
-      store: this._store,
       getInstalled: () => this._installed,
     });
 
@@ -332,7 +330,7 @@ export class ChartPlotter extends HTMLElement {
     // .pmtiles archive path (the plotter is shell-owned).
     this._chartLib = this.shadowRoot.getElementById("chart-lib");
     if (this._chartLib) {
-      this._chartLib.configure({ dl: this._dl, api: this._api, notify: this._notify, store: this._store, assets: this._assets, widget: this._widget });
+      this._chartLib.configure({ dl: this._dl, api: this._api, notify: this._notify, assets: this._assets, widget: this._widget });
       this._chartLib.setHiddenCells([...this._hiddenCells]); // seed checkbox state from persisted prefs
       this._chartLib.addEventListener("charts-changed", () => { this._renderInstalledSets().catch(() => {}); });
       // Per-cell show/hide: apply the client filter to the live map + persist.
@@ -507,8 +505,8 @@ export class ChartPlotter extends HTMLElement {
     this._map = map;
     this._resolveReady();
     // Share-restore carries bearing/pitch too (center+zoom were applied as the
-    // initial camera). The installed cells were already added to _installed in
-    // boot(), so the loadStoreCells below bakes them at the restored viewport.
+    // initial camera). The shared cells were baked into the "user-shared" pack in
+    // _loadSharedView(); _renderInstalledSets() below renders it.
     if (this._sharePending) {
       const v = this._sharePending; this._sharePending = null;
       try { map.jumpTo({ bearing: v.bearing || 0, pitch: v.pitch || 0 }); } catch (e) { console.warn("[share] camera", e); }
@@ -1171,29 +1169,29 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // Fetch the latest shared snapshot and install its cells locally, downloading
-  // any not already stored through the server (which serves them from its cache —
-  // including bytes the publisher uploaded — or fetches the NOAA url). Returns the
-  // snapshot's camera ({center,zoom,...}) for boot() to use as the initial view;
-  // bearing/pitch are stashed for onReady. Cells are added to _installed so the
-  // normal loadStoreCells/lazy-bake path renders them.
+  // The cells are baked server-side into a "user-shared" pack (the server fetches
+  // each from its cache or the NOAA url), which _renderInstalledSets then renders
+  // like any other pack. Returns the snapshot's camera ({center,zoom,...}) for boot()
+  // as the initial view; bearing/pitch are stashed for onReady.
   async _loadSharedView() {
     const resp = await fetch("api/share", { cache: "no-store" });
     if (!resp.ok) throw new Error("snapshot HTTP " + resp.status);
     const snap = await resp.json();
     const cells = Array.isArray(snap.cells) ? snap.cells : [];
+    const specs = [];
     for (const cell of cells) {
       const n = typeof cell === "string" ? cell : (cell && cell.n);
       if (!n) continue;
+      specs.push({ name: n, url: (cell && cell.z) || "" });
+      this._installed.add(n);
+    }
+    // Bake the shared cells into a single server pack so they render through the
+    // normal installed-set path. Best-effort: a failure just leaves the view empty.
+    if (specs.length && this._api) {
       try {
-        if (!(await this._store.has(n))) {
-          const z = cell && cell.z ? cell.z : "";
-          const url = "api/cell/" + encodeURIComponent(n) + (z ? "?url=" + encodeURIComponent(z) : "");
-          const r = await fetch(url);
-          if (!r.ok) throw new Error("HTTP " + r.status);
-          await this._store.put(n, new Uint8Array(await r.arrayBuffer()));
-        }
-        this._installed.add(n);
-      } catch (e) { console.warn("[share] install cell", n, e); }
+        const { job } = await this._api.import({ set: "user-shared", cells: specs });
+        await this._api.pollJob(job, { name: "shared view" });
+      } catch (e) { console.warn("[share] bake shared view", e); }
     }
     const view = snap.view || null;
     this._sharePending = view; // onReady applies bearing/pitch
@@ -1459,8 +1457,8 @@ export class ChartPlotter extends HTMLElement {
 
   // The User-Charts local-file import (openFiles + the OPFS upload/bake path) now
   // lives in <chart-library>; a dropped .pmtiles is handed back to the shell via
-  // the "chart-import-archive" event (see _importArchiveFile). The shell's debug
-  // tools still re-bake the local store through the component's _refreshCharts.
+  // the "chart-import-archive" event (see _importArchiveFile). Uploads bake into
+  // their own server pack; the dev tools re-bake installed packs via /api/import.
 
   // Render every baked tile set the server has (GET /tiles/) — each a provider/pack
   // (noaa-d17, ienc-…, import). This is the single source of truth for what's
@@ -1492,13 +1490,6 @@ export class ChartPlotter extends HTMLElement {
     this._refreshInstalledBounds();
     if (this._chartFinder) this._chartFinder.update(); // packs changed → recompute off-screen pointers
     return active;
-  }
-
-  // Re-bake the local OPFS store on the server (the User-Charts import path). The
-  // <chart-library> component owns this; the shell's debug tools delegate to it.
-  // Returns a resolved promise when there's no component yet (boot/widget guards).
-  _refreshCharts() {
-    return this._chartLib ? this._chartLib._refreshCharts() : Promise.resolve();
   }
 
   // Wait for a server job (download/bake) to complete, surfacing progress through
