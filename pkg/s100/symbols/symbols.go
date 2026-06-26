@@ -3,10 +3,13 @@
 // and rasterizes them in pure Go. It is the single source of truth for
 // SVG→raster, used by the sprite-atlas builder.
 //
-// Two oksvg defects are worked around here: it ignores a non-zero viewBox
-// origin (we normalize to "0 0 W H" and wrap the content in a translate), and
-// it applies stroke-width in device px without scaling by the draw transform
-// (we pre-multiply stroke-width by the px/mm scale).
+// Three oksvg/rasterx defects are worked around here: oksvg ignores a non-zero
+// viewBox origin (we normalize to "0 0 W H" and wrap the content in a
+// translate); it applies stroke-width in device px without scaling by the draw
+// transform (we pre-multiply stroke-width by the px/mm scale); and it ignores
+// the fill-rule attribute while rasterx's ScannerGV cannot do even-odd fills at
+// all (we force even-odd winding and rasterize through scanFT, which honours
+// it) so the catalogue's even-odd danger symbols don't fill their holes solid.
 package symbols
 
 import (
@@ -23,6 +26,7 @@ import (
 
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
+	"github.com/srwiley/scanFT"
 )
 
 var cssRuleRE = regexp.MustCompile(`\.([A-Za-z0-9_]+)\s*\{([^}]*)\}`)
@@ -58,6 +62,17 @@ func Render(svg []byte, css map[string]string, pxPerMM float64) (*Rendered, erro
 	if err != nil {
 		return nil, err
 	}
+	// oksvg ignores the SVG fill-rule attribute and always fills with the
+	// nonzero winding rule. Every S-101 symbol is authored with
+	// fill-rule="evenodd": the danger hatch of ISODGR01/DANGER0x and similar
+	// glyphs is a single compound path whose inner subpath is a hole, and
+	// nonzero winding fills that hole solid (an ISODGR01 with no star in it).
+	// Force even-odd winding on every path so the holes render. For simple,
+	// non-self-intersecting paths even-odd and nonzero are identical, so this
+	// is safe for the rest of the set.
+	for i := range icon.SVGPaths {
+		icon.SVGPaths[i].UseNonZeroWinding = false
+	}
 	w := int(math.Ceil(vb[2] * pxPerMM))
 	h := int(math.Ceil(vb[3] * pxPerMM))
 	if w < 1 || h < 1 {
@@ -65,7 +80,10 @@ func Render(svg []byte, css map[string]string, pxPerMM float64) (*Rendered, erro
 	}
 	rgba := image.NewRGBA(image.Rect(0, 0, w, h))
 	icon.SetTarget(0, 0, float64(w), float64(h))
-	scanner := rasterx.NewScannerGV(w, h, rgba, rgba.Bounds())
+	// scanFT (freetype-backed) honours the even-odd winding set above;
+	// rasterx's own ScannerGV silently ignores it (it is nonzero-only), which
+	// fills the danger-symbol holes solid.
+	scanner := scanFT.NewScannerFT(w, h, scanFT.NewRGBAPainter(rgba))
 	icon.Draw(rasterx.NewDasher(w, h, scanner), 1.0)
 
 	// rasterx writes alpha-premultiplied RGBA; draw.Src into NRGBA converts to
