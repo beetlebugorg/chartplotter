@@ -205,6 +205,7 @@ export class ChartPlotter extends HTMLElement {
     // NOAA catalogue/discovery lives in this._dl (ChartDownloader, created in
     // boot); _catalog/_byName/_districts/_catalogDate are proxy getters onto it.
     this._installed = new Set();        // all stored cell names
+    this._activeCells = [];             // active (enabled-pack) cells {n,l,bb} — the search catalog
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
     this._cellBounds = new Map();       // name -> [w,s,e,n] footprint (from the baker), to locate uploaded cells
     this._cellScale = new Map();        // name -> compilation scale (CSCL) of uploaded cells, for picking a detail zoom
@@ -1481,6 +1482,9 @@ export class ChartPlotter extends HTMLElement {
     if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
     const cells = await this._api.cells();
     if (cells) this._installed = cells; // null → keep current view
+    // Active (enabled-pack) cells WITH bounds — the search catalog, so you can find
+    // an installed chart by name and fly to it (esp. on a blank/no-basemap map).
+    this._activeCells = await this._api.activeCells();
     // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
     // district and the server fans to its band-sets.
     this._installedSets = new Set(packs.map((p) => p.name));
@@ -1845,7 +1849,7 @@ export class ChartPlotter extends HTMLElement {
       getInput: () => $("search-input"),
       getSearchPop: () => $("search"),
       getSearchTab: () => $("search-tab"),
-      getCatalog: () => this._catalog,
+      getCatalog: () => this._activeCells || [], // search ACTIVE installed charts (name → fly to footprint)
       isChartSource,
       classLabel: (acr) => S57_CLASS[acr],
       layerLabel: (srcLayer) => INSPECT_LAYER_LABEL[srcLayer],

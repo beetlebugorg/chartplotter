@@ -58,7 +58,7 @@ export class SearchBox {
     el.innerHTML = hits.length
       ? hits.map((h, i) => {
           const sel = i === 0 ? " sel" : "";
-          if (h.type === "cell") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">Chart · ${esc(h.c.n)} · 1:${(h.c.s || 0).toLocaleString()}</div></div>`;
+          if (h.type === "cell") { const sub = h.c.s ? `Chart · ${esc(h.c.n)} · 1:${h.c.s.toLocaleString()}` : `Chart · ${esc(h.c.n)}`; return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">${sub}</div></div>`; }
           return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.label)}</div><div class="s">${esc(h.sub)}</div></div>`;
         }).join("")
       : `<div class="sr-item"><span class="muted">No matches in view</span></div>`;

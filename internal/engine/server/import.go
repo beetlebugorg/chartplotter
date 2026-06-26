@@ -329,6 +329,9 @@ func (s *Server) cacheCells(cells map[string]baker.CellData) {
 			_ = os.WriteFile(filepath.Join(dir, filepath.Base(un)), ub, 0o644)
 		}
 	}
+	if s.cellIdx != nil {
+		go s.cellIdx.rebuild() // index the newly-cached cells' bounds in the background
+	}
 }
 
 // filterCells keeps only the cells whose stem (name sans .000) is in names.
