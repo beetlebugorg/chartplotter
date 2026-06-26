@@ -157,6 +157,18 @@ export function coreSettingsContributions(app) {
         key: "showCellBounds", type: "toggle", label: "Cell boundaries",
         desc: "Outline installed charts when zoomed out — tap one to jump to it",
       },
+      // Date-dependency (S-52 §10.4.1.1 / §10.6.1.1). "Hide out-of-date features"
+      // is the mandatory current-date filter (default on); turning it off shows
+      // seasonal/expired features regardless of their validity dates. "Highlight"
+      // adds the CHDATD01 "d" marker to features that carry date conditions.
+      {
+        key: "dateDependent", type: "toggle", label: "Hide out-of-date features",
+        desc: "Hide seasonal or expired features outside their validity dates", default: true,
+      },
+      {
+        key: "highlightDateDependent", type: "toggle", label: "Highlight date-dependent",
+        desc: "Mark features that carry date conditions with the “d” symbol",
+      },
     ],
   };
 
