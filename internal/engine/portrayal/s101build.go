@@ -595,7 +595,7 @@ func primitiveName(t s57.GeometryType) string {
 
 // stringAttrs encodes S-57 attribute values as the strings ConvertEncodedValue
 // expects (enumeration/integer → digits, boolean → "1"/"0", text → as-is).
-func stringAttrs(attrs map[string]interface{}) map[string]string {
+func stringAttrs(attrs map[string]any) map[string]string {
 	out := make(map[string]string, len(attrs))
 	for k, v := range attrs {
 		if s, ok := encodeAttr(v); ok {
@@ -605,7 +605,7 @@ func stringAttrs(attrs map[string]interface{}) map[string]string {
 	return out
 }
 
-func encodeAttr(v interface{}) (string, bool) {
+func encodeAttr(v any) (string, bool) {
 	switch t := v.(type) {
 	case nil:
 		return "", false

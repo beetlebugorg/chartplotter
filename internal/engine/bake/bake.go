@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -641,7 +641,7 @@ func (b *Baker) ScaminValues() []uint32 {
 	for v := range b.scaminSeen {
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 
@@ -1357,7 +1357,7 @@ func (b *Baker) emitScaleBoundaries() {
 				run = run[:0]
 				minOut = cm.bandMin
 			}
-			for i := 0; i < n; i++ {
+			for i := range n {
 				lon1, lat1 := ring[i][0], ring[i][1]
 				lon2, lat2 := ring[(i+1)%n][0], ring[(i+1)%n][1]
 				dx, dy := lon2-lon1, lat2-lat1
@@ -1821,14 +1821,14 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 			}
 		} else if r.cscl != 0 && r.layer != "scale_boundaries" &&
 			(r.kind == mvt.GeomPoint || r.kind == mvt.GeomLineString || r.layer == "area_patterns" || r.layer == "areas") {
-			switch {
-			case r.kind == mvt.GeomPoint:
+			switch r.kind {
+			case mvt.GeomPoint:
 				// A point tests its OWN position — a boundary tile keeps coarse points
 				// that fall outside the finer coverage.
 				if s := b.coverageScaleAt(unnormY(r.wMinY), r.wMinX*360-180, bandZ, true); s != 0 && s < r.cscl {
 					suppressed = true
 				}
-			case r.kind == mvt.GeomLineString:
+			case mvt.GeomLineString:
 				// Lines (incl. complex/symbolised) do NOT occlude. Each per-band archive
 				// is a SEPARATE client source with no maxzoom cap on the fine bands, so a
 				// coarse line kept in a tile a finer cell also covers DOUBLE-DRAWS: the
@@ -2102,10 +2102,7 @@ func tessellateFigure(sp *sectorPrim, z uint32) []sectorStroke {
 		if sweep == 0 {
 			sweep = 360 // a zero sweep is a full all-round ring
 		}
-		n := int(math.Ceil(math.Abs(sweep) / 3.0))
-		if n < 8 {
-			n = 8
-		}
+		n := max(int(math.Ceil(math.Abs(sweep)/3.0)), 8)
 		pts := make([]geo.LatLon, n+1)
 		for i := range pts {
 			brg := sp.fig.StartDeg + sweep*float64(i)/float64(n)
@@ -2432,7 +2429,7 @@ func ptBbox(p geo.LatLon) geo.BoundingBox {
 // depthVals returns a depth area's DRVAL1/DRVAL2 (metres) for the client's live
 // SEABED01 shading, or (NaN, NaN) for non-depth areas (so route() omits them).
 // DRVAL2 falls back to DRVAL1 when absent. Mirrors the is_depth gate.
-func depthVals(attrs map[string]interface{}, class string) (float32, float32) {
+func depthVals(attrs map[string]any, class string) (float32, float32) {
 	if class != "DEPARE" && class != "DRGARE" {
 		return nan32f, nan32f
 	}
@@ -2450,7 +2447,7 @@ func depthVals(attrs map[string]interface{}, class string) (float32, float32) {
 // contourValdco returns a DEPCNT depth contour's VALDCO (metres) so the client can
 // label it in the chosen depth unit, or NaN for non-contours / contours with no
 // value (so route() omits the tag and the client draws no label — not a "0").
-func contourValdco(attrs map[string]interface{}, class string) float32 {
+func contourValdco(attrs map[string]any, class string) float32 {
 	if class != "DEPCNT" {
 		return nan32f
 	}
@@ -2468,7 +2465,7 @@ func contourValdco(attrs map[string]interface{}, class string) float32 {
 var nan32f = float32(math.NaN())
 
 // floatAttr reads a numeric S-57 attribute (int/float/string) as a float64.
-func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
+func floatAttr(attrs map[string]any, key string) (float64, bool) {
 	v, ok := attrs[key]
 	if !ok {
 		return 0, false
@@ -2495,7 +2492,7 @@ func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
 // numbers are formatted minimally, satisfying the no-padding rule (§10.8 rule 3).
 // Returns "" for an attribute-free feature. json.Marshal sorts map keys, so the
 // output is deterministic (bake reproducibility).
-func encodeS57Attrs(attrs map[string]interface{}) string {
+func encodeS57Attrs(attrs map[string]any) string {
 	if len(attrs) == 0 {
 		return ""
 	}
@@ -2532,14 +2529,14 @@ func encodeS57Attrs(attrs map[string]interface{}) string {
 }
 
 // stringAttr returns the trimmed string value of a string attribute, or "".
-func stringAttr(attrs map[string]interface{}, key string) string {
+func stringAttr(attrs map[string]any, key string) string {
 	if s, ok := attrs[key].(string); ok {
 		return strings.TrimSpace(s)
 	}
 	return ""
 }
 
-func intAttr(attrs map[string]interface{}, key string) uint32 {
+func intAttr(attrs map[string]any, key string) uint32 {
 	v, ok := attrs[key]
 	if !ok {
 		return 0

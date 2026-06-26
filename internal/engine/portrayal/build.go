@@ -88,41 +88,8 @@ type FeatureBuildPass struct {
 	Pts   int
 }
 
-// applyDangerDepth tags the DANGER01/DANGER02 symbol of a sounded obstruction /
-// wreck / rock (one with VALSOU) with its depth and the deep variant, so the
-// client swaps shallow<->deep (DANGER01<->DANGER02) against the LIVE safety
-// contour with no re-bake (S-52 §13.2.x). It ONLY touches the DANGER01/02 pair —
-// soundings, ISODGR01, OBSTRN11, DANGER03 and every other primitive the CSP
-// emitted are left exactly as placed. The base symbol is normalised to DANGER01
-// (the shallow variant) so the client's coalesce picks DANGER01/DANGER02 by the
-// live contour.
-//
-// (The CSPs — OBSTRN07 Continuation A, WRECKS05 — now emit DANGER01/02 + the
-// sounding directly, so this is a post-tag rather than the old symbol-replacing
-// override that dropped the sounding glyphs.)
-func applyDangerDepth(prims []Primitive, class string, attrs map[string]interface{}) []Primitive {
-	if class != "OBSTRN" && class != "WRECKS" && class != "UWTROC" {
-		return prims
-	}
-	valsou, ok := floatAttr(attrs, "VALSOU")
-	if !ok {
-		return prims
-	}
-	for i := range prims {
-		sc, ok := prims[i].(SymbolCall)
-		if !ok || (sc.SymbolName != "DANGER01" && sc.SymbolName != "DANGER02") {
-			continue
-		}
-		sc.SymbolName = "DANGER01"
-		sc.DangerDepthM = float32(valsou)
-		sc.DeepSymbolName = "DANGER02"
-		prims[i] = sc
-	}
-	return prims
-}
-
 // stringAttr returns an attribute's encoded string value, or "" when absent.
-func stringAttr(attrs map[string]interface{}, key string) string {
+func stringAttr(attrs map[string]any, key string) string {
 	if v, ok := attrs[key]; ok {
 		if s, ok := encodeAttr(v); ok {
 			return s
@@ -131,7 +98,7 @@ func stringAttr(attrs map[string]interface{}, key string) string {
 	return ""
 }
 
-func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
+func floatAttr(attrs map[string]any, key string) (float64, bool) {
 	v, ok := attrs[key]
 	if !ok || v == nil {
 		return 0, false
@@ -155,13 +122,9 @@ func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
 
 // -- helpers -----------------------------------------------------------------
 
-func isSoundingDigit(name string) bool {
-	return strings.HasPrefix(name, "SOUNDG") || strings.HasPrefix(name, "SOUNDS")
-}
-
 // lookupAttributeText returns the textual value of an attribute for a label, or
 // ok=false when absent/empty (which suppresses the label, per S-52).
-func lookupAttributeText(attrs map[string]interface{}, acronym string) (string, bool) {
+func lookupAttributeText(attrs map[string]any, acronym string) (string, bool) {
 	v, ok := attrs[acronym]
 	if !ok || v == nil {
 		return "", false
@@ -172,7 +135,7 @@ func lookupAttributeText(attrs map[string]interface{}, acronym string) (string, 
 			return "", false
 		}
 		return t, true
-	case []string, []interface{}:
+	case []string, []any:
 		return "", false // list attributes have no single label value
 	default:
 		return strings.TrimSpace(stringifyScalar(v)), true
@@ -317,7 +280,7 @@ func ringCentroid(ring []geo.LatLon) (geo.LatLon, bool) {
 		return geo.LatLon{}, false
 	}
 	var a, cx, cy float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		j := (i + 1) % n
 		cross := ring[i].Lon*ring[j].Lat - ring[j].Lon*ring[i].Lat
 		a += cross
@@ -399,32 +362,6 @@ func pointInRing(p geo.LatLon, ring []geo.LatLon) bool {
 	return in
 }
 
-// geometryCode maps an s57 geometry type to the S-52 LUPT geometry code.
-func geometryCode(t s57.GeometryType) string {
-	switch t {
-	case s57.GeometryTypePoint:
-		return "P"
-	case s57.GeometryTypeLineString:
-		return "L"
-	case s57.GeometryTypePolygon:
-		return "A"
-	default:
-		return "P"
-	}
-}
-
-// goGeomType is the CSContext.GeometryType string form.
-func goGeomType(code string) string {
-	switch code {
-	case "L":
-		return "Line"
-	case "A":
-		return "Area"
-	default:
-		return "Point"
-	}
-}
-
 // geometryOf converts s57 geometry to the portrayal geom (lat/lon). SOUNDG is
 // handled separately by BuildFeature (per-point).
 func geometryOf(g s57.Geometry) geom {
@@ -490,20 +427,6 @@ func coordsToLatLon(coords [][]float64) []geo.LatLon {
 	return out
 }
 
-func cloneRings(rings [][]geo.LatLon) [][]geo.LatLon {
-	out := make([][]geo.LatLon, len(rings))
-	for i, r := range rings {
-		out[i] = clonePts(r)
-	}
-	return out
-}
-
-func clonePts(pts []geo.LatLon) []geo.LatLon {
-	out := make([]geo.LatLon, len(pts))
-	copy(out, pts)
-	return out
-}
-
 // mapHJust / mapVJust map S-52 SHOWTEXT justification codes (§9.1) to alignments.
 // HJUST: 1=centre, 2=right, 3=left. VJUST: 1=bottom, 2=centre, 3=top.
 func mapHJust(h int) HAlign {
@@ -529,20 +452,13 @@ func mapVJust(v int) VAlign {
 	}
 }
 
-func maxF32(a, b float32) float32 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // formatSubstitute substitutes attribute values into a TE/TX C-printf format
 // string (S-52 §8.3.3.3 — e.g. "clr op %4.1lf" with VERCOP -> "clr op 12.3").
 // Handles %[flags][width][.precision][l|h|L]conv; width/flags only affect
 // fixed-pitch padding so they are ignored, precision is honoured for floats.
 // Returns ok=false when a referenced attribute is absent — per S-52 a label with
 // a missing mandatory field is not drawn.
-func formatSubstitute(attrs map[string]interface{}, format string, attrNames []string) (string, bool) {
+func formatSubstitute(attrs map[string]any, format string, attrNames []string) (string, bool) {
 	var out strings.Builder
 	attrIdx := 0
 	i := 0
@@ -652,7 +568,7 @@ func zeroPad(s string, width int, flags string) string {
 
 // stringifyScalar renders a scalar attribute value as label text. Integer-valued
 // floats drop the decimal, matching the lookup attribute-text "{d}" output.
-func stringifyScalar(v interface{}) string {
+func stringifyScalar(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
@@ -670,17 +586,6 @@ func stringifyScalar(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
-}
-
-// isUnknownClass reports that the S-57 parser could not resolve the feature's
-// numeric object code to a catalogue acronym — it names such classes "OBJL_<code>"
-// (see internal/s57/parser/objectclass.go). These are proprietary / non-ENC
-// classes (e.g. Inland ENC extensions) with no Presentation Library lookup entry.
-// S-52 PresLib e4.0.0 §2.30 & §10.1.1: such objects must NOT be hidden — each is
-// shown with the magenta question-mark SY(QUESMRK1) at IMO category Standard so
-// the mariner is told an unknown object exists.
-func isUnknownClass(objClass string) bool {
-	return strings.HasPrefix(objClass, "OBJL_")
 }
 
 // unknownObjectBuild is the §10.1.1 portrayal of an unknown-class feature: a
