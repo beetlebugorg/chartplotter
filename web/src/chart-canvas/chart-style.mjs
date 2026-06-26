@@ -84,7 +84,7 @@ function textLayers(mariner, palette) {
   const notLight = ["!=", ["get", "class"], "LIGHTS"];
   return [{
     id: "text", type: "symbol", source: "chart", "source-layer": "text",
-    filter: ["all", notLight, S52.textGroupFilter(mariner)],
+    filter: ["all", notLight, ["!=", ["get", "class"], "NEWOBJ"], S52.textGroupFilter(mariner)],
     layout: {
       "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
       "text-size": ["coalesce", ["get", "font_size_px"], 11],
@@ -100,6 +100,30 @@ function textLayers(mariner, palette) {
     },
     paint: {
       // Legible at dusk/night (bright ink + dark halo) — see textColor.
+      "text-color": S52.textColor(active, palette),
+      "text-halo-color": S52.textHaloColor(active),
+      "text-halo-width": 1.4,
+      "text-halo-blur": 0.5,
+    },
+  }, {
+    // Producer-placed text (NEWOBJ + SYMINS TX/TE, S-52 §10.3.3.8 — e.g. the PresLib
+    // "ECDIS Chart 1" legend captions): the producer's EXPLICIT instruction, which
+    // must always render. Two-line captions ("restricted area," + "anchoring
+    // prohibited") are TWO separate point features stacked one line apart; the
+    // general collidable layer above declutters them and drops the lower line. Honour
+    // them on their OWN always-on layer (text-allow-overlap), mirroring "light-text".
+    // text-max-width 40 is unchanged, so genuine single-line labels still never wrap.
+    id: "placed-text", type: "symbol", source: "chart", "source-layer": "text",
+    filter: ["all", ["==", ["get", "class"], "NEWOBJ"], S52.textGroupFilter(mariner)],
+    layout: {
+      "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
+      "text-size": ["coalesce", ["get", "font_size_px"], 11],
+      "text-anchor": TEXT_ANCHOR,
+      "text-max-width": 40,
+      "text-allow-overlap": true, "text-ignore-placement": true,
+      visibility: "visible",
+    },
+    paint: {
       "text-color": S52.textColor(active, palette),
       "text-halo-color": S52.textHaloColor(active),
       "text-halo-width": 1.4,
