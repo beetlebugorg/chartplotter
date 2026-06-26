@@ -35,15 +35,24 @@ type Sim struct {
 	Targets []*Vessel
 	codec   *aisnmea.NMEACodec
 	depth   float64
+	// Own-ship heading model. leeway is the crab angle (heading = COG − leeway);
+	// fixed at 7° normally. In sailing mode own-ship weaves about baseCourse and
+	// leeway swings, so the heading line and COG vector visibly diverge.
+	leeway     float64
+	baseCourse float64
+	sailing    bool
+	phase      float64 // seconds of elapsed sailing time, drives the weave
 }
 
 // Options configures a new Sim.
 type Options struct {
-	Lat, Lon  float64 // own-ship start
-	Course    float64 // own-ship course (deg true)
-	Speed     float64 // own-ship speed (kn)
-	Targets   int     // number of AIS targets
-	Collision bool    // make one target converge on own-ship
+	Lat, Lon  float64      // own-ship start
+	Course    float64      // own-ship course (deg true)
+	Speed     float64      // own-ship speed (kn)
+	OwnRoute  [][2]float64 // optional own-ship route (lat,lon waypoints) to steer through
+	Targets   int          // number of AIS targets
+	Collision bool         // make one target converge on own-ship
+	Sailing   bool         // own-ship tacks (COG weaves) with a varying leeway (heading ≠ COG)
 	Seed      int64
 	Water     *WaterMask // optional: constrain placement to navigable water from a cell
 }
@@ -74,9 +83,18 @@ func New(o Options) *Sim {
 		return destination(o.Lat, o.Lon, brg, dist)
 	}
 	s := &Sim{
-		Own:   Vessel{Name: "OWN", Lat: o.Lat, Lon: o.Lon, Course: o.Course, Speed: o.Speed},
-		codec: aisnmea.NMEACodecNew(ais.CodecNew(false, false)),
-		depth: 12,
+		Own:        Vessel{Name: "OWN", Lat: o.Lat, Lon: o.Lon, Course: o.Course, Speed: o.Speed},
+		codec:      aisnmea.NMEACodecNew(ais.CodecNew(false, false)),
+		depth:      12,
+		leeway:     7, // fixed crab; sailing mode overrides this each step
+		baseCourse: o.Course,
+		sailing:    o.Sailing,
+	}
+	// Own-ship route: steer through the given waypoints (same machinery as targets),
+	// starting pointed at the first one so the opening fix already heads down-route.
+	if len(o.OwnRoute) > 0 {
+		s.Own.wps = o.OwnRoute
+		s.Own.Course = bearing(s.Own.Lat, s.Own.Lon, o.OwnRoute[0][0], o.OwnRoute[0][1])
 	}
 	names := []string{"SEA BREEZE", "NORDIC STAR", "BAY TRADER", "MISS MOLLY", "EL TORO", "PACIFICA", "ORION", "KESTREL", "ARGO", "TIDEWATER"}
 	types := []uint8{30, 36, 37, 52, 60, 70, 80} // fishing, sailing, pleasure, tug, passenger, cargo, tanker
@@ -126,10 +144,26 @@ func New(o Options) *Sim {
 
 // Step advances every vessel by dt seconds (dead reckoning + gentle turns).
 func (s *Sim) Step(dt float64) {
-	advance(&s.Own, dt)
+	if s.sailing {
+		s.stepSail(dt)
+	} else {
+		advance(&s.Own, dt)
+	}
 	for _, t := range s.Targets {
 		advance(t, dt)
 	}
+}
+
+// stepSail weaves own-ship like a boat working to windward: COG tacks ±42° about
+// the base course (≈110 s period) while leeway swings ±14° on a different period
+// (≈55 s, so it beats against the tack) — heading = COG − leeway thus separates
+// from COG and the gap keeps changing, the case the heading line exists to show.
+func (s *Sim) stepSail(dt float64) {
+	s.phase += dt
+	s.Own.Course = math.Mod(s.baseCourse+42*math.Sin(s.phase*2*math.Pi/110)+360, 360)
+	s.leeway = 14 * math.Sin(s.phase*2*math.Pi/55) // flips sign with the tack
+	nm := s.Own.Speed * (dt / 3600)
+	s.Own.Lat, s.Own.Lon = destination(s.Own.Lat, s.Own.Lon, s.Own.Course, nm)
 }
 
 func advance(v *Vessel, dt float64) {
@@ -148,8 +182,16 @@ func advance(v *Vessel, dt float64) {
 	v.Lat, v.Lon = destination(v.Lat, v.Lon, v.Course, nm)
 }
 
-// OwnSentences returns the own-ship instrument sentences for this instant.
+// OwnSentences returns all own-ship instrument sentences for this instant
+// (position/motion + environment).
 func (s *Sim) OwnSentences() []string {
+	return append(s.NavSentences(), s.EnvSentences()...)
+}
+
+// NavSentences returns the position/motion sentences (GGA/RMC/VTG/HDT/VHW). These
+// are what stop when a GPS feed drops, so `cp simulate --drop-gps` withholds them
+// while EnvSentences keep flowing — exactly what a real signal loss looks like.
+func (s *Sim) NavSentences() []string {
 	now := time.Now().UTC()
 	hms := now.Format("150405.00")
 	dmy := now.Format("020106")
@@ -157,13 +199,20 @@ func (s *Sim) OwnSentences() []string {
 	lon, ew := toNMEALon(s.Own.Lon)
 	cog := s.Own.Course
 	sog := s.Own.Speed
-	hdg := math.Mod(cog-7+360, 360) // a small crab angle so heading ≠ COG (head-up ≠ course-up)
+	hdg := math.Mod(cog-s.leeway+360, 360) // crab/leeway so heading ≠ COG (head-up ≠ course-up)
 	return []string{
 		line(fmt.Sprintf("GPGGA,%s,%s,%s,%s,%s,1,10,0.8,2,M,-33.0,M,,", hms, lat, ns, lon, ew)),
 		line(fmt.Sprintf("GPRMC,%s,A,%s,%s,%s,%s,%.1f,%.1f,%s,,,A", hms, lat, ns, lon, ew, sog, cog, dmy)),
 		line(fmt.Sprintf("GPVTG,%.1f,T,,M,%.1f,N,,K,A", cog, sog)),
 		line(fmt.Sprintf("HEHDT,%.1f,T", hdg)),
 		line(fmt.Sprintf("IIVHW,%.1f,T,,M,%.1f,N,,K", cog, sog)),
+	}
+}
+
+// EnvSentences returns the environment sentences (depth/wind/water temp), which
+// keep flowing even when the GPS drops.
+func (s *Sim) EnvSentences() []string {
+	return []string{
 		line(fmt.Sprintf("SDDPT,%.1f,0.5,", s.depth)),
 		line(fmt.Sprintf("IIMWV,%.1f,R,%.1f,N,A", 45.0, 12.0)),
 		line(fmt.Sprintf("IIMTW,%.1f,C", 18.0)),

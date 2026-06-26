@@ -18,9 +18,19 @@ import { OWN_SHIP_MARKER, CENTER_ICON } from "../lib/openbridge-icons.mjs";
 import { fmtLatLon } from "./target-info.mjs";
 import { format } from "../lib/units.mjs";
 
-const SRC = "ownship-predictor";
+const SRC = "ownship-predictor";       // COG/SOG vector (dashed)
 const CASING = "ownship-predictor-casing";
 const LINE = "ownship-predictor-line";
+const HSRC = "ownship-heading";         // heading line (solid, the vessel's nose)
+const HCASING = "ownship-heading-casing";
+const HLINE = "ownship-heading-line";
+
+// GPS freshness thresholds. A position that hasn't advanced for STALE_MS is shown
+// greyed (sensor hiccup); past LOST_MS it's "GPS lost" and the vectors drop. The
+// boat is never removed on a dropout — it freezes at the last known fix, which is
+// the safe behaviour underway (a vanishing boat reads as "no hazard here").
+const STALE_MS = 6000;
+const LOST_MS = 20000;
 
 const CHIP_STYLE = `
   #ownship-recenter {
@@ -38,6 +48,20 @@ const CHIP_STYLE = `
   #ownship-recenter:active { transform: translateX(-50%) scale(.95); }
   #ownship-recenter svg { width: 17px; height: 17px; display: block; }
   #ownship-recenter[hidden] { display: none; }
+  #ownship-gps {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    top: calc(var(--topbar-h, 0px) + 12px); z-index: 7;
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 13px; border-radius: 20px; pointer-events: none;
+    font: 600 12px/1 system-ui, sans-serif; color: #1a1300;
+    box-shadow: 0 3px 14px rgba(0,0,0,.28);
+  }
+  #ownship-gps::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+  }
+  #ownship-gps.stale { background: #f5b301; }
+  #ownship-gps.lost { background: #e5484d; color: #fff; }
+  #ownship-gps[hidden] { display: none; }
 `;
 
 const EMPTY = { type: "FeatureCollection", features: [] };
@@ -62,6 +86,14 @@ export class OwnShip {
     this._predict = null;   // {course, sog} for the predictor, from the latest fix
     this._poseRAF = 0;      // in-flight pose tween
     this._lastFixTs = 0;    // ms of the previous fix (to size the tween to the gap)
+    // GPS freshness: _freshWall is the wall-clock of the last position that actually
+    // advanced (moved, or its fix clock ticked). The watchdog ages it into
+    // live/stale/lost so a frozen feed is caught even when other sentences (depth,
+    // wind) keep the snapshot — and thus onChange — flowing.
+    this._freshWall = 0;
+    this._posKey = null;    // last "lat,lon" seen, to spot a moving fix
+    this._fixClock = 0;     // last navigation.datetime (ms), to spot a stationary-but-live fix
+    this._gps = "none";     // none | live | stale | lost
 
     this._el = document.createElement("div");
     this._el.style.cssText = "pointer-events:auto;cursor:pointer;will-change:transform";
@@ -72,11 +104,20 @@ export class OwnShip {
     });
 
     this._chip = this._makeChip(host);
+    this._gpsChip = this._makeGpsChip(host);
 
-    // A user pan breaks follow; programmatic eases (our own recenters) don't fire
-    // dragstart, so this only triggers on a real gesture.
-    this._onDrag = () => this._setFollow(false);
-    map.on("dragstart", this._onDrag);
+    // Pan and rotate both mean "I want to set my own view", so both break follow;
+    // pinch/wheel-zoom keeps it (vessel-anchored). We guard on originalEvent so only
+    // real user gestures count — our own programmatic eases (recenter, and the
+    // per-fix bearing hold in course-/head-up) fire rotate events WITHOUT one.
+    this._onGesture = (e) => { if (!e || e.originalEvent) this._setFollow(false); };
+    map.on("dragstart", this._onGesture);
+    map.on("rotatestart", this._onGesture);
+
+    // GPS-freshness watchdog: ages the last fix into live/stale/lost independent of
+    // the feed cadence (a frozen GPS still pushes depth/wind deltas, so we can't
+    // wait on onChange to notice the position stopped).
+    this._gpsTimer = setInterval(() => this._tickGps(), 1000);
 
     // Defer layer creation until the style is ready (see _ensureLayers); subscribe
     // first so a not-yet-loaded style can't abort the constructor before we do.
@@ -107,9 +148,45 @@ export class OwnShip {
     return btn;
   }
 
+  // A non-interactive status pill (top-centre) shown only when the fix goes
+  // stale/lost. Mirrors the recenter chip's host-mounted pattern.
+  _makeGpsChip(host) {
+    if (!host) return null;
+    const el = document.createElement("div");
+    el.id = "ownship-gps";
+    el.hidden = true;
+    host.appendChild(el);
+    return el;
+  }
+
   _setFollow(on) {
     this._follow = on;
     this._syncChip();
+  }
+
+  // Watchdog tick: age the last fresh fix into live/stale/lost and reflect it.
+  _tickGps() {
+    if (!this._freshWall || !this._fix) return;
+    const age = Date.now() - this._freshWall;
+    const next = age > LOST_MS ? "lost" : age > STALE_MS ? "stale" : "live";
+    if (next !== this._gps) this._applyGps(next);
+  }
+
+  // Reflect GPS freshness: grey/fade the glyph, drop the vectors once not live, and
+  // show the status pill. Never removes the boat — it stays frozen at the last fix.
+  _applyGps(status) {
+    this._gps = status;
+    this._el.style.filter =
+      status === "lost" ? "grayscale(1) opacity(.4)"
+      : status === "stale" ? "grayscale(1) opacity(.6)"
+      : "";
+    if (status !== "live") this._clearVectors(); // a frozen heading/COG vector would mislead
+    if (this._gpsChip) {
+      const lost = status === "lost";
+      this._gpsChip.hidden = status === "live" || status === "none";
+      this._gpsChip.className = lost ? "lost" : status === "stale" ? "stale" : "";
+      this._gpsChip.textContent = lost ? "GPS lost" : "Position stale";
+    }
   }
 
   // Plugin contract (consumed by WheelZoom via the shell): the geographic point
@@ -149,15 +226,53 @@ export class OwnShip {
         paint: { "line-color": "#16324f", "line-width": 1.8, "line-dasharray": [2, 1.8] } },
       { belowLabels: true },
     );
+    // Heading line (HDT, the vessel's nose): SOLID, distinct from the dashed COG
+    // vector. The gap between the two is what reveals being set by current/wind.
+    if (!map.getSource(HSRC)) {
+      map.addSource(HSRC, { type: "geojson", data: this._lastH || EMPTY });
+    }
+    this._plotter.addOverlayLayer(
+      { id: HCASING, type: "line", source: HSRC, layout: { "line-cap": "round" },
+        paint: { "line-color": "#fff", "line-width": 4, "line-opacity": 0.9 } },
+      { belowLabels: true },
+    );
+    this._plotter.addOverlayLayer(
+      { id: HLINE, type: "line", source: HSRC, layout: { "line-cap": "round" },
+        paint: { "line-color": "#16324f", "line-width": 1.8 } },
+      { belowLabels: true },
+    );
   }
 
   _update(s) {
-    const pos = s && s.navigation && s.navigation.position;
+    const nav = s && s.navigation;
+    const pos = nav && nav.position;
     if (!pos || typeof pos.lat !== "number") {
-      this._hide();
+      // No position in the feed. If we've never had one, there's nothing to show.
+      // If we had a fix, keep it frozen and let the watchdog age it to lost — don't
+      // make the boat disappear.
+      if (!this._fix) this._hide();
       return;
     }
-    const nav = s.navigation;
+
+    // Freshness: the fix is "fresh" if it moved, or its own clock (RMC/ZDA datetime)
+    // advanced — the latter catches a healthy GPS at anchor. Either way, stamp the
+    // wall clock the watchdog ages.
+    const key = pos.lat.toFixed(6) + "," + pos.lon.toFixed(6);
+    const clock = nav.datetime ? Date.parse(nav.datetime) : 0;
+    if (key !== this._posKey || (clock && clock !== this._fixClock) || !this._freshWall) {
+      this._freshWall = Date.now();
+      if (this._gps !== "live") this._applyGps("live");
+    }
+    this._posKey = key;
+    if (clock) this._fixClock = clock;
+
+    // Self-heal the vector sources/layers each fix (~1 Hz, idempotent). The plugin
+    // is built on the canvas `ready` event — after the initial `style.load` has
+    // already fired — and the chart rebuilds its style with setStyle({diff:false}),
+    // which drops plugin layers. Relying on the style.load listener alone left the
+    // sources never (re)added, so the predictor + heading line never drew.
+    this._ensureLayers();
+
     const lng = pos.lon;
     const lat = pos.lat;
     // Heading priority: true heading (HDT) → magnetic heading + variation (most
@@ -219,15 +334,37 @@ export class OwnShip {
     }
     this._marker.setLngLat([lng, lat]).setRotation(rot);
     if (!this._added) { this._marker.addTo(this._map); this._added = true; }
+    // Vectors are dropped while the fix is stale/lost (a frozen vector misleads).
+    const live = this._gps === "live" || this._gps === "none";
+    // COG/SOG vector (dashed): along course, length = SOG × predictMin.
     let data = EMPTY;
-    if (this._predict) {
+    if (live && this._predict) {
       const end = destination(lat, lng, this._predict.course, this._predict.sog * (this._predictMin / 60));
-      data = { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [[lng, lat], end] } }] };
+      data = seg([lng, lat], end);
     }
-    this._last = data;
+    // Heading line (solid): along the rendered heading (`rot`). Matches the COG
+    // vector's length under way so the crab angle is visible; a short fixed line at
+    // rest so the bow is still shown at anchor.
+    let hdata = EMPTY;
+    if (live) {
+      const hlen = this._predict ? this._predict.sog * (this._predictMin / 60) : 0.3;
+      hdata = seg([lng, lat], destination(lat, lng, rot, hlen));
+    }
+    this._last = data; this._lastH = hdata;
     const src = this._map.getSource(SRC);
     if (src) src.setData(data);
+    const hsrc = this._map.getSource(HSRC);
+    if (hsrc) hsrc.setData(hdata);
     this._renderLng = lng; this._renderLat = lat; this._renderRot = rot;
+  }
+
+  // Clear both vector sources (used when the fix goes stale/lost).
+  _clearVectors() {
+    this._last = EMPTY; this._lastH = EMPTY;
+    const src = this._map && this._map.getSource(SRC);
+    if (src) src.setData(EMPTY);
+    const hsrc = this._map && this._map.getSource(HSRC);
+    if (hsrc) hsrc.setData(EMPTY);
   }
 
   // Tween the drawn pose to the new fix over `dur` ms (linear). Bearing takes the
@@ -270,21 +407,31 @@ export class OwnShip {
       this._added = false;
     }
     this._fix = null;
-    this._last = EMPTY;
-    const src = this._map && this._map.getSource(SRC);
-    if (src) src.setData(EMPTY);
+    this._freshWall = 0; this._posKey = null; this._fixClock = 0;
+    this._gps = "none";
+    this._el.style.filter = "";
+    if (this._gpsChip) this._gpsChip.hidden = true;
+    this._clearVectors();
     this._syncChip();
   }
 
   destroy() {
     if (this._poseRAF) cancelAnimationFrame(this._poseRAF);
+    if (this._gpsTimer) clearInterval(this._gpsTimer);
     if (this._off) this._off();
     if (this._onStyle) this._map.off("style.load", this._onStyle);
-    if (this._onDrag) this._map.off("dragstart", this._onDrag);
+    if (this._onGesture) { this._map.off("dragstart", this._onGesture); this._map.off("rotatestart", this._onGesture); }
     if (this._marker) this._marker.remove();
     if (this._chip) this._chip.remove();
+    if (this._gpsChip) this._gpsChip.remove();
     this._plotter.removeOverlay([CASING, LINE], SRC);
+    this._plotter.removeOverlay([HCASING, HLINE], HSRC);
   }
+}
+
+// seg builds a one-segment LineString FeatureCollection from a→b.
+function seg(a, b) {
+  return { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [a, b] } }] };
 }
 
 // num coerces a finite number or returns null (so `?? fallback` works and 0 is kept).
