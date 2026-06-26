@@ -204,6 +204,7 @@ export class ChartPlotter extends HTMLElement {
     // NOAA catalogue/discovery lives in this._dl (ChartDownloader, created in
     // boot); _catalog/_byName/_districts/_catalogDate are proxy getters onto it.
     this._installed = new Set();        // all stored cell names
+    this._activeCells = [];             // active (enabled-pack) cells {n,l,bb} — the search catalog
     this._cellError = new Map();        // name -> error message, for cells that failed to parse
     this._cellBounds = new Map();       // name -> [w,s,e,n] footprint (from the baker), to locate uploaded cells
     this._cellScale = new Map();        // name -> compilation scale (CSCL) of uploaded cells, for picking a detail zoom
@@ -283,6 +284,10 @@ export class ChartPlotter extends HTMLElement {
     // attribute so the :host([widget]) styles apply either way.
     this._widget = this.hasAttribute("widget") || new URLSearchParams(location.search).has("widget");
     if (this._widget) this.setAttribute("widget", "");
+    // Spec mode (?spec / [spec]): a clean, chrome-free full-bleed map — every
+    // floating control + readout hidden — for capturing reference-style plots (the
+    // S-52 PresLib "ECDIS Chart 1" panels diff against the spec). See :host([spec]).
+    if (this.hasAttribute("spec") || new URLSearchParams(location.search).has("spec")) this.setAttribute("spec", "");
     // Display settings (scheme · basemap · mariner toggles · cell-boundary toggle ·
     // bands-off) are persisted SERVER-side so every screen pointed at this boat's
     // server shares them and they survive a restart. Adopt them BEFORE the renderer
@@ -514,6 +519,11 @@ export class ChartPlotter extends HTMLElement {
     // Apply persisted display prefs.
     if (this._scheme !== "day") this._plotter.setScheme(this._scheme);
     this.setAttribute("data-scheme", this._scheme);
+    // Calibrated CSS-pixel pitch drives true-physical feature sizing in the renderer
+    // (the same calibration the scale readout uses). Push it before the first frame.
+    if (typeof this._pxPitch === "number" && this._plotter.setPxPitch) {
+      try { this._plotter.setPxPitch(this._pxPitch); } catch (e) { console.warn(e); }
+    }
     if (Object.keys(this._mariner).length) {
       try { this._plotter.setMariner(this._mariner); } catch (e) { console.warn(e); }
     }
@@ -521,7 +531,10 @@ export class ChartPlotter extends HTMLElement {
       try { this._plotter.setHiddenCells([...this._hiddenCells]); } catch (e) { console.warn(e); }
     }
     await this._catalogReady;
-    this.addCatalogOverlay(map);
+    // Best-effort: if the style is mid-rebuild this no-ops (or throws on older
+    // maps) — either way the style.load handler below re-adds the overlay once the
+    // fresh style is ready, so never let it skip registering that listener.
+    try { this.addCatalogOverlay(map); } catch (e) { console.warn("[overlay] deferring to style.load:", e); }
     // The plotter rebuilds the whole style (setStyle) when server sets load or the
     // SCAMIN buckets refresh, wiping every app-added overlay (coverage boxes, pick &
     // inspect highlights). Re-apply them after each rebuild, and repopulate the
@@ -1058,6 +1071,13 @@ export class ChartPlotter extends HTMLElement {
     return this._plotter ? this._plotter.setView(opts) : null;
   }
 
+  // Public: the underlying MapLibre map, once ready (null before the first paint).
+  // Lets embedders frame a region with the library's own camera helpers, e.g.
+  //   app.map?.fitBounds([[w, s], [e, n]], { padding: 56 })
+  get map() {
+    return this._map || null;
+  }
+
   saveView() {
     // The cell-picker "charts mode" (whose zoomed-out framing we used to skip
     // persisting) was removed; the live view is always the one to save.
@@ -1075,6 +1095,12 @@ export class ChartPlotter extends HTMLElement {
     // layers. A style.load handler (see onReady) re-invokes this against the fresh
     // style; the guard makes a redundant call (when the overlay is still present) a
     // no-op so we never double-add.
+    //
+    // The style may still be REBUILDING when this first runs from onReady (a
+    // setStyle for the physical-scale restage / SCAMIN buckets can be in flight
+    // after the awaited catalog load) — addSource would throw "Style is not done
+    // loading". Bail; the onReady style.load handler re-invokes us once it's ready.
+    if (!map.isStyleLoaded()) return;
     if (map.getSource("focus")) return;
     const empty = { type: "FeatureCollection", features: [] };
     map.addSource("focus", { type: "geojson", data: empty });
@@ -1475,6 +1501,9 @@ export class ChartPlotter extends HTMLElement {
     if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
     const cells = await this._api.cells();
     if (cells) this._installed = cells; // null → keep current view
+    // Active (enabled-pack) cells WITH bounds — the search catalog, so you can find
+    // an installed chart by name and fly to it (esp. on a blank/no-basemap map).
+    this._activeCells = await this._api.activeCells();
     // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
     // district and the server fans to its band-sets.
     this._installedSets = new Set(packs.map((p) => p.name));
@@ -1616,10 +1645,12 @@ export class ChartPlotter extends HTMLElement {
 
   // Job progress (download / import / bake) lives in a row ABOVE the live nav
   // readout inside the bottom status card — one box, no separate pill or pop-out.
-  // `p` carries { label, pill, sub, frac, error }; null clears the row. The label
-  // and detail are packed onto one line so all the context (region · cell · count
-  // · size) is visible at a glance; the bar shows the fraction (indeterminate when
-  // unknown). Spacing is handled by the card's flex gap + the divider rule.
+  // `p` carries { label, pill, sub, detail, frac, error }; null clears the row.
+  // Three stacked pieces: the region TITLE (label) on top; beneath it the live
+  // ACTION (sub, incl. the band being baked) on the left with the COUNT (detail,
+  // unit spelled out) pinned right. There's no percentage — the bar alone carries
+  // the proportion, so the count is the only moving number (a single slow sweep
+  // when the fraction is unknown — no spinner). Spacing is the card's flex gap.
   _setNotification(p) {
     const r = this.shadowRoot;
     const box = r.getElementById("databox");
@@ -1627,21 +1658,23 @@ export class ChartPlotter extends HTMLElement {
     if (!box || !prog) return;
     if (!p) {
       prog.hidden = true;
-      prog.classList.remove("busy", "error");
+      prog.classList.remove("error");
       return;
     }
     box.hidden = false; // a job can finish before the map readout first paints
     const done = p.frac === 1 || !!p.error;
     prog.hidden = false;
-    prog.classList.toggle("busy", !done); // spinner while working
     prog.classList.toggle("error", !!p.error);
-    const detail = p.sub && p.sub.trim() ? p.sub.trim() : "";
-    const label = p.label || p.pill || "";
-    r.getElementById("db-prog-label").textContent = detail ? `${label} · ${detail}` : label;
-    r.getElementById("db-prog-pct").textContent = p.frac != null ? `${Math.round(p.frac * 100)}%` : "";
+    // On error the reason takes the action line and the count is cleared.
+    const title = p.label || p.pill || "";
+    const action = p.error ? String(p.error) : (p.sub || "");
+    const count = p.error ? "" : (p.detail || "");
+    r.getElementById("db-prog-title").textContent = title;
+    r.getElementById("db-prog-action").textContent = action;
+    r.getElementById("db-prog-count").textContent = count;
     const fill = r.getElementById("db-prog-fill");
     fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
-    fill.classList.toggle("indet", p.frac == null && !done); // sweeping bar when no fraction
+    fill.classList.toggle("indet", p.frac == null && !done); // slow sweep when no fraction
   }
 
   // Frame to the union bounds of the installed region archives (from the manifest).
@@ -1690,6 +1723,8 @@ export class ChartPlotter extends HTMLElement {
     try { localStorage.setItem(LS_PX_PITCH, JSON.stringify(this._pxPitch ?? null)); } catch (e) { /* quota/private */ }
     this._persistSettings();
     if (this._hud) this._hud.updateHud();
+    // Re-render features at true physical size for the new pitch (icons/lines/text).
+    if (this._plotter && this._plotter.setPxPitch) { try { this._plotter.setPxPitch(this._pxPitch); } catch (e) { console.warn(e); } }
   }
 
   // Fetch the server-persisted display settings at boot and adopt them over the
@@ -1828,14 +1863,14 @@ export class ChartPlotter extends HTMLElement {
       getInput: () => $("search-input"),
       getSearchPop: () => $("search"),
       getSearchTab: () => $("search-tab"),
-      getCatalog: () => this._catalog,
+      getCatalog: () => this._activeCells || [], // search ACTIVE installed charts (name → fly to footprint)
       isChartSource,
       classLabel: (acr) => S57_CLASS[acr],
       layerLabel: (srcLayer) => INSPECT_LAYER_LABEL[srcLayer],
       positionCaret: (pop, tab) => this._positionCaret(pop, tab),
     });
     const closeSearch = () => { $("search").hidden = true; $("search-tab").classList.remove("on"); };
-    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); };
+    const openSearch = () => { $("search").hidden = false; $("search-tab").classList.add("on"); this._search.position(); si.focus(); this._search.doSearch(si.value); /* show the browse list (active charts) right away */ };
     $("search-tab").onclick = () => ($("search").hidden ? openSearch() : closeSearch());
     si.oninput = () => this._search.doSearch(si.value);
     si.onkeydown = (e) => {

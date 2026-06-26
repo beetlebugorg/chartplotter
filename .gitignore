@@ -9,6 +9,10 @@ coverage.*
 /testdata/full/
 /All_ENCs.zip
 
+# S-52 PresLib "ECDIS Chart 1" harness: extracted cells + rendered panels
+/testdata/preslib_chart1/
+/testdata/preslib-chart1-out/
+
 # Generated tile archives / runtime chart state (never committed)
 *.pmtiles
 web/noaa.pmtiles
@@ -18,6 +22,9 @@ web/.regioncache-*.zip
 web/charts-user.*
 web/charts-index.json
 web/chartplotter.wasm
+
+# Working design notes / specs (kept local, never committed)
+/specs/
 
 # Editor / OS
 .DS_Store
@@ -36,3 +43,4 @@ web/patterns.json
 web/patterns.png
 web/sprite.json
 web/sprite.png
+/testdata/s64-pages-out/

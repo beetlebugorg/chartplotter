@@ -10,7 +10,8 @@
 //   await api.pollJob(job, { name: "Mid-Atlantic", onStatus: p => t.progress(p.frac, p.sub) });
 //   const packs = await api.packs();                            // [{name,enabled,bands,bounds}]
 //
-// onStatus receives a UI-ready { label, sub, frac } (frac 0..1 or null). The
+// onStatus receives a UI-ready { label, sub, detail, frac } (frac 0..1 or null):
+// label is the region title, sub the live action, detail the count-with-unit. The
 // raw job phases are mapped to friendly verbs here so callers don't echo server
 // filenames. Methods throw on hard failure; pollJob resolves with the final
 // status object or rejects on error/timeout.
@@ -24,7 +25,7 @@ const PHASE = {
   extract: ["Extracting", "charts"], unzip: ["Extracting", "charts"], expand: ["Extracting", "charts"],
   parse: ["Reading", "charts"], read: ["Reading", "charts"], import: ["Reading", "charts"],
   bake: ["Generating", "tiles"], tiles: ["Generating", "tiles"], render: ["Generating", "tiles"],
-  register: ["Finishing", ""], finalize: ["Finishing", ""], index: ["Finishing", ""],
+  register: ["Finishing", "up"], finalize: ["Finishing", "up"], index: ["Finishing", "up"],
 };
 
 // Bytes → compact "12 MB" / "1.4 KB" (local copy so this module is self-contained).
@@ -129,23 +130,29 @@ export class ChartService {
     });
   }
 
-  // Map a raw job status into a friendly { label, sub, frac } for the UI. Builds
-  // a verb from the phase + the region name ("Baking Mid-Atlantic charts…"); the
-  // numeric detail (counts/bytes) becomes the sub-line.
+  // Map a raw job status into UI-ready { label, sub, detail, frac }, laid out as
+  // three stacked pieces: the region is the stable TITLE (label) on top; the live
+  // action is the STATUS (sub) beneath it; the COUNT (detail) sits beside the
+  // status, always with its unit spelled out ("7 / 12 charts", "1,234 / 4,567
+  // tiles", "12 MB / 45 MB"). The action carries the band but not the noun, so the
+  // unit isn't repeated — "Generating coastal…" + "1,234 / 4,567 tiles".
   _formatStatus(s, name) {
     const m = s.phase ? PHASE[s.phase] : null;
-    const verb = m ? m[0] : (s.phase ? s.phase[0].toUpperCase() + s.phase.slice(1) : "Working on");
-    const noun = m ? m[1] : "charts";
-    // e.g. "Generating NOAA · Northeast tiles…" / "Downloading NOAA · Northeast charts…"
-    const label = [verb, name, noun].filter(Boolean).join(" ") + "…";
-    let sub = "";
-    if (s.unit === "bytes") sub = s.total ? `${fmtBytes(s.done)} / ${fmtBytes(s.total)}` : fmtBytes(s.done);
+    let verb = m ? m[0] : (s.phase ? s.phase[0].toUpperCase() + s.phase.slice(1) : "Working");
+    // The bake phase has two visible stages the server distinguishes by unit:
+    // "cells" while a band's charts are parsed + portrayed (the long gap before
+    // any tile emits), then "tiles" while that band's tiles are generated.
+    if (m && m[1] === "tiles" && s.unit === "cells") verb = "Preparing";
+    const sub = [verb, s.band].filter(Boolean).join(" ") + "…"; // "Preparing coastal…"
+    // Count, with the unit named in every stage so a bare number is never ambiguous.
+    let detail = "";
+    if (s.unit === "bytes") detail = s.total ? `${fmtBytes(s.done)} / ${fmtBytes(s.total)}` : fmtBytes(s.done);
     else if (s.total) {
-      const u = s.unit === "cells" ? "charts" : s.unit === "tiles" ? "" : (s.unit || "");
-      sub = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
+      const u = s.unit === "cells" ? "charts" : (s.unit || "");
+      detail = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
     }
     const frac = s.total ? s.done / s.total : (s.percent ? s.percent / 100 : null);
-    return { label, sub, frac };
+    return { label: name || "", sub, detail, frac };
   }
 
   // GET /api/packs — the installed-pack registry (single source of truth, incl.
@@ -169,6 +176,17 @@ export class ChartService {
   async cells() {
     try { const j = await fetch(this._url("api/cells")).then((r) => (r.ok ? r.json() : null)); return new Set((j && j.cells) || []); }
     catch (e) { return null; }
+  }
+
+  // GET /api/cells?active=1 — the ACTIVE (enabled-pack) cells that are indexed,
+  // as search-catalog entries {n,l,bb}: so a cell can be found by name and flown
+  // to its footprint. Only cells with known bounds (indexed) are returned.
+  async activeCells() {
+    try {
+      const j = await fetch(this._url("api/cells?active=1")).then((r) => (r.ok ? r.json() : null));
+      const bb = (j && j.bbox) || {};
+      return Object.keys(bb).map((n) => ({ n, l: n, bb: bb[n] }));
+    } catch (e) { return []; }
   }
 
   // POST /api/set/{enable,disable} — toggle a pack's rendering (data is kept).

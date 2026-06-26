@@ -192,10 +192,10 @@ export class ChartLibrary extends HTMLElement {
   // Notify the shell that installed/enabled state changed (it reconciles the map).
   _changed() { this._emit("charts-changed"); }
 
-  // An onStatus handler for a job that drives a NotificationCenter task: the
-  // phase-aware label ("Generating NOAA · Northeast tiles…") AND the numeric
-  // sub-line both update as the server moves through download → bake → finish.
-  _jobStatus(t) { return (p) => { if (!t) return; if (p.label) t.label(p.label); t.progress(p.frac, p.sub); }; }
+  // An onStatus handler for a job that drives a NotificationCenter task: the region
+  // title, the live action line, and the count-with-unit all update as the server
+  // moves through download → prepare → generate → finish.
+  _jobStatus(t) { return (p) => { if (!t) return; if (p.label) t.label(p.label); t.progress(p.frac, p.sub, p.detail); }; }
 
   // Refresh the installed/disabled/installed-cell snapshot from the server, so the
   // panel's pack badges + counts are current. Called before a (re-)render that
@@ -884,7 +884,7 @@ export class ChartLibrary extends HTMLElement {
     this._activeDistrict = cg;
     const set = "noaa-d" + cg;
     const name = d ? `NOAA · ${d.region}` : "NOAA";
-    const t = this._notify ? this._notify.task("download:" + set, { label: `Preparing ${name}…` }) : null;
+    const t = this._notify ? this._notify.task("download:" + set, { label: name }) : null;
     const onStatus = this._jobStatus(t);
     if (this._active) this.render();
     let ok = false;

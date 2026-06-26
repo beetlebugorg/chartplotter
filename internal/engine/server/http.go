@@ -45,6 +45,7 @@ type Server struct {
 	packs   map[string]string // ALL baked packs on disk: set name → pmtiles path
 	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
 	auxIdx  *auxIndex         // index of companion aux.zips for /api/aux (TXTDSC/PICREP)
+	cellIdx *cellIndex        // persistent name→bbox index over cached cells (/api/cells, search fly-to)
 
 	vessel  *nmea.Store       // latest NMEA0183 vessel state (fed by nmeaMgr)
 	nmeaMgr *nmea.Manager     // live NMEA0183 connections (writes into vessel)
@@ -63,7 +64,8 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if dataDir == "" {
 		dataDir = cacheDir
 	}
-	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex()}
+	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex(), cellIdx: newCellIndex(dataDir)}
+	go s.cellIdx.build() // backfill cell bounds once, in the background (never blocks a request)
 	// Discover every baked pack on disk (provider trees + flat tiles/), then
 	// register the ENABLED ones (disabled packs stay on disk but off the map). State
 	// lives in <data>/prefs.json so it survives restarts and is shared across clients.

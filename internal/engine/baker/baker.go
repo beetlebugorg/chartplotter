@@ -143,7 +143,7 @@ func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*
 	applyPortrayer(b)
 	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
 		return ParseCellBytes(name, cells[name])
-	}, onSkip)
+	}, onSkip, nil)
 	return b, ok, nil
 }
 
@@ -210,13 +210,20 @@ func parseInOrder[T any](
 // the dominant bake cost and are independent per cell, so they run concurrently;
 // the stateful route/merge stays single-threaded and ordered, so the archive is
 // byte-for-byte identical to the serial path. Returns the routed cell names.
-func addCellsParallel(b *bake.Baker, names []string, parse func(name string) (*s57.Chart, error), onSkip func(name string, err error)) []string {
+// onCell, if non-nil, is called once per cell as it is routed (done, total) so the
+// caller can report parse+portray progress — the dominant per-band cost, which is
+// otherwise an invisible pause before any tile is emitted.
+func addCellsParallel(b *bake.Baker, names []string, parse func(name string) (*s57.Chart, error), onSkip func(name string, err error), onCell func(done, total int)) []string {
 	ok := make([]string, 0, len(names))
+	total := len(names)
 	parseInOrder(names, parse,
 		func(_ string, chart *s57.Chart) bake.CellPortrayal { return b.PortrayCell(chart) },
 		func(name string, chart *s57.Chart, pc bake.CellPortrayal) {
 			b.AddCellPortrayed(chart, pc)
 			ok = append(ok, name)
+			if onCell != nil {
+				onCell(len(ok), total)
+			}
 		}, onSkip)
 	return ok
 }
@@ -285,7 +292,7 @@ func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func
 	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
 		cd := cells[name]
 		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
-	}, onSkip)
+	}, onSkip, nil)
 	return b, ok, nil
 }
 
@@ -377,7 +384,12 @@ func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done,
 // routing, so the overhead is small relative to the memory saved. emit(slug,
 // builder) is called per band that produced tiles; returns the cell-union bounds
 // and the number of cells parsed.
-func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSkip func(name string, err error), progress func(done, total int), emit func(slug string, pb *pmtiles.Builder) error) (geo.BoundingBox, int, error) {
+//
+// progress(stage, done, total, band) reports both visible stages so neither pause
+// is a dead bar: stage "prepare" while a band's cells are parsed + portrayed (the
+// long gap before any tile emits; band "" during the pass-1 coverage scan), then
+// stage "tiles" while that band's tiles are emitted.
+func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSkip func(name string, err error), progress func(stage string, done, total int, band string), emit func(slug string, pb *pmtiles.Builder) error) (geo.BoundingBox, int, error) {
 	b := bake.New()
 	applyPortrayer(b)
 	if maxZoom > 0 {
@@ -407,9 +419,24 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 	},
 		func(string, *s57.Chart) struct{} { return struct{}{} },
 		func(name string, chart *s57.Chart, _ struct{}) {
-			band := b.AddCellCoverage(chart)
+			band, n := b.AddCellCoverage(chart)
+			if n == 0 {
+				// The M_COVR-only coverage parse found no data-coverage polygon (the
+				// cell omits M_COVR — non-conformant, e.g. the S-52 PresLib test cells).
+				// Re-parse it fully so AddCellCoverage's bounding-box fallback has the
+				// cell's geometry to derive a coverage rectangle from; otherwise the cell
+				// contributes nothing to covMeta and a coarser band's symbols double-draw
+				// over it. Rare (real ENCs always carry M_COVR), so the extra parse is fine.
+				cd := cells[name]
+				if full, err := ParseCellWithUpdates(name, cd.Base, cd.Updates); err == nil {
+					band, _ = b.AddCellCoverage(full)
+				}
+			}
 			byBand[band.ZoomRange().Max] = append(byBand[band.ZoomRange().Max], name)
 			parsed++
+			if progress != nil {
+				progress("prepare", parsed, len(names), "") // coverage scan; no band yet
+			}
 		}, onSkip)
 	b.SetSkipCoverage(true) // covMeta is now global; don't re-derive it per band
 
@@ -423,14 +450,24 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 		// Parse + portray this band's cells in parallel; route them serially in
 		// order (deterministic, same as the per-cell loop). Coverage is skipped
 		// (SetSkipCoverage above), so re-parsing is just for this band's geometry.
-		addCellsParallel(b, bandCells, parse, onSkip)
+		// This is the long pre-tile pause, so report it ("prepare") per routed cell.
+		var prep func(done, total int)
+		if progress != nil {
+			progress("prepare", 0, len(bandCells), bd.Slug) // announce the band up front
+			prep = func(done, total int) { progress("prepare", done, total, bd.Slug) }
+		}
+		addCellsParallel(b, bandCells, parse, onSkip, prep)
 		coords := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max)
 		if len(coords) == 0 {
 			continue
 		}
 		b.BuildEmitIndexBand(MVTExtent, MVTBuffer, bd.Max)
 		pb := pmtiles.New()
-		emitTiles(coords, pb, progress, func(c tile.TileCoord, ts *bake.TileScratch) []byte {
+		var tileProg func(done, total int)
+		if progress != nil {
+			tileProg = func(done, total int) { progress("tiles", done, total, bd.Slug) }
+		}
+		emitTiles(coords, pb, tileProg, func(c tile.TileCoord, ts *bake.TileScratch) []byte {
 			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, bd.Max)
 		})
 		b.ClearEmitIndex()

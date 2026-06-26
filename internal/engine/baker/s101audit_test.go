@@ -196,6 +196,12 @@ func TestS101Audit(t *testing.T) {
 		}
 	}
 	// Empty-but-mapped is the silent-suppression gap; list those classes.
+	t.Logf("=== classes with errors (errd>0) ===")
+	for _, c := range sortedKeys3(classStat) {
+		if s := classStat[c]; s.errd > 0 {
+			t.Logf("  %-8s errd=%d total=%d ok=%d", c, s.errd, s.total, s.ok)
+		}
+	}
 	t.Logf("=== classes with empty (mapped, no-error, emitted nothing) ===")
 	for _, c := range sortedKeys3(classStat) {
 		s := classStat[c]

@@ -47,6 +47,14 @@ jobs:
           path: ${{ runner.temp }}/demo-cells
           key: demo-cells-${{ hashFiles('scripts/fetch-demo-cells.sh', 'Makefile') }}
 
+      # Cache the S-52 PresLib "ECDIS Chart 1" source cells (the IHO draft zip is
+      # fetched once and extracted), keyed on the fetch script so a change re-pulls.
+      - name: Cache PresLib Chart 1 cells
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/preslib-cells
+          key: preslib-cells-${{ hashFiles('scripts/fetch-preslib-cells.sh') }}
+
       # Build the read-only widget demo bundle into docs/static/demo so Docusaurus
       # copies it into the published site at /chartplotter/demo/. Needs the S-101
       # catalogue (IHO material kept out of the repo): clone it and let `make build`
@@ -60,6 +68,18 @@ jobs:
             S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml" \
             DEMO_CACHE="$RUNNER_TEMP/demo-cells" \
             DEMO_OUT="docs/static/demo"
+
+      # Bake the S-52 "ECDIS Chart 1" reference sheet to tiles into docs/static/chart1
+      # (published at /chartplotter/chart1/). The symbol-compliance docs page embeds
+      # it live, reusing the demo bundle's frontend assets. Reuses the S-101 catalogue
+      # cloned above; the source cells come from the IHO PresLib draft (fetched once).
+      - name: Build live Chart 1 tiles (docs/static/chart1)
+        run: |
+          make demo-chart1 \
+            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
+            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml" \
+            PRESLIB_CACHE="$RUNNER_TEMP/preslib-cells" \
+            DEMO_CHART1_OUT="docs/static/chart1"
 
       - uses: actions/setup-node@v6
         with:

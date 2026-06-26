@@ -12,9 +12,14 @@ import "github.com/beetlebugorg/chartplotter/pkg/geo"
 
 // DefaultPxPerSymbolUnit is screen px per 0.01-mm PresLib symbol unit at 100%
 // zoom — the nominal S-52 feature scale shared by the symbol/linestyle renderers
-// and the tile engine's LC/AP/sector sizing. 0.01 / 0.35278 mm-per-pt renders
-// every glyph at its encoded physical size.
-const DefaultPxPerSymbolUnit float32 = 0.01 / 0.35278
+// and the tile engine's LC/AP/sector sizing. It MUST use the same reference pixel
+// pitch the rest of the app measures the screen with (web util.mjs
+// DEFAULT_PX_PITCH_MM = 0.26458 mm, the 1/96-inch CSS reference pixel) so a symbol
+// renders at its encoded physical size: the S-52 size-check symbol SY(CHKSYM01),
+// a 5 mm box, then measures 5 mm (500 units × this = 18.9 px × 0.26458 mm = 5 mm).
+// (Previously 0.35278 — the 1/72-inch point — which rendered every symbol ~25% too
+// small against the app's 0.26458 mm pixel.)
+const DefaultPxPerSymbolUnit float32 = 0.01 / 0.26458
 
 // Dash is a simple line-stroke dash style (LS instruction).
 type Dash uint8
@@ -162,6 +167,10 @@ type AugmentedFigure struct {
 	// Ray params (true-north bearing, already from-seaward-reversed by the rule).
 	BearingDeg float64
 	LengthMM   float64
+	// LengthGroundM is a ray leg's length when given as a GROUND distance (metres,
+	// from a GeographicCRS sectorLineLength / full-VALNMR leg) rather than display
+	// mm — drawn zoom-dependently. 0 ⇒ use LengthMM (display mm). See tessellateFigure.
+	LengthGroundM float64
 	// Arc params (centred on Anchor); a full 360° sweep is an all-round ring.
 	RadiusMM float64
 	StartDeg float64
