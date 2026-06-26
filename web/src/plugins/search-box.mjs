@@ -19,7 +19,7 @@
 //   sb.doSearch(query);           // input → render results
 //   sb.gotoHit(i);                // result-click / Enter → fly + close
 
-import { esc } from "../lib/util.mjs";
+import { esc, parseLatLon, fmtLatLon } from "../lib/util.mjs";
 
 export class SearchBox {
   constructor(opts) {
@@ -40,8 +40,12 @@ export class SearchBox {
   doSearch(q) {
     const el = this._getResultsEl();
     if (!el) return;
-    const needle = q.trim().toLowerCase();
+    const raw = (q || "").trim();
+    const needle = raw.toLowerCase();
     if (needle.length < 2) { el.hidden = true; el.innerHTML = ""; this._hits = []; this.position(); return; }
+    // 0) A typed coordinate (any common notation) → a "Go to" hit pinned on top,
+    // so Enter jumps straight there. Other matches still list below.
+    const coord = parseLatLon(raw);
     // 1) Catalog cells (chart titles / numbers), fuzzy-matched. Best score wins;
     // ties break to the coarser chart (overview before an arbitrary harbour inset).
     const cells = [];
@@ -53,11 +57,16 @@ export class SearchBox {
     cells.sort((a, b) => (b.score - a.score) || ((b.c.s || 0) - (a.c.s || 0)));
     // 2) Every loaded chart feature, fuzzy-matched across its attribute data.
     const feats = this._searchFeatures(needle);
-    const hits = [...cells.slice(0, 5).map(({ c }) => ({ type: "cell", c })), ...feats.slice(0, 8)];
+    const hits = [
+      ...(coord ? [{ type: "coord", lat: coord.lat, lng: coord.lng }] : []),
+      ...cells.slice(0, 5).map(({ c }) => ({ type: "cell", c })),
+      ...feats.slice(0, 8),
+    ];
     this._hits = hits;
     el.innerHTML = hits.length
       ? hits.map((h, i) => {
           const sel = i === 0 ? " sel" : "";
+          if (h.type === "coord") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(fmtLatLon(h.lat, h.lng))}</div><div class="s">Go to coordinate</div></div>`;
           if (h.type === "cell") return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.c.l || h.c.n)}</div><div class="s">Chart · ${esc(h.c.n)} · 1:${(h.c.s || 0).toLocaleString()}</div></div>`;
           return `<div class="sr-item${sel}" data-i="${i}"><div class="t">${esc(h.label)}</div><div class="s">${esc(h.sub)}</div></div>`;
         }).join("")
@@ -103,7 +112,8 @@ export class SearchBox {
     const h = (this._hits || [])[i];
     const map = this._getMap();
     if (!h || !map) return;
-    if (h.type === "feat") map.flyTo({ center: [h.lng, h.lat], zoom: Math.max(map.getZoom(), 14), duration: 800 });
+    if (h.type === "coord") map.flyTo({ center: [h.lng, h.lat], zoom: Math.max(map.getZoom(), 13), duration: 800 });
+    else if (h.type === "feat") map.flyTo({ center: [h.lng, h.lat], zoom: Math.max(map.getZoom(), 14), duration: 800 });
     else { const c = h.c; map.fitBounds([[c.bb[0], c.bb[1]], [c.bb[2], c.bb[3]]], { padding: 80, maxZoom: 13, duration: 800 }); }
     const el = this._getResultsEl(); if (el) el.hidden = true;
     // Keep the query (and selected highlight) so reopening search returns you to
