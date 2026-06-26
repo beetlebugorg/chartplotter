@@ -28,7 +28,7 @@ import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 d
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { OwnShip } from "./plugins/own-ship.mjs"; // own-ship marker + course predictor + follow camera
 import { AISOverlay } from "./plugins/ais-overlay.mjs"; // AIS targets (other vessels) from the live feed
-import { InfoCallouts } from "./plugins/info-callouts.mjs"; // precise DOM tap pads on INFORM01 info-callout boxes
+import { InfoCallouts } from "./plugins/info-callouts.mjs"; // precise DOM tap pads on INFORM01 + CHDATD01 callout boxes
 import "./plugins/target-info.mjs"; // defines <target-info> (own-ship / AIS tap-info picker)
 import { PALETTE_DAY_ICON, PALETTE_DUSK_ICON, PALETTE_NIGHT_ICON } from "./lib/openbridge-icons.mjs"; // OpenBridge scheme glyphs
 import { DISTRICTS, NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
@@ -663,9 +663,10 @@ export class ChartPlotter extends HTMLElement {
       this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
       // AIS targets (other vessels) from the live feed.
       this._ais = new AISOverlay({ map, assets: this._assets, widget: this._widget, onSelect: showInfo, units: () => this._mariner });
-      // Precise DOM tap pads on the INFORM01 "additional information" callout boxes
-      // (the box floats offset from the feature, so the fuzzy symbol pick can't own
-      // it). Sparse by nature — only info-bearing features — so DOM markers are fine.
+      // Precise DOM tap pads on the INFORM01 "additional information" and CHDATD01
+      // "date-dependent" callout boxes (each floats offset from the feature, so the
+      // fuzzy symbol pick can't own it). Sparse by nature — only info-bearing /
+      // date-dependent features — so DOM markers are fine.
       this._infoCallouts = new InfoCallouts({
         map,
         getSizeScale: () => (this._plotter && this._plotter._featureSizeScale ? this._plotter._featureSizeScale() : 1),
