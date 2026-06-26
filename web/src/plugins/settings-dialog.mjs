@@ -139,6 +139,11 @@ export class SettingsDialog extends HTMLElement {
         if (!isFinite(v)) { this.render(); return; }
         apply(inp.dataset.contrib, inp.dataset.key, v);
       }));
+
+    // A date input stores the compact "YYYYMMDD" the mariner model uses; blank
+    // clears it (unset = real today).
+    body.querySelectorAll('input[data-type="date"]').forEach((inp) =>
+      (inp.onchange = () => apply(inp.dataset.contrib, inp.dataset.key, inp.value ? inp.value.replace(/-/g, "") : undefined)));
   }
 }
 

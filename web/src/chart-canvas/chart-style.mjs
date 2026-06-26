@@ -222,7 +222,7 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
     // toggled by the mariner's "contour labels" setting — no re-bake.
     { id: "contour-labels", type: "symbol", source: "chart", "source-layer": "lines",
       filter: ["all", ["==", ["get", "class"], "DEPCNT"], ["has", "valdco"]],
-      layout: { "symbol-placement": "line", "text-field": S52.contourLabelField(mariner), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "symbol-spacing": 300, "text-allow-overlap": false, "text-optional": true, visibility: mariner.showContourLabels ? "visible" : "none" },
+      layout: { "symbol-placement": "line-center", "text-field": S52.contourLabelField(mariner), "text-font": FONT, "text-size": 10, "text-max-angle": 30, "text-allow-overlap": false, "text-optional": true, visibility: mariner.showContourLabels ? "visible" : "none" },
       paint: { "text-color": S52.contourLabelColor(active, palette), "text-halo-color": S52.textHaloColor(active), "text-halo-width": 1.2 } },
     // Dredged-area depth label (S-52 row 47, client-side): DRVAL1 placed at the
     // DRGARE centroid, in the chosen depth unit. The baker drops the rule's

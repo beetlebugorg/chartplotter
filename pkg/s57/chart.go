@@ -547,6 +547,11 @@ type Geometry struct {
 	// keeps the full concatenation for backward compatibility. Empty/nil ⇒ no
 	// masking applied → stroke Coordinates.
 	Lines [][][]float64
+
+	// Quapos is the feature's effective QUAPOS (quality of position), derived from
+	// its edges' spatial-level QUAPOS attribute. 0 ⇒ none/surveyed; a low-accuracy
+	// value (not 1/10/11) means the depth contour is drawn dashed (S-52 DEPCNT03).
+	Quapos int
 }
 
 // GeometryType represents the type of geometry.
@@ -623,6 +628,7 @@ func convertChart(internal *parser.Chart) *Chart {
 				Rings:         rings,
 				BoundaryLines: f.Geometry.BoundaryLines,
 				Lines:         f.Geometry.Lines,
+				Quapos:        f.Geometry.Quapos,
 			},
 			attributes: attributes,
 		}

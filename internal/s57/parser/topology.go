@@ -131,6 +131,35 @@ func (r *polygonBuilder) drawableBoundaryLines(edgeRefs []spatialRef, coalneEdge
 	return lines
 }
 
+// boundaryQuapos returns the feature's effective QUAPOS over its DRAWN boundary
+// edges — the same edge selection as drawableBoundaryLines (S-52 §8.6.2). Returns
+// the low-accuracy value when the majority of drawn edges are low accuracy, else
+// 0. (QUAPOS is a spatial-level attribute on the edge records.)
+func (r *polygonBuilder) boundaryQuapos(edgeRefs []spatialRef, coalneEdges map[int64]bool, maskCoast bool) int {
+	var total, low, lowVal int
+	for _, er := range edgeRefs {
+		if er.Mask == 1 || er.Usage == 3 {
+			continue
+		}
+		if maskCoast && coalneEdges[er.RCID] {
+			continue
+		}
+		sp := r.spatialRecords[spatialKey{RCNM: int(spatialTypeEdge), RCID: er.RCID}]
+		if sp == nil {
+			continue
+		}
+		total++
+		if isLowAccuracyQuapos(sp.Quapos) {
+			low++
+			lowVal = sp.Quapos
+		}
+	}
+	if total > 0 && low*2 > total {
+		return lowVal
+	}
+	return 0
+}
+
 // loadEdge loads an edge from spatial records, with caching
 // Returns cached edge if already loaded, otherwise loads from spatial record
 func (r *polygonBuilder) loadEdge(edgeID int64) (*edge, error) {

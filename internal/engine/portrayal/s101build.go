@@ -300,6 +300,15 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 			return fb
 		}
 	}
+	// M_NSYS (navigational system of marks): the S-101 NavigationalSystemOfMarks
+	// rule is an UNOFFICIAL stub (NullInstruction only), so draw the S-52 boundary
+	// here — MARSYS51 (the A-B system line) or NAVARE51 + a direction-of-buoyage
+	// arrow per ORIENT. Bypasses the stub stream entirely.
+	if f.ObjectClass() == "M_NSYS" {
+		if nb := navSystemBuild(f); len(nb.Primitives) > 0 {
+			return nb
+		}
+	}
 	// Genuinely-unknown object class (no S-101 alias) → the magenta "unknown
 	// object" mark (S-52 §10.1.1 parity).
 	if strings.HasPrefix(stream, "UNMAPPED:") {
@@ -394,6 +403,20 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 			}
 		}
 	}
+	// Low-accuracy geometry (QUAPOS not surveyed/precise) is drawn DASHED — the S-52
+	// approximate-position line style (DEPCNT03 dashes a low-accuracy depth contour;
+	// the same applies to coastline, rivers, tracks, …). The S-101 rules read this
+	// from a per-edge spatial-quality association we don't model, so apply it here
+	// from the parsed per-feature QUAPOS aggregate: switch the feature's solid simple
+	// strokes to dashed. Complex line styles and point symbols keep their look.
+	if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 {
+		for i, p := range prims {
+			if sl, ok := p.(StrokeLine); ok && sl.Dash == DashSolid {
+				sl.Dash = DashDashed
+				prims[i] = sl
+			}
+		}
+	}
 	// Centred-area symbol placement (S-52 PresLib §8.5.1): the pivot point is the
 	// area's representative point (sg.Anchor), where the FIRST/primary centred symbol
 	// sits "so it is evident which area the symbol applies to"; ADDITIONAL symbols
@@ -426,15 +449,37 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 // commandsNeedAnchor reports whether any reduced draw command consumes the
 // feature anchor — the anchored ops emitPrimitives reads geom.Anchor for: point
 // symbols, text, and sector/augmented figures. Fills and boundary lines don't,
-// so an area emitting only those skips the expensive polylabel anchor.
+// so an area emitting only those skips the expensive polylabel anchor. A SPARSE
+// fill pattern (lattice-placed symbols) needs it too, for the small-area
+// fallback (one centred symbol when no lattice point lands inside).
 func commandsNeedAnchor(cmds []instructions.DrawCommand) bool {
 	for _, c := range cmds {
 		switch c.Op {
 		case instructions.OpPoint, instructions.OpText, instructions.OpAugmentedLine:
 			return true
+		case instructions.OpAreaFill:
+			if sparseFillPatterns[c.Reference] {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// sparseFillPatterns are the S-52 "fill patterns" (PresLib §8.5.4): WIDELY-SPACED
+// symbol patterns (lattice cell ≳20 mm) placed as discrete whole symbols on a
+// geographic lattice rather than tiled as a texture — so a symbol is never
+// clipped mid-glyph at the area boundary (the "strange looking pattern fill"
+// §8.5.4 warns against) and small areas still get a centred symbol. Dense
+// "textures" (DRGARE dots, DIAMOND1 night-shading, NODATA/PRTSUR dashes, ICEARE,
+// FOULAR, TSSJCT, vegetation) stay tiled fill-patterns.
+var sparseFillPatterns = map[string]bool{
+	"DQUALA11": true, "DQUALA21": true, "DQUALB01": true,
+	"DQUALC01": true, "DQUALD01": true, "DQUALU01": true,
+	"MARCUL02": true,                                     // aquaculture / marine farm
+	"FSHFAC03": true, "FSHFAC04": true, "FSHHAV02": true, // fishing facility / fish haven
+	"AIRARE02": true, // airport / airfield
+	"SNDWAV01": true, // sand waves
 }
 
 // strokeRunsFor returns the drawable polylines an S-101 line draw strokes for a
@@ -550,7 +595,7 @@ func primitiveName(t s57.GeometryType) string {
 
 // stringAttrs encodes S-57 attribute values as the strings ConvertEncodedValue
 // expects (enumeration/integer → digits, boolean → "1"/"0", text → as-is).
-func stringAttrs(attrs map[string]interface{}) map[string]string {
+func stringAttrs(attrs map[string]any) map[string]string {
 	out := make(map[string]string, len(attrs))
 	for k, v := range attrs {
 		if s, ok := encodeAttr(v); ok {
@@ -560,7 +605,7 @@ func stringAttrs(attrs map[string]interface{}) map[string]string {
 	return out
 }
 
-func encodeAttr(v interface{}) (string, bool) {
+func encodeAttr(v any) (string, bool) {
 	switch t := v.(type) {
 	case nil:
 		return "", false

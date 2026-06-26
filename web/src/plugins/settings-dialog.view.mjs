@@ -75,6 +75,12 @@ export const STYLE = `
   }
 `;
 
+// "YYYYMMDD" → "YYYY-MM-DD" for the native date input (blank if unset/invalid).
+function ymdToInput(v) {
+  const s = String(v || "");
+  return /^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : "";
+}
+
 // One control, dispatched by item.type. `value` is the item's current value (the
 // host read it from contribution.get). `on` reads a boolean key for `multi`.
 function control(item, value, on) {
@@ -93,6 +99,10 @@ function control(item, value, on) {
       ].join("")}</div>`;
     case "number":
       return `<input type="number" ${k} data-type="number" step="${esc(item.step || "any")}" value="${esc(value)}">${item.unit ? `<span class="unit">${esc(item.unit)}</span>` : ""}`;
+    case "date":
+      // Value is stored as compact "YYYYMMDD" (mariner.dateView); the native date
+      // input wants "YYYY-MM-DD". Blank = unset (use real today).
+      return `<input type="date" ${k} data-type="date" value="${esc(ymdToInput(value))}">`;
     case "select":
       return `<select ${k} data-type="select">${(item.options || []).map(([v, lbl]) =>
         `<option value="${esc(v)}" ${value === v ? "selected" : ""}>${esc(lbl)}</option>`).join("")}</select>`;

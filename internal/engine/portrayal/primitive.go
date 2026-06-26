@@ -113,6 +113,16 @@ type SymbolCall struct {
 type PatternFill struct {
 	Rings       [][]geo.LatLon
 	PatternName string
+	// Sparse marks a WIDELY-SPACED S-52 "fill pattern" (PresLib §8.5.4) — a
+	// pattern of discrete symbols (quality-of-data, aquaculture, fishing…) rather
+	// than a dense texture. The baker places it as individual WHOLE symbols on a
+	// geographic lattice instead of a tiled fill-pattern, so a symbol is never
+	// clipped mid-glyph at the area edge (the "strange looking pattern fill" the
+	// spec warns against). When set, the fields below carry the lattice.
+	Sparse    bool
+	SymbolRef string     // the pattern's point symbol (sprite-atlas name)
+	V1, V2    [2]float64 // lattice basis vectors, millimetres (display)
+	Anchor    geo.LatLon // area representative point (small-area fallback)
 }
 
 // LinePattern draws a polyline with a complex linestyle (LC instruction).

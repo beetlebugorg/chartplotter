@@ -662,7 +662,14 @@ export class ChartCanvas extends HTMLElement {
     const v = (typeof mm === "number" && mm > 0) ? mm : undefined;
     if (v === this._pxPitch) return;
     this._pxPitch = v;
-    if (this._map && this._sources) this._map.setStyle(this.buildStyle(), { diff: false, validate: false });
+    if (this._map && this._sources) {
+      // Patterns bake the physical-size correction into their pixelRatio at
+      // registration; a calibration change alters that ratio but registerPattern
+      // never updates an existing image (hasImage guard). Drop them so they
+      // re-register at the new ratio (point symbols rescale via icon-size).
+      this._dropPatternImages();
+      this._map.setStyle(this.buildStyle(), { diff: false, validate: false });
+    }
   }
 
   // Switch the basemap live: "coastline" (offline GSHHG land/lakes), "osm"
@@ -1059,6 +1066,22 @@ export class ChartCanvas extends HTMLElement {
     for (const name in this._patterns) {
       if (name === "_meta") continue;
       this.registerPattern(name);
+    }
+  }
+
+  // Remove every registered pattern image so the styleimagemissing handler
+  // re-registers it at the CURRENT _patternPixelRatio. Used after a calibration
+  // change (setPxPitch) recomputes that ratio: the physical-size correction is
+  // baked into a pattern's pixelRatio at registration and never updated in place
+  // (registerPattern's hasImage guard), so a stale image keeps the old size.
+  _dropPatternImages() {
+    if (!this._map || !this._patterns) return;
+    for (const name in this._patterns) {
+      if (name === "_meta") continue;
+      const id = PAT_PREFIX + name;
+      if (this._map.hasImage(id)) {
+        try { this._map.removeImage(id); } catch (e) { /* already gone */ }
+      }
     }
   }
 

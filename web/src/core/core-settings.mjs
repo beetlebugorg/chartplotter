@@ -83,6 +83,7 @@ export function coreSettingsContributions(app) {
       { key: "showIsolatedDangersShallow", type: "toggle", label: "Isolated dangers (shallow)", desc: "Only flag isolated dangers in shallow water" },
       { key: "dataQuality", type: "toggle", label: "Data quality", desc: "Survey zones-of-confidence overlay" },
       { key: "showInformCallouts", type: "toggle", label: "Information callouts", desc: "“Additional information available” (i) markers on features that carry notes" },
+      { key: "highlightDateDependent", type: "toggle", label: "Highlight date-dependent", desc: "Mark features that carry date conditions with the “d” symbol" },
       { key: "showMetaBounds", type: "toggle", label: "Metadata boundaries", desc: "Chart coverage & region indicator lines" },
       { key: "showScaleBoundaries", type: "toggle", label: "Scale boundaries", desc: "Outline where more detailed charts exist", default: true },
       {
@@ -156,6 +157,19 @@ export function coreSettingsContributions(app) {
       {
         key: "showCellBounds", type: "toggle", label: "Cell boundaries",
         desc: "Outline installed charts when zoomed out — tap one to jump to it",
+      },
+      // Date-dependency (S-52 §10.4.1.1). "Hide out-of-date features" is the
+      // mandatory current-date filter (default on); turning it off shows
+      // seasonal/expired features regardless of their validity dates. The viewing
+      // date evaluates that filter (and the "Highlight date-dependent" markers,
+      // toggled under General) against a chosen date for passage planning.
+      {
+        key: "dateDependent", type: "toggle", label: "Hide out-of-date features",
+        desc: "Hide seasonal or expired features outside their validity dates", default: true,
+      },
+      {
+        key: "dateView", type: "date", label: "Viewing date",
+        desc: "Evaluate date-dependent features against this date for passage planning (blank = today)",
       },
     ],
   };

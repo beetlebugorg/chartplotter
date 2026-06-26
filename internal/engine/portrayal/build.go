@@ -88,41 +88,8 @@ type FeatureBuildPass struct {
 	Pts   int
 }
 
-// applyDangerDepth tags the DANGER01/DANGER02 symbol of a sounded obstruction /
-// wreck / rock (one with VALSOU) with its depth and the deep variant, so the
-// client swaps shallow<->deep (DANGER01<->DANGER02) against the LIVE safety
-// contour with no re-bake (S-52 §13.2.x). It ONLY touches the DANGER01/02 pair —
-// soundings, ISODGR01, OBSTRN11, DANGER03 and every other primitive the CSP
-// emitted are left exactly as placed. The base symbol is normalised to DANGER01
-// (the shallow variant) so the client's coalesce picks DANGER01/DANGER02 by the
-// live contour.
-//
-// (The CSPs — OBSTRN07 Continuation A, WRECKS05 — now emit DANGER01/02 + the
-// sounding directly, so this is a post-tag rather than the old symbol-replacing
-// override that dropped the sounding glyphs.)
-func applyDangerDepth(prims []Primitive, class string, attrs map[string]interface{}) []Primitive {
-	if class != "OBSTRN" && class != "WRECKS" && class != "UWTROC" {
-		return prims
-	}
-	valsou, ok := floatAttr(attrs, "VALSOU")
-	if !ok {
-		return prims
-	}
-	for i := range prims {
-		sc, ok := prims[i].(SymbolCall)
-		if !ok || (sc.SymbolName != "DANGER01" && sc.SymbolName != "DANGER02") {
-			continue
-		}
-		sc.SymbolName = "DANGER01"
-		sc.DangerDepthM = float32(valsou)
-		sc.DeepSymbolName = "DANGER02"
-		prims[i] = sc
-	}
-	return prims
-}
-
 // stringAttr returns an attribute's encoded string value, or "" when absent.
-func stringAttr(attrs map[string]interface{}, key string) string {
+func stringAttr(attrs map[string]any, key string) string {
 	if v, ok := attrs[key]; ok {
 		if s, ok := encodeAttr(v); ok {
 			return s
@@ -131,7 +98,7 @@ func stringAttr(attrs map[string]interface{}, key string) string {
 	return ""
 }
 
-func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
+func floatAttr(attrs map[string]any, key string) (float64, bool) {
 	v, ok := attrs[key]
 	if !ok || v == nil {
 		return 0, false
@@ -155,13 +122,9 @@ func floatAttr(attrs map[string]interface{}, key string) (float64, bool) {
 
 // -- helpers -----------------------------------------------------------------
 
-func isSoundingDigit(name string) bool {
-	return strings.HasPrefix(name, "SOUNDG") || strings.HasPrefix(name, "SOUNDS")
-}
-
 // lookupAttributeText returns the textual value of an attribute for a label, or
 // ok=false when absent/empty (which suppresses the label, per S-52).
-func lookupAttributeText(attrs map[string]interface{}, acronym string) (string, bool) {
+func lookupAttributeText(attrs map[string]any, acronym string) (string, bool) {
 	v, ok := attrs[acronym]
 	if !ok || v == nil {
 		return "", false
@@ -172,7 +135,7 @@ func lookupAttributeText(attrs map[string]interface{}, acronym string) (string, 
 			return "", false
 		}
 		return t, true
-	case []string, []interface{}:
+	case []string, []any:
 		return "", false // list attributes have no single label value
 	default:
 		return strings.TrimSpace(stringifyScalar(v)), true
@@ -222,6 +185,15 @@ func areaLabelPoint(rings [][]geo.LatLon) (geo.LatLon, bool) {
 		return geo.LatLon{}, false
 	}
 	ext := rings[0]
+	// S-52 §8.5.3: the representative point is the area's CENTRE OF GRAVITY by
+	// default; only when the centroid falls outside the area (concave / holed
+	// shapes) is another point used. Prefer the centroid when it's inside — it
+	// sits at the true centre, whereas the pole of inaccessibility below drifts
+	// off-centre along a wide shape's mid-line (a wide rectangle's pole is not
+	// unique), which left centred symbols visibly off-centre.
+	if c, ok := ringCentroid(ext); ok && pointInRingsEvenOdd(c, rings) {
+		return c, true
+	}
 	minLat, minLon := math.Inf(1), math.Inf(1)
 	maxLat, maxLon := math.Inf(-1), math.Inf(-1)
 	var sumLat, sumLon float64
@@ -298,6 +270,46 @@ func areaLabelPoint(rings [][]geo.LatLon) (geo.LatLon, bool) {
 	return geo.LatLon{Lat: best.y, Lon: best.x / kx}, true
 }
 
+// ringCentroid returns the area centroid (centre of gravity) of a polygon ring
+// via the shoelace formula. ok is false for a degenerate (zero-area) ring. The
+// ring may be open or closed; edges wrap. Computed in raw lon/lat — the slight
+// cos(lat) skew is immaterial for a centring point over a chart-sized area.
+func ringCentroid(ring []geo.LatLon) (geo.LatLon, bool) {
+	n := len(ring)
+	if n < 3 {
+		return geo.LatLon{}, false
+	}
+	var a, cx, cy float64
+	for i := range n {
+		j := (i + 1) % n
+		cross := ring[i].Lon*ring[j].Lat - ring[j].Lon*ring[i].Lat
+		a += cross
+		cx += (ring[i].Lon + ring[j].Lon) * cross
+		cy += (ring[i].Lat + ring[j].Lat) * cross
+	}
+	if math.Abs(a) < 1e-12 {
+		return geo.LatLon{}, false
+	}
+	a *= 0.5
+	return geo.LatLon{Lat: cy / (6 * a), Lon: cx / (6 * a)}, true
+}
+
+// pointInRingsEvenOdd reports whether p is inside the even-odd union of rings
+// (exterior boundary + holes): inside the exterior AND outside every hole.
+func pointInRingsEvenOdd(p geo.LatLon, rings [][]geo.LatLon) bool {
+	inside := false
+	for _, ring := range rings {
+		n := len(ring)
+		for i, j := 0, n-1; i < n; j, i = i, i+1 {
+			if (ring[i].Lat > p.Lat) != (ring[j].Lat > p.Lat) &&
+				p.Lon < (ring[j].Lon-ring[i].Lon)*(p.Lat-ring[i].Lat)/(ring[j].Lat-ring[i].Lat)+ring[i].Lon {
+				inside = !inside
+			}
+		}
+	}
+	return inside
+}
+
 // plCell is one square candidate region in the polylabel search (scaled space).
 type plCell struct {
 	x, y, half float64 // centre and half-size
@@ -348,32 +360,6 @@ func pointInRing(p geo.LatLon, ring []geo.LatLon) bool {
 		}
 	}
 	return in
-}
-
-// geometryCode maps an s57 geometry type to the S-52 LUPT geometry code.
-func geometryCode(t s57.GeometryType) string {
-	switch t {
-	case s57.GeometryTypePoint:
-		return "P"
-	case s57.GeometryTypeLineString:
-		return "L"
-	case s57.GeometryTypePolygon:
-		return "A"
-	default:
-		return "P"
-	}
-}
-
-// goGeomType is the CSContext.GeometryType string form.
-func goGeomType(code string) string {
-	switch code {
-	case "L":
-		return "Line"
-	case "A":
-		return "Area"
-	default:
-		return "Point"
-	}
 }
 
 // geometryOf converts s57 geometry to the portrayal geom (lat/lon). SOUNDG is
@@ -441,20 +427,6 @@ func coordsToLatLon(coords [][]float64) []geo.LatLon {
 	return out
 }
 
-func cloneRings(rings [][]geo.LatLon) [][]geo.LatLon {
-	out := make([][]geo.LatLon, len(rings))
-	for i, r := range rings {
-		out[i] = clonePts(r)
-	}
-	return out
-}
-
-func clonePts(pts []geo.LatLon) []geo.LatLon {
-	out := make([]geo.LatLon, len(pts))
-	copy(out, pts)
-	return out
-}
-
 // mapHJust / mapVJust map S-52 SHOWTEXT justification codes (§9.1) to alignments.
 // HJUST: 1=centre, 2=right, 3=left. VJUST: 1=bottom, 2=centre, 3=top.
 func mapHJust(h int) HAlign {
@@ -480,20 +452,13 @@ func mapVJust(v int) VAlign {
 	}
 }
 
-func maxF32(a, b float32) float32 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // formatSubstitute substitutes attribute values into a TE/TX C-printf format
 // string (S-52 §8.3.3.3 — e.g. "clr op %4.1lf" with VERCOP -> "clr op 12.3").
 // Handles %[flags][width][.precision][l|h|L]conv; width/flags only affect
 // fixed-pitch padding so they are ignored, precision is honoured for floats.
 // Returns ok=false when a referenced attribute is absent — per S-52 a label with
 // a missing mandatory field is not drawn.
-func formatSubstitute(attrs map[string]interface{}, format string, attrNames []string) (string, bool) {
+func formatSubstitute(attrs map[string]any, format string, attrNames []string) (string, bool) {
 	var out strings.Builder
 	attrIdx := 0
 	i := 0
@@ -603,7 +568,7 @@ func zeroPad(s string, width int, flags string) string {
 
 // stringifyScalar renders a scalar attribute value as label text. Integer-valued
 // floats drop the decimal, matching the lookup attribute-text "{d}" output.
-func stringifyScalar(v interface{}) string {
+func stringifyScalar(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
@@ -621,17 +586,6 @@ func stringifyScalar(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
-}
-
-// isUnknownClass reports that the S-57 parser could not resolve the feature's
-// numeric object code to a catalogue acronym — it names such classes "OBJL_<code>"
-// (see internal/s57/parser/objectclass.go). These are proprietary / non-ENC
-// classes (e.g. Inland ENC extensions) with no Presentation Library lookup entry.
-// S-52 PresLib e4.0.0 §2.30 & §10.1.1: such objects must NOT be hidden — each is
-// shown with the magenta question-mark SY(QUESMRK1) at IMO category Standard so
-// the mariner is told an unknown object exists.
-func isUnknownClass(objClass string) bool {
-	return strings.HasPrefix(objClass, "OBJL_")
 }
 
 // unknownObjectBuild is the §10.1.1 portrayal of an unknown-class feature: a
@@ -705,6 +659,65 @@ func newObjectBuild(f *s57.Feature) FeatureBuild {
 // so it errors and would be suppressed. The S-52 PresLib reference (page 243)
 // draws a dashed boundary around the area plus a "swept to <DRVAL1>" depth label,
 // so emit that.
+// navSystemBuild portrays an M_NSYS (navigational system of marks) area. The S-101
+// NavigationalSystemOfMarks rule is an unofficial stub (NullInstruction), so this
+// reproduces the S-52 PresLib lookup (DAI LU00344–347, symbolized boundary):
+//   - a region WITHOUT a direction of buoyage (ORIENT) → the MARSYS51 "A-B" line
+//     (dashes + the embedded A/B symbols, "boundary between IALA-A and IALA-B");
+//   - a region WITH ORIENT → the generic NAVARE51 triangle boundary plus a
+//     direction-of-buoyage arrow (DIRBOYA1 for IALA-A, DIRBOYB1 for IALA-B, else
+//     DIRBOY01), rotated to ORIENT.
+func navSystemBuild(f *s57.Feature) FeatureBuild {
+	g := f.Geometry()
+	if g.Type != s57.GeometryTypePolygon {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	orient, hasOrient := floatAttr(f.Attributes(), "ORIENT")
+	boundary := "MARSYS51" // no direction of buoyage → the A-B system boundary line
+	if hasOrient {
+		boundary = "NAVARE51"
+	}
+	var prims []Primitive
+	for _, r := range g.Rings {
+		pts := make([]geo.LatLon, 0, len(r.Coordinates))
+		for _, c := range r.Coordinates {
+			if len(c) >= 2 {
+				pts = append(pts, geo.LatLon{Lat: c[1], Lon: c[0]})
+			}
+		}
+		if len(pts) > 1 && pts[0] != pts[len(pts)-1] {
+			pts = append(pts, pts[0]) // close the ring
+		}
+		if len(pts) >= 2 {
+			prims = append(prims, LinePattern{Points: pts, LinestyleName: boundary, ColorToken: "CHGRD"})
+		}
+	}
+	if len(prims) == 0 {
+		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	// Direction-of-buoyage arrow at the region's representative point (DAI LU00345-347).
+	if hasOrient {
+		arrow := "DIRBOY01"
+		switch m, _ := floatAttr(f.Attributes(), "MARSYS"); int(m) {
+		case 1:
+			arrow = "DIRBOYA1"
+		case 2:
+			arrow = "DIRBOYB1"
+		}
+		if a, ok := areaSurfacePoint(coordsToLatLon(exteriorRing(g))); ok {
+			// Centre the arrow on the area's representative point: DIRBOY's catalogue
+			// pivot sits at the arrow's tail (SVG 0,0, bottom-centre), so honouring it
+			// would push the whole arrow ~30 mm north of the centre and out of a small
+			// region. CentreOnArea centres the glyph instead (S-52 §8.5.1).
+			prims = append(prims, SymbolCall{
+				Anchor: a, SymbolName: arrow, RotationDeg: float32(orient), RotationTrueNorth: true,
+				CentreOnArea: true, Scale: DefaultPxPerSymbolUnit, SoundingDepthM: nan32, DangerDepthM: nan32,
+			})
+		}
+	}
+	return FeatureBuild{Primitives: prims, DisplayPriority: 12, DisplayCategory: displayStandard}
+}
+
 func sweptAreaBuild(f *s57.Feature) FeatureBuild {
 	g := f.Geometry()
 	if g.Type != s57.GeometryTypePolygon {
@@ -731,12 +744,23 @@ func sweptAreaBuild(f *s57.Feature) FeatureBuild {
 	if len(prims) == 0 {
 		return FeatureBuild{DisplayCategory: displayStandard}
 	}
-	// "swept to <DRVAL1>" depth label at the area's representative point.
-	if d, ok := floatAttr(f.Attributes(), "DRVAL1"); ok {
-		if a, ok := areaSurfacePoint(ringLL(exteriorRing(g))); ok {
+	// Swept-depth notation at the area's representative point: the SWPARE51 "⊔"
+	// bracket centred on the point, with the "swept to <DRVAL1>" label just above
+	// it (S-101 HighConfidenceDepthArea: SY(SWPARE51) + text at LocalOffset 0,-3.51
+	// mm). The S-101 SweptArea rule is an IHO gap, so this Go fallback reproduces it.
+	if a, ok := areaSurfacePoint(ringLL(exteriorRing(g))); ok {
+		prims = append(prims, SymbolCall{
+			Anchor: a, SymbolName: "SWPARE51", Scale: DefaultPxPerSymbolUnit,
+			SoundingDepthM: nan32, DangerDepthM: nan32,
+		})
+		if d, ok := floatAttr(f.Attributes(), "DRVAL1"); ok {
 			prims = append(prims, DrawText{
+				// VAlignTop anchors the text at its top edge on the rep point, so it
+				// drops BELOW the SWPARE51 bracket (which extends UP from the same
+				// point) instead of overprinting it — the client text layer ignores
+				// per-feature pixel offsets, so position via the anchor.
 				Anchor: a, Text: "swept to " + strconv.FormatFloat(d, 'f', -1, 64),
-				FontSizePx: 11, ColorToken: "CHBLK", HAlign: HAlignCenter, VAlign: VAlignMiddle,
+				FontSizePx: 11, ColorToken: "CHBLK", HAlign: HAlignCenter, VAlign: VAlignTop,
 			})
 		}
 	}

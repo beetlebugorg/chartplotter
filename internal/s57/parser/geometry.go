@@ -99,6 +99,12 @@ type Geometry struct {
 	// backward compatibility. Empty/nil ⇒ no masking applied (or topology didn't
 	// resolve) → fall back to stroking Coordinates.
 	Lines [][][]float64
+
+	// Quapos is the feature's effective QUAPOS (quality of position): the value
+	// held by the majority of its drawn edges (S-57 QUAPOS is a spatial-level
+	// attribute on edges, not a feature attribute). 0 ⇒ none/surveyed. A
+	// low-accuracy value (not 1/10/11) drives the dashed depth contour (DEPCNT03).
+	Quapos int
 }
 
 // constructGeometry builds a Geometry from feature and spatial records.
@@ -166,6 +172,9 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 	var curPart [][]float64
 	chainBroken := true // force a new part on the first drawable edge
 	sawMask := false
+	// QUAPOS tally over the feature's DRAWN edges, to derive a feature-level
+	// quality of position (it's a spatial-level attribute, one per edge).
+	var quaposTotal, quaposLow, quaposLowVal int
 	flushPart := func() {
 		if len(curPart) >= 2 {
 			lineParts = append(lineParts, curPart)
@@ -238,6 +247,12 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 				chainBroken = true
 				continue
 			}
+			// Drawn edge: tally its QUAPOS for the feature-level aggregate.
+			quaposTotal++
+			if isLowAccuracyQuapos(spatial.Quapos) {
+				quaposLow++
+				quaposLowVal = spatial.Quapos
+			}
 			first := []float64{edgeCoords[0][0], edgeCoords[0][1]}
 			// Start a new part if the chain was broken (masked gap) or this edge does
 			// not continue the previous part's last point.
@@ -291,7 +306,18 @@ func constructLineStringGeometry(featureRec *featureRecord, spatialRecords map[s
 	if sawMask {
 		geom.Lines = lineParts
 	}
+	// Feature is low-accuracy when most of its drawn edges are: dash the contour.
+	if quaposTotal > 0 && quaposLow*2 > quaposTotal {
+		geom.Quapos = quaposLowVal
+	}
 	return geom, nil
+}
+
+// isLowAccuracyQuapos reports whether a QUAPOS value means "low accuracy" — i.e.
+// drawn dashed (S-52 DEPCNT03 / DEPARE03): present and not surveyed (1), precisely
+// known (10), or calculated (11). 0 means the attribute was absent.
+func isLowAccuracyQuapos(q int) bool {
+	return q != 0 && q != 1 && q != 10 && q != 11
 }
 
 // constructPointGeometry builds point geometry from spatial references
@@ -540,6 +566,7 @@ func constructPolygonGeometry(featureRec *featureRecord, spatialRecords map[spat
 			Coordinates:   allCoords, // Flattened for backward compatibility
 			Rings:         rings,     // Structured rings with usage indicators
 			BoundaryLines: resolver.drawableBoundaryLines(edgeRefs, coalneEdges, maskCoast),
+			Quapos:        resolver.boundaryQuapos(edgeRefs, coalneEdges, maskCoast),
 		}, nil
 	}
 
