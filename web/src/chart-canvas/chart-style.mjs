@@ -89,6 +89,11 @@ function textLayers(mariner, palette) {
       "text-field": ["coalesce", ["get", "text"], ""], "text-font": FONT,
       "text-size": ["coalesce", ["get", "font_size_px"], 11],
       "text-anchor": TEXT_ANCHOR,
+      // S-52 TX/TE labels are single-line; MapLibre's default text-max-width (10 em)
+      // wrapped longer labels (e.g. "Information about chart display (A,B)") onto a
+      // second line that then collided and dropped. A wide max-width keeps each label
+      // on one line, matching the spec plots.
+      "text-max-width": 40,
       "symbol-sort-key": TEXT_SORT_KEY,
       "text-allow-overlap": false, "text-optional": true,
       visibility: "visible",
