@@ -55,8 +55,8 @@ func TestNavSystemMarsysLine(t *testing.T) {
 		marsys string
 		want   string
 	}{
-		{"1", "DIRBOYA1"}, // IALA-A
-		{"2", "DIRBOYB1"}, // IALA-B
+		{"1", "DIRBOYA1"},  // IALA-A
+		{"2", "DIRBOYB1"},  // IALA-B
 		{"10", "DIRBOY01"}, // other system
 	} {
 		marsys, navare, arrows, arrow := count(navSystemBuild(nsys(map[string]any{"MARSYS": tc.marsys, "ORIENT": 42.0})))
