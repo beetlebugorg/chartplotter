@@ -659,16 +659,23 @@ func newObjectBuild(f *s57.Feature) FeatureBuild {
 // so it errors and would be suppressed. The S-52 PresLib reference (page 243)
 // draws a dashed boundary around the area plus a "swept to <DRVAL1>" depth label,
 // so emit that.
-// navSystemBuild draws an M_NSYS (navigational system of marks) area boundary —
-// the S-52 NAVARE51 complex line (dashes + EMAREGR1 triangle markers) around the
-// IALA-A / IALA-B / other-system region. The S-101 NavigationalSystemOfMarks rule
-// is an unofficial stub (NullInstruction), so reproduce the S-52 lookup here. The
-// boundary is the same regardless of MARSYS — the system only governs the buoy
-// colours inside, not the region outline.
-func navSystemBuild(f *s57.Feature, nsysIdx *nsysIndex) FeatureBuild {
+// navSystemBuild portrays an M_NSYS (navigational system of marks) area. The S-101
+// NavigationalSystemOfMarks rule is an unofficial stub (NullInstruction), so this
+// reproduces the S-52 PresLib lookup (DAI LU00344–347, symbolized boundary):
+//   - a region WITHOUT a direction of buoyage (ORIENT) → the MARSYS51 "A-B" line
+//     (dashes + the embedded A/B symbols, "boundary between IALA-A and IALA-B");
+//   - a region WITH ORIENT → the generic NAVARE51 triangle boundary plus a
+//     direction-of-buoyage arrow (DIRBOYA1 for IALA-A, DIRBOYB1 for IALA-B, else
+//     DIRBOY01), rotated to ORIENT.
+func navSystemBuild(f *s57.Feature) FeatureBuild {
 	g := f.Geometry()
 	if g.Type != s57.GeometryTypePolygon {
 		return FeatureBuild{DisplayCategory: displayStandard}
+	}
+	orient, hasOrient := floatAttr(f.Attributes(), "ORIENT")
+	boundary := "MARSYS51" // no direction of buoyage → the A-B system boundary line
+	if hasOrient {
+		boundary = "NAVARE51"
 	}
 	var prims []Primitive
 	for _, r := range g.Rings {
@@ -681,83 +688,30 @@ func navSystemBuild(f *s57.Feature, nsysIdx *nsysIndex) FeatureBuild {
 		if len(pts) > 1 && pts[0] != pts[len(pts)-1] {
 			pts = append(pts, pts[0]) // close the ring
 		}
-		if len(pts) < 2 {
-			continue
-		}
-		// Split the boundary into runs of like kind: a segment shared with the OTHER
-		// IALA system is drawn with the MARSYS51 "A-B" line (S-52: "boundary between
-		// IALA-A and IALA-B systems"); every other segment is the generic NAVARE51
-		// triangle boundary. Consecutive same-kind segments form one complex-line run.
-		for i := 0; i < len(pts)-1; {
-			trans := nsysIdx.isTransition(pts[i], pts[i+1])
-			j := i + 1
-			for j < len(pts)-1 && nsysIdx.isTransition(pts[j], pts[j+1]) == trans {
-				j++
-			}
-			run := append([]geo.LatLon(nil), pts[i:j+1]...)
-			ls := "NAVARE51"
-			if trans {
-				ls = "MARSYS51"
-			}
-			prims = append(prims, LinePattern{Points: run, LinestyleName: ls, ColorToken: "CHGRD"})
-			i = j
+		if len(pts) >= 2 {
+			prims = append(prims, LinePattern{Points: pts, LinestyleName: boundary, ColorToken: "CHGRD"})
 		}
 	}
 	if len(prims) == 0 {
 		return FeatureBuild{DisplayCategory: displayStandard}
 	}
-	return FeatureBuild{Primitives: prims, DisplayPriority: 12, DisplayCategory: displayStandard}
-}
-
-// nsysIndex maps each M_NSYS boundary segment to the set of IALA systems whose
-// region carries it (bit 1 = IALA-A / MARSYS 1, bit 2 = IALA-B / MARSYS 2). A
-// segment with BOTH bits is the shared edge between an A region and a B region —
-// the MARSYS51 "A-B" transition boundary. Built once per batch over all M_NSYS.
-type nsysIndex struct {
-	seg map[nsysSeg]int
-}
-
-// nsysSeg is an order-independent, ~1 cm-quantised boundary segment key.
-type nsysSeg struct{ a0, a1, b0, b1 int64 }
-
-func nsysSegKey(p, q geo.LatLon) nsysSeg {
-	a0, a1 := int64(math.Round(p.Lat*1e7)), int64(math.Round(p.Lon*1e7))
-	b0, b1 := int64(math.Round(q.Lat*1e7)), int64(math.Round(q.Lon*1e7))
-	if a0 > b0 || (a0 == b0 && a1 > b1) { // canonical endpoint order
-		a0, a1, b0, b1 = b0, b1, a0, a1
-	}
-	return nsysSeg{a0, a1, b0, b1}
-}
-
-func buildNsysIndex(features []*s57.Feature) *nsysIndex {
-	idx := &nsysIndex{seg: map[nsysSeg]int{}}
-	for _, f := range features {
-		if f.ObjectClass() != "M_NSYS" {
-			continue
-		}
-		var bit int
+	// Direction-of-buoyage arrow at the region's representative point (DAI LU00345-347).
+	if hasOrient {
+		arrow := "DIRBOY01"
 		switch m, _ := floatAttr(f.Attributes(), "MARSYS"); int(m) {
 		case 1:
-			bit = 1 // IALA-A
+			arrow = "DIRBOYA1"
 		case 2:
-			bit = 2 // IALA-B
-		default:
-			continue // only A/B regions define the A-B transition
+			arrow = "DIRBOYB1"
 		}
-		for _, r := range f.Geometry().Rings {
-			pts := coordsToLatLon(r.Coordinates)
-			for i := 0; i+1 < len(pts); i++ {
-				idx.seg[nsysSegKey(pts[i], pts[i+1])] |= bit
-			}
+		if a, ok := areaSurfacePoint(coordsToLatLon(exteriorRing(g))); ok {
+			prims = append(prims, SymbolCall{
+				Anchor: a, SymbolName: arrow, RotationDeg: float32(orient), RotationTrueNorth: true,
+				Scale: DefaultPxPerSymbolUnit, SoundingDepthM: nan32, DangerDepthM: nan32,
+			})
 		}
 	}
-	return idx
-}
-
-// isTransition reports whether a boundary segment is shared between an IALA-A and
-// an IALA-B region (both bits set) — the MARSYS51 A-B boundary.
-func (idx *nsysIndex) isTransition(p, q geo.LatLon) bool {
-	return idx != nil && idx.seg[nsysSegKey(p, q)] == 3
+	return FeatureBuild{Primitives: prims, DisplayPriority: 12, DisplayCategory: displayStandard}
 }
 
 func sweptAreaBuild(f *s57.Feature) FeatureBuild {
