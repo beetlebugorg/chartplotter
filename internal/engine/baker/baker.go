@@ -419,7 +419,19 @@ func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSk
 	},
 		func(string, *s57.Chart) struct{} { return struct{}{} },
 		func(name string, chart *s57.Chart, _ struct{}) {
-			band := b.AddCellCoverage(chart)
+			band, n := b.AddCellCoverage(chart)
+			if n == 0 {
+				// The M_COVR-only coverage parse found no data-coverage polygon (the
+				// cell omits M_COVR — non-conformant, e.g. the S-52 PresLib test cells).
+				// Re-parse it fully so AddCellCoverage's bounding-box fallback has the
+				// cell's geometry to derive a coverage rectangle from; otherwise the cell
+				// contributes nothing to covMeta and a coarser band's symbols double-draw
+				// over it. Rare (real ENCs always carry M_COVR), so the extra parse is fine.
+				cd := cells[name]
+				if full, err := ParseCellWithUpdates(name, cd.Base, cd.Updates); err == nil {
+					band, _ = b.AddCellCoverage(full)
+				}
+			}
 			byBand[band.ZoomRange().Max] = append(byBand[band.ZoomRange().Max], name)
 			parsed++
 			if progress != nil {
