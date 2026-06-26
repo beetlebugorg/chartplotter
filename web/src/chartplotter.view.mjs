@@ -384,26 +384,28 @@ export const STYLE = `
         /* Job-progress row inside the bottom status card — sits ABOVE the nav
            readout, separated by a hairline divider. One width with the card so the
            label can run full-width; the percentage is pinned right. */
-        .db-prog { width:100%; box-sizing:border-box; display:flex; flex-direction:column; gap:6px;
-          padding-bottom:7px; margin-bottom:1px; border-bottom:1px solid var(--ui-border); }
+        .db-prog { width:100%; box-sizing:border-box; display:flex; flex-direction:column; gap:7px;
+          padding-bottom:9px; margin-bottom:2px; border-bottom:1px solid var(--ui-border); }
         .db-prog[hidden] { display:none; }
-        .db-prog-head { display:flex; align-items:center; gap:8px; font:600 12px/1.2 system-ui,sans-serif; color:var(--ui-text); }
-        .db-prog-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .db-prog-pct { flex:none; font-weight:700; color:var(--ui-accent); font-variant-numeric:tabular-nums; }
-        .db-prog.error .db-prog-pct { color:#c0392b; }
-        .db-prog.error .db-prog-label { color:#c0392b; }
-        /* Spinner shows only while actively working (not on the done/error frame). */
-        .db-prog-spin { width:13px; height:13px; flex:none; border-radius:50%; display:none;
-          border:2px solid color-mix(in srgb, var(--ui-accent) 30%, transparent); border-top-color:var(--ui-accent);
-          animation:dlspin .8s linear infinite; }
-        .db-prog.busy .db-prog-spin { display:inline-block; }
-        .db-prog-track { position:relative; width:100%; height:5px; border-radius:3px; overflow:hidden; background:var(--ui-surface-2); }
-        .db-prog-fill { position:absolute; left:0; top:0; bottom:0; width:0; border-radius:3px; background:var(--ui-accent); transition:width .25s ease; }
+        /* Title (region) on top — the stable headline; the eye isn't re-reading it. */
+        .db-prog-title { font:600 12.5px/1.25 system-ui,sans-serif; color:var(--ui-text);
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .db-prog-title:empty { display:none; }
+        /* Status row beneath it: the live action (left) + the count-with-unit (right,
+           the ONLY moving number — the bar carries the proportion, no percentage). */
+        .db-prog-status { display:flex; align-items:baseline; gap:10px;
+          font:500 11.5px/1.3 system-ui,sans-serif; color:var(--ui-text-dim); }
+        .db-prog-action { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .db-prog-count { flex:none; font-variant-numeric:tabular-nums; }
+        .db-prog-status:empty { display:none; }
+        .db-prog.error .db-prog-title, .db-prog.error .db-prog-action { color:#c0392b; }
+        .db-prog-track { position:relative; width:100%; height:6px; border-radius:3px; overflow:hidden; background:var(--ui-surface-2); }
+        .db-prog-fill { position:absolute; left:0; top:0; bottom:0; width:0; border-radius:3px; background:var(--ui-accent); transition:width .3s ease; }
         .db-prog.error .db-prog-fill { background:#c0392b; }
-        /* Indeterminate (no known fraction): a sweeping segment instead of a fill. */
-        .db-prog-fill.indet { width:35% !important; animation:db-sweep 1.1s ease-in-out infinite; }
-        @keyframes db-sweep { 0% { left:-35%; } 100% { left:100%; } }
-        @media (prefers-reduced-motion: reduce) { .db-prog-spin { animation-duration:2s; } .db-prog-fill.indet { animation:none; left:0; width:100% !important; } }
+        /* Indeterminate (no known fraction): one slow, calm sweep — no spinner. */
+        .db-prog-fill.indet { width:30% !important; animation:db-sweep 1.9s ease-in-out infinite; }
+        @keyframes db-sweep { 0% { left:-30%; } 100% { left:100%; } }
+        @media (prefers-reduced-motion: reduce) { .db-prog-fill.indet { animation:none; left:0; width:100% !important; } }
         /* NotificationCenter banners: a bottom-stacked toast list (non-task messages). */
         #toasts { position:absolute; left:50%; bottom:calc(var(--botbar-h) + 14px); transform:translateX(-50%); z-index:9; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
         .toast { pointer-events:auto; max-width:80vw; padding:9px 14px; border-radius:8px; font:600 12.5px/1.3 system-ui,sans-serif; color:var(--ui-text); background:var(--ui-surface); border:1px solid var(--ui-border-2); box-shadow:0 4px 16px rgba(0,0,0,.28); opacity:1; transition:opacity .3s ease, transform .3s ease; }
@@ -536,10 +538,10 @@ export const CHROME = `
            readout while a job runs. Driven by _updateHud + _setNotification. -->
       <div id="databox" hidden>
         <div id="db-prog" class="db-prog" hidden>
-          <div class="db-prog-head">
-            <span class="db-prog-spin"></span>
-            <span id="db-prog-label" class="db-prog-label"></span>
-            <span id="db-prog-pct" class="db-prog-pct"></span>
+          <div id="db-prog-title" class="db-prog-title"></div>
+          <div class="db-prog-status">
+            <span id="db-prog-action" class="db-prog-action"></span>
+            <span id="db-prog-count" class="db-prog-count"></span>
           </div>
           <div class="db-prog-track"><span id="db-prog-fill" class="db-prog-fill"></span></div>
         </div>
