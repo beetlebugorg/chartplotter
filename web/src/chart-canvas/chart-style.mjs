@@ -162,7 +162,16 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
   // see buildStyle.)
   const notLand = ["match", ["get", "color_token"], ["LANDA", "CHBRN"], false, true];
   const base = [
-    { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}), paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
+    // Paint area fills in S-52 display-priority order (DrawingPriority, baked as
+    // draw_prio: DEPARE=3, LNDARE=12…) so a higher-priority fill draws ON TOP — e.g.
+    // land over water. Real ENCs tile their areas (no overlap, so order is moot), but
+    // a cell with OVERLAPPING areas (the PresLib "ECDIS Chart 1" inset: one deep-water
+    // polygon under the shallow water + land) would otherwise paint last-in-tile on
+    // top, hiding land/shallow under deep water. Tiebreak by -drval1 so shallower
+    // water draws over deeper within the same priority.
+    { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}),
+      layout: { "fill-sort-key": ["-", ["*", ["coalesce", ["get", "draw_prio"], 0], 1000], ["coalesce", ["get", "drval1"], 0]] },
+      paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
     { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
     // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
     // the shallow side of the live safety contour, shown only when the
