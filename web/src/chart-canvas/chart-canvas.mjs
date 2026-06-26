@@ -766,6 +766,15 @@ export class ChartCanvas extends HTMLElement {
 
     const cam = { center: [fix.lng, fix.lat], duration, easing: LINEAR };
 
+    // Look-ahead offset: in course-/head-up the chart rotates so the vessel's
+    // direction points up, so we sit the vessel ⅓ up from the bottom — most of the
+    // screen is water *ahead*. Screen y is down, so a positive y-offset drops the
+    // centre (the vessel) below the container middle; ⅓-from-bottom is ⅙ of the
+    // height below centre. North-up stays centred (offset 0).
+    const h = (this._followLookAhead !== false && (this._cameraMode === "course-up" || this._cameraMode === "head-up"))
+      ? (map.getContainer() && map.getContainer().clientHeight) || 0 : 0;
+    if (h) cam.offset = [0, h / 6];
+
     // Hold the mode's bearing on every fix; otherwise this centre-only ease would
     // cancel the one-shot bearing reset from setCameraMode (north-up gets stuck at
     // the previous course-up heading). Feed an UNWRAPPED target relative to the
