@@ -299,9 +299,10 @@ func (s *Server) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
 // un-indexed cell has no footprint to test or fly to).
 func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
 	active := r.URL.Query().Get("active") == "1"
-	var enabled [][4]float64
+	var inPack map[string]bool // cells baked into enabled packs (exact, from manifests)
+	var legacy [][4]float64    // bounds of enabled packs WITHOUT a manifest (bbox fallback)
 	if active {
-		enabled = s.enabledPackBounds()
+		inPack, legacy = s.enabledPackCells()
 	}
 	_, idx := s.cellIdx.snapshot()
 	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "ENC_ROOT"))
@@ -313,8 +314,13 @@ func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
 		}
 		n := e.Name()
 		box, has := idx[n]
-		if active && (!has || !bboxOverlapsAny(box, enabled)) {
-			continue
+		if active {
+			// Active = actually baked into an enabled pack. Prefer the exact per-pack
+			// cell manifest; fall back to bbox-overlap only for legacy packs without
+			// one (so a globe-spanning import doesn't drag in every cached cell).
+			if !(inPack[n] || (has && bboxOverlapsAny(box, legacy))) {
+				continue
+			}
 		}
 		names = append(names, n)
 		if has {
@@ -329,21 +335,32 @@ func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
 	}{names, boxes})
 }
 
-// enabledPackBounds is each enabled pack's [W,S,E,N] (read from its archive),
-// used by the ?active filter to test which cells are currently on the map.
-func (s *Server) enabledPackBounds() [][4]float64 {
-	var out [][4]float64
+// enabledPackCells reports which cells are "active" (on the map). It returns (a) the
+// union of cell stems recorded for each ENABLED pack that has a cell manifest (written
+// at bake time by writeSetCells) — the exact installed set — and (b) the [W,S,E,N] of
+// each enabled pack with NO manifest (a legacy pack baked before per-pack cell
+// tracking), for the ?active filter to fall back to bbox-overlap on. Re-baking a
+// legacy pack (re-import) writes its manifest and moves it onto the exact path.
+func (s *Server) enabledPackCells() (map[string]bool, [][4]float64) {
+	cells := map[string]bool{}
+	var legacy [][4]float64
 	for _, name := range sortedKeys(s.packs) {
 		if s.prefs.isDisabled(name) {
+			continue
+		}
+		if stems, ok := s.setCells(name); ok {
+			for _, st := range stems {
+				cells[st] = true
+			}
 			continue
 		}
 		if src, err := tilesource.Open(s.packs[name]); err == nil {
 			m := src.Meta()
 			_ = tilesource.Close(src)
-			out = append(out, [4]float64{m.W, m.S, m.E, m.N})
+			legacy = append(legacy, [4]float64{m.W, m.S, m.E, m.N})
 		}
 	}
-	return out
+	return cells, legacy
 }
 
 // bboxOverlapsAny reports whether [W,S,E,N] box intersects any of the rects.

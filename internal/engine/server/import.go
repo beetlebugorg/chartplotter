@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -539,6 +540,12 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 			if err := s.writeAndRegister(bandSet, pb, bandAux); err != nil {
 				return err
 			}
+			// Record which cells went into this pack (beside its pmtiles), so
+			// /api/cells?active returns exactly the installed cells — not every
+			// cached cell that overlaps the pack's (often global) bounding box.
+			if err := s.writeSetCells(bandSet, cells); err != nil {
+				log.Printf("import %s: cell manifest %q: %v", jobID, bandSet, err)
+			}
 			first = false
 			bands++
 			tiles += pb.Count()
@@ -588,6 +595,42 @@ func (s *Server) setDir(set string) string {
 		return filepath.Join(s.cacheDir, provider, pack)
 	}
 	return filepath.Join(s.cacheDir, "import")
+}
+
+// writeSetCells records the cell stems baked into `set` beside its pmtiles
+// (<setDir>/<set>.cells.json). /api/cells?active reads these to return exactly the
+// installed cells, instead of every cached cell whose bounds overlap the pack's
+// (often global, for a worldwide-scattered import) bounding box.
+func (s *Server) writeSetCells(set string, cells map[string]baker.CellData) error {
+	stems := make([]string, 0, len(cells))
+	for n := range cells {
+		stems = append(stems, strings.TrimSuffix(n, ".000"))
+	}
+	sort.Strings(stems)
+	dir := s.setDir(set)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	b, err := json.Marshal(stems)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, set+".cells.json"), b, 0o644)
+}
+
+// setCells reads the cell-stem manifest written by writeSetCells for `set`, or nil
+// (with ok=false) if the pack has none — a legacy pack baked before per-pack cell
+// tracking, for which the caller falls back to bbox-overlap.
+func (s *Server) setCells(set string) ([]string, bool) {
+	data, err := os.ReadFile(filepath.Join(s.setDir(set), set+".cells.json"))
+	if err != nil {
+		return nil, false
+	}
+	var stems []string
+	if json.Unmarshal(data, &stems) != nil {
+		return nil, false
+	}
+	return stems, true
 }
 
 // writeAndRegister writes the baked archive to <setDir>/<set>.pmtiles atomically
