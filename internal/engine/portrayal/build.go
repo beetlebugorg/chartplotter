@@ -222,6 +222,15 @@ func areaLabelPoint(rings [][]geo.LatLon) (geo.LatLon, bool) {
 		return geo.LatLon{}, false
 	}
 	ext := rings[0]
+	// S-52 §8.5.3: the representative point is the area's CENTRE OF GRAVITY by
+	// default; only when the centroid falls outside the area (concave / holed
+	// shapes) is another point used. Prefer the centroid when it's inside — it
+	// sits at the true centre, whereas the pole of inaccessibility below drifts
+	// off-centre along a wide shape's mid-line (a wide rectangle's pole is not
+	// unique), which left centred symbols visibly off-centre.
+	if c, ok := ringCentroid(ext); ok && pointInRingsEvenOdd(c, rings) {
+		return c, true
+	}
 	minLat, minLon := math.Inf(1), math.Inf(1)
 	maxLat, maxLon := math.Inf(-1), math.Inf(-1)
 	var sumLat, sumLon float64
@@ -296,6 +305,46 @@ func areaLabelPoint(rings [][]geo.LatLon) (geo.LatLon, bool) {
 		heap.Push(pq, mkCell(c.x+hh, c.y+hh, hh))
 	}
 	return geo.LatLon{Lat: best.y, Lon: best.x / kx}, true
+}
+
+// ringCentroid returns the area centroid (centre of gravity) of a polygon ring
+// via the shoelace formula. ok is false for a degenerate (zero-area) ring. The
+// ring may be open or closed; edges wrap. Computed in raw lon/lat — the slight
+// cos(lat) skew is immaterial for a centring point over a chart-sized area.
+func ringCentroid(ring []geo.LatLon) (geo.LatLon, bool) {
+	n := len(ring)
+	if n < 3 {
+		return geo.LatLon{}, false
+	}
+	var a, cx, cy float64
+	for i := 0; i < n; i++ {
+		j := (i + 1) % n
+		cross := ring[i].Lon*ring[j].Lat - ring[j].Lon*ring[i].Lat
+		a += cross
+		cx += (ring[i].Lon + ring[j].Lon) * cross
+		cy += (ring[i].Lat + ring[j].Lat) * cross
+	}
+	if math.Abs(a) < 1e-12 {
+		return geo.LatLon{}, false
+	}
+	a *= 0.5
+	return geo.LatLon{Lat: cy / (6 * a), Lon: cx / (6 * a)}, true
+}
+
+// pointInRingsEvenOdd reports whether p is inside the even-odd union of rings
+// (exterior boundary + holes): inside the exterior AND outside every hole.
+func pointInRingsEvenOdd(p geo.LatLon, rings [][]geo.LatLon) bool {
+	inside := false
+	for _, ring := range rings {
+		n := len(ring)
+		for i, j := 0, n-1; i < n; j, i = i, i+1 {
+			if (ring[i].Lat > p.Lat) != (ring[j].Lat > p.Lat) &&
+				p.Lon < (ring[j].Lon-ring[i].Lon)*(p.Lat-ring[i].Lat)/(ring[j].Lat-ring[i].Lat)+ring[i].Lon {
+				inside = !inside
+			}
+		}
+	}
+	return inside
 }
 
 // plCell is one square candidate region in the polylabel search (scaled space).
