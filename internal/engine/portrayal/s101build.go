@@ -426,15 +426,37 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 // commandsNeedAnchor reports whether any reduced draw command consumes the
 // feature anchor — the anchored ops emitPrimitives reads geom.Anchor for: point
 // symbols, text, and sector/augmented figures. Fills and boundary lines don't,
-// so an area emitting only those skips the expensive polylabel anchor.
+// so an area emitting only those skips the expensive polylabel anchor. A SPARSE
+// fill pattern (lattice-placed symbols) needs it too, for the small-area
+// fallback (one centred symbol when no lattice point lands inside).
 func commandsNeedAnchor(cmds []instructions.DrawCommand) bool {
 	for _, c := range cmds {
 		switch c.Op {
 		case instructions.OpPoint, instructions.OpText, instructions.OpAugmentedLine:
 			return true
+		case instructions.OpAreaFill:
+			if sparseFillPatterns[c.Reference] {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// sparseFillPatterns are the S-52 "fill patterns" (PresLib §8.5.4): WIDELY-SPACED
+// symbol patterns (lattice cell ≳20 mm) placed as discrete whole symbols on a
+// geographic lattice rather than tiled as a texture — so a symbol is never
+// clipped mid-glyph at the area boundary (the "strange looking pattern fill"
+// §8.5.4 warns against) and small areas still get a centred symbol. Dense
+// "textures" (DRGARE dots, DIAMOND1 night-shading, NODATA/PRTSUR dashes, ICEARE,
+// FOULAR, TSSJCT, vegetation) stay tiled fill-patterns.
+var sparseFillPatterns = map[string]bool{
+	"DQUALA11": true, "DQUALA21": true, "DQUALB01": true,
+	"DQUALC01": true, "DQUALD01": true, "DQUALU01": true,
+	"MARCUL02": true,                                     // aquaculture / marine farm
+	"FSHFAC03": true, "FSHFAC04": true, "FSHHAV02": true, // fishing facility / fish haven
+	"AIRARE02": true, // airport / airfield
+	"SNDWAV01": true, // sand waves
 }
 
 // strokeRunsFor returns the drawable polylines an S-101 line draw strokes for a

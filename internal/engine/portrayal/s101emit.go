@@ -57,6 +57,20 @@ func emitPrimitives(cmd instructions.DrawCommand, geom S101Geometry, cat *catalo
 		if len(geom.Rings) == 0 {
 			return nil
 		}
+		// Widely-spaced "fill patterns" (§8.5.4) are placed as discrete whole
+		// symbols on a geographic lattice by the baker (no mid-glyph edge clip),
+		// not tiled as a texture. Carry the lattice (V1/V2 in mm) + a rep point.
+		if sparseFillPatterns[cmd.Reference] && cat != nil {
+			if af := cat.AreaFills[cmd.Reference]; af != nil {
+				return []Primitive{PatternFill{
+					Rings: geom.Rings, PatternName: cmd.Reference, Sparse: true,
+					SymbolRef: af.SymbolRef,
+					V1:        [2]float64{af.V1.X, af.V1.Y},
+					V2:        [2]float64{af.V2.X, af.V2.Y},
+					Anchor:    geom.Anchor,
+				}}
+			}
+		}
 		return []Primitive{PatternFill{Rings: geom.Rings, PatternName: cmd.Reference}}
 
 	case instructions.OpLine:

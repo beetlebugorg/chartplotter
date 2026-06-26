@@ -1085,6 +1085,12 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		r.attrs = common(extra...)
 		b.add(r, ringsBbox(v.Rings))
 	case portrayal.PatternFill:
+		if v.Sparse {
+			// Widely-spaced fill pattern (§8.5.4): place discrete WHOLE symbols on a
+			// geographic lattice instead of a tiled, edge-clipped texture.
+			b.routeSparsePattern(v, common, r)
+			break
+		}
 		r.layer, r.kind, r.nrings = scaminLayer("area_patterns", r.bcScamin), mvt.GeomPolygon, normRings(v.Rings)
 		r.attrs = common(mvt.KeyValue{Key: "pattern_name", Value: mvt.StringVal(v.PatternName)})
 		b.add(r, ringsBbox(v.Rings))
@@ -1205,6 +1211,107 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 	}
 	r.attrs = attrs
 	b.add(r, ptBbox(v.Anchor))
+}
+
+// routeSparsePattern places a widely-spaced S-52 "fill pattern" (PresLib §8.5.4)
+// as individual WHOLE symbols on a fixed geographic lattice, instead of a tiled
+// MapLibre fill-pattern (which clips symbols mid-glyph at the area edge and can't
+// adapt its spacing to the area). The lattice is spanned by the pattern's V1/V2
+// vectors (display millimetres → ground metres at the cell's compilation scale)
+// and phase-anchored to a global origin, so adjacent areas align and the pattern
+// doesn't drift on pan (§8.5.4: "based on a geographical position … not on an edge
+// of the … area"). A symbol is emitted only where a lattice point falls INSIDE the
+// polygon (whole, never clipped); if the area is too small to contain one, a
+// single symbol is centred on the representative point (the small-area case).
+func (b *Baker) routeSparsePattern(v portrayal.PatternFill, common func(...mvt.KeyValue) []mvt.KeyValue, r routed) {
+	emit := func(ll geo.LatLon) {
+		b.routeSymbol(portrayal.SymbolCall{
+			Anchor:         ll,
+			SymbolName:     v.SymbolRef,
+			Scale:          portrayal.DefaultPxPerSymbolUnit,
+			CentreOnArea:   true, // centre each glyph on its lattice point
+			SoundingDepthM: nan32f,
+			DangerDepthM:   nan32f,
+		}, common, r)
+	}
+
+	scale := float64(b.curCscl)
+	if scale <= 0 || len(v.Rings) == 0 || len(v.Rings[0]) < 3 {
+		emit(v.Anchor) // no scale/geometry → fall back to one centred symbol
+		return
+	}
+	// Lattice basis in ground metres: P mm on the chart at 1:scale = P/1000·scale m.
+	// V1 is horizontal (east); V1[1] is always 0 in the catalogue.
+	const mPerMM = 1.0 / 1000.0
+	v1e := v.V1[0] * mPerMM * scale
+	v2e := v.V2[0] * mPerMM * scale
+	v2n := v.V2[1] * mPerMM * scale
+	if v1e < 1 || v2n < 1 {
+		emit(v.Anchor)
+		return
+	}
+	// Local equirectangular metres with a GLOBAL (0,0) origin so the lattice phase
+	// is shared across areas; the east scale uses cos(latRef) for the cell's band.
+	bb := ringsBbox(v.Rings)
+	latRef := (bb.MinLat + bb.MaxLat) / 2
+	const mPerDegLat = 111320.0
+	mPerDegLon := mPerDegLat * math.Cos(latRef*math.Pi/180)
+	if mPerDegLon < 1 {
+		emit(v.Anchor)
+		return
+	}
+	// Convert rings to [lon,lat] for the even-odd point-in-polygon test.
+	rings := make([][][]float64, len(v.Rings))
+	for i, ring := range v.Rings {
+		rr := make([][]float64, len(ring))
+		for k, p := range ring {
+			rr[k] = []float64{p.Lon, p.Lat}
+		}
+		rings[i] = rr
+	}
+	// A symbol must remain INSIDE the area (§8.5.1.1) — placing it only where its
+	// centre is inside still lets a glyph overhang the boundary. So require the
+	// symbol's footprint to fit: test the lattice point plus four cardinal offsets
+	// at ~symbol-half-extent (a fraction of the cell) are all inside. This also
+	// makes a SMALL area (≈ one cell, e.g. the Chart-1 quality boxes) hold no
+	// fitting lattice point, so it collapses to one centred symbol (§8.5.2 / the
+	// spec's "closer together for a small area" intent) rather than a clutter of
+	// edge-clipped repeats.
+	insetLon := 0.4 * v1e / mPerDegLon
+	insetLat := 0.4 * v2n / mPerDegLat
+	fits := func(lon, lat float64) bool {
+		return pointInRings(lon, lat, rings) &&
+			pointInRings(lon-insetLon, lat, rings) && pointInRings(lon+insetLon, lat, rings) &&
+			pointInRings(lon, lat-insetLat, rings) && pointInRings(lon, lat+insetLat, rings)
+	}
+	eMin, eMax := bb.MinLon*mPerDegLon, bb.MaxLon*mPerDegLon
+	nMin, nMax := bb.MinLat*mPerDegLat, bb.MaxLat*mPerDegLat
+	jLo, jHi := int(math.Floor(nMin/v2n)), int(math.Ceil(nMax/v2n))
+	var pts []geo.LatLon
+	const maxLattice = 4000 // perf guard; sparse patterns never approach this
+	for j := jLo; j <= jHi && len(pts) < maxLattice; j++ {
+		n := float64(j) * v2n
+		iLo := int(math.Floor((eMin - float64(j)*v2e) / v1e))
+		iHi := int(math.Ceil((eMax - float64(j)*v2e) / v1e))
+		for i := iLo; i <= iHi && len(pts) < maxLattice; i++ {
+			e := float64(i)*v1e + float64(j)*v2e
+			lon, lat := e/mPerDegLon, n/mPerDegLat
+			if fits(lon, lat) {
+				pts = append(pts, geo.LatLon{Lat: lat, Lon: lon})
+			}
+		}
+	}
+	// A small area that seats at most one symbol gets a single CENTRED symbol on
+	// the representative point (§8.5.2) — centred in its box, not parked at an
+	// off-centre global-lattice point. Only a larger area (≥2 fitting points) draws
+	// the spaced lattice.
+	if len(pts) <= 1 {
+		emit(v.Anchor)
+		return
+	}
+	for _, ll := range pts {
+		emit(ll)
+	}
 }
 
 // emitScaleBoundaries draws S-52 DATCVR §10.1.9.1 "chart scale boundaries": a
