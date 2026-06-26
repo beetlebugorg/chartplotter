@@ -1225,11 +1225,15 @@ func (b *Baker) routeSymbol(v portrayal.SymbolCall, common func(...mvt.KeyValue)
 // single symbol is centred on the representative point (the small-area case).
 func (b *Baker) routeSparsePattern(v portrayal.PatternFill, common func(...mvt.KeyValue) []mvt.KeyValue, r routed) {
 	emit := func(ll geo.LatLon) {
+		// No CentreOnArea: a pattern symbol carries its pivot at its designed
+		// centre (the <circle class="pivotPoint"> at 0,0), so the normal pivot-on-
+		// point placement centres it exactly. CentreOnArea's "ctr:" variant centres
+		// the content BOUNDING BOX instead — meant for corner-pivot "…RES" symbols —
+		// and would nudge these off (a downward triangle's bbox centre ≠ its pivot).
 		b.routeSymbol(portrayal.SymbolCall{
 			Anchor:         ll,
 			SymbolName:     v.SymbolRef,
 			Scale:          portrayal.DefaultPxPerSymbolUnit,
-			CentreOnArea:   true, // centre each glyph on its lattice point
 			SoundingDepthM: nan32f,
 			DangerDepthM:   nan32f,
 		}, common, r)
