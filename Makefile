@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo serve-demo
+.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo serve-demo preslib-chart1
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -204,6 +204,14 @@ serve-demo: demo ## Preview the static demo bundle locally (range-capable static
 
 docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
 	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)
+
+# Render the S-52 PresLib "ECDIS Chart 1" panels (one PNG per reference-plot page)
+# with our implementation, for visual diffing against the spec's reference plots
+# (PresLib e4.0.0 Part I §16). Self-contained: extracts the cells, bakes+serves via
+# the import path, screenshots each panel, tears down. Needs the PresLib zip in
+# testdata/ + a headless Chromium. Output → testdata/preslib-chart1-out/ (gitignored).
+preslib-chart1: ## Render PresLib "ECDIS Chart 1" panels for spec comparison (one PNG per reference page)
+	scripts/preslib-chart1.sh
 
 # Regenerate the documentation UI screenshots (docs/static/img/ui/*.png) from the
 # live app, so they stay in sync when the UI changes. Needs baked charts in the

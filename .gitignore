@@ -9,6 +9,10 @@ coverage.*
 /testdata/full/
 /All_ENCs.zip
 
+# S-52 PresLib "ECDIS Chart 1" harness: extracted cells + rendered panels
+/testdata/preslib_chart1/
+/testdata/preslib-chart1-out/
+
 # Generated tile archives / runtime chart state (never committed)
 *.pmtiles
 web/noaa.pmtiles
