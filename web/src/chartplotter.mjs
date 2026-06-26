@@ -516,6 +516,11 @@ export class ChartPlotter extends HTMLElement {
     // Apply persisted display prefs.
     if (this._scheme !== "day") this._plotter.setScheme(this._scheme);
     this.setAttribute("data-scheme", this._scheme);
+    // Calibrated CSS-pixel pitch drives true-physical feature sizing in the renderer
+    // (the same calibration the scale readout uses). Push it before the first frame.
+    if (typeof this._pxPitch === "number" && this._plotter.setPxPitch) {
+      try { this._plotter.setPxPitch(this._pxPitch); } catch (e) { console.warn(e); }
+    }
     if (Object.keys(this._mariner).length) {
       try { this._plotter.setMariner(this._mariner); } catch (e) { console.warn(e); }
     }
@@ -1699,6 +1704,8 @@ export class ChartPlotter extends HTMLElement {
     try { localStorage.setItem(LS_PX_PITCH, JSON.stringify(this._pxPitch ?? null)); } catch (e) { /* quota/private */ }
     this._persistSettings();
     if (this._hud) this._hud.updateHud();
+    // Re-render features at true physical size for the new pitch (icons/lines/text).
+    if (this._plotter && this._plotter.setPxPitch) { try { this._plotter.setPxPitch(this._pxPitch); } catch (e) { console.warn(e); } }
   }
 
   // Fetch the server-persisted display settings at boot and adopt them over the
