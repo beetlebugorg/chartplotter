@@ -27,6 +27,7 @@ import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 d
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { OwnShip } from "./plugins/own-ship.mjs"; // own-ship marker + course predictor + follow camera
 import { AISOverlay } from "./plugins/ais-overlay.mjs"; // AIS targets (other vessels) from the live feed
+import { InfoCallouts } from "./plugins/info-callouts.mjs"; // precise DOM tap pads on INFORM01 info-callout boxes
 import "./plugins/target-info.mjs"; // defines <target-info> (own-ship / AIS tap-info picker)
 import { PALETTE_DAY_ICON, PALETTE_DUSK_ICON, PALETTE_NIGHT_ICON } from "./lib/openbridge-icons.mjs"; // OpenBridge scheme glyphs
 import { DISTRICTS, NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA CG-district packs + ENC page (shared)
@@ -661,6 +662,15 @@ export class ChartPlotter extends HTMLElement {
       this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
       // AIS targets (other vessels) from the live feed.
       this._ais = new AISOverlay({ map, assets: this._assets, widget: this._widget, onSelect: showInfo, units: () => this._mariner });
+      // Precise DOM tap pads on the INFORM01 "additional information" callout boxes
+      // (the box floats offset from the feature, so the fuzzy symbol pick can't own
+      // it). Sparse by nature — only info-bearing features — so DOM markers are fine.
+      this._infoCallouts = new InfoCallouts({
+        map,
+        getSizeScale: () => (this._plotter && this._plotter._featureSizeScale ? this._plotter._featureSizeScale() : 1),
+        atlasPpu: (this._plotter && this._plotter._atlasPpu) || 0.08,
+        onSelect: (f) => this.showInfoForFeature(f),
+      });
     }
 
     // Persist the view so a refresh resumes where you were; refresh the coverage
@@ -1296,6 +1306,20 @@ export class ChartPlotter extends HTMLElement {
     el.setAux(this._aux);
     el.setUnits(this._mariner); // heights/ranges/speeds in the mariner's chosen units
     el.show(uniq, ev ? { x: ev.clientX, y: ev.clientY } : null);
+  }
+
+  // Open the pick report for ONE feature — the info-callout pads (InfoCallouts) call
+  // this when their box is tapped, so a callout surfaces exactly its own object's
+  // additional information rather than a cursor-pick of whatever's under the box.
+  showInfoForFeature(f) {
+    if (!f) return;
+    const el = this._ensurePickEl();
+    if (!el) return;
+    f._hiGeom = f.geometry;
+    el.setCatalogue(this._s57cat);
+    el.setAux(this._aux);
+    el.setUnits(this._mariner);
+    el.show([f], null);
   }
 
   // Create the cursor-pick panel on first use and bridge it to the map highlight.
