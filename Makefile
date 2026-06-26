@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo serve-demo preslib-chart1
+.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -212,6 +212,14 @@ docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT 
 # testdata/ + a headless Chromium. Output → testdata/preslib-chart1-out/ (gitignored).
 preslib-chart1: ## Render PresLib "ECDIS Chart 1" panels for spec comparison (one PNG per reference page)
 	scripts/preslib-chart1.sh
+
+# Render the IHO S-64 ENC test dataset's rendering pages (one PNG per test section)
+# for diffing against the S-64 reference plots. Same self-contained flow as
+# preslib-chart1, but the S-64 tests vary the mariner settings per page (§3.1 renders
+# Base/Standard/Other). Needs the S-64 zip in testdata/ + a headless Chromium.
+# Output → testdata/s64-pages-out/ (gitignored).
+s64-pages: ## Render S-64 ENC test pages for spec comparison (one PNG per test section)
+	scripts/s64-pages.sh
 
 # Regenerate the documentation UI screenshots (docs/static/img/ui/*.png) from the
 # live app, so they stay in sync when the UI changes. Needs baked charts in the
