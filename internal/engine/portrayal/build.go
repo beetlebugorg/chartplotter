@@ -780,12 +780,23 @@ func sweptAreaBuild(f *s57.Feature) FeatureBuild {
 	if len(prims) == 0 {
 		return FeatureBuild{DisplayCategory: displayStandard}
 	}
-	// "swept to <DRVAL1>" depth label at the area's representative point.
-	if d, ok := floatAttr(f.Attributes(), "DRVAL1"); ok {
-		if a, ok := areaSurfacePoint(ringLL(exteriorRing(g))); ok {
+	// Swept-depth notation at the area's representative point: the SWPARE51 "⊔"
+	// bracket centred on the point, with the "swept to <DRVAL1>" label just above
+	// it (S-101 HighConfidenceDepthArea: SY(SWPARE51) + text at LocalOffset 0,-3.51
+	// mm). The S-101 SweptArea rule is an IHO gap, so this Go fallback reproduces it.
+	if a, ok := areaSurfacePoint(ringLL(exteriorRing(g))); ok {
+		prims = append(prims, SymbolCall{
+			Anchor: a, SymbolName: "SWPARE51", Scale: DefaultPxPerSymbolUnit,
+			SoundingDepthM: nan32, DangerDepthM: nan32,
+		})
+		if d, ok := floatAttr(f.Attributes(), "DRVAL1"); ok {
 			prims = append(prims, DrawText{
+				// VAlignTop anchors the text at its top edge on the rep point, so it
+				// drops BELOW the SWPARE51 bracket (which extends UP from the same
+				// point) instead of overprinting it — the client text layer ignores
+				// per-feature pixel offsets, so position via the anchor.
 				Anchor: a, Text: "swept to " + strconv.FormatFloat(d, 'f', -1, 64),
-				FontSizePx: 11, ColorToken: "CHBLK", HAlign: HAlignCenter, VAlign: VAlignMiddle,
+				FontSizePx: 11, ColorToken: "CHBLK", HAlign: HAlignCenter, VAlign: VAlignTop,
 			})
 		}
 	}
