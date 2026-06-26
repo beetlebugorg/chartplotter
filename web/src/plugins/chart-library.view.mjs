@@ -167,11 +167,10 @@ export const STYLE = `
 // picker. Wired by _wireImport via #file/#drop/#pick.
 export function widgetBody() {
   return `
-        <p class="add-hint">Add your own charts — drop a NOAA <code>.zip</code> / <code>.000</code>, or a baked <code>.pmtiles</code>. They're baked right here in your browser and kept offline alongside the prebaked charts.</p>
+        <p class="add-hint">Add your own charts — drop a NOAA/IENC exchange-set <code>.zip</code>, an individual <code>.000</code>, or a baked <code>.pmtiles</code>. A <code>.zip</code> becomes its own pack, named and described from its catalogue.</p>
         <div id="drop" class="drop"><span class="drop-hint">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br></span><button id="pick" class="btn" style="margin-top:6px">Choose files…</button></div>
         <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
-        <div id="import-log" class="muted"></div>
-        <div id="archive-list"></div>`;
+        <div id="import-log" class="muted"></div>`;
 }
 
 // The full (non-widget) Library body: search box + 3-pane miller + freshness
@@ -340,7 +339,6 @@ export function importDetail() {
       <div id="drop" class="drop"><span class="drop-hint">Drop a <code>.zip</code>, <code>.000</code> or <code>.pmtiles</code> here, or<br></span><button id="pick" class="btn" style="margin-top:8px">Choose files…</button></div>
       <input id="file" type="file" accept=".zip,.000,.pmtiles" multiple hidden>
       <div id="import-log" class="muted"></div>
-      <div id="archive-list"></div>
     </div></div>`;
 }
 
@@ -373,15 +371,4 @@ export function agreementModal({ encUrl, agreementUrl }) {
             </div>
           </div>
         </div>`;
-}
-
-// The "from archive" selectable cell list (after a .zip is opened).
-//   items: [{ name, label, checked }]   nSel: count of selected
-export function archiveList({ items, nSel }) {
-  return `<h4>From archive (${items.length})</h4>` + items.map((it) => {
-    const checked = it.checked ? "checked" : "";
-    return `<label class="row"><input type="checkbox" data-name="${it.name}" ${checked}>
-        <span class="grow"><span class="name">${it.name}</span> <span class="meta">${it.label || ""}</span></span></label>`;
-  }).join("") +
-    `<div style="margin-top:8px"><button id="import-btn" class="btn">Import ${nSel} chart(s)</button></div>`;
 }

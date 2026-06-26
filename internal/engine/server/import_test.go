@@ -43,9 +43,14 @@ func TestExtractZipCells(t *testing.T) {
 		"ENC_ROOT/README.TXT":            []byte("readme"),    // excluded
 		"ENC_ROOT/US5MD1MC/US5MD1MC.TXT": []byte("desc"),      // aux text
 	})
-	cells, aux, err := extractZipCells(z)
+	cells, aux, cat, err := extractZipCells(z)
 	if err != nil {
 		t.Fatalf("extractZipCells: %v", err)
+	}
+	// The bogus CATALOG.031 bytes aren't a valid ISO 8211 file → parse fails
+	// gracefully to a nil catalogue (logged, ignored), not an error.
+	if cat != nil {
+		t.Errorf("expected nil catalogue from unparseable CATALOG.031, got %+v", cat)
 	}
 	if len(cells) != 2 {
 		t.Fatalf("cells = %d, want 2", len(cells))

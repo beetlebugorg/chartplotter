@@ -19,6 +19,7 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
 
 // Server-side import/bake. POST /api/import takes ENC input — an uploaded
@@ -135,14 +136,18 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	set := r.URL.Query().Get("set")
-	if !isSetName(set) {
+	// "auto" (or empty) means "name this upload from its CATALOG identity" — the
+	// one-pack-per-upload path. The real name is derived below, after the zip is
+	// parsed (we need its catalogue / cell names first).
+	autoName := set == "" || set == "auto"
+	if !autoName && !isSetName(set) {
 		apiErr(w, http.StatusBadRequest, "set must be a valid name")
 		return
 	}
 	overzoom := r.URL.Query().Get("overzoom") == "1"
 	applyUpdates := r.URL.Query().Get("updates") != "0" // default: apply .001+ (NtM corrections)
 
-	cells, aux, err := s.importInputs(r)
+	cells, aux, cat, err := s.importInputs(r)
 	if err != nil {
 		apiErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -151,13 +156,55 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "no ENC base cells (.000) in input")
 		return
 	}
+	if autoName {
+		set = s.deriveUploadSet(cat, cells)
+	}
 
 	job := s.imports.create(set)
-	go s.runImport(job.ID, set, cells, aux, overzoom, applyUpdates)
+	go s.runImport(job.ID, set, cells, aux, cat, overzoom, applyUpdates)
 
 	w.Header().Set("Content-Type", jsonCT)
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, `{"ok":true,"job":%q,"set":%q}`, job.ID, set)
+}
+
+// deriveUploadSet picks a stable, friendly pack name for an uploaded exchange set
+// from its CATALOG identity (longest common cell-name prefix), falling back to the
+// cells' shared prefix when there's no catalogue, then to "upload". Namespaced
+// under the "user" provider and uniquified against existing packs.
+func (s *Server) deriveUploadSet(cat *s57.Catalog, cells map[string]baker.CellData) string {
+	id := ""
+	if cat != nil {
+		id = catalogPackIdentity(cat)
+	}
+	if id == "" {
+		stems := make([]string, 0, len(cells))
+		for n := range cells {
+			stems = append(stems, strings.TrimSuffix(n, ".000"))
+		}
+		id = commonPrefixIdentity(stems)
+	}
+	if id == "" {
+		id = "upload"
+	}
+	return s.uniqueSet("user-" + id)
+}
+
+// uniqueSet returns base, or base-2/base-3/… if a pack (any band-set of that
+// district) already exists, so a second upload of the same area doesn't clobber
+// the first.
+func (s *Server) uniqueSet(base string) string {
+	taken := func(name string) bool { return len(s.setsForDistrict(name)) > 0 }
+	if !taken(base) {
+		return base
+	}
+	for i := 2; i < 1000; i++ {
+		cand := base + "-" + itoa(i)
+		if !taken(cand) {
+			return cand
+		}
+	}
+	return base
 }
 
 // importFetchReq is the JSON body of a server-side download+bake. Either zipURL
@@ -234,6 +281,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 
 	var cells map[string]baker.CellData
 	var aux map[string][]byte
+	var cat *s57.Catalog
 
 	if req.ZipURL != "" {
 		// Bulk: stream the one zip (byte progress), then extract + cache its cells.
@@ -251,7 +299,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 		s.imports.update(jobID, func(j *importJob) {
 			j.Phase, j.Unit, j.Note, j.Done, j.Total = "extract", "cells", "Extracting "+name, 0, 0
 		})
-		cells, aux, err = extractZipCells(data)
+		cells, aux, cat, err = extractZipCells(data)
 		if err != nil {
 			fail(err)
 			return
@@ -305,7 +353,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 		bakeMap = s.cachedCellData(strings.Join(req.Bake, ","))
 		maps.Copy(bakeMap, cells)
 	}
-	s.bakeAndRegister(jobID, req.Set, bakeMap, aux, req.Overzoom, applyUpdates)
+	s.bakeAndRegister(jobID, req.Set, bakeMap, aux, cat, req.Overzoom, applyUpdates)
 }
 
 // cacheCells writes each cell's base (+updates) into the ENC_ROOT cache layout so
@@ -397,41 +445,41 @@ func fetchURLProgress(raw string, onProgress func(done, total int)) ([]byte, err
 // importInputs gathers the cells to bake: from an uploaded zip (raw zip body or a
 // multipart "file" field) when one is present, else from the ENC_ROOT cache
 // (optionally narrowed by ?cells=A,B,C).
-func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[string][]byte, error) {
+func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		f, _, err := r.FormFile("file")
 		if err != nil {
-			return nil, nil, fmt.Errorf("multipart: %w", err)
+			return nil, nil, nil, fmt.Errorf("multipart: %w", err)
 		}
 		defer f.Close()
 		data, err := io.ReadAll(io.LimitReader(f, maxImportBytes))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		return s.cacheExtracted(extractZipCells(data))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxImportBytes))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if isZip(body) {
 		return s.cacheExtracted(extractZipCells(body))
 	}
 	// No (zip) body → bake from the cached cells (already on disk).
-	return s.cachedCellData(r.URL.Query().Get("cells")), nil, nil
+	return s.cachedCellData(r.URL.Query().Get("cells")), nil, nil, nil
 }
 
 // cacheExtracted persists freshly-extracted upload cells to the ENC_ROOT source
 // cache before baking, so the ORIGINAL cell files are always kept (re-bakeable
 // after a tile-cache wipe) rather than discarded after an in-memory bake. Passes
 // the (cells, aux, err) triple straight through.
-func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, err error) (map[string]baker.CellData, map[string][]byte, error) {
+func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, err error) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
 	if err == nil && len(cells) > 0 {
 		s.cacheCells(cells)
 	}
-	return cells, aux, err
+	return cells, aux, cat, err
 }
 
 // maxImportBytes caps an uploaded exchange set (a single NOAA district zip is well
@@ -479,8 +527,8 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 }
 
 // runImport bakes cells into <cache>/tiles/<set>.pmtiles and registers the set.
-func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, overzoom, applyUpdates bool) {
-	s.bakeAndRegister(jobID, set, cells, aux, overzoom, applyUpdates)
+func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
+	s.bakeAndRegister(jobID, set, cells, aux, cat, overzoom, applyUpdates)
 }
 
 // bakeAndRegister is the shared bake → write → register tail for every import
@@ -490,7 +538,7 @@ func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, a
 // no-data hatch holes). Each band that produced tiles is written + registered as its
 // own set; the district aux.zip is written once (with the first band). Progress and
 // the terminal state are recorded on the job.
-func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, overzoom, applyUpdates bool) {
+func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
 	fail := func(err error) {
 		log.Printf("import %s (%s): %v", jobID, set, err)
 		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
@@ -555,6 +603,20 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 	}
 	s.imports.update(jobID, func(j *importJob) { j.Cells = nCells })
 	s.auxIdx.invalidate() // the district's companion aux.zip changed — re-index /api/aux
+
+	// Per-pack metadata sidecar for the chart library: per-cell scale/edition/date/
+	// agency/coverage (cheap coverage-only parse) overlaid with the catalogue's chart
+	// titles + coverage. Best-effort — a write failure only costs the extracted detail.
+	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
+	cellMeta := baker.ExtractCellMeta(cells, func(name string, e error) {
+		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
+	})
+	meta := buildSetMeta(set, cellMeta, cat)
+	meta.Imported = time.Now().UTC().Format(time.RFC3339)
+	if err := s.writeSetMeta(set, meta); err != nil {
+		log.Printf("import %s: write meta %q: %v", jobID, set, err)
+	}
+
 	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, nCells, bands, tiles)
 	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
 }
@@ -726,10 +788,10 @@ func (s *Server) importEvents(w http.ResponseWriter, r *http.Request) {
 // extractZipCells reads an exchange-set zip held in memory, grouping each cell's
 // base (.000) + updates (.001…) by cell stem and collecting referenced aux files.
 // It mirrors the CLI's collectCells/addZipCells for an in-memory archive.
-func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte, error) {
+func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, nil, fmt.Errorf("not a valid zip: %w", err)
+		return nil, nil, nil, fmt.Errorf("not a valid zip: %w", err)
 	}
 	type acc struct {
 		base    []byte
@@ -737,20 +799,33 @@ func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte,
 	}
 	byCell := map[string]*acc{}
 	aux := map[string][]byte{}
+	var catalogBytes []byte // CATALOG.031 — parsed after the loop for per-cell metadata
 	for _, e := range zr.File {
-		ext := encExtServer(e.Name)
+		// CATALOG.031 must be tested FIRST: its ".031" extension otherwise looks like
+		// an ENC update file to encExtServer and gets grouped as a baseless update.
+		isCat := isCatalogFile(e.Name)
+		ext := ""
+		if !isCat {
+			ext = encExtServer(e.Name)
+		}
 		isAux := ext == "" && isAuxContentServer(e.Name)
-		if ext == "" && !isAux {
+		if !isCat && ext == "" && !isAux {
 			continue
 		}
 		rc, err := e.Open()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		b, err := io.ReadAll(rc)
 		rc.Close()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		if isCat {
+			if catalogBytes == nil {
+				catalogBytes = b
+			}
+			continue
 		}
 		if isAux {
 			if k := strings.ToUpper(filepath.Base(e.Name)); aux[k] == nil {
@@ -780,7 +855,21 @@ func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte,
 		}
 		cells[stem+".000"] = baker.CellData{Base: a.base, Updates: a.updates}
 	}
-	return cells, aux, nil
+	var cat *s57.Catalog
+	if catalogBytes != nil {
+		if c, err := s57.ParseCatalog(catalogBytes); err == nil {
+			cat = c
+		} else {
+			log.Printf("import: CATALOG.031 parse failed (ignored): %v", err)
+		}
+	}
+	return cells, aux, cat, nil
+}
+
+// isCatalogFile reports whether a zip entry is an S-57 exchange-set catalogue
+// (CATALOG.031). Matched by basename so it's found wherever it sits (ENC_ROOT/…).
+func isCatalogFile(name string) bool {
+	return strings.HasPrefix(strings.ToUpper(filepath.Base(name)), "CATALOG.")
 }
 
 // (helpers below)
