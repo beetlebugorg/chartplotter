@@ -13,7 +13,7 @@ import (
 // no human chart name.
 type CellMeta struct {
 	Name      string     `json:"name"`            // cell stem, e.g. "US5MD1MC"
-	Title     string     `json:"title,omitempty"` // long name (from CATALOG.031), else dataset name
+	Title     string     `json:"title,omitempty"` // human chart name (from CATALOG.031 LFIL); empty if none — consumers show Name
 	Scale     int        `json:"scale,omitempty"` // compilation scale denominator (CSCL)
 	Edition   string     `json:"edition,omitempty"`
 	Update    string     `json:"update,omitempty"`
@@ -25,8 +25,9 @@ type CellMeta struct {
 
 // ExtractCellMeta parses each cell's header + coverage (coverage-only, cheap) and
 // returns per-cell metadata keyed by cell stem. Cells that fail to parse are
-// reported via onSkip and omitted. Title is populated with the dataset name as a
-// fallback; the caller overlays the catalogue long name where available.
+// reported via onSkip and omitted. Title is left empty (S-57 headers carry no human
+// chart name — only the cell code); the caller overlays the CATALOG.031 long name
+// where the exchange set provides one.
 func ExtractCellMeta(cells map[string]CellData, onSkip func(name string, err error)) map[string]CellMeta {
 	out := make(map[string]CellMeta, len(cells))
 	names := make([]string, 0, len(cells))
@@ -49,7 +50,6 @@ func ExtractCellMeta(cells map[string]CellData, onSkip func(name string, err err
 		}
 		m := CellMeta{
 			Name:      stem,
-			Title:     chart.DatasetName(),
 			Scale:     int(chart.CompilationScale()),
 			Edition:   chart.Edition(),
 			Update:    chart.UpdateNumber(),

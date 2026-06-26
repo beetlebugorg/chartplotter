@@ -44,6 +44,49 @@ func buildExchangeZip(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+// TestImport_NoCatalog covers the common real-world case where an upload has NO
+// CATALOG.031 (producers don't always include it): naming + full metadata still
+// come from the cells' own headers — no dependency on any master index. The human
+// title falls back to the cell's dataset name; the client resolves a nicer name
+// where it can.
+func TestImport_NoCatalog(t *testing.T) {
+	s := New(t.TempDir(), t.TempDir(), t.TempDir(), false)
+	cell, err := os.ReadFile("../../../testdata/US5MD1MC.000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("ENC_ROOT/US5MD1MC/US5MD1MC.000") // cell only — no CATALOG.031
+	if _, err := f.Write(cell); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cells, _, cat, err := extractZipCells(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat != nil {
+		t.Fatal("expected no catalogue (none in the zip)")
+	}
+	// Naming still works (cell-prefix fallback), and metadata comes from the header.
+	if set := s.deriveUploadSet(cat, cells); set != "user-us5md1mc" {
+		t.Errorf("deriveUploadSet = %q, want user-us5md1mc", set)
+	}
+	meta := buildSetMeta("user-us5md1mc", baker.ExtractCellMeta(cells, nil), cat)
+	if meta.ScaleMin != 12000 || len(meta.BBox) != 4 || meta.Agency != "NOAA (US)" {
+		t.Errorf("header metadata missing: scale=%d bbox=%v agency=%q", meta.ScaleMin, meta.BBox, meta.Agency)
+	}
+	// No catalogue → no human title (no master-index lookup); the cell Name carries
+	// the identity, which the client shows.
+	if len(meta.Cells) != 1 || meta.Cells[0].Name != "US5MD1MC" || meta.Cells[0].Title != "" {
+		t.Errorf("per-cell = %+v; want Name US5MD1MC, empty Title", meta.Cells[0])
+	}
+}
+
 // TestImport_AutoNameAndMeta exercises the upload metadata wiring (minus HTTP and
 // the bake): extract → derive a CATALOG-identity pack name → extract per-cell
 // metadata → write the sidecar → surface it on /api/packs and /api/pack/<name>.

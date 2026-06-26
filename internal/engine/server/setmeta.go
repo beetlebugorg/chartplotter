@@ -114,8 +114,12 @@ func slug(s string) string {
 }
 
 // buildSetMeta assembles a pack's SetMeta from the per-cell header metadata and
-// (optionally) the exchange-set catalogue. The catalogue supplies human chart
-// titles (LFIL) and a coverage bbox even for cells whose header lacks M_COVR.
+// (optionally) the exchange-set catalogue. The catalogue's LFIL supplies the human
+// chart title and fills a coverage bbox for cells whose header lacked M_COVR. When
+// there's no CATALOG.031 (common — producers don't always include it), per-cell
+// titles are left empty and the CLIENT resolves them from the NOAA master index it
+// already holds (chart-library's _byName); cells stay fully described by their own
+// header (scale/edition/date/agency/coverage) regardless.
 func buildSetMeta(set string, cellMeta map[string]baker.CellMeta, cat *s57.Catalog) SetMeta {
 	// Catalogue overlay: stem → long name, stem → bbox.
 	catTitle := map[string]string{}
@@ -143,8 +147,10 @@ func buildSetMeta(set string, cellMeta map[string]baker.CellMeta, cat *s57.Catal
 	sort.Strings(stems)
 	for _, stem := range stems {
 		c := cellMeta[stem]
+		// Title from the exchange-set catalogue (LFIL) when present; otherwise left
+		// empty for the client to resolve from the NOAA master index.
 		if t := catTitle[stem]; t != "" {
-			c.Title = t // prefer the catalogue's human name over the dataset name
+			c.Title = t
 		}
 		if !c.HasBBox {
 			if box, ok := catBox[stem]; ok {
