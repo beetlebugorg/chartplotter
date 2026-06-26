@@ -22,6 +22,7 @@ import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts li
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
 import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
+import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
@@ -371,6 +372,8 @@ export class ChartPlotter extends HTMLElement {
       if (this._widget && c.id === "core-advanced") continue;
       this._settingsRegistry.register(c);
     }
+    // Display calibration (ruler-measure the 5 mm check box → true physical scale).
+    this._settingsRegistry.register(calibrationContribution(this));
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
     if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
