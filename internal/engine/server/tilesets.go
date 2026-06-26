@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -172,6 +173,11 @@ func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
 		_ = os.Remove(filepath.Join(dir, name+".aux.zip"))
 		_ = os.Remove(dir) // best-effort: drop the pack dir if now empty
 	}
+	// Drop the district's metadata sidecar (<district>.meta.json), which lives in
+	// the district's own setDir, separate from the per-band dirs above.
+	mdir := s.setDir(set)
+	_ = os.Remove(filepath.Join(mdir, set+setMetaExt))
+	_ = os.Remove(mdir)
 	s.auxIdx.invalidate() // a district's companion aux.zip is gone — re-index /api/aux
 	w.Header().Set("Content-Type", jsonCT)
 	io.WriteString(w, `{"ok":true}`)
@@ -236,6 +242,26 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 		if p.hasBounds {
 			fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, p.w, p.s, p.e, p.n)
 		}
+		// Extracted per-pack metadata (title/agency/scale range/counts/imported date),
+		// from the <pack>.meta.json sidecar written at import. Cells are omitted from
+		// the list view — fetch GET /api/pack/<name> for the full per-cell detail.
+		if m, ok := s.readSetMeta(d); ok {
+			if m.Title != "" {
+				fmt.Fprintf(w, `,"title":%q`, m.Title)
+			}
+			if m.Agency != "" {
+				fmt.Fprintf(w, `,"agency":%q`, m.Agency)
+			}
+			if m.CellCount > 0 {
+				fmt.Fprintf(w, `,"cellCount":%d`, m.CellCount)
+			}
+			if m.ScaleMin > 0 {
+				fmt.Fprintf(w, `,"scaleMin":%d,"scaleMax":%d`, m.ScaleMin, m.ScaleMax)
+			}
+			if m.Imported != "" {
+				fmt.Fprintf(w, `,"imported":%q`, m.Imported)
+			}
+		}
 		fmt.Fprint(w, `,"bands":[`)
 		for j, band := range p.bands {
 			if j > 0 {
@@ -246,6 +272,25 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "]}")
 	}
 	fmt.Fprint(w, "]}")
+}
+
+// handlePackDetail returns the full extracted metadata for one pack, including the
+// per-cell list (GET /api/pack/<name>). 404s when the pack has no metadata sidecar
+// (e.g. baked before metadata extraction existed, or a built-in pack).
+func (s *Server) handlePackDetail(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/api/pack/"
+	name := strings.TrimPrefix(r.URL.Path, prefix)
+	if name == "" || !isSetName(name) {
+		apiErr(w, http.StatusBadRequest, "bad pack name")
+		return
+	}
+	m, ok := s.readSetMeta(name)
+	if !ok {
+		apiErr(w, http.StatusNotFound, "no metadata for pack")
+		return
+	}
+	w.Header().Set("Content-Type", jsonCT)
+	_ = json.NewEncoder(w).Encode(m)
 }
 
 // handleSetEnabled shows or hides a pack on the map (POST /api/set/enable|disable

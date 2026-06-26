@@ -262,6 +262,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
 	case r.URL.Path == "/api/packs":
 		s.handlePacks(w, r) // GET: all baked packs + enabled state
+	case strings.HasPrefix(r.URL.Path, "/api/pack/"):
+		s.handlePackDetail(w, r) // GET: one pack's full extracted metadata (per-cell)
 	case r.URL.Path == "/api/set/enable" || r.URL.Path == "/api/set/disable":
 		s.handleSetEnabled(w, r) // POST: show/hide a pack on the map (data kept)
 	case r.URL.Path == "/api/set":
