@@ -284,6 +284,10 @@ export class ChartPlotter extends HTMLElement {
     // attribute so the :host([widget]) styles apply either way.
     this._widget = this.hasAttribute("widget") || new URLSearchParams(location.search).has("widget");
     if (this._widget) this.setAttribute("widget", "");
+    // Spec mode (?spec / [spec]): a clean, chrome-free full-bleed map — every
+    // floating control + readout hidden — for capturing reference-style plots (the
+    // S-52 PresLib "ECDIS Chart 1" panels diff against the spec). See :host([spec]).
+    if (this.hasAttribute("spec") || new URLSearchParams(location.search).has("spec")) this.setAttribute("spec", "");
     // Display settings (scheme · basemap · mariner toggles · cell-boundary toggle ·
     // bands-off) are persisted SERVER-side so every screen pointed at this boat's
     // server shares them and they survive a restart. Adopt them BEFORE the renderer

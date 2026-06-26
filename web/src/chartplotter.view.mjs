@@ -85,6 +85,12 @@ export const STYLE = `
            affordances. Settings drop the Advanced tab (gated in JS). */
         :host([widget]) #empty-add, :host([widget]) #empty .welcome-sub { display:none; }
         :host([widget]) #charts-btn, :host([widget]) #share-btn { display:none; }
+        /* Spec mode: a clean, chrome-free full-bleed map for capturing reference-style
+           plots (the S-52 PresLib "ECDIS Chart 1" panels). Hide every floating control,
+           the status readout, the attribution and the load bar so only the chart shows. */
+        :host([spec]) #tl-controls, :host([spec]) #tr-controls, :host([spec]) #br-controls,
+        :host([spec]) #databox, :host([spec]) #noaa-attr, :host([spec]) #load-bar,
+        :host([spec]) #toasts { display:none; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
