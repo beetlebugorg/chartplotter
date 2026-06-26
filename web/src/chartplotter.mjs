@@ -542,15 +542,18 @@ export class ChartPlotter extends HTMLElement {
     // Best-effort: if the style is mid-rebuild this no-ops (or throws on older
     // maps) — either way the style.load handler below re-adds the overlay once the
     // fresh style is ready, so never let it skip registering that listener.
-    try { this.addCatalogOverlay(map); } catch (e) { console.warn("[overlay] deferring to style.load:", e); }
-    // The plotter rebuilds the whole style (setStyle) when server sets load or the
-    // SCAMIN buckets refresh, wiping every app-added overlay (coverage boxes, pick &
-    // inspect highlights). Re-apply them after each rebuild, and repopulate the
-    // coverage boxes — otherwise they vanish the moment a set renders.
-    map.on("style.load", () => {
-      this.addCatalogOverlay(map);
-      this._refreshInstalledBounds();
-    });
+    // Add the app overlay (focus/inspect/pick sources + coverage) AND wire the map
+    // interaction listeners (crosshair cursor, click → ECDIS pick). addSource throws
+    // if the style isn't loaded, so call it only WHEN the style is ready: now if it
+    // already is, plus on every style.load (the plotter rebuilds the whole style on
+    // server-set load + SCAMIN refresh, wiping app-added overlays — re-apply each
+    // time). This avoids the "Style is not done loading" throw WITHOUT ever skipping
+    // the wiring — an earlier isStyleLoaded()-guard-and-RETURN inside addCatalogOverlay
+    // left the cursor/pick/coverage permanently unwired whenever the first call hit a
+    // mid-rebuild style and no later style.load re-fired.
+    const ensureOverlay = () => { this.addCatalogOverlay(map); this._refreshInstalledBounds(); };
+    if (map.isStyleLoaded()) ensureOverlay();
+    map.on("style.load", ensureOverlay);
     // Hold the 1:MIN_DETAIL_SCALE max-zoom floor on EVERY view change. It's
     // latitude-dependent (recompute as the centre moves), and a fly-to-chart raises
     // the cap to reach a pack's detail — without re-enforcing here that raised cap
@@ -1102,13 +1105,10 @@ export class ChartPlotter extends HTMLElement {
     // change and SCAMIN-bucket refresh, which drops all these app-added sources/
     // layers. A style.load handler (see onReady) re-invokes this against the fresh
     // style; the guard makes a redundant call (when the overlay is still present) a
-    // no-op so we never double-add.
-    //
-    // The style may still be REBUILDING when this first runs from onReady (a
-    // setStyle for the physical-scale restage / SCAMIN buckets can be in flight
-    // after the awaited catalog load) — addSource would throw "Style is not done
-    // loading". Bail; the onReady style.load handler re-invokes us once it's ready.
-    if (!map.isStyleLoaded()) return;
+    // no-op so we never double-add. The caller (onReady) only invokes this on a
+    // LOADED style — directly if ready, else on style.load — so addSource never
+    // throws "Style is not done loading"; do NOT add an isStyleLoaded()-guard return
+    // here (it silently skipped the cursor/pick/coverage wiring at the tail).
     if (map.getSource("focus")) return;
     const empty = { type: "FeatureCollection", features: [] };
     map.addSource("focus", { type: "geojson", data: empty });
