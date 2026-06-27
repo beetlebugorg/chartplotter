@@ -507,10 +507,21 @@ var coastDefinerClasses = map[string]bool{
 	"SLCONS": true,
 }
 
-// isCoastlineMaskExempt reports whether an area object class is a coast-definer and
-// therefore exempt from derived coastline-coincident boundary masking.
+// boundaryNeverMaskedClasses are area classes whose drawn boundary is a DISTINCT
+// symbolized line (not the plain coast/shore), so it must NOT be coastline-masked even
+// where it happens to share an edge with a coast-definer. A production/storage area
+// (PRDARE) sitting on an LNDARE shares the box edge with the land area, but its dashed
+// boundary is meaningful symbology — masking it (S-52 §17.2 is only about redundant
+// coast lines) would drop the production-area outline entirely.
+var boundaryNeverMaskedClasses = map[string]bool{
+	"PRDARE": true,
+}
+
+// isCoastlineMaskExempt reports whether an area object class is exempt from derived
+// coastline-coincident boundary masking — either a coast-definer (keeps the shore) or
+// a class whose boundary is a distinct symbolized line (boundaryNeverMaskedClasses).
 func isCoastlineMaskExempt(objClass string) bool {
-	return coastDefinerClasses[objClass]
+	return coastDefinerClasses[objClass] || boundaryNeverMaskedClasses[objClass]
 }
 
 // contains checks if a slice contains a string
