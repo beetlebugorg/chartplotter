@@ -299,6 +299,15 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 		if fb, ok := parseSYMINS(f); ok {
 			return fb
 		}
+		// No producer SYMINS, and the V-AIS alias would emit only the generic untyped
+		// "default V-AIS" (VATON00) — almost always a plain new object, not a real
+		// virtual AIS aid (those carry a type → VATON01-12). Portray the S-52 NEWOBJ
+		// "!" instead; typed V-AIS still go through the rule below.
+		if strings.Contains(stream, "VATON00") {
+			if nb := newObjectBuild(f); len(nb.Primitives) > 0 {
+				return nb
+			}
+		}
 	}
 	// M_NSYS (navigational system of marks): the S-101 NavigationalSystemOfMarks
 	// rule is an UNOFFICIAL stub (NullInstruction only), so draw the S-52 boundary

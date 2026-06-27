@@ -64,15 +64,20 @@ NOAA_BANDS  := overview general coastal approach harbor berthing
 NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
 S101_EMBED_DIR := internal/engine/s101catalog/catalog
+# Our own additions to the catalogue (symbols/rules the upstream S-101 PortrayalCatalog
+# lacks, e.g. the NEWOBJ "!" symbol). Committed here and re-applied OVER the upstream
+# sync, so they survive a re-sync and live in this repo — not the external catalogue.
+S101_CUSTOM    := internal/engine/s101catalog/custom-overlay
 
 # Copy the external S-101 catalogue into the (gitignored) embed dir so a
 # `-tags embed_s101` build bakes it into the binary. Files never enter the repo.
-sync-s101: ## Sync the external S-101 PortrayalCatalog + FeatureCatalogue into the embed dir
+sync-s101: ## Sync the external S-101 PortrayalCatalog + our custom overlay into the embed dir
 	@rm -rf "$(S101_EMBED_DIR)"
 	@mkdir -p "$(S101_EMBED_DIR)/PortrayalCatalog"
 	@cp -a "$(S101_PC)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
 	@cp -a "$(S101_FC)" "$(S101_EMBED_DIR)/FeatureCatalogue.xml"
-	@echo "synced S-101 catalogue → $(S101_EMBED_DIR)"
+	@cp -a "$(S101_CUSTOM)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
+	@echo "synced S-101 catalogue (+ custom overlay) → $(S101_EMBED_DIR)"
 
 # Embed the S-101 catalogue when it's available locally (the normal dev/deploy
 # case); otherwise build without it (the binary then needs --s101 at runtime).
