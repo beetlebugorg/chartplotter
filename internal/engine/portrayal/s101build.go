@@ -460,6 +460,10 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	if f.ObjectClass() == "BRIDGE" {
 		prims = bridgePostProcess(f, prims)
 	}
+	switch f.ObjectClass() {
+	case "OBSTRN", "WRECKS", "UWTROC":
+		prims = obstructionPostProcess(f, prims)
+	}
 	return FeatureBuild{
 		Primitives:      prims,
 		DisplayPriority: priority,
@@ -640,6 +644,53 @@ func attachSoundingDepths(prims []Primitive, pts [][3]float64) {
 			prims[i] = sc
 		}
 	}
+}
+
+// attachDangerDepth tags the isolated-danger symbol (ISODGR01) on an under/awash hazard
+// with the hazard's sounding depth (S-57 VALSOU), which the baker bakes as danger_depth.
+// The client then hides / swaps the mark when the hazard is DEEPER than the mariner's
+// safety contour (S-52 UDWHAZ05: only a sub-safety-contour danger is an isolated danger).
+// Without it DangerDepthM stays NaN and every obstruction shows ISODGR01 regardless of
+// depth (a line obstruction deeper than the safety contour is not an isolated danger).
+func obstructionPostProcess(f *s57.Feature, prims []Primitive) []Primitive {
+	d, ok := floatAttr(f.Attributes(), "VALSOU")
+	if !ok {
+		return prims
+	}
+	// Tag the isolated-danger mark (ISODGR01) with the sounding so the client shows the
+	// ⊗ only when the hazard is shallower than the live safety contour (S-52 UDWHAZ05);
+	// a deeper-than-safety obstruction is portrayed by its depth label, not the mark.
+	for i := range prims {
+		if sc, ok := prims[i].(SymbolCall); ok && sc.SymbolName == "ISODGR01" {
+			sc.DangerDepthM = float32(d)
+			prims[i] = sc
+		}
+	}
+	// The obstruction carries its VALSOU as a depth (sounding) label. A low-accuracy
+	// sounding (unreliable QUAPOS) is parenthesised — the S-52 approximate convention.
+	if anchor, ok := representativePoint(f); ok {
+		txt := formatSounding(d)
+		if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 {
+			txt = "(" + txt + ")"
+		}
+		prims = append(prims, DrawText{
+			Anchor:     anchor,
+			Text:       txt,
+			FontSizePx: 10,
+			ColorToken: "CHBLK",
+			Halo:       &TextHalo{ColorToken: "CHWHT", WidthPx: 1},
+			Group:      11,
+		})
+	}
+	return prims
+}
+
+// formatSounding renders a sounding depth: an integer for whole metres, else one decimal.
+func formatSounding(d float64) string {
+	if d == math.Trunc(d) {
+		return strconv.FormatFloat(d, 'f', 0, 64)
+	}
+	return strconv.FormatFloat(d, 'f', 1, 64)
 }
 
 func primitiveName(t s57.GeometryType) string {
