@@ -207,12 +207,14 @@ func (e *Engine) bindHost() {
 }
 
 // clearances maps each S-101 clearance complex attribute to the S-57 simple
-// attribute that backs it and the value sub-attribute the rules read. Bridges
-// carry clearances as S-57 simple attributes (VERCCL/VERCLR/HORCLR/VERCOP); the
-// S-101 catalogue models them as complex attributes wrapping a *Value field.
+// attribute that backs it and the value sub-attribute the rules read. Bridges and
+// overhead cables/pipes carry clearances as S-57 simple attributes
+// (VERCCL/VERCLR/VERCSA/HORCLR/VERCOP); the S-101 catalogue models them as complex
+// attributes wrapping a *Value field.
 var clearances = map[string]struct{ s57, value string }{
 	"verticalClearanceClosed":  {"VERCCL", "verticalClearanceValue"},
 	"verticalClearanceFixed":   {"VERCLR", "verticalClearanceValue"},
+	"verticalClearanceSafe":    {"VERCSA", "verticalClearanceValue"},
 	"verticalClearanceOpen":    {"VERCOP", "verticalClearanceValue"},
 	"horizontalClearanceFixed": {"HORCLR", "horizontalClearanceValue"},
 }
