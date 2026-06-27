@@ -1180,6 +1180,7 @@ export class ChartCanvas extends HTMLElement {
       scheme: this._active,
       server: this._sources.server, serverSets: this._sources.sets,
       scaminValues: this._sources.scaminValues, scaminLat, bandsHidden: this._bandsHidden,
+      bandsPresent: new Set(this._sources.loadedBands()),
       ignoreScamin: this._ignoreScamin, sizeScale, pxPitch: this._pxPitch,
     });
     this._layerBase = layerBase; this._variants = variants; this._layerVis = layerVis;
