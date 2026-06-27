@@ -1,6 +1,7 @@
 package portrayal
 
 import (
+	"fmt"
 	"io/fs"
 	"math"
 	"os"
@@ -456,6 +457,9 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	if cat == 0 {
 		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}
+	if f.ObjectClass() == "BRIDGE" {
+		prims = bridgePostProcess(f, prims)
+	}
 	return FeatureBuild{
 		Primitives:      prims,
 		DisplayPriority: priority,
@@ -464,6 +468,42 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 		DateEnd:         dateEnd,
 		TimeValid:       timeValid,
 	}
+}
+
+// bridgePostProcess fixes two S-101-model gaps the Bridge rule can't, because the
+// S-101 Bridge feature type binds neither a verticalClearance* attribute (the model
+// puts clearance on the related SpanFixed feature) nor a true openingBridge for S-57
+// CATBRG:1 (the framework still resolves openingBridge → true, so the rule stamps the
+// opening-bridge symbol BRIDGE01 on fixed bridges):
+//   - drop BRIDGE01 unless CATBRG is an opening category (2–8);
+//   - emit the "clr <value>" vertical-clearance label from the S-57 VERCLR directly.
+func bridgePostProcess(f *s57.Feature, prims []Primitive) []Primitive {
+	catbrg, _ := floatAttr(f.Attributes(), "CATBRG")
+	opening := catbrg >= 2 && catbrg <= 8
+	if !opening {
+		out := prims[:0]
+		for _, p := range prims {
+			if sc, ok := p.(SymbolCall); ok && sc.SymbolName == "BRIDGE01" {
+				continue
+			}
+			out = append(out, p)
+		}
+		prims = out
+	}
+	if v, ok := floatAttr(f.Attributes(), "VERCLR"); ok && v > 0 {
+		if anchor, ok := representativePoint(f); ok {
+			prims = append(prims, DrawText{
+				Anchor:     anchor,
+				Text:       fmt.Sprintf("clr %.1f", v),
+				FontSizePx: 12,
+				ColorToken: "CHBLK",
+				Halo:       &TextHalo{ColorToken: "CHWHT", WidthPx: 1},
+				Group:      11, // S-52 text group 11: clearances / important
+				OffsetYPx:  11,
+			})
+		}
+	}
+	return prims
 }
 
 // commandsNeedAnchor reports whether any reduced draw command consumes the
