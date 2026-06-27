@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 docs-harness serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -209,6 +209,31 @@ demo-chart1: build ## Bake the S-52 ECDIS Chart 1 sheet to tiles for the docs (i
 	@mkdir -p "$(DEMO_CHART1_OUT)"
 	$(BIN) bake "$(PRESLIB_CACHE)/cells" -o "$(DEMO_CHART1_OUT)/chart1.pmtiles" --bands --max-zoom $(CHART1_MAXZOOM) --manifest "$(DEMO_CHART1_OUT)/charts-index.json"
 	@echo "  chart1 tiles ready: $(DEMO_CHART1_OUT)/ — served beside the demo bundle as /chart1/"
+
+# ---- assets for the docs "Test harness" page (Chart 1 + S-64 review viewer) ----
+# Bakes BOTH suites into one merged manifest the page's <chart-plotter> points
+# catalog= at, emits the shared widget frontend into /demo/, and crops the IHO
+# reference plots the page shows beside our render. All gitignored (large + derived
+# from copyrighted PDFs/zips); the page degrades to a build-it hint when absent.
+HARNESS_OUT    ?= docs/static/harness
+HARNESS_ASSETS ?= docs/static/demo
+S64_ZIP        ?= testdata/S-64_ENC_Unencrypted_TDS.zip
+
+docs-harness: build ## Bake Chart 1 + S-64 tiles + widget assets + reference crops for the docs Test-harness page
+	# Widget frontend assets (shared with /demo/; additive — won't disturb a full demo bundle).
+	@mkdir -p "$(HARNESS_ASSETS)"
+	$(BIN) emit-assets "$(HARNESS_ASSETS)" $(if $(wildcard $(S101_PC)),--s101 "$(S101_PC)")
+	@cp -R web/src web/vendor web/glyphs web/basemap "$(HARNESS_ASSETS)/"
+	@cp web/catalog.json "$(HARNESS_ASSETS)/" 2>/dev/null || true
+	# Chart 1 + S-64 tiles → one merged manifest.
+	PRESLIB_CACHE="$(PRESLIB_CACHE)" scripts/fetch-preslib-cells.sh
+	@mkdir -p "$(HARNESS_OUT)"
+	$(BIN) bake "$(PRESLIB_CACHE)/cells" -o "$(HARNESS_OUT)/chart1.pmtiles" --bands --max-zoom $(CHART1_MAXZOOM) --manifest "$(HARNESS_OUT)/chart1.index.json"
+	$(BIN) bake "$(S64_ZIP)" -o "$(HARNESS_OUT)/s64.pmtiles" --bands --manifest "$(HARNESS_OUT)/s64.index.json"
+	node docs/scripts/merge-manifests.mjs "$(HARNESS_OUT)/charts-index.json" "$(HARNESS_OUT)/chart1.index.json" "$(HARNESS_OUT)/s64.index.json"
+	# Reference-plot crops (needs pdftoppm + the source PDFs; a missing PDF is a warning).
+	node docs/scripts/extract-refs.mjs
+	@echo "  docs harness ready — run: make docs"
 
 # LOCAL PREVIEW ONLY. The bundle is pure static files — deploy it to ANY
 # range-capable static host (GitHub Pages, S3/CloudFront, nginx, `npx serve`); it
