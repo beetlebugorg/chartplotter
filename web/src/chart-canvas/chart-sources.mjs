@@ -130,6 +130,13 @@ export class ChartSources {
   get server() { return this._server; }
   get sets() { return this._serverSets; }
   get scaminValues() { return this._scaminValues; }
+  // Band slugs that currently have data — server: the active sets' bands; pmtiles:
+  // the loaded per-band archives. Drives the overscale-pattern gate (a band gets the
+  // AP(OVERSC01) hatch only when a FINER band is present, i.e. a real scale boundary).
+  loadedBands() {
+    if (this._server) return [...new Set(this._serverSets.map((s) => s.band).filter(Boolean))];
+    return Object.keys(this._bands);
+  }
   // The latitude the SCAMIN bucket minzooms are computed at. Falls back to the
   // map's LIVE centre latitude until the first idle pass sets it — without this,
   // the initial style (and server mode, which never ran the discovery loop that

@@ -334,19 +334,17 @@ function _pushScaminProbes(out, server) {
 // above the band's native max (where the chart is grossly enlarged, ≥ ~×2 its
 // compilation scale). Inserted right after the band's base fill so a finer band's
 // opaque fill covers it — the hatch survives only on coarse-only overscale patches.
-// No-op for the finest band / merged "all" set (nothing coarser to enlarge). S-52
-// §10.1.10.2; display priority 3, viewing group 21030.
-function _pushOverscale(out, source, band, layerVis, showOverscale, bandsHidden) {
-  // DISABLED: the old "hatch wherever a band overzooms past its native max"
-  // heuristic over-triggers — it paints AP(OVERSC01) on plain zoom-in of the
-  // best-available chart, which S-52 §10.1.10.1 says must show ONLY the "×N"
-  // indication, never the pattern. Real ECDIS show the area pattern only at a
-  // genuine scale boundary (a coarser cell enlarged ≥×2 in a finer cell's hole,
-  // §10.1.10.2) — that wants a baked overscale_areas layer (task #3). Until then,
-  // no auto-hatch (the HUD still shows the ×N overscale indication).
-  return; // eslint-disable-line no-unreachable
+// S-52 §10.1.10.2; display priority 3, viewing group 21030.
+//
+// `finerPresent` is the spec gate: emit ONLY when a finer band is loaded, so a real
+// chart-scale boundary exists and this band can show through a finer band's hole
+// (grossly overscaled → pattern). When this band IS the finest available, plain
+// zoom-in is "deliberate overscale of best-available" and must show ONLY the ×N
+// overscale indication, never the pattern (§10.1.10.1) — so we emit nothing and the
+// HUD ×N stands alone. No-op for the merged "all" set (no per-band layering).
+function _pushOverscale(out, source, band, layerVis, showOverscale, bandsHidden, finerPresent) {
   const nm = CHART_BANDS.find((b) => b.slug === band);
-  if (!nm || band === "all" || nm.max >= 18) return;
+  if (!nm || band === "all" || nm.max >= 18 || !finerPresent) return;
   const id = "overscale@" + source;
   const vis = showOverscale === false ? "none" : "visible";
   layerVis[id] = vis;
@@ -386,6 +384,7 @@ export function buildChartLayers({
   scheme,                                     // active scheme branch ("day"/"dusk"/"night") = this._active
   server, serverSets, scaminValues, scaminLat, // chart-source state (already resolved)
   bandsHidden,                                 // Set (this._bandsHidden)
+  bandsPresent = new Set(),                    // Set of band slugs that have data — gates the overscale pattern
   ignoreScamin,                                // DEBUG: drop the per-SCAMIN display gate (show everything in-band)
   sizeScale = 1,                               // px→true-physical feature-size multiplier (0.35278/pxPitch); see _scaleSizes
   pxPitch,                                     // calibrated CSS-pixel pitch (mm) → SCAMIN gates on the true physical scale
@@ -394,6 +393,23 @@ export function buildChartLayers({
   const layerBase = {}, variants = {}, layerVis = {};
   const tmpl = buildLayers(mariner, palette, atlasPpu, osm, sizeScale);
   const out = [];
+  // Overscale-pattern gate (S-52 §10.1.10.2): a band gets the AP(OVERSC01) hatch only
+  // when a strictly-FINER band is present in the loaded set — i.e. a real chart-scale
+  // boundary exists for it to show through. The finest band present is the
+  // best-available data, so its plain zoom-in is the ×N-only case (§10.1.10.1).
+  const _bandRank = (slug) => CHART_BANDS.findIndex((b) => b.slug === slug);
+  const _presentRanks = [...bandsPresent]
+    .filter((slug) => slug && slug !== "all")
+    .map(_bandRank)
+    .filter((i) => i >= 0);
+  const _finestPresentRank = _presentRanks.length ? Math.max(..._presentRanks) : -1;
+  // Emit the hatch for `slug` only when this band is itself present AND a strictly
+  // finer band is also present (the pmtiles path iterates ALL bands, so the present
+  // check matters). The finest present band never qualifies — it's best-available.
+  const finerBandPresent = (slug) => {
+    const r = _bandRank(slug);
+    return r >= 0 && bandsPresent.has(slug) && r < _finestPresentRank;
+  };
   // Group each base template layer with the *_scamin clone that _withScamin placed
   // immediately after it (tagged _baseId), so the pair expands TOGETHER per band
   // below — both fill paths iterate group-outer, band-mid, member-inner. Expanding
@@ -479,7 +495,7 @@ export function buildChartLayers({
         // interleaved per band, so a finer band's opaque fill covers it where finer
         // data exists — the hatch is left only on the coarse-only (overscale) patches
         // such as open water shown enlarged. S-52 §10.1.10.2.
-        if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, undefined, bandsHidden);
+        if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, undefined, bandsHidden, finerBandPresent(set.band));
         }
       }
     }
@@ -543,7 +559,7 @@ export function buildChartLayers({
       } else {
         mk("", base, dmin || undefined);
       }
-      if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, undefined, bandsHidden);
+      if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, undefined, bandsHidden, finerBandPresent(band.slug));
     }
     }
   }
