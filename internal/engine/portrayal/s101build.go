@@ -289,6 +289,17 @@ func hasAdditionalInfo(attrs map[string]any) bool {
 	return false
 }
 
+// quaposSolidClass: man-made structures drawn with a definite (solid) line regardless
+// of QUAPOS. The S-52 approximate-position dashing (DEPCNT03 and friends) is for natural
+// features whose position is uncertain — depth contours, coastline, rivers — not
+// engineered structures whose charted extent is definite. Without this, a bridge or road
+// whose edges carry a low-accuracy QUAPOS (often inherited from a shared coastline edge)
+// is wrongly dashed.
+var quaposSolidClass = map[string]bool{
+	"BRIDGE": true, "ROADWY": true, "RAILWY": true,
+	"CAUSWY": true, "DAMCON": true, "GATCON": true,
+}
+
 // buildFeatureBody turns one feature's emitted instruction stream into its FeatureBuild.
 func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBuild {
 	// NEWOBJ with a SYMINS attribute: portray the producer's explicit symbol
@@ -418,7 +429,7 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	// from a per-edge spatial-quality association we don't model, so apply it here
 	// from the parsed per-feature QUAPOS aggregate: switch the feature's solid simple
 	// strokes to dashed. Complex line styles and point symbols keep their look.
-	if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 {
+	if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 && !quaposSolidClass[f.ObjectClass()] {
 		for i, p := range prims {
 			if sl, ok := p.(StrokeLine); ok && sl.Dash == DashSolid {
 				sl.Dash = DashDashed
