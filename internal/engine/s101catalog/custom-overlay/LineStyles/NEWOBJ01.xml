@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?S100Meta name="NEWOBJ01" exposition="default symbol for a new object — line (dashed magenta with repeated ! marks)"?>
+<ls:lineStyle xmlns:ls="http://www.iho.int/S100LineStyle/5.2">
+   <intervalLength>10</intervalLength>
+   <pen width="0.45">
+      <color>CHMGD</color>
+   </pen>
+   <dash>
+      <start>0</start>
+      <length>3.5</length>
+   </dash>
+   <symbol reference="NEWOBJ01">
+      <position>7</position>
+   </symbol>
+</ls:lineStyle>

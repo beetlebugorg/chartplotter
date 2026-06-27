@@ -1,6 +1,7 @@
 package portrayal
 
 import (
+	"fmt"
 	"io/fs"
 	"math"
 	"os"
@@ -289,6 +290,17 @@ func hasAdditionalInfo(attrs map[string]any) bool {
 	return false
 }
 
+// quaposSolidClass: man-made structures drawn with a definite (solid) line regardless
+// of QUAPOS. The S-52 approximate-position dashing (DEPCNT03 and friends) is for natural
+// features whose position is uncertain — depth contours, coastline, rivers — not
+// engineered structures whose charted extent is definite. Without this, a bridge or road
+// whose edges carry a low-accuracy QUAPOS (often inherited from a shared coastline edge)
+// is wrongly dashed.
+var quaposSolidClass = map[string]bool{
+	"BRIDGE": true, "ROADWY": true, "RAILWY": true,
+	"CAUSWY": true, "DAMCON": true, "GATCON": true,
+}
+
 // buildFeatureBody turns one feature's emitted instruction stream into its FeatureBuild.
 func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBuild {
 	// NEWOBJ with a SYMINS attribute: portray the producer's explicit symbol
@@ -298,6 +310,15 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	if f.ObjectClass() == "NEWOBJ" {
 		if fb, ok := parseSYMINS(f); ok {
 			return fb
+		}
+		// No producer SYMINS, and the V-AIS alias would emit only the generic untyped
+		// "default V-AIS" (VATON00) — almost always a plain new object, not a real
+		// virtual AIS aid (those carry a type → VATON01-12). Portray the S-52 NEWOBJ
+		// "!" instead; typed V-AIS still go through the rule below.
+		if strings.Contains(stream, "VATON00") {
+			if nb := newObjectBuild(f); len(nb.Primitives) > 0 {
+				return nb
+			}
 		}
 	}
 	// M_NSYS (navigational system of marks): the S-101 NavigationalSystemOfMarks
@@ -409,7 +430,7 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	// from a per-edge spatial-quality association we don't model, so apply it here
 	// from the parsed per-feature QUAPOS aggregate: switch the feature's solid simple
 	// strokes to dashed. Complex line styles and point symbols keep their look.
-	if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 {
+	if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 && !quaposSolidClass[f.ObjectClass()] {
 		for i, p := range prims {
 			if sl, ok := p.(StrokeLine); ok && sl.Dash == DashSolid {
 				sl.Dash = DashDashed
@@ -436,6 +457,13 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	if cat == 0 {
 		cat = displayStandard // no display-category band emitted (e.g. text-only)
 	}
+	if f.ObjectClass() == "BRIDGE" {
+		prims = bridgePostProcess(f, prims)
+	}
+	switch f.ObjectClass() {
+	case "OBSTRN", "WRECKS", "UWTROC":
+		prims = obstructionPostProcess(f, prims)
+	}
 	return FeatureBuild{
 		Primitives:      prims,
 		DisplayPriority: priority,
@@ -444,6 +472,42 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 		DateEnd:         dateEnd,
 		TimeValid:       timeValid,
 	}
+}
+
+// bridgePostProcess fixes two S-101-model gaps the Bridge rule can't, because the
+// S-101 Bridge feature type binds neither a verticalClearance* attribute (the model
+// puts clearance on the related SpanFixed feature) nor a true openingBridge for S-57
+// CATBRG:1 (the framework still resolves openingBridge → true, so the rule stamps the
+// opening-bridge symbol BRIDGE01 on fixed bridges):
+//   - drop BRIDGE01 unless CATBRG is an opening category (2–8);
+//   - emit the "clr <value>" vertical-clearance label from the S-57 VERCLR directly.
+func bridgePostProcess(f *s57.Feature, prims []Primitive) []Primitive {
+	catbrg, _ := floatAttr(f.Attributes(), "CATBRG")
+	opening := catbrg >= 2 && catbrg <= 8
+	if !opening {
+		out := prims[:0]
+		for _, p := range prims {
+			if sc, ok := p.(SymbolCall); ok && sc.SymbolName == "BRIDGE01" {
+				continue
+			}
+			out = append(out, p)
+		}
+		prims = out
+	}
+	if v, ok := floatAttr(f.Attributes(), "VERCLR"); ok && v > 0 {
+		if anchor, ok := representativePoint(f); ok {
+			prims = append(prims, DrawText{
+				Anchor:     anchor,
+				Text:       fmt.Sprintf("clr %.1f", v),
+				FontSizePx: 12,
+				ColorToken: "CHBLK",
+				Halo:       &TextHalo{ColorToken: "CHWHT", WidthPx: 1},
+				Group:      11, // S-52 text group 11: clearances / important
+				OffsetYPx:  11,
+			})
+		}
+	}
+	return prims
 }
 
 // commandsNeedAnchor reports whether any reduced draw command consumes the
@@ -580,6 +644,53 @@ func attachSoundingDepths(prims []Primitive, pts [][3]float64) {
 			prims[i] = sc
 		}
 	}
+}
+
+// attachDangerDepth tags the isolated-danger symbol (ISODGR01) on an under/awash hazard
+// with the hazard's sounding depth (S-57 VALSOU), which the baker bakes as danger_depth.
+// The client then hides / swaps the mark when the hazard is DEEPER than the mariner's
+// safety contour (S-52 UDWHAZ05: only a sub-safety-contour danger is an isolated danger).
+// Without it DangerDepthM stays NaN and every obstruction shows ISODGR01 regardless of
+// depth (a line obstruction deeper than the safety contour is not an isolated danger).
+func obstructionPostProcess(f *s57.Feature, prims []Primitive) []Primitive {
+	d, ok := floatAttr(f.Attributes(), "VALSOU")
+	if !ok {
+		return prims
+	}
+	// Tag the isolated-danger mark (ISODGR01) with the sounding so the client shows the
+	// ⊗ only when the hazard is shallower than the live safety contour (S-52 UDWHAZ05);
+	// a deeper-than-safety obstruction is portrayed by its depth label, not the mark.
+	for i := range prims {
+		if sc, ok := prims[i].(SymbolCall); ok && sc.SymbolName == "ISODGR01" {
+			sc.DangerDepthM = float32(d)
+			prims[i] = sc
+		}
+	}
+	// The obstruction carries its VALSOU as a depth (sounding) label. A low-accuracy
+	// sounding (unreliable QUAPOS) is parenthesised — the S-52 approximate convention.
+	if anchor, ok := representativePoint(f); ok {
+		txt := formatSounding(d)
+		if q := f.Geometry().Quapos; q != 0 && q != 1 && q != 10 && q != 11 {
+			txt = "(" + txt + ")"
+		}
+		prims = append(prims, DrawText{
+			Anchor:     anchor,
+			Text:       txt,
+			FontSizePx: 10,
+			ColorToken: "CHBLK",
+			Halo:       &TextHalo{ColorToken: "CHWHT", WidthPx: 1},
+			Group:      11,
+		})
+	}
+	return prims
+}
+
+// formatSounding renders a sounding depth: an integer for whole metres, else one decimal.
+func formatSounding(d float64) string {
+	if d == math.Trunc(d) {
+		return strconv.FormatFloat(d, 'f', 0, 64)
+	}
+	return strconv.FormatFloat(d, 'f', 1, 64)
 }
 
 func primitiveName(t s57.GeometryType) string {

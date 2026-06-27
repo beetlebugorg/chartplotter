@@ -635,17 +635,36 @@ func newObjectBuild(f *s57.Feature) FeatureBuild {
 		}
 		return StrokeLine{Points: pts, ColorToken: "CHMGF", WidthPx: 1.5, Dash: DashDashed}
 	}
+	// Centred "!" — the S-52 "default symbol for NEWOBJ" (§10.3.3.8). NEWOBJ01 is our
+	// own symbol (the PresLib glyph isn't in the S-101 catalogue). Used for areas.
+	centreMark := func() (SymbolCall, bool) {
+		anchor, ok := representativePoint(f)
+		return SymbolCall{Anchor: anchor, SymbolName: "NEWOBJ01", Scale: DefaultPxPerSymbolUnit, SoundingDepthM: nan32, DangerDepthM: nan32}, ok
+	}
 	var prims []Primitive
 	switch g.Type {
+	case s57.GeometryTypePoint:
+		// A point NEWOBJ only reaches here when the Virtual-AIS rule produced nothing
+		// (a real V-AIS point portrays via that rule and never gets here), so a generic
+		// new-object point safely falls back to the bare "!".
+		if mark, ok := centreMark(); ok {
+			prims = append(prims, mark)
+		}
 	case s57.GeometryTypeLineString:
+		// Dashed magenta line with repeated "!" marks — the NEWOBJ01 line style embeds
+		// the marks and the complex-line tessellator places them per zoom (so they
+		// repeat with breaks at every scale, not one symbol on a plain line).
 		if pts := toLL(g.Coordinates); len(pts) >= 2 {
-			prims = append(prims, dashed(pts, false))
+			prims = append(prims, LinePattern{Points: pts, LinestyleName: "NEWOBJ01", ColorToken: "CHMGD"})
 		}
 	case s57.GeometryTypePolygon:
 		for _, r := range g.Rings {
 			if pts := toLL(r.Coordinates); len(pts) >= 2 {
 				prims = append(prims, dashed(pts, true))
 			}
+		}
+		if mark, ok := centreMark(); ok {
+			prims = append(prims, mark)
 		}
 	}
 	if len(prims) == 0 {

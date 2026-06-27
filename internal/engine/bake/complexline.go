@@ -29,11 +29,22 @@ type lsEmbed struct {
 	name   string
 }
 
+// lsPen is one stroke of a (possibly composite) line style. A compositeLineStyle
+// (double line) has several, listed background-first: e.g. INDHLT02 = a wide black
+// backing then a narrow yellow pen ON TOP, drawn in order so the yellow highlight
+// sits inside a black outline.
+type lsPen struct {
+	colorToken string
+	widthPx    float64
+}
+
 // lsInfo is the per-zoom-independent geometry of one complex linestyle.
 type lsInfo struct {
-	periodPx   float64
-	onRuns     []lsOnRun
-	symbols    []lsEmbed
+	periodPx float64
+	onRuns   []lsOnRun
+	symbols  []lsEmbed
+	pens     []lsPen // ≥1, background→foreground; the dash geometry is stroked once per pen
+	// colorToken/widthPx mirror the foreground (last) pen — the prim's fallback tag.
 	colorToken string
 	widthPx    float64
 }
@@ -68,8 +79,16 @@ func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, 
 	}
 
 	full := b.attrsFor(r, attrScratch) // rebuild base+variable (aliases attrScratch; stable here)
-	dashAttrs := append(append([]mvt.KeyValue(nil), full...),
-		mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(info.widthPx + 0.5))})
+	// color_token + width_px are added PER PEN below (a composite line strokes each),
+	// so strip any the prim carried — otherwise the foreground colour would leak onto
+	// the backing pen.
+	dashBase := make([]mvt.KeyValue, 0, len(full)+2)
+	for _, kv := range full {
+		if kv.Key == "color_token" || kv.Key == "width_px" {
+			continue
+		}
+		dashBase = append(dashBase, kv)
+	}
 	symBase := full // class/cell/draw_prio/cat/bnd (+inspector extras)
 	symScale := float64(0.01 / 0.35278)
 
@@ -135,7 +154,16 @@ func (b *Baker) emitComplexLine(r *routed, proj tile.Projector, rect tile.Rect, 
 		// feature carries SCAMIN (set by route via scaminLayer) so the dashes land
 		// in the SCAMIN-bucketed source-layer. The embedded symbols below stay in
 		// point_symbols (already bucketed; they carry `scamin` via attrsFor).
-		tb.Layer(r.layer).AddLines(dashPaths, dashAttrs)
+		// Stroke the geometry once per pen, background→foreground, so a composite
+		// double line (e.g. INDHLT02: black backing + yellow top) renders the bright
+		// pen inside a dark outline — same paths, each pen's own colour + width.
+		lay := tb.Layer(r.layer)
+		for _, pen := range info.pens {
+			attrs := append(append([]mvt.KeyValue(nil), dashBase...),
+				mvt.KeyValue{Key: "color_token", Value: mvt.StringVal(pen.colorToken)},
+				mvt.KeyValue{Key: "width_px", Value: mvt.IntVal(int64(pen.widthPx + 0.5))})
+			lay.AddLines(dashPaths, attrs)
+		}
 	}
 	// AddPoints shares one attr set per call, so emit each symbol on its own (their
 	// rotations differ).

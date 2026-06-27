@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="daySvgStyle.css" type="text/css"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.2" baseProfile="tiny" xml:space="preserve" shape-rendering="geometricPrecision" fill-rule="evenodd" width="4mm" height="4mm" viewBox="-2 -2 4 4">
+  <title>NEWOBJ01</title>
+  <desc>default symbol for a new object (NEWOBJ) — S-52 §10.3.3.8; original artwork (not derived from the S-52 PresLib digital files)</desc>
+  <metadata>
+    <iho:S100SVG xmlns:iho="http://www.iho.int/SVGMetadata/5.2">
+      <iho:Description iho:publisher="chartplotter" iho:format="S100SVG" iho:version="0.1"/>
+    </iho:S100SVG>
+  </metadata>
+  <rect class="symbolBox layout" fill="none" x="-1.8" y="-1.8" height="3.6" width="3.6"/>
+  <rect class="svgBox layout" fill="none" x="-1.8" y="-1.8" height="3.6" width="3.6"/>
+  <circle class="fCHMGD" cx="0" cy="0" r="1.65"/>
+  <path class="sl f0 sCHWHT" d=" M 0,-0.95 L 0,0.35" stroke-width="0.45"/>
+  <circle class="fCHWHT" cx="0" cy="0.95" r="0.24"/>
+  <circle class="pivotPoint layout" fill="none" cx="0" cy="0" r="1"/>
+</svg>
