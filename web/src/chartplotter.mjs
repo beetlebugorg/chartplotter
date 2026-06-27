@@ -229,7 +229,15 @@ export class ChartPlotter extends HTMLElement {
     this._pxPitch = loadJSON(LS_PX_PITCH, undefined); // calibrated CSS-pixel pitch (mm); undefined → util default (CSS reference)
     // Feature-inspect + tile-debugger state now live in DevTools (Advanced tab).
     this._hasArchive = false;           // is a chart archive currently loaded?
-    this._mariner = { ...DEFAULT_MARINER, ...loadJSON(LS_MARINER, {}) };
+    // Widget (embed) mode is HERMETIC for display settings: it must not read or write
+    // the shared localStorage scheme/basemap/mariner. Several embeds share one origin
+    // (the docs intro demo + the Chart 1 reference page), so persisting would let one
+    // clobber another — e.g. the reference page forcing dataQuality:true would leak
+    // onto the intro demo on its next load. Embeds boot from DEFAULT_MARINER and set
+    // their own state via applyMariner/applyScheme at ready. (boot() also sets
+    // this._widget the same way, before any apply* runs.)
+    const embed = this.hasAttribute("widget") || new URLSearchParams(location.search).has("widget");
+    this._mariner = { ...DEFAULT_MARINER, ...(embed ? {} : loadJSON(LS_MARINER, {})) };
     // Migrate the old single-value display category (base|standard|other) to
     // the multi-select Base/Standard/Other booleans (now client-side filters).
     if (this._mariner.displayCategory) {
@@ -250,8 +258,8 @@ export class ChartPlotter extends HTMLElement {
     // S-52 §10.2: Display Base is the minimum safe-navigation set and can never
     // be deselected. Force it on regardless of any (stale) persisted value.
     this._mariner.displayBase = true;
-    this._scheme = localStorage.getItem(LS_SCHEME) || "day";
-    if (!SCHEMES.includes(this._scheme)) this._scheme = "day"; // fall back if the persisted scheme isn't a known one
+    this._scheme = (embed ? this.getAttribute("scheme") : localStorage.getItem(LS_SCHEME)) || "day";
+    if (!SCHEMES.includes(this._scheme)) this._scheme = "day"; // fall back if the persisted/attr scheme isn't a known one
     // The provision job is a SERVER task: `_task` mirrors GET /api/tasks (polled,
     // never invented), `_taskMeta` holds the client-only label hints (which region,
     // which verb) the server doesn't know. `_poll` is the polling interval handle.
@@ -393,14 +401,17 @@ export class ChartPlotter extends HTMLElement {
     }
 
     const plotter = document.createElement("chart-canvas");
-    const view = shareView || loadJSON(LS_VIEW, null); // resume the last view → load in-region
+    // Embeds are hermetic (see constructor): never resume a persisted view — always
+    // boot from the `center`/`zoom` attributes (the docs intro demo pins Annapolis),
+    // so the Chart 1 reference page's view can't leak onto the intro demo.
+    const view = shareView || (this._widget ? null : loadJSON(LS_VIEW, null)); // resume the last view → load in-region
     plotter.setAttribute("center", view ? view.center.join(",") : (this.getAttribute("center") || "-76.4875,38.975"));
     plotter.setAttribute("zoom", String(view ? view.zoom : (this.getAttribute("zoom") || 11)));
     if (this.hasAttribute("cell-url")) plotter.setAttribute("cell-url", this.getAttribute("cell-url"));
     plotter.setAttribute("assets", this._assets);
     this._osmVecUrl = this._cfg("osm-pmtiles"); // hosted OSM vector basemap archive (enables the "Vector" option)
     if (this._osmVecUrl) plotter.setAttribute("osm-pmtiles", this._osmVecUrl);
-    this._basemap = this._serverBasemap || localStorage.getItem(LS_BASEMAP) || this.getAttribute("basemap") || "coastline";
+    this._basemap = this._serverBasemap || (this._widget ? null : localStorage.getItem(LS_BASEMAP)) || this.getAttribute("basemap") || "coastline";
     if (!["coastline", "osm", "osmvec", "none"].includes(this._basemap)) this._basemap = "coastline";
     if (this._basemap === "osmvec" && !this._osmVecUrl) this._basemap = "coastline"; // vector not configured
     plotter.setAttribute("basemap", this._basemap);
@@ -769,7 +780,9 @@ export class ChartPlotter extends HTMLElement {
         loaded = true;
         const frames = [...(regions || [])];
         if (this._userBake && this._userBake.bounds && !this._isWorldBounds(this._userBake.bounds)) frames.push({ bounds: this._userBake.bounds });
-        if (frames.length && !loadJSON(LS_VIEW, null)) this._frameRegionArchives(frames);
+        // Embeds keep their pinned center/zoom (Annapolis) — don't auto-frame the
+        // loaded region and don't consult the persisted view (hermetic; see constructor).
+        if (frames.length && !this._widget && !loadJSON(LS_VIEW, null)) this._frameRegionArchives(frames);
       }
     }
     if (loaded) { this.updateEmptyState(); return; }
@@ -784,7 +797,7 @@ export class ChartPlotter extends HTMLElement {
   // answers "is the centre covered at all", which is all we need here.)
   _frameInitial() {
     // (the cell-picker "charts mode" was removed — this is just the no-saved-view guard)
-    if (loadJSON(LS_VIEW, null) || !this._districts.length) return;
+    if (this._widget || loadJSON(LS_VIEW, null) || !this._districts.length) return; // embeds keep their pinned view
     const c = this._map.getCenter();
     const covered = (d) => d.bounds && c.lng >= d.bounds[0] && c.lng <= d.bounds[2] && c.lat >= d.bounds[1] && c.lat <= d.bounds[3];
     if (this._districts.some(covered)) return;
@@ -862,7 +875,7 @@ export class ChartPlotter extends HTMLElement {
     try {
       const arc = add ? await this._plotter.addArchive(url, "all") : await this._plotter.loadArchiveUrl(url);
       const b = (entry && entry.bounds) || (arc && arc.bounds);
-      if (b && !loadJSON(LS_VIEW, null)) this._map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 40, duration: 0 });
+      if (b && !this._widget && !loadJSON(LS_VIEW, null)) this._map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 40, duration: 0 }); // embeds keep their pinned view
       this._markArchive(entry ? { type: "url", file: entry.file } : null);
       return true;
     } catch (e) { console.warn("[archive] load", url, e); return false; }
@@ -1102,6 +1115,7 @@ export class ChartPlotter extends HTMLElement {
   }
 
   saveView() {
+    if (this._widget) return; // embeds are hermetic — never persist the view (see constructor)
     // The cell-picker "charts mode" (whose zoomed-out framing we used to skip
     // persisting) was removed; the live view is always the one to save.
     const c = this._map.getCenter();
@@ -1801,7 +1815,7 @@ export class ChartPlotter extends HTMLElement {
     this._scheme = name;
     this._plotter.setScheme(name);
     this.setAttribute("data-scheme", name);
-    localStorage.setItem(LS_SCHEME, name);
+    if (!this._widget) localStorage.setItem(LS_SCHEME, name); // embeds are hermetic (see constructor)
     this._persistSettings();
     this._syncSchemeUI();
   }
@@ -1811,7 +1825,7 @@ export class ChartPlotter extends HTMLElement {
   applyBasemap(mode) {
     this._basemap = (mode === "osm" || mode === "osmvec" || mode === "none") ? mode : "coastline";
     if (this._plotter) this._plotter.setBasemap(this._basemap);
-    localStorage.setItem(LS_BASEMAP, this._basemap);
+    if (!this._widget) localStorage.setItem(LS_BASEMAP, this._basemap); // embeds are hermetic (see constructor)
     this._persistSettings();
   }
 
@@ -1847,7 +1861,7 @@ export class ChartPlotter extends HTMLElement {
     // re-bake), so just apply the changed key(s) and persist.
     try { this._plotter.setMariner(patch); }
     catch (e) { console.warn(e); }
-    localStorage.setItem(LS_MARINER, JSON.stringify(this._mariner));
+    if (!this._widget) localStorage.setItem(LS_MARINER, JSON.stringify(this._mariner)); // embeds are hermetic (see constructor)
     this._persistSettings();
     // Switching units relabels + reconverts the depth fields (still in metres
     // under the hood), so redraw the settings panel.
