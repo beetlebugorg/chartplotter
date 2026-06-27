@@ -1,22 +1,30 @@
-// InfoCallouts gives the S-52 §10.6.1.1 "additional information available" markers
-// (SY(INFORM01), the box-on-a-leader) a PRECISE, layering-proof tap target.
+// InfoCallouts gives the S-52 §10.6.1.1 callout markers — the box-on-a-leader
+// symbols that float OFFSET from the feature — a PRECISE, layering-proof tap target.
+// It covers both:
+//   • SY(INFORM01)  "additional information available by cursor query"
+//   • SY(CHDATD01)  "this object is a date-dependent object" (the timed-data marker)
 //
-// The marker is a baked map symbol whose icon hit-quad is centred on the FEATURE,
-// so MapLibre's fuzzy queryRenderedFeatures makes the whole symbol area tappable
-// ("close enough") and symbol declutter/z-order makes some boxes un-pickable. This
-// overlay instead drops a transparent, exactly-sized DOM pad on each visible box
-// (a real clickable element, like the AIS-target Markers) — tapping it opens that
-// feature's info, and tapping the feature itself is left to pick the feature.
+// Each marker is a baked map symbol whose icon hit-quad is centred on the FEATURE, so
+// MapLibre's fuzzy queryRenderedFeatures makes the whole symbol area tappable ("close
+// enough") and symbol declutter/z-order makes some boxes un-pickable. This overlay
+// instead drops a transparent, exactly-sized DOM pad on each visible box (a real
+// clickable element, like the AIS-target Markers) — tapping it opens that feature's
+// info, and tapping the feature itself is left to pick the feature.
 //
-// It is purely an INTERACTION layer: the baked INFORM01 sprite stays the visual
-// box-on-leader; the pad is invisible and sits on top. It follows the mariner
-// toggle for free — when "Information callouts" is off the symbol isn't rendered,
-// so queryRenderedFeatures returns none and no pads are placed.
+// It is purely an INTERACTION layer: the baked sprite stays the visual box-on-leader;
+// the pad is invisible and sits on top. Each callout follows its mariner toggle for
+// free — when "Information callouts" / "Highlight date-dependent" is off the symbol
+// isn't rendered, so queryRenderedFeatures returns none and no pads are placed.
 
-// The INFORM01.svg "i" box, relative to the sprite pivot (the feature), in mm: the
-// box centre and (square) size. Used to place + size the pad over the rendered box.
-const BOX_CENTRE_MM = [12.4, -12.6]; // +x right, -y up (SVG y is down)
-const BOX_SIZE_MM = 5.0;
+// Per-callout box geometry, read off each symbol's SVG (the box rect relative to the
+// sprite pivot = the feature), in mm: the box centre [+x right, -y up; SVG y is down]
+// and the (square) box size. Used to place + size the pad over the rendered box.
+const CALLOUTS = {
+  // INFORM01.svg box rect x 9.93..14.88, y -15.05..-10.10 → up-right of the feature.
+  INFORM01: { centreMM: [12.4, -12.6], sizeMM: 5.0, title: "Additional information — tap to view" },
+  // CHDATD01.svg box rect x -15.16..-10.16, y 9.87..14.87 → down-left of the feature.
+  CHDATD01: { centreMM: [-12.66, 12.37], sizeMM: 5.0, title: "Date-dependent feature — tap to view" },
+};
 const MIN_PAD_PX = 22; // touch-friendly floor, regardless of zoom-independent symbol size
 
 export class InfoCallouts {
@@ -62,24 +70,25 @@ export class InfoCallouts {
     let feats = [];
     try {
       feats = (layers.length ? m.queryRenderedFeatures({ layers }) : m.queryRenderedFeatures())
-        .filter((f) => f.properties && f.properties.symbol_name === "INFORM01" && f.geometry && f.geometry.type === "Point");
+        .filter((f) => f.properties && CALLOUTS[f.properties.symbol_name] && f.geometry && f.geometry.type === "Point");
     } catch {
       return;
     }
     const seen = new Set();
     for (const f of feats) {
       const p = f.properties;
-      const key = (p.cell || "") + "|" + (p.class || "") + "|" + f.geometry.coordinates.join(",");
+      const spec = CALLOUTS[p.symbol_name];
+      const key = p.symbol_name + "|" + (p.cell || "") + "|" + (p.class || "") + "|" + f.geometry.coordinates.join(",");
       if (seen.has(key)) continue;
       seen.add(key);
       const pxmm = this._pxPerMM(+p.scale);
-      const off = [BOX_CENTRE_MM[0] * pxmm, BOX_CENTRE_MM[1] * pxmm];
-      const size = Math.max(MIN_PAD_PX, BOX_SIZE_MM * pxmm);
+      const off = [spec.centreMM[0] * pxmm, spec.centreMM[1] * pxmm];
+      const size = Math.max(MIN_PAD_PX, spec.sizeMM * pxmm);
       let rec = this._markers.get(key);
       if (!rec) {
         const el = document.createElement("div");
         el.className = "info-callout-pad";
-        el.title = "Additional information — tap to view";
+        el.title = spec.title;
         // Invisible by default (the baked S-52 box stays the visual); a faint ring on
         // hover/touch shows it's the live tap target. pointer-events auto so it owns
         // the click; box-sizing so the ring doesn't grow it.
