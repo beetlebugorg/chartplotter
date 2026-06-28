@@ -76,7 +76,7 @@ func TestImport_NoCatalog(t *testing.T) {
 	if set := s.deriveUploadSet(cat, cells); set != "user-us5md1mc" {
 		t.Errorf("deriveUploadSet = %q, want user-us5md1mc", set)
 	}
-	meta := buildSetMeta("user-us5md1mc", baker.ExtractCellMeta(cells, nil), cat)
+	meta := buildSetMeta("user-us5md1mc", baker.ExtractCellMeta(cells, cat, nil), cat)
 	if meta.ScaleMin != 12000 || len(meta.BBox) != 4 || meta.Agency != "NOAA (US)" {
 		t.Errorf("header metadata missing: scale=%d bbox=%v agency=%q", meta.ScaleMin, meta.BBox, meta.Agency)
 	}
@@ -115,7 +115,7 @@ func TestImport_AutoNameAndMeta(t *testing.T) {
 	}
 
 	// The post-bake metadata tail (bakeAndRegister does exactly this after baking).
-	cellMeta := baker.ExtractCellMeta(cells, nil)
+	cellMeta := baker.ExtractCellMeta(cells, cat, nil)
 	meta := buildSetMeta(set, cellMeta, cat)
 	meta.Imported = "2026-06-25T00:00:00Z"
 	if err := s.writeSetMeta(set, meta); err != nil {
