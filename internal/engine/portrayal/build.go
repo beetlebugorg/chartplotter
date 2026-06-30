@@ -21,6 +21,13 @@ type FeatureBuild struct {
 	Primitives      []Primitive
 	DisplayPriority int
 	DisplayCategory int
+	// ViewingGroup is the raw S-101/S-52 viewing-group number of the feature's
+	// MOST-VISIBLE draw — the same draw that set DisplayCategory — so
+	// displayCategoryForViewingGroup(ViewingGroup) == DisplayCategory always holds.
+	// 0 when the feature carries no banded viewing group. Baked as the per-feature
+	// `vg` tile tag for the mariner's fine-grained viewing-group selection (S-52
+	// §14.5). Mirrors tile57's Portrayal.vg (src/s100/s101_instr.zig).
+	ViewingGroup int
 	// DateStart/DateEnd/TimeValid carry the feature's date dependency when it has
 	// one (S-57 DATSTA/DATEND fixed window or PERSTA/PEREND periodic window), so the
 	// baker can tag the feature and a date-aware client show/hide it against the

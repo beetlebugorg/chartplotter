@@ -263,6 +263,7 @@ type routed struct {
 	bcBnd    int8
 	bcPts    int16
 	bcScamin uint32 // SCAMIN denominator (0 = none); emitted as `scamin` for the client's per-SCAMIN bucket layers
+	bcVG     int32  // raw viewing group (S-52 §14.5; 0 = unbanded); emitted as `vg` when non-zero for the mariner's per-viewing-group filter
 	bcHasPts bool
 	bcBase   bool // attrs is variable-only; rebuild the base from bc* at emit
 }
@@ -281,6 +282,7 @@ type sectorPrim struct {
 	zMin     uint32
 	natMax   uint32
 	scamin   uint32 // SCAMIN denominator of the parent LIGHTS (0 = none); emitted as `scamin` so the client's per-SCAMIN bucket layer gates the exact display cutoff, same as point symbols/text
+	vg       int32  // raw viewing group (S-52 §14.5) of the parent LIGHTS; emitted as `vg` when non-zero
 	// Date validity of the parent LIGHTS (S-52 §10.4.1.1); empty when none. Carried
 	// because sectors tessellate at tile-emit time, after b.curDate* has moved on.
 	dateStart, dateEnd string
@@ -311,6 +313,7 @@ type Baker struct {
 	curCell   string // dataset name of the cell currently being added (stamped on each feature)
 	curCscl   uint32 // compilation-scale denominator of the cell currently being added (per-cell best-available)
 	curScamin uint32 // SCAMIN (1:N min display scale) of the feature currently being expanded; 0 = none
+	curVG     int32  // raw viewing group (S-52 §14.5) of the feature currently being expanded; 0 = unbanded. Baked as `vg` for the mariner's per-viewing-group filter.
 	curObjnam string // OBJNAM of the feature currently being expanded (for the inspector)
 	curLight  string // light characteristic string of the current LIGHTS feature (e.g. "Fl.R.4s")
 	curAttrs  string // compact JSON of the feature's full S-57 attribute set (acronym→value) for the cursor-pick report (S-52 PresLib §10.8); "" when the feature has none
@@ -780,6 +783,7 @@ func (b *Baker) addCell(chart *s57.Chart, pc CellPortrayal) {
 			scamin := intAttr(f.Attributes(), "SCAMIN")
 			b.curScamin = scamin   // baked as the `scamin` tag → client per-SCAMIN bucket layers
 			b.recordScamin(scamin) // publish the band's distinct values (manifest → TileJSON)
+			b.curVG = int32(fb.ViewingGroup) // baked as the `vg` tag → client per-viewing-group filter
 			// Date validity period (S-52 §10.4.1.1) — baked onto each primitive so the
 			// client applies the mandatory current-date filter.
 			b.curDateStart, b.curDateEnd = fb.DateStart, fb.DateEnd
@@ -903,6 +907,9 @@ func (b *Baker) routeSoundingGroup(names []string, sc portrayal.SymbolCall, clas
 		{Key: "symbol_names", Value: mvt.StringVal(joined)},
 		{Key: "scale", Value: mvt.FloatVal(sc.Scale)},
 	}
+	if b.curVG != 0 {
+		attrs = append(attrs, mvt.KeyValue{Key: "vg", Value: mvt.IntVal(int64(b.curVG))})
+	}
 	if pts != ptsAlwaysShown {
 		attrs = append(attrs, mvt.KeyValue{Key: "pts", Value: mvt.IntVal(pts)})
 	}
@@ -1009,6 +1016,9 @@ func (b *Baker) attrsFor(r *routed, scratch *[]mvt.KeyValue) []mvt.KeyValue {
 	if r.bcScamin != 0 {
 		out = append(out, mvt.KeyValue{Key: "scamin", Value: mvt.IntVal(int64(r.bcScamin))})
 	}
+	if r.bcVG != 0 {
+		out = append(out, mvt.KeyValue{Key: "vg", Value: mvt.IntVal(int64(r.bcVG))})
+	}
 	out = append(out, r.attrs...)
 	*scratch = out
 	return out
@@ -1063,6 +1073,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 		bcCat:    int16(catRank(cat)),
 		bcBnd:    int8(bnd),
 		bcScamin: b.curScamin,
+		bcVG:     b.curVG,
 	}
 	// pts is omitted for the common case (2): only paper/simplified variant passes
 	// (0/1) carry it, so most features stay lean.
@@ -1171,6 +1182,7 @@ func (b *Baker) route(p portrayal.Primitive, class string, drawPrio, cat int, zr
 			fig: v, class: class, cell: b.curCell,
 			drawPrio: drawPrio, cat: cat, zMin: zMin, natMax: zr.Max,
 			scamin:    b.curScamin,
+			vg:        b.curVG,
 			dateStart: b.curDateStart, dateEnd: b.curDateEnd,
 			legNorm: legNorm,
 		})
@@ -1972,6 +1984,9 @@ func (b *Baker) emitTileInto(coord tile.TileCoord, extent uint32, buffer float64
 				{Key: "cat", Value: mvt.IntVal(catRank(sp.cat))},
 				{Key: "bnd", Value: mvt.IntVal(bndAlwaysShown)},
 				{Key: "draw_prio", Value: mvt.IntVal(int64(sp.drawPrio))},
+			}
+			if sp.vg != 0 {
+				attrs = append(attrs, mvt.KeyValue{Key: "vg", Value: mvt.IntVal(int64(sp.vg))})
 			}
 			// Leg-length variant tag — only on the short/full legs (0/1); arcs and
 			// rings (sleg -1) stay untagged so the client always shows them.

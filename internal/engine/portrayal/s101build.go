@@ -371,6 +371,7 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 	var prims []Primitive
 	priority := 0
 	cat := 0 // unset; resolved from the viewing groups the rule emits
+	vg := 0  // raw VG of the most-visible draw (the one that set cat), 0 if unbanded
 	var dateStart, dateEnd, timeValid string
 	for _, c := range cmds {
 		if c.Priority > priority {
@@ -399,6 +400,7 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 		// also carries a standard/other label.
 		if dc := displayCategoryForViewingGroup(c.ViewingGroup); dc != 0 && (cat == 0 || dc < cat) {
 			cat = dc
+			vg = c.ViewingGroup // the most-visible draw's VG, so band(vg) == cat (tile57 parity)
 		}
 		prims = append(prims, emitPrimitives(c, sg, b.Catalog)...)
 	}
@@ -468,6 +470,7 @@ func (b *S101Builder) buildFeatureBody(f *s57.Feature, stream string) FeatureBui
 		Primitives:      prims,
 		DisplayPriority: priority,
 		DisplayCategory: cat,
+		ViewingGroup:    vg,
 		DateStart:       dateStart,
 		DateEnd:         dateEnd,
 		TimeValid:       timeValid,

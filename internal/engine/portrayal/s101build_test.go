@@ -201,6 +201,28 @@ func TestS101BuildDisplayCategory(t *testing.T) {
 	}
 }
 
+// TestS101BuildViewingGroup: a feature stamps the raw viewing group of its
+// most-visible draw (LNDARE → 12010), and that VG's band always matches the
+// chosen DisplayCategory — the invariant the client relies on when filtering on
+// `cat` (category) and `vg` (viewing group) independently. Mirrors tile57's
+// Portrayal.vg rule (band(vg) == cat).
+func TestS101BuildViewingGroup(t *testing.T) {
+	b := s101Builder(t)
+	ring := [][]float64{{0, 0}, {0, 1}, {1, 1}, {1, 0}, {0, 0}}
+	land := s57.NewFeature(7, "LNDARE",
+		s57.Geometry{Type: s57.GeometryTypePolygon, Coordinates: ring}, nil)
+	build, ok := b.Build(&land)
+	if !ok {
+		t.Fatal("build failed")
+	}
+	if build.ViewingGroup != 12010 {
+		t.Errorf("LNDARE viewing group = %d, want 12010", build.ViewingGroup)
+	}
+	if dc := displayCategoryForViewingGroup(build.ViewingGroup); dc != build.DisplayCategory {
+		t.Errorf("band(vg %d) = %d, want it to equal cat %d", build.ViewingGroup, dc, build.DisplayCategory)
+	}
+}
+
 // TestS101LightFlareRotation: a LIGHTS feature's flare symbol is rotated (the
 // catalogue default 135°, screen-referenced). Regression: the CRS-qualified
 // "Rotation:PortrayalCRS,135" parsed to 0°, so flares never rotated.

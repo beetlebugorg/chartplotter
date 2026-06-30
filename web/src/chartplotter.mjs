@@ -105,6 +105,10 @@ const DEFAULT_MARINER = {
   showContourLabels: false,
   dataQuality: false,
   showMetaBounds: false,
+  // Fine-grained viewing-group selection (S-52 §14.5): a DENY-LIST of raw viewing-
+  // group ids (the baked `vg` tag) the mariner has turned off. Empty = every group
+  // shown (default). Driven by the "Viewing groups" settings tab; see viewing-groups.mjs.
+  viewingGroupsOff: [],
   // Display units for non-depth quantities (distance/height/speed/wind/temp).
   // Depth has its own metric/imperial toggle (depthUnit, above). See units.mjs.
   ...UNIT_DEFAULTS,
