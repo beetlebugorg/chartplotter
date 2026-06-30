@@ -64,7 +64,11 @@ export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 9, approach:
 // no-SCAMIN counterparts stay in the original (areas/area_patterns/lines/
 // complex_lines) layers — single, always-in-band, NOT bucketed.
 export const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines",
-  "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin"]);
+  "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin",
+  // The native tile57 engine splits SCAMIN point symbols + text into their own
+  // source-layers (vs. the Go baker's in-layer `scamin` property), so bucket those
+  // too — without them, tile57's SCAMIN buoys/beacons/lights/labels never show.
+  "point_symbols_scamin", "text_scamin"]);
 
 // Centre-latitude drift (degrees) that triggers a SCAMIN bucket-minzoom rebuild.
 // The cutoff zoom shifts with cos(lat); 2° keeps the error under ~0.05 zoom at

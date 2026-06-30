@@ -69,8 +69,12 @@ export class CoverageBoxes {
     if (!map.getLayer("inst-outline")) map.addLayer({ id: "inst-outline", type: "line", source: "inst-bounds", layout: { visibility: vis }, paint: {
       "line-color": "#3a9bdc",
       "line-dasharray": [4, 3],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 2, 2.2, 8, 1.6, 13, 1, 16, 0.8],
-      "line-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.95, 8, 0.8, 13, 0.55, 16, 0.4],
+      // BOLD at the far zoom-out (z3.5 floor) so "where are my charts" reads clearly
+      // over the basemap even for a pack with no overview tiles (a harbor-only import
+      // is invisible there otherwise — only this outline marks it); subtle once zoomed
+      // in so it doesn't fight the chart symbology.
+      "line-width": ["interpolate", ["linear"], ["zoom"], 3, 3, 6, 2.2, 8, 1.6, 13, 1, 16, 0.8],
+      "line-opacity": ["interpolate", ["linear"], ["zoom"], 3, 1, 8, 0.8, 13, 0.55, 16, 0.4],
     } });
     this._apply(); // restore data after a style rebuild
   }

@@ -527,6 +527,28 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 	return cells
 }
 
+// bakeEngine returns the effective bake engine for server imports. The persisted
+// client setting ("bakeEngine", set from the Advanced settings UI) wins; otherwise
+// the launch-flag default (--tile57-bake → BakeEngine) applies. It is forced to
+// "go" unless this binary embeds the native libtile57 baker, so a stray setting on
+// a CGO-free binary can't disable imports.
+func (s *Server) bakeEngine() string {
+	eng := s.BakeEngine
+	s.settings.load(s.dataDir)
+	if body := s.settings.get(); len(body) > 0 {
+		var peek struct {
+			BakeEngine string `json:"bakeEngine"`
+		}
+		if json.Unmarshal(body, &peek) == nil && peek.BakeEngine != "" {
+			eng = peek.BakeEngine
+		}
+	}
+	if eng == "tile57" && bakeTile57Available {
+		return "tile57"
+	}
+	return "go"
+}
+
 // runImport bakes cells into <cache>/tiles/<set>.pmtiles and registers the set.
 func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
 	s.bakeAndRegister(jobID, set, cells, aux, cat, overzoom, applyUpdates)
@@ -552,6 +574,15 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		}
 		cells = base
 	}
+
+	// Native libtile57 bundle bake (opt-in): one self-describing bundle per set
+	// (tiles + SCAMIN-bucketed styles + assets), registered as a single set. The
+	// engine is the "Advanced → bake engine" setting (capability-gated). Falls through
+	// to the Go per-band path if unhandled.
+	if s.bakeEngine() == "tile57" && s.bakeBundleTile57(jobID, set, cells, aux, cat, applyUpdates) {
+		return
+	}
+
 	_ = overzoom // the per-band streaming bake has no all-bands-to-z0 overzoom mode
 	s.imports.update(jobID, func(j *importJob) {
 		// Open on the "prepare" stage (unit "cells"): the bake starts by parsing

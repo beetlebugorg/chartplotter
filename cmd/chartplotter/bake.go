@@ -27,6 +27,7 @@ type bakeCmd struct {
 	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
 	S101     string   `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Requires --s101-fc."`
 	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
+	Tile57   bool     `name:"tile57" help:"(requires a -tags tile57 build) Bake with the native libtile57 engine into a self-contained chart BUNDLE (tiles/chart.pmtiles + assets/style-*.json + manifest.json) under -o (treated as a directory). Honors --max-zoom; --bands/--manifest/--overzoom don't apply (the bundle is zoom-banded per cell and self-describing)."`
 }
 
 func (c bakeCmd) Run() error {
@@ -39,6 +40,14 @@ func (c bakeCmd) Run() error {
 		}
 		fmt.Fprintln(os.Stderr, "portrayal: S-101 rule engine")
 	}
+
+	// Native libtile57 bundle path (opt-in, -tags tile57): the engine reads the ENC
+	// from disk and writes a self-contained bundle, so it runs BEFORE the in-memory
+	// collectCells the Go baker needs.
+	if c.Tile57 {
+		return c.runTile57Bundle()
+	}
+
 	cells, aux, err := collectCells(c.In)
 	if err != nil {
 		return err
@@ -219,6 +228,81 @@ func (c bakeCmd) runBands(cells map[string]baker.CellData, aux map[string][]byte
 		fmt.Printf("wrote manifest %s\n", c.Manifest)
 	}
 	return nil
+}
+
+// runTile57Bundle bakes the ENC inputs with the native libtile57 engine into a
+// self-contained chart bundle (tiles/chart.pmtiles + per-scheme SCAMIN-bucketed
+// style-*.json + assets + manifest.json) under the output directory. The engine
+// reads the ENC from disk, so a lone directory or .000 is handed over directly and
+// only zips / multiple inputs are staged into a temp directory of cells first.
+func (c bakeCmd) runTile57Bundle() error {
+	input, cleanup, err := c.tile57Input()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	outDir := bundleOutDir(c.Out)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	// nil progress → the lib's built-in per-band console progress (good CLI output).
+	n, bbox, err := bakeTile57Bundle(input, outDir, c.MaxZoom, nil)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("baked %d cell(s) → %s/ via libtile57 — bundle: tiles/chart.pmtiles + assets/style-{day,dusk,night}.json + manifest.json (bbox %.4f,%.4f,%.4f,%.4f)\n",
+		n, outDir, bbox[0], bbox[1], bbox[2], bbox[3])
+	return nil
+}
+
+// tile57Input resolves the ENC inputs to a single on-disk path for the bundle
+// baker. A lone existing directory or .000 file is used as-is (no cleanup). Zips,
+// multiple inputs, or anything else are gathered with collectCells and written to a
+// temp directory of cells (returned with a cleanup that removes it).
+func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
+	noop := func() {}
+	if len(c.In) == 1 {
+		if fi, e := os.Stat(c.In[0]); e == nil && (fi.IsDir() || encExt(c.In[0]) == ".000") {
+			return c.In[0], noop, nil
+		}
+	}
+	cells, _, err := collectCells(c.In)
+	if err != nil {
+		return "", noop, err
+	}
+	if len(cells) == 0 {
+		return "", noop, fmt.Errorf("no .000 base cells found in: %s", strings.Join(c.In, ", "))
+	}
+	dir, err := os.MkdirTemp("", "cp-tile57-enc-")
+	if err != nil {
+		return "", noop, err
+	}
+	for name, cd := range cells { // name is "<stem>.000"
+		if err := os.WriteFile(filepath.Join(dir, name), cd.Base, 0o644); err != nil {
+			os.RemoveAll(dir)
+			return "", noop, err
+		}
+		for un, ub := range cd.Updates { // sequential .001+ alongside the base
+			if err := os.WriteFile(filepath.Join(dir, filepath.Base(un)), ub, 0o644); err != nil {
+				os.RemoveAll(dir)
+				return "", noop, err
+			}
+		}
+	}
+	return dir, func() { os.RemoveAll(dir) }, nil
+}
+
+// bundleOutDir derives the bundle output DIRECTORY from the -o value: a *.pmtiles /
+// *.mbtiles path becomes its stem (charts.pmtiles → charts/), otherwise -o is used
+// as the directory verbatim.
+func bundleOutDir(out string) string {
+	switch strings.ToLower(filepath.Ext(out)) {
+	case ".pmtiles", ".mbtiles":
+		return strings.TrimSuffix(out, filepath.Ext(out))
+	default:
+		return out
+	}
 }
 
 // encExt reports the 3-digit S-57 cell extension (".000" base, ".001"+ updates)

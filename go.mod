@@ -19,6 +19,7 @@ require (
 
 require (
 	github.com/adrianmo/go-nmea v1.3.0 // indirect
+	github.com/beetlebugorg/chartplotter-native/bindings/go v0.0.0
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -34,3 +35,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/beetlebugorg/chartplotter-native/bindings/go => ../tile57/bindings/go

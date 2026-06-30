@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib serve-tile57 xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -90,6 +90,51 @@ build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin
 	  echo "S-101 catalogue not found at $(S101_PC); building WITHOUT it (needs --s101 at runtime)"; \
 	  go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
 	fi
+
+# --- Optional native libtile57 (tile57) CGO backend ----------------------------
+# The default build is CGO-free (a release-binary requirement); this opt-in target
+# links the native Zig engine's static library so tiles, bakes, and S-101 assets
+# are produced by libtile57 instead of the pure-Go path. TILE57 points at the
+# engine repo via the ../tile57 symlink (→ chartplotter-native); override to relocate.
+TILE57     ?= ../tile57
+TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
+
+# Build the static library on demand (only when absent). Needs Zig 0.16 on PATH.
+$(TILE57_LIB):
+	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH and $(TILE57_LIB) missing — install Zig or prebuild the lib"; exit 1; }
+	@echo "building libtile57.a (zig build in $(TILE57))…"
+	cd "$(TILE57)" && zig build
+
+tile57-lib: ## Force-rebuild ../tile57/zig-out/lib/libtile57.a (the native engine static lib)
+	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH"; exit 1; }
+	cd "$(TILE57)" && zig build
+
+# CGO build linking libtile57 as the tile/asset backend (-tags tile57). Embeds the
+# S-101 catalogue too when it's available locally, like `make build`.
+build-tile57: $(TILE57_LIB) ## Build bin/chartplotter with the libtile57 CGO backend (needs the ../tile57 symlink + Zig)
+	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — create the symlink: ln -s ../chartplotter-native ../tile57"; exit 1; }
+	@if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then \
+	  $(MAKE) --no-print-directory sync-s101; \
+	  echo "building libtile57 backend + embedded S-101 catalogue (-tags 'embed_s101 tile57')…"; \
+	  CGO_ENABLED=1 go build -tags 'embed_s101 tile57' -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
+	else \
+	  echo "S-101 catalogue not found; building libtile57 backend WITHOUT it (needs --s101 at runtime)…"; \
+	  CGO_ENABLED=1 go build -tags tile57 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
+	fi
+	@echo "→ $(BIN) (libtile57 backend; serve with --tile57 <ENC_ROOT> or bake with --tile57)"
+
+# Build the FULL app WITH libtile57 compiled in and serve it: the web frontend +
+# provisioning / chart-library API, defaulting chart imports to the native tile57
+# bundle baker (--tile57-bake; the Advanced→"Bake engine" UI setting still overrides
+# per deployment). No --s101 needed — build-tile57 embeds the catalogue (and tile57
+# bakes with libtile57's own rules). Uses the MAIN $(CACHE) (where the tile57 bundle
+# baker writes its packs as <PROVIDER>/<PACK>/tiles/chart.pmtiles), NOT `serve`'s
+# vestigial $(S101_CACHE) subdir — so the chart library you bake with tile57 is the
+# one served here. Set ENC_ROOT=<dir/.zip/.000> to ALSO register a LIVE libtile57 set
+# generated on demand from those cells (registered as 'tile57'; /tiles/tile57.json).
+serve-tile57: build-tile57 ## Build + serve the full app with libtile57 compiled in (tile57 bake engine; ENC_ROOT=… also adds a live set)
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) --tile57-bake --cache $(CACHE) \
+	  $(if $(ENC_ROOT),--tile57 "$(ENC_ROOT)")
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps

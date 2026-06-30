@@ -38,6 +38,15 @@ func (ts *tileSets) register(name string, src tilesource.TileSource) {
 	ts.m[name] = src
 }
 
+// RegisterTileSet registers (or replaces) a tile set under name, served at
+// /tiles/{name}/… exactly like a prebaked archive. It is exposed so an alternate
+// backend — e.g. the optional libtile57 live source compiled in under
+// -tags tile57 — can publish a set the same way discovery registers .pmtiles
+// packs. A replaced backend is closed.
+func (s *Server) RegisterTileSet(name string, src tilesource.TileSource) {
+	s.sets.register(name, src)
+}
+
 // remove unregisters and closes the set named name. Reports whether it existed.
 func (ts *tileSets) remove(name string) bool {
 	ts.mu.Lock()

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
@@ -26,6 +25,8 @@ type serveCmd struct {
 	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached baked archives for a clean slate (source ENC is kept)."`
 	S101       string `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Every chart baked by the server (chart library imports) uses this catalogue's symbology, and the matching client assets are served. Requires --s101-fc."`
 	S101FC     string `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
+	Tile57     string `name:"tile57" type:"path" help:"(requires a -tags tile57 build) Serve a LIVE libtile57-backed tile set from this ENC_ROOT / .zip / .000, generating MVT on demand from the cells instead of prebaking. Registered as the 'tile57' set (point a client at /tiles/tile57.json)."`
+	Tile57Bake bool   `name:"tile57-bake" help:"(requires a -tags tile57 build) DEFAULT server imports to the native libtile57 bundle baker (tiles + SCAMIN-bucketed styles + assets) instead of the Go per-band baker. The Advanced→\"Bake engine\" UI setting overrides this per deployment; this flag just sets the headless default."`
 }
 
 func (c serveCmd) Run() error {
@@ -61,7 +62,7 @@ func (c serveCmd) Run() error {
 		if err != nil {
 			return err
 		}
-		if _, err := assets.EmitS101FS(catalogFS, "daySvgStyle.css", assetDir); err != nil {
+		if _, err := emitS101Assets(catalogFS, "daySvgStyle.css", assetDir); err != nil {
 			return fmt.Errorf("emit S-101 assets: %w", err)
 		}
 		// The emitted S-101 client assets (colortables/linestyles/sprite/patterns)
@@ -96,6 +97,23 @@ func (c serveCmd) Run() error {
 	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
 	srv.ReportStaleCache() // loud warning if any served pack predates this binary
+
+	// Optional libtile57 live backend (-tags tile57): generate MVT on demand from
+	// raw ENC cells instead of serving a prebaked archive.
+	if c.Tile57 != "" {
+		if err := registerTile57Set(srv, "tile57", c.Tile57, c.S101); err != nil {
+			return err
+		}
+	} else if tile57Available {
+		fmt.Println("tile57: libtile57 backend available — pass --tile57 <ENC_ROOT> for a live set")
+	}
+	if c.Tile57Bake {
+		if !tile57Available {
+			return fmt.Errorf("--tile57-bake requires a binary built with -tags tile57 (run `make build-tile57`)")
+		}
+		srv.BakeEngine = "tile57"
+		fmt.Println("tile57: server chart imports will bake native libtile57 bundles")
+	}
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""
