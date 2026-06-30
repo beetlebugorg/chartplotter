@@ -23,17 +23,27 @@ export const STYLE = `
   .set-rail button { text-align:left; border:none; background:none; color:var(--ui-text-dim); font:inherit; font-size:13px; font-weight:600; padding:9px 11px; border-radius:8px; cursor:pointer; transition:background .1s,color .1s; }
   .set-rail button:hover { background:var(--ui-surface); color:var(--ui-text); }
   .set-rail button.sel { background:var(--ui-accent); color:var(--ui-accent-text); }
-  .set-pane { flex:1 1 0; min-width:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:4px 18px 10px; }
-  .set-group { margin-top:14px; font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--ui-text-faint); padding:0 2px 2px; }
-  .set-group:first-child { margin-top:4px; }
+  /* No top padding: the first section header pins flush to the very top, so no row
+     can peek through the gap above a stuck sticky header. */
+  .set-pane { flex:1 1 0; min-width:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:0 18px 10px; }
+  /* Section header: STICKS to the top of the scrolling pane until the next section's
+     header slides up and takes its place. A full-bleed opaque bar (the pane sits on
+     --ui-surface) so rows scroll cleanly underneath. Mirrors .mcol-head in the chart
+     library. */
+  .set-group { position:sticky; top:0; z-index:2; margin:0 -18px; padding:9px 20px 7px;
+    font-size:11.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+    color:var(--ui-text-dim); background:var(--ui-surface); border-bottom:1px solid var(--ui-border-2); }
   .set-host { /* a contribution's custom-render slot */ }
   .set-host .dev-tools { border-top:1px solid var(--ui-border-2); margin-top:8px; }
 
-  .set-row { display:flex; align-items:center; gap:14px; padding:13px 2px; border-bottom:1px solid var(--ui-border-2); }
+  /* The row stacks: a header line (label + control side-by-side) and, beneath it,
+     the description spanning the FULL row width so it doesn't wrap inside the narrow
+     label column when a control sits beside it. */
+  .set-row { display:flex; flex-direction:column; padding:13px 2px; border-bottom:1px solid var(--ui-border-2); }
   .set-row:last-child { border-bottom:none; }
-  .set-row .lbl { display:flex; flex-direction:column; min-width:0; flex:1 1 auto; }
-  .set-row .lbl .t { font-weight:600; font-size:13.5px; }
-  .set-row .lbl .d { font-size:12px; color:var(--ui-text-faint); margin-top:3px; line-height:1.45; }
+  .set-row .set-head { display:flex; align-items:center; gap:14px; }
+  .set-row .t { font-weight:600; font-size:13.5px; flex:1 1 auto; min-width:0; }
+  .set-row .d { font-size:12px; color:var(--ui-text-faint); margin-top:6px; line-height:1.45; }
   .set-row .ctl { flex:none; margin-left:auto; display:flex; align-items:center; gap:6px; }
   .set-row .ctl input[type=number] { width:58px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px; padding:5px 7px; font:inherit; font-size:16px; background:var(--ui-surface); color:var(--ui-text); }
   .set-row .ctl .unit { color:var(--ui-text-faint); font-size:12px; min-width:14px; }
@@ -55,8 +65,7 @@ export const STYLE = `
 
   .set-empty { padding:24px 2px; color:var(--ui-text-faint); font-size:13px; }
   @media (max-width:560px) {
-    .set-row { flex-wrap:wrap; gap:8px 14px; }
-    .set-row .lbl { flex:1 1 60%; }
+    .set-row .set-head { flex-wrap:wrap; gap:8px 14px; }
     /* Stack the shell: the rail becomes a horizontal scrolling tab strip above the pane. */
     .set-shell { flex-direction:column; max-height:none; }
     .set-rail { flex:0 0 auto; flex-direction:row; gap:4px; overflow-x:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
@@ -113,9 +122,9 @@ function control(item, value, on) {
 
 // A labelled settings row wrapping one control.
 export function settingRow(item, value, on) {
-  const desc = item.desc ? `<span class="d">${esc(item.desc)}</span>` : "";
-  return `<div class="set-row"><div class="lbl"><span class="t">${esc(item.label)}</span>${desc}</div>
-    <div class="ctl">${control(item, value, on)}</div></div>`;
+  const desc = item.desc ? `<div class="d">${esc(item.desc)}</div>` : "";
+  return `<div class="set-row"><div class="set-head"><span class="t">${esc(item.label)}</span>
+    <div class="ctl">${control(item, value, on)}</div></div>${desc}</div>`;
 }
 
 // A group subheading (only when a group has a title).
