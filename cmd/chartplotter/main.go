@@ -9,8 +9,6 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
-	"os"
 
 	"github.com/alecthomas/kong"
 
@@ -36,22 +34,10 @@ type emitAssetsCmd struct {
 }
 
 func (c emitAssetsCmd) Run() error {
-	// Emit the client assets from the S-101 catalogue via the native libtile57
-	// asset emitter (emitS101Assets); a CGO-free build has none and errors.
-	var catalogFS fs.FS
-	switch {
-	case c.S101 != "":
-		catalogFS = os.DirFS(c.S101)
-	case s101catalog.Available():
-		fsys, err := s101catalog.PortrayalFS()
-		if err != nil {
-			return err
-		}
-		catalogFS = fsys
-	default:
-		return fmt.Errorf("no S-101 catalogue (build with `make` or pass --s101)")
-	}
-	files, err := emitS101Assets(catalogFS, c.CSS, c.Dir)
+	// Emit the client assets via the native libtile57 asset baker: c.S101 "" uses
+	// libtile57's embedded S-101 catalogue, else an on-disk PortrayalCatalog dir.
+	// A CGO-free build has no asset baker and errors via the stub.
+	files, err := emitS101Assets(c.S101, c.Dir)
 	if err != nil {
 		return err
 	}

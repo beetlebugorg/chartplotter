@@ -4,8 +4,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
-	"strings"
 
 	tile57 "github.com/beetlebugorg/chartplotter-native/bindings/go"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
@@ -33,32 +34,45 @@ func (t tile57Source) Meta() tilesource.TileMeta {
 }
 
 // registerTile57Set opens the ENC inputs under root with libtile57 and registers
-// a live tile set (MVT generated on demand from the cells, no prebake) under
-// name. rulesDir overrides the S-101 portrayal rules ("" = libtile57's built-in).
+// a live tile set (MVT generated on demand from the cells, no prebake) under name.
+// libtile57's streaming Open reads an ENC_ROOT dir / single .000 from disk on
+// demand; a .zip or other input is first staged into a temp ENC dir (kept for the
+// source's lifetime). rulesDir is unused — the engine uses its embedded catalogue.
 func registerTile57Set(srv *server.Server, name, root, rulesDir string) error {
-	cells, _, err := collectCells([]string{root})
-	if err != nil {
-		return err
+	_ = rulesDir
+	encRoot := root
+	if fi, err := os.Stat(root); err != nil || !(fi.IsDir() || encExt(root) == ".000") {
+		cells, _, err := collectCells([]string{root})
+		if err != nil {
+			return err
+		}
+		if len(cells) == 0 {
+			return fmt.Errorf("tile57: no .000 base cells found under %s", root)
+		}
+		dir, err := os.MkdirTemp("", "cp-tile57-live-")
+		if err != nil {
+			return err
+		}
+		for n, cd := range cells { // n == "<stem>.000"
+			if err := os.WriteFile(filepath.Join(dir, n), cd.Base, 0o644); err != nil {
+				return err
+			}
+			for un, ub := range cd.Updates {
+				if err := os.WriteFile(filepath.Join(dir, filepath.Base(un)), ub, 0o644); err != nil {
+					return err
+				}
+			}
+		}
+		encRoot = dir
 	}
-	if len(cells) == 0 {
-		return fmt.Errorf("tile57: no .000 base cells found under %s", root)
-	}
-	inputs := make([]tile57.CellInput, 0, len(cells))
-	for name, cd := range cells {
-		inputs = append(inputs, tile57.CellInput{
-			Name:    strings.TrimSuffix(name, ".000"), // pick-report "source cell" badge
-			Base:    cd.Base,
-			Updates: orderedUpdates(cd.Updates),
-		})
-	}
-	src, err := tile57.OpenCells(inputs, rulesDir, tile57.PickInclude)
+	src, err := tile57.Open(encRoot)
 	if err != nil {
 		return err
 	}
 	srv.RegisterTileSet(name, tile57Source{src})
-	mn, mx := src.ZoomRange()
-	fmt.Printf("tile57: live set %q from %d cell(s) (libtile57 %s, zoom %d..%d)\n",
-		name, len(inputs), tile57.Version(), mn, mx)
+	info := src.Info()
+	fmt.Printf("tile57: live set %q (libtile57 %s, zoom %d..%d)\n",
+		name, tile57.Version(), info.MinZoom, info.MaxZoom)
 	return nil
 }
 

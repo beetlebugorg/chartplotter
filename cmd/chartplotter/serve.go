@@ -2,12 +2,10 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
@@ -29,44 +27,26 @@ type serveCmd struct {
 }
 
 func (c serveCmd) Run() error {
-	// Portrayal is S-101. Pick the catalogue source: an explicit --s101 dir wins
-	// (override / rule iteration); otherwise the build-time embedded catalogue (the
-	// default — `make` builds it in). The baker defaults to the embedded portrayer
-	// on its own (baker.applyPortrayer); here we emit the matching client assets
-	// (colortables/sprite/patterns/linestyles) into a temp dir and serve them.
-	var catalogFS fs.FS
-	var s101AssetDir string // freshly-emitted S-101 client assets (temp dir), or ""
-	switch {
-	case c.S101 != "":
-		if c.S101FC == "" {
-			return fmt.Errorf("--s101 requires --s101-fc")
-		}
-		catalogFS = os.DirFS(c.S101)
-		fmt.Printf("portrayal: S-101 (catalogue=%s)\n", c.S101)
-	case s101catalog.Available():
-		fsys, err := s101catalog.PortrayalFS()
-		if err != nil {
-			return fmt.Errorf("embedded S-101 catalogue: %w", err)
-		}
-		catalogFS = fsys
-		fmt.Println("portrayal: S-101 (embedded catalogue)")
-	default:
-		fmt.Println("portrayal: none embedded — pass --s101 or build with `make` (-tags embed_s101)")
+	// Portrayal is S-101. Emit the client assets (colortables/linestyles/sprite/
+	// patterns) via libtile57's asset baker and serve them as a fallback: an explicit
+	// --s101 PortrayalCatalog dir overrides libtile57's embedded catalogue.
+	catalogDir := c.S101 // "" = libtile57's embedded catalogue
+	assetDir, err := os.MkdirTemp("", "cp-s101-assets-")
+	if err != nil {
+		return err
 	}
-	if catalogFS != nil {
-		assetDir, err := os.MkdirTemp("", "cp-s101-assets-")
-		if err != nil {
-			return err
-		}
-		if _, err := emitS101Assets(catalogFS, "daySvgStyle.css", assetDir); err != nil {
-			return fmt.Errorf("emit S-101 assets: %w", err)
-		}
-		// The emitted S-101 client assets (colortables/linestyles/sprite/patterns)
-		// are a FALLBACK, not a replacement: an explicit --assets dir stays primary
-		// (so a prebaked widget bundle serves its own index.html / charts-index.json /
-		// .pmtiles), this temp dir fills in the generated S-101 files it lacks, and the
-		// embedded bundle backs the rest. Registered on the Server below.
-		s101AssetDir = assetDir
+	if _, err := emitS101Assets(catalogDir, assetDir); err != nil {
+		return fmt.Errorf("emit S-101 assets: %w", err)
+	}
+	// The emitted assets are a FALLBACK, not a replacement: an explicit --assets dir
+	// stays primary (a prebaked widget bundle serves its own index.html /
+	// charts-index.json / .pmtiles), this temp dir fills in the generated S-101 files
+	// it lacks, and the embedded bundle backs the rest. Registered on the Server below.
+	s101AssetDir := assetDir
+	if catalogDir != "" {
+		fmt.Printf("portrayal: S-101 (catalogue=%s)\n", catalogDir)
+	} else {
+		fmt.Println("portrayal: S-101 (libtile57 embedded catalogue)")
 	}
 
 	cacheDir := c.Cache

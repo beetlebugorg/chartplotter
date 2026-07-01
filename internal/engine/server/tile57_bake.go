@@ -93,9 +93,8 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 		})
 	}
 	created := time.Now().UTC().Format(time.RFC3339)
-	// minzoom 0 / maxzoom 24 = the ABI's "no clamp" — bake each cell's full native
-	// band (maxzoom 0 would clamp every band down to z0, i.e. an empty archive).
-	n, _, err := tile57.BakeBundle(encDir, outDir, "", "", created, 0, 24, tile57.PickInclude, progress)
+	// Zero MinZoom/MaxZoom = the ABI's "no clamp" — bake each cell's full native band.
+	n, _, err := tile57.BakeBundle(encDir, outDir, tile57.BakeOpts{Created: created}, progress)
 	if err != nil {
 		return fail(err)
 	}

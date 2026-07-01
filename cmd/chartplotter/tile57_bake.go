@@ -17,11 +17,11 @@ import (
 // maxZoom caps the highest baked zoom (0 = no cap). progress nil uses the lib's
 // built-in console progress. Returns the cell count + bbox (west,south,east,north).
 func bakeTile57Bundle(input, outDir string, maxZoom int, progress func(tile57.BakeProgress)) (int, [4]float64, error) {
-	mz := uint8(24) // ABI: 0/24 means "no clamp"; only narrow when the user caps it
+	opts := tile57.BakeOpts{} // zero MinZoom/MaxZoom = no clamp
 	if maxZoom > 0 && maxZoom < 24 {
-		mz = uint8(maxZoom)
+		opts.MaxZoom = uint8(maxZoom)
 	}
-	return tile57.BakeBundle(input, outDir, "", "", "", 0, mz, tile57.PickInclude, progress)
+	return tile57.BakeBundle(input, outDir, opts, progress)
 }
 
 // runTile57Bands bakes the ENC inputs into one gap-clipped PMTiles archive PER
@@ -29,7 +29,7 @@ func bakeTile57Bundle(input, outDir string, maxZoom int, progress func(tile57.Ba
 // mirroring the Go baker's --bands output so the frontend loads each into its
 // chart-<slug> source. Cells are grouped into bands by compilation scale (the same
 // BandForScale mapping the Go baker uses); each band's cell subset is baked on its
-// own via tile57.BakeCells, so the archive is naturally clipped to that band's
+// own via tile57.BakePmtiles, so the archive is naturally clipped to that band's
 // coverage. Cross-band best-available (coarse fills finer gaps, none bleed) is then
 // composed CLIENT-side across the per-band sources, exactly as for the Go baker's
 // per-band archives. Honors --max-zoom and --overzoom; writes --manifest + aux.zip.
@@ -48,7 +48,7 @@ func (c bakeCmd) runTile57Bands() error {
 	})
 
 	type bandAcc struct {
-		cells []tile57.CellInput
+		cells []tile57.Cell
 		bbox  bbox4
 	}
 	byBand := map[baker.Band]*bandAcc{}
@@ -64,7 +64,7 @@ func (c bakeCmd) runTile57Bands() error {
 			acc = &bandAcc{bbox: emptyBBox()}
 			byBand[band] = acc
 		}
-		acc.cells = append(acc.cells, tile57.CellInput{
+		acc.cells = append(acc.cells, tile57.Cell{
 			Base:    cd.Base,
 			Updates: orderedUpdates(cd.Updates),
 			Name:    stem,
@@ -95,7 +95,7 @@ func (c bakeCmd) runTile57Bands() error {
 		if c.MaxZoom > 0 && uint32(c.MaxZoom) < bb.Max {
 			maxZ = uint8(c.MaxZoom)
 		}
-		data, err := tile57.BakeCells(acc.cells, "", minZ, maxZ, tile57.PickInclude, nil)
+		data, err := tile57.BakePmtiles(acc.cells, tile57.BakeOpts{MinZoom: minZ, MaxZoom: maxZ}, nil)
 		if err != nil {
 			// A band whose cells cover nothing at its zooms produces no tiles; skip it
 			// (the same as the Go baker emitting no archive for an empty band).
