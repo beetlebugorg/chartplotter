@@ -12,7 +12,7 @@ import (
 
 	"github.com/alecthomas/kong"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
+	tile57 "github.com/beetlebugorg/chartplotter-native/bindings/go"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -51,7 +51,7 @@ type versionCmd struct{}
 
 func (versionCmd) Run() error {
 	fmt.Printf("chartplotter %s\n", version)
-	fmt.Printf("embedded S-101 catalogue: %v\n", s101catalog.Available())
+	fmt.Printf("libtile57 %s (S-101 catalogue embedded)\n", tile57.Version())
 	return nil
 }
 

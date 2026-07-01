@@ -79,23 +79,9 @@ sync-s101: ## Sync the external S-101 PortrayalCatalog + our custom overlay into
 	@cp -a "$(S101_CUSTOM)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
 	@echo "synced S-101 catalogue (+ custom overlay) → $(S101_EMBED_DIR)"
 
-# Embed the S-101 catalogue when it's available locally (the normal dev/deploy
-# case); otherwise build without it (the binary then needs --s101 at runtime).
-build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin/
-	@if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then \
-	  $(MAKE) --no-print-directory sync-s101; \
-	  echo "building with embedded S-101 catalogue (-tags embed_s101)…"; \
-	  go build -tags embed_s101 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	else \
-	  echo "S-101 catalogue not found at $(S101_PC); building WITHOUT it (needs --s101 at runtime)"; \
-	  go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	fi
-
-# --- Optional native libtile57 (tile57) CGO backend ----------------------------
-# The default build is CGO-free (a release-binary requirement); this opt-in target
-# links the native Zig engine's static library so tiles, bakes, and S-101 assets
-# are produced by libtile57 instead of the pure-Go path. TILE57 points at the
-# engine repo via the ../tile57 symlink (→ chartplotter-native); override to relocate.
+# --- native libtile57 engine (the SOLE tile/portrayal/asset engine) -------------
+# TILE57 points at the engine repo via the ../tile57 symlink (→ chartplotter-native);
+# override to relocate. Its static lib is built on demand with Zig 0.16.
 TILE57     ?= ../tile57
 TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
 
@@ -109,31 +95,28 @@ tile57-lib: ## Force-rebuild ../tile57/zig-out/lib/libtile57.a (the native engin
 	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH"; exit 1; }
 	cd "$(TILE57)" && zig build
 
-# CGO build linking libtile57 as the tile/asset backend (-tags tile57). Embeds the
-# S-101 catalogue too when it's available locally, like `make build`.
-build-tile57: $(TILE57_LIB) ## Build bin/chartplotter with the libtile57 CGO backend (needs the ../tile57 symlink + Zig)
+# Build bin/chartplotter. libtile57 is the sole engine, so this is a CGO build that
+# statically links the native lib; the S-101 catalogue lives inside libtile57, so
+# there is no separate sync/embed step (web/ is still embedded). Needs the ../tile57
+# symlink + Zig 0.16.
+build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; needs the ../tile57 symlink + Zig 0.16)
 	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — create the symlink: ln -s ../chartplotter-native ../tile57"; exit 1; }
-	@if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then \
-	  $(MAKE) --no-print-directory sync-s101; \
-	  echo "building libtile57 backend + embedded S-101 catalogue (-tags 'embed_s101 tile57')…"; \
-	  CGO_ENABLED=1 go build -tags 'embed_s101 tile57' -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	else \
-	  echo "S-101 catalogue not found; building libtile57 backend WITHOUT it (needs --s101 at runtime)…"; \
-	  CGO_ENABLED=1 go build -tags tile57 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	fi
-	@echo "→ $(BIN) (libtile57 backend; serve with --tile57 <ENC_ROOT> or bake with --tile57)"
+	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
+	@echo "→ $(BIN) (native libtile57 engine)"
+
+# Back-compat alias — libtile57 is now the default engine, so this is just `build`.
+build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
 
 # Build the FULL app WITH libtile57 compiled in and serve it: the web frontend +
 # provisioning / chart-library API, defaulting chart imports to the native tile57
-# bundle baker (--tile57-bake; the Advanced→"Bake engine" UI setting still overrides
-# per deployment). No --s101 needed — build-tile57 embeds the catalogue (and tile57
-# bakes with libtile57's own rules). Uses the MAIN $(CACHE) (where the tile57 bundle
-# baker writes its packs as <PROVIDER>/<PACK>/tiles/chart.pmtiles), NOT `serve`'s
-# vestigial $(S101_CACHE) subdir — so the chart library you bake with tile57 is the
-# one served here. Set ENC_ROOT=<dir/.zip/.000> to ALSO register a LIVE libtile57 set
-# generated on demand from those cells (registered as 'tile57'; /tiles/tile57.json).
-serve-tile57: build-tile57 ## Build + serve the full app with libtile57 compiled in (tile57 bake engine; ENC_ROOT=… also adds a live set)
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) --tile57-bake --cache $(CACHE) \
+# Build + serve the full app. Chart imports always bake native libtile57 bundles
+# (the sole engine); no --s101 needed — the catalogue lives in libtile57. Uses the
+# MAIN $(CACHE) (where the tile57 bundle baker writes its packs as
+# <PROVIDER>/<PACK>/tiles/chart.pmtiles). Set ENC_ROOT=<dir/.zip/.000> to ALSO
+# register a LIVE libtile57 set generated on demand (registered as 'tile57';
+# /tiles/tile57.json). Now just `serve` + a cache override — kept as a convenience.
+serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a live libtile57 set
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) --cache $(CACHE) \
 	  $(if $(ENC_ROOT),--tile57 "$(ENC_ROOT)")
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
