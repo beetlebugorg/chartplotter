@@ -10,10 +10,10 @@ package main
 import (
 	"fmt"
 	"io/fs"
+	"os"
 
 	"github.com/alecthomas/kong"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
 	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 )
 
@@ -36,21 +36,22 @@ type emitAssetsCmd struct {
 }
 
 func (c emitAssetsCmd) Run() error {
-	var (
-		files []string
-		err   error
-	)
+	// Emit the client assets from the S-101 catalogue via the native libtile57
+	// asset emitter (emitS101Assets); a CGO-free build has none and errors.
+	var catalogFS fs.FS
 	switch {
 	case c.S101 != "":
-		files, err = assets.EmitS101(c.S101, c.CSS, c.Dir)
+		catalogFS = os.DirFS(c.S101)
 	case s101catalog.Available():
-		var fsys fs.FS
-		if fsys, err = s101catalog.PortrayalFS(); err == nil {
-			files, err = assets.EmitS101FS(fsys, c.CSS, c.Dir)
+		fsys, err := s101catalog.PortrayalFS()
+		if err != nil {
+			return err
 		}
+		catalogFS = fsys
 	default:
 		return fmt.Errorf("no S-101 catalogue (build with `make` or pass --s101)")
 	}
+	files, err := emitS101Assets(catalogFS, c.CSS, c.Dir)
 	if err != nil {
 		return err
 	}

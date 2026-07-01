@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
@@ -41,9 +40,6 @@ func (c serveCmd) Run() error {
 	case c.S101 != "":
 		if c.S101FC == "" {
 			return fmt.Errorf("--s101 requires --s101-fc")
-		}
-		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
-			return fmt.Errorf("load S-101 catalogue: %w", err)
 		}
 		catalogFS = os.DirFS(c.S101)
 		fmt.Printf("portrayal: S-101 (catalogue=%s)\n", c.S101)

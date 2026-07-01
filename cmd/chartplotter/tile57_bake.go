@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	tile57 "github.com/beetlebugorg/chartplotter-native/bindings/go"
-	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
@@ -52,14 +51,14 @@ func (c bakeCmd) runTile57Bands() error {
 		cells []tile57.CellInput
 		bbox  bbox4
 	}
-	byBand := map[bake.Band]*bandAcc{}
+	byBand := map[baker.Band]*bandAcc{}
 	for name, cd := range cells { // name is "<stem>.000"
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
 		scale := 0
 		if m, ok := metas[stem]; ok {
 			scale = m.Scale
 		}
-		band := bake.BandForScale(uint32(scale))
+		band := baker.BandForScale(uint32(scale))
 		acc := byBand[band]
 		if acc == nil {
 			acc = &bandAcc{bbox: emptyBBox()}
@@ -83,8 +82,8 @@ func (c bakeCmd) runTile57Bands() error {
 	// Bake each band coarse→fine (BakeBands order matches the Band enum), writing
 	// <stem>-<slug><ext>. minZ/maxZ clamp the archive to the band's native zoom span
 	// (--overzoom floats every band down to the world view; --max-zoom caps the top).
-	for i, bb := range bake.BakeBands() {
-		acc := byBand[bake.Band(i)]
+	for i, bb := range baker.BakeBands() {
+		acc := byBand[baker.Band(i)]
 		if acc == nil || len(acc.cells) == 0 {
 			continue
 		}

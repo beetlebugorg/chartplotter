@@ -527,18 +527,6 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 	return cells
 }
 
-// bakeEngine returns the baker used for server imports. libtile57 is the only
-// supported engine: a tile57-capable binary ALWAYS bakes with it. The old
-// per-client "bakeEngine" setting (which could pin "go" and silently downgrade a
-// tile57 server after a few UI bakes — the "reverts to go" bug) is gone. A
-// CGO-free build has no native baker, so it falls back to the Go per-band baker.
-func (s *Server) bakeEngine() string {
-	if bakeTile57Available {
-		return "tile57"
-	}
-	return "go"
-}
-
 // runImport bakes cells into <cache>/tiles/<set>.pmtiles and registers the set.
 func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
 	s.bakeAndRegister(jobID, set, cells, aux, cat, overzoom, applyUpdates)
@@ -565,88 +553,15 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		cells = base
 	}
 
-	// Native libtile57 bundle bake (opt-in): one self-describing bundle per set
-	// (tiles + SCAMIN-bucketed styles + assets), registered as a single set. The
-	// engine is the "Advanced → bake engine" setting (capability-gated). Falls through
-	// to the Go per-band path if unhandled.
-	if s.bakeEngine() == "tile57" && s.bakeBundleTile57(jobID, set, cells, aux, cat, applyUpdates) {
-		return
+	_ = overzoom // the tile57 bundle is zoom-banded per cell; no all-bands-to-z0 mode
+
+	// libtile57 is the SOLE bake engine. bakeBundleTile57 bakes a self-contained
+	// bundle per set (tiles + per-scheme style + assets + aux + metadata sidecar +
+	// cell manifest) and records success or a job error itself. A binary built
+	// without it (the CGO-free default) can't bake — the stub returns false.
+	if !s.bakeBundleTile57(jobID, set, cells, aux, cat, applyUpdates) {
+		fail(fmt.Errorf("baking requires a libtile57 build (rebuild with `make build-tile57`)"))
 	}
-
-	_ = overzoom // the per-band streaming bake has no all-bands-to-z0 overzoom mode
-	s.imports.update(jobID, func(j *importJob) {
-		// Open on the "prepare" stage (unit "cells"): the bake starts by parsing
-		// cells for coverage, well before the first tile emits.
-		j.Phase, j.Unit, j.Band, j.Note, j.Done, j.Total = "bake", "cells", "", fmt.Sprintf("Baking %d cell(s)", len(cells)), 0, 0
-	})
-
-	// Drop any STALE merged archive named exactly `set` from a prior (pre-per-band)
-	// bake, so the old single-maxzoom set isn't left serving alongside the new bands.
-	s.removeMergedSet(set)
-
-	// ONE bake path: the exact streaming per-band bake the CLI (`chartplotter bake
-	// --bands`) uses — same cross-band suppression, same zoom ranges. No server-only
-	// baker variant to drift out of sync.
-	bands, tiles, first := 0, 0, true
-	_, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, 0,
-		func(name string, e error) { log.Printf("import %s: skip %s: %v", jobID, name, e) },
-		func(stage string, done, total int, band string) {
-			// "prepare" = parsing + portraying a band's cells (the gap before any
-			// tile emits); "tiles" = emitting that band's tiles. The unit lets the
-			// client name the stage (Preparing … charts vs Generating … tiles).
-			unit := "tiles"
-			if stage == "prepare" {
-				unit = "cells"
-			}
-			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total, j.Band, j.Unit = done, total, band, unit })
-		},
-		func(slug string, pb *pmtiles.Builder) error {
-			bandSet := set + "-" + slug
-			bandAux := aux
-			if !first { // ship the district aux.zip ONCE, with the first band
-				bandAux = nil
-			}
-			if err := s.writeAndRegister(bandSet, pb, bandAux); err != nil {
-				return err
-			}
-			// Record which cells went into this pack (beside its pmtiles), so
-			// /api/cells?active returns exactly the installed cells — not every
-			// cached cell that overlaps the pack's (often global) bounding box.
-			if err := s.writeSetCells(bandSet, cells); err != nil {
-				log.Printf("import %s: cell manifest %q: %v", jobID, bandSet, err)
-			}
-			first = false
-			bands++
-			tiles += pb.Count()
-			log.Printf("import %s: baked %q (%d tiles)", jobID, bandSet, pb.Count())
-			return nil
-		})
-	if err != nil {
-		fail(err)
-		return
-	}
-	if bands == 0 {
-		fail(fmt.Errorf("no bands produced tiles"))
-		return
-	}
-	s.imports.update(jobID, func(j *importJob) { j.Cells = nCells })
-	s.auxIdx.invalidate() // the district's companion aux.zip changed — re-index /api/aux
-
-	// Per-pack metadata sidecar for the chart library: per-cell scale/edition/date/
-	// agency/coverage (cheap coverage-only parse) overlaid with the catalogue's chart
-	// titles + coverage. Best-effort — a write failure only costs the extracted detail.
-	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
-	cellMeta := baker.ExtractCellMeta(cells, func(name string, e error) {
-		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
-	})
-	meta := buildSetMeta(set, cellMeta, cat)
-	meta.Imported = time.Now().UTC().Format(time.RFC3339)
-	if err := s.writeSetMeta(set, meta); err != nil {
-		log.Printf("import %s: write meta %q: %v", jobID, set, err)
-	}
-
-	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, nCells, bands, tiles)
-	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
 }
 
 // removeMergedSet drops a stale MERGED archive named exactly `set` (the pre-per-band

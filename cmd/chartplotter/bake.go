@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 )
 
 // bakeCmd bakes S-57 ENC base cells into a PMTiles archive of MVT tiles, for
@@ -31,192 +30,15 @@ type bakeCmd struct {
 }
 
 func (c bakeCmd) Run() error {
-	if c.S101 != "" {
-		if c.S101FC == "" {
-			return fmt.Errorf("--s101 requires --s101-fc")
-		}
-		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
-			return fmt.Errorf("load S-101 catalogue: %w", err)
-		}
-		fmt.Fprintln(os.Stderr, "portrayal: S-101 rule engine")
-	}
-
-	// Native libtile57 path (opt-in, -tags tile57). With --bands it writes one
-	// gap-clipped PMTiles archive per navigational band (+ manifest) — parity with
-	// the Go baker's per-band output, so the district/demo/widget workflows keep
-	// working. Without --bands it writes a self-contained bundle directory. The
-	// engine reads the ENC from disk, so both run BEFORE the Go baker's collectCells.
-	if c.Tile57 {
-		if c.Bands {
-			return c.runTile57Bands()
-		}
-		return c.runTile57Bundle()
-	}
-
-	cells, aux, err := collectCells(c.In)
-	if err != nil {
-		return err
-	}
-	if len(cells) == 0 {
-		return fmt.Errorf("no .000 base cells found in: %s", strings.Join(c.In, ", "))
-	}
-	nUpd := 0
-	for _, cd := range cells {
-		nUpd += len(cd.Updates)
-	}
-	fmt.Fprintf(os.Stderr, "baking %d cell(s) (%d update file(s) applied)…\n", len(cells), nUpd)
-
-	// Per-band streaming holds only one band's geometry at a time, so it skips the
-	// all-cells BuildBakerWithUpdates entirely.
+	// libtile57 is the sole bake engine. --bands writes one gap-clipped PMTiles
+	// archive per navigational band (+ manifest) so the district/demo/widget
+	// workflows keep working; otherwise a self-contained bundle directory
+	// (tiles/chart.pmtiles + per-scheme style + assets + manifest.json). Both need
+	// a -tags tile57 build; a CGO-free binary errors via the stub.
 	if c.Bands {
-		return c.runBands(cells, aux)
+		return c.runTile57Bands()
 	}
-
-	b, ok, err := baker.BuildBakerWithUpdates(cells, c.Overzoom, func(name string, err error) {
-		fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
-	})
-	if err != nil {
-		return err
-	}
-	if len(ok) == 0 {
-		return fmt.Errorf("no cells parsed successfully")
-	}
-	if c.MaxZoom > 0 {
-		b.MaxBakeZoom = uint32(c.MaxZoom)
-	}
-
-	lastPct := -1
-	pb := baker.BakeToPMTiles(b, func(done, total int) {
-		if total == 0 {
-			return
-		}
-		if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
-			lastPct = pct
-			fmt.Fprintf(os.Stderr, "\r  tiles %d/%d (%d%%)", done, total, pct)
-		}
-	})
-	fmt.Fprintln(os.Stderr)
-
-	f, err := os.Create(c.Out)
-	if err != nil {
-		return err
-	}
-	if err := pb.WriteArchive(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	st, _ := os.Stat(c.Out)
-	fmt.Printf("baked %d cell(s) → %s (%d tiles, %.1f MB)\n", len(ok), c.Out, pb.Count(), float64(st.Size())/(1<<20))
-
-	stem := strings.TrimSuffix(c.Out, filepath.Ext(c.Out))
-	auxFile, err := writeAuxZip(stem, aux)
-	if err != nil {
-		return err
-	}
-
-	if c.Manifest != "" {
-		file := c.BaseURL
-		if file == "" {
-			file = filepath.Base(c.Out)
-		}
-		bb := b.Bounds()
-		man := map[string]any{
-			"districts": []map[string]any{{
-				"file":   file,
-				"band":   "all",
-				"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
-			}},
-		}
-		if auxFile != "" {
-			man["aux"] = auxFile
-		}
-		if err := writeManifestJSON(c.Manifest, man); err != nil {
-			return err
-		}
-		fmt.Printf("wrote manifest %s (file=%s)\n", c.Manifest, file)
-	}
-	return nil
-}
-
-// runBands writes one gap-clipped PMTiles archive per navigational band
-// (<out-stem>-<slug>.pmtiles) plus a manifest tagging each with its band slug, so
-// the frontend loads each into its own chart-<slug> source.
-func (c bakeCmd) runBands(cells map[string]baker.CellData, aux map[string][]byte) error {
-	ext := filepath.Ext(c.Out)
-	stem := strings.TrimSuffix(c.Out, ext)
-	var entries []map[string]any
-	lastPct := -1
-
-	// Streaming: pass 1 derives coverage per cell; pass 2 re-parses + bakes one band
-	// at a time, so only a single band's geometry + archive is ever resident.
-	bb, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, uint32(c.MaxZoom),
-		func(name string, err error) {
-			fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
-		},
-		func(stage string, done, total int, band string) {
-			if total == 0 {
-				return
-			}
-			if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
-				lastPct = pct
-				where := band
-				if where == "" {
-					where = "coverage"
-				}
-				fmt.Fprintf(os.Stderr, "\r  %-9s %-8s %d/%d (%d%%)   ", where, stage, done, total, pct)
-			}
-		},
-		func(slug string, pb *pmtiles.Builder) error {
-			out := stem + "-" + slug + ext
-			f, err := os.Create(out)
-			if err != nil {
-				return err
-			}
-			if err := pb.WriteArchive(f); err != nil {
-				f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			st, _ := os.Stat(out)
-			fmt.Fprintf(os.Stderr, "\r")
-			fmt.Printf("  %-9s → %s (%d tiles, %.1f MB)\n", slug, out, pb.Count(), float64(st.Size())/(1<<20))
-			entries = append(entries, map[string]any{
-				"file": filepath.Base(out),
-				"band": slug,
-			})
-			return nil
-		})
-	if err != nil {
-		return err
-	}
-	// District bounds (cell-union) are known only after both passes; stamp them
-	// onto every band entry now.
-	for _, e := range entries {
-		e["bounds"] = []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat}
-	}
-	fmt.Printf("baked %d cell(s) → %d band archive(s)\n", nCells, len(entries))
-
-	auxFile, err := writeAuxZip(stem, aux)
-	if err != nil {
-		return err
-	}
-
-	if c.Manifest != "" {
-		man := map[string]any{"districts": entries}
-		if auxFile != "" {
-			man["aux"] = auxFile
-		}
-		if err := writeManifestJSON(c.Manifest, man); err != nil {
-			return err
-		}
-		fmt.Printf("wrote manifest %s\n", c.Manifest)
-	}
-	return nil
+	return c.runTile57Bundle()
 }
 
 // runTile57Bundle bakes the ENC inputs with the native libtile57 engine into a

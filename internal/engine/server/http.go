@@ -265,8 +265,6 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveConnectionsStream(w, r) // SSE: live connection-status badges
 	case strings.HasPrefix(r.URL.Path, "/api/connections/"):
 		s.serveConnection(w, r) // GET/PUT/DELETE /<id>, or SSE /<id>/raw (sniffer)
-	case strings.HasPrefix(r.URL.Path, "/api/tile/"):
-		s.serveTile(w, r) // GET one MVT tile baked from cached cells (tile-debugger inspect)
 	case r.URL.Path == "/api/aux" || strings.HasPrefix(r.URL.Path, "/api/aux/"):
 		s.serveAux(w, r) // GET aux manifest, or one TXTDSC/PICREP file on demand (not the raw zip)
 	case strings.HasPrefix(r.URL.Path, "/api/import"):

@@ -1,89 +1,17 @@
-// Package baker wires S-57 cell bytes through parse + S-101 portrayal into a
-// PMTiles archive. It is the shared core behind the bake-zip / provision CLI
-// paths and the server's background provision job.
+// Package baker holds the CGO-free S-57 cell metadata + parse helpers shared by
+// the server chart library, the cell index, and the tile57 bake path: parsing a
+// cell's bytes (base + updates), extracting its header/coverage metadata, and the
+// compilation-scale → navigational-band mapping (bands.go). It no longer bakes
+// tiles — the native libtile57 engine is the sole tile/portrayal engine.
 package baker
 
 import (
-	"bytes"
-	"compress/gzip"
 	"path"
-	"runtime"
-	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/bake"
-	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
-	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
-	"github.com/beetlebugorg/chartplotter/internal/engine/tile"
-	"github.com/beetlebugorg/chartplotter/pkg/geo"
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
-
-// MVT bake parameters (default values).
-const (
-	MVTExtent uint32  = 4096
-	MVTBuffer float64 = 64
-)
-
-// s101Portrayer is an optional external-catalogue override set via
-// UseS101Catalog. When set, every Baker built here portrays from that catalogue;
-// otherwise baking uses the build-time embedded catalogue.
-var s101Portrayer bake.Portrayer
-
-// UseS101Catalog overrides the embedded catalogue, loading the S-101 portrayal
-// engine from a PortrayalCatalog directory + a FeatureCatalogue.xml path. Call
-// once before baking.
-func UseS101Catalog(portrayalCatalogDir, featureCataloguePath string) error {
-	p, err := bake.NewS101Portrayer(portrayalCatalogDir, featureCataloguePath)
-	if err != nil {
-		return err
-	}
-	s101Portrayer = p
-	return nil
-}
-
-var (
-	embeddedOnce sync.Once
-	embeddedPort bake.Portrayer
-)
-
-// embeddedPortrayer lazily builds the portrayer from the build-time embedded
-// S-101 catalogue (internal/engine/s101catalog), or returns nil if this binary
-// was built without it (a plain `go build`, no -tags embed_s101).
-func embeddedPortrayer() bake.Portrayer {
-	embeddedOnce.Do(func() {
-		if !s101catalog.Available() {
-			return
-		}
-		catFS, err := s101catalog.PortrayalFS()
-		if err != nil {
-			return
-		}
-		fcXML, err := s101catalog.FeatureCatalogue()
-		if err != nil {
-			return
-		}
-		if p, err := bake.NewS101PortrayerFS(catFS, fcXML); err == nil {
-			embeddedPort = p
-		}
-	})
-	return embeddedPort
-}
-
-func applyPortrayer(b *bake.Baker) {
-	// An explicit --s101 override (UseS101Catalog) wins; otherwise use the
-	// build-time embedded catalogue.
-	p := s101Portrayer
-	if p == nil {
-		p = embeddedPortrayer()
-	}
-	if p != nil {
-		b.SetPortrayer(p)
-	}
-}
 
 // ParseCellBytes parses an S-57 base cell held entirely in memory (e.g. a zip
 // entry or a downloaded NOAA cell) by staging it on an in-memory filesystem.
@@ -97,137 +25,6 @@ func ParseCellBytes(name string, data []byte) (*s57.Chart, error) {
 	return s57.ParseWithOptions(p, opts)
 }
 
-// Session is an incremental Baker builder: cells are parsed and added one at a
-// time (AddCell) into a long-lived Baker, instead of all-at-once via BuildBaker.
-// This is the real-time wasm path — parsing a single large cell can take seconds
-// in wasm, so loading the set one cell per call lets the host yield between cells
-// (servicing tile requests / reporting progress) rather than blocking on the
-// whole set.
-type Session struct {
-	Baker *bake.Baker
-}
-
-// NewSession returns an empty incremental Session. Add cells with AddCellBytes,
-// then bake tiles off Session.Baker.
-func NewSession() (*Session, error) {
-	b := bake.New()
-	applyPortrayer(b)
-	b.OverzoomAllBands = true // realtime/upload path: keep a few uploaded cells visible (skeleton) when zoomed out
-	return &Session{Baker: b}, nil
-}
-
-// AddCellBytes parses one raw cell and adds it to the session's Baker. The caller
-// should rebuild the emit index (Baker.BuildEmitIndex) before baking tiles after
-// any add.
-func (s *Session) AddCellBytes(name string, data []byte) (s57.Bounds, error) {
-	chart, err := ParseCellBytes(name, data)
-	if err != nil {
-		return s57.Bounds{}, err
-	}
-	s.Baker.AddCell(chart)
-	return chart.Bounds(), nil
-}
-
-// BuildBaker parses and adds each named cell to a fresh Baker. cells maps a
-// cell name (or path) to its raw bytes. onSkip, if non-nil, is called for each
-// cell that fails to parse. Returns the Baker and the names successfully added,
-// in sorted order for deterministic output.
-func BuildBaker(cells map[string][]byte, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
-	names := make([]string, 0, len(cells))
-	for n := range cells {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	b := bake.New()
-	applyPortrayer(b)
-	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
-		return ParseCellBytes(name, cells[name])
-	}, onSkip, nil)
-	return b, ok, nil
-}
-
-// parseInOrder parses cells on a bounded worker pool and delivers each to consume
-// serially in `names` order. parse and precompute run in the worker (concurrent,
-// for the independent per-cell work — S-57 parse + S-101 portrayal); consume runs
-// on the calling goroutine in order, so it may mutate shared baker state and the
-// result stays deterministic. At most ~NumCPU cells are resident at once: a token
-// is taken before a worker starts and released by the consumer after that cell is
-// handled. onSkip fires in `names` order for parse errors.
-func parseInOrder[T any](
-	names []string,
-	parse func(name string) (*s57.Chart, error),
-	precompute func(name string, chart *s57.Chart) T,
-	consume func(name string, chart *s57.Chart, pre T),
-	onSkip func(name string, err error),
-) {
-	workers := runtime.NumCPU()
-	if workers > len(names) {
-		workers = len(names)
-	}
-	if workers < 1 {
-		return
-	}
-	type result struct {
-		chart *s57.Chart
-		pre   T
-		err   error
-	}
-	slots := make([]chan result, len(names))
-	for i := range slots {
-		slots[i] = make(chan result, 1)
-	}
-	sem := make(chan struct{}, workers)
-	go func() {
-		for i, name := range names {
-			sem <- struct{}{}
-			go func(i int, name string) {
-				chart, err := parse(name)
-				if err != nil {
-					slots[i] <- result{err: err}
-					return
-				}
-				slots[i] <- result{chart: chart, pre: precompute(name, chart)}
-			}(i, name)
-		}
-	}()
-	for i, name := range names {
-		r := <-slots[i]
-		if r.err != nil {
-			if onSkip != nil {
-				onSkip(name, r.err)
-			}
-			<-sem
-			continue
-		}
-		consume(name, r.chart, r.pre)
-		<-sem
-	}
-}
-
-// addCellsParallel parses and portrays cells on a worker pool (parseInOrder), then
-// routes them into b serially in `names` order. Parsing and S-101 portrayal are
-// the dominant bake cost and are independent per cell, so they run concurrently;
-// the stateful route/merge stays single-threaded and ordered, so the archive is
-// byte-for-byte identical to the serial path. Returns the routed cell names.
-// onCell, if non-nil, is called once per cell as it is routed (done, total) so the
-// caller can report parse+portray progress — the dominant per-band cost, which is
-// otherwise an invisible pause before any tile is emitted.
-func addCellsParallel(b *bake.Baker, names []string, parse func(name string) (*s57.Chart, error), onSkip func(name string, err error), onCell func(done, total int)) []string {
-	ok := make([]string, 0, len(names))
-	total := len(names)
-	parseInOrder(names, parse,
-		func(_ string, chart *s57.Chart) bake.CellPortrayal { return b.PortrayCell(chart) },
-		func(name string, chart *s57.Chart, pc bake.CellPortrayal) {
-			b.AddCellPortrayed(chart, pc)
-			ok = append(ok, name)
-			if onCell != nil {
-				onCell(len(ok), total)
-			}
-		}, onSkip)
-	return ok
-}
-
 // CellData is a base cell (.000) plus its sequential update files (.001, .002, …)
 // keyed by filename. Updates are applied in order to bring the cell to its current
 // edition.
@@ -238,7 +35,7 @@ type CellData struct {
 
 // cellParseOpts stages a base cell + its update files on an in-memory filesystem
 // (so the parser discovers and applies the .001/.002/… chain) and returns the
-// path + the baker's standard parse options.
+// path + the standard parse options.
 func cellParseOpts(name string, base []byte, updates map[string][]byte) (string, s57.ParseOptions) {
 	p := "/" + path.Base(name)
 	fsys := iso8211.MemFS{p: base}
@@ -261,228 +58,14 @@ func ParseCellWithUpdates(name string, base []byte, updates map[string][]byte) (
 }
 
 // ParseCellCoverage parses ONLY a cell's M_COVR coverage features, skipping every
-// other feature's geometry construction (the expensive topology/ring assembly).
-// The streaming bake's coverage pass reads only M_COVR (extractCoverage) and the
-// cell's band comes from the header scale, so this yields the same covMeta far
-// cheaper than a full parse. Updates are still applied (the filter acts after
-// them), so the coverage reflects the cell's current edition.
+// other feature's geometry construction (the expensive topology/ring assembly) —
+// enough for the cell's coverage bbox + header scale, far cheaper than a full
+// parse. Updates are still applied (the filter acts after them).
 func ParseCellCoverage(name string, base []byte, updates map[string][]byte) (*s57.Chart, error) {
 	p, opts := cellParseOpts(name, base, updates)
 	opts.ObjectClassFilter = []string{"M_COVR"}
 	opts.MaskCoastlineCoincidentBoundaries = false // irrelevant to M_COVR rings; skip the coastline-edge setup
 	return s57.ParseWithOptions(p, opts)
-}
-
-// BuildBakerWithUpdates is BuildBaker, but each cell's update files are applied.
-// cells maps a cell name (the base filename) to its base+update bytes. When
-// overzoom is true every band overzooms DOWN to the world view (Baker
-// .OverzoomAllBands) so a standalone large-scale set (e.g. an IENC bundle with no
-// overview cells) stays visible zoomed out; leave it false for a full NOAA bake
-// whose overview/general bands already supply the zoomed-out skeleton.
-func BuildBakerWithUpdates(cells map[string]CellData, overzoom bool, onSkip func(name string, err error)) (*bake.Baker, []string, error) {
-	names := make([]string, 0, len(cells))
-	for n := range cells {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	b := bake.New()
-	applyPortrayer(b)
-	b.OverzoomAllBands = overzoom
-	ok := addCellsParallel(b, names, func(name string) (*s57.Chart, error) {
-		cd := cells[name]
-		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
-	}, onSkip, nil)
-	return b, ok, nil
-}
-
-// BakeToPMTiles bakes every tile from b into a PMTiles builder. Tiles are emitted
-// in parallel across all CPUs (EmitTileInto only reads the Baker) and each worker
-// adds its tile to the builder directly under a mutex, so only one encoded tile
-// per worker is live at a time instead of holding every tile's bytes in a second
-// full-size slice. (Add order is no longer deterministic, so the blob LAYOUT can
-// vary run-to-run; the tiles served — sorted by TileID at write — are identical.)
-// progress, if non-nil, is called as (tilesEmitted, totalTiles).
-func BakeToPMTiles(b *bake.Baker, progress func(done, total int)) *pmtiles.Builder {
-	// Build the inverted tile→prim index once (single-threaded) so each parallel
-	// worker's EmitTileInto iterates only on-tile prims instead of scanning all of
-	// b.prims. Read-only after this point, so concurrent reads are safe.
-	b.BuildEmitIndex(MVTExtent, MVTBuffer)
-	pb := pmtiles.New()
-	emitTiles(b.TileCoords(MVTExtent), pb, progress, func(c tile.TileCoord, ts *bake.TileScratch) []byte {
-		return b.EmitTileInto(c, MVTExtent, MVTBuffer, ts)
-	})
-	// Override the tile-derived bounds (the spec-display z0 world tile would make
-	// them global) with the real cell-union extent so clients frame to the charts.
-	if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
-		pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
-	}
-	return pb
-}
-
-// emitTiles bakes coords in parallel and adds each non-empty tile to pb under a
-// mutex — no intermediate full-archive slice of encoded bytes (only one tile per
-// worker is live at a time). emit returns the encoded tile (or nil to skip).
-func emitTiles(coords []tile.TileCoord, pb *pmtiles.Builder, progress func(done, total int), emit func(tile.TileCoord, *bake.TileScratch) []byte) {
-	total := len(coords)
-	workers := runtime.NumCPU()
-	if workers > total {
-		workers = total
-	}
-	if workers < 1 {
-		workers = 1
-	}
-	pb.SetTilesGzipped() // each tile is gzipped in the worker below
-	var mu sync.Mutex
-	var next, done int64 = -1, 0
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			var ts bake.TileScratch // reused across every tile this worker bakes
-			gz := gzip.NewWriter(nil)
-			var buf bytes.Buffer
-			defer wg.Done()
-			for {
-				i := int(atomic.AddInt64(&next, 1))
-				if i >= total {
-					return
-				}
-				c := coords[i]
-				if data := emit(c, &ts); data != nil {
-					// gzip in the worker (parallel); the archive stores compressed
-					// tiles (~3–5× smaller blob + file). Deterministic (no mtime), so
-					// identical tiles still dedup.
-					buf.Reset()
-					gz.Reset(&buf)
-					gz.Write(data)
-					gz.Close()
-					mu.Lock()
-					pb.AddTile(uint8(c.Z), c.X, c.Y, buf.Bytes())
-					mu.Unlock()
-				}
-				if progress != nil {
-					progress(int(atomic.AddInt64(&done, 1)), total)
-				}
-			}
-		}()
-	}
-	wg.Wait()
-}
-
-// BakeToPMTilesBandsStreaming bakes per-band archives while holding only ONE
-// band's parsed geometry in memory at a time — the key to baking a large district
-// without keeping every cell's prims resident. It works in two passes:
-//
-//	Pass 1 — parse each cell and extract only its coverage + native band (no
-//	  feature routing), building the global covMeta once so best-available
-//	  suppression and scale boundaries have full cross-band coverage.
-//	Pass 2 — for each band, re-parse just that band's cells, route them, bake the
-//	  band's archive (emit), then drop the prims before the next band.
-//
-// Cells are therefore parsed twice, but pass 1 skips the expensive portrayal +
-// routing, so the overhead is small relative to the memory saved. emit(slug,
-// builder) is called per band that produced tiles; returns the cell-union bounds
-// and the number of cells parsed.
-//
-// progress(stage, done, total, band) reports both visible stages so neither pause
-// is a dead bar: stage "prepare" while a band's cells are parsed + portrayed (the
-// long gap before any tile emits; band "" during the pass-1 coverage scan), then
-// stage "tiles" while that band's tiles are emitted.
-func BakeToPMTilesBandsStreaming(cells map[string]CellData, maxZoom uint32, onSkip func(name string, err error), progress func(stage string, done, total int, band string), emit func(slug string, pb *pmtiles.Builder) error) (geo.BoundingBox, int, error) {
-	b := bake.New()
-	applyPortrayer(b)
-	if maxZoom > 0 {
-		b.MaxBakeZoom = maxZoom
-	}
-
-	names := make([]string, 0, len(cells))
-	for n := range cells {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	parse := func(name string) (*s57.Chart, error) {
-		cd := cells[name]
-		return ParseCellWithUpdates(name, cd.Base, cd.Updates)
-	}
-
-	// Pass 1: coverage + band per cell (no routing). Parse in parallel — and only
-	// the M_COVR coverage (extractCoverage reads nothing else), so the geometry of
-	// every other feature isn't built here; the full parse happens once, in pass 2.
-	// The coverage merge (covMeta) stays serial and ordered.
-	byBand := map[uint32][]string{}
-	parsed := 0
-	parseInOrder(names, func(name string) (*s57.Chart, error) {
-		cd := cells[name]
-		return ParseCellCoverage(name, cd.Base, cd.Updates)
-	},
-		func(string, *s57.Chart) struct{} { return struct{}{} },
-		func(name string, chart *s57.Chart, _ struct{}) {
-			band, n := b.AddCellCoverage(chart)
-			if n == 0 {
-				// The M_COVR-only coverage parse found no data-coverage polygon (the
-				// cell omits M_COVR — non-conformant, e.g. the S-52 PresLib test cells).
-				// Re-parse it fully so AddCellCoverage's bounding-box fallback has the
-				// cell's geometry to derive a coverage rectangle from; otherwise the cell
-				// contributes nothing to covMeta and a coarser band's symbols double-draw
-				// over it. Rare (real ENCs always carry M_COVR), so the extra parse is fine.
-				cd := cells[name]
-				if full, err := ParseCellWithUpdates(name, cd.Base, cd.Updates); err == nil {
-					band, _ = b.AddCellCoverage(full)
-				}
-			}
-			byBand[band.ZoomRange().Max] = append(byBand[band.ZoomRange().Max], name)
-			parsed++
-			if progress != nil {
-				progress("prepare", parsed, len(names), "") // coverage scan; no band yet
-			}
-		}, onSkip)
-	b.SetSkipCoverage(true) // covMeta is now global; don't re-derive it per band
-
-	// Pass 2: per band, re-parse + route + bake + free.
-	for _, bd := range bake.BakeBands() {
-		bandCells := byBand[bd.Max]
-		if len(bandCells) == 0 {
-			continue
-		}
-		b.ResetPrims()
-		// Parse + portray this band's cells in parallel; route them serially in
-		// order (deterministic, same as the per-cell loop). Coverage is skipped
-		// (SetSkipCoverage above), so re-parsing is just for this band's geometry.
-		// This is the long pre-tile pause, so report it ("prepare") per routed cell.
-		var prep func(done, total int)
-		if progress != nil {
-			progress("prepare", 0, len(bandCells), bd.Slug) // announce the band up front
-			prep = func(done, total int) { progress("prepare", done, total, bd.Slug) }
-		}
-		addCellsParallel(b, bandCells, parse, onSkip, prep)
-		coords := b.TileCoordsBand(MVTExtent, bd.Min, bd.Max)
-		if len(coords) == 0 {
-			continue
-		}
-		b.BuildEmitIndexBand(MVTExtent, MVTBuffer, bd.Max)
-		pb := pmtiles.New()
-		var tileProg func(done, total int)
-		if progress != nil {
-			tileProg = func(done, total int) { progress("tiles", done, total, bd.Slug) }
-		}
-		emitTiles(coords, pb, tileProg, func(c tile.TileCoord, ts *bake.TileScratch) []byte {
-			return b.EmitTileBandInto(c, MVTExtent, MVTBuffer, ts, bd.Max)
-		})
-		b.ClearEmitIndex()
-		pb.SetScamin(b.ScaminValues()) // publish this band's SCAMIN manifest in the archive metadata
-		if bb := b.Bounds(); bb.MinLon <= bb.MaxLon && bb.MinLat <= bb.MaxLat {
-			pb.SetBounds(bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat)
-		}
-		if pb.Count() == 0 {
-			continue
-		}
-		if err := emit(bd.Slug, pb); err != nil { // write + free this band before the next
-			return b.Bounds(), parsed, err
-		}
-	}
-	return b.Bounds(), parsed, nil
 }
 
 // IsBaseCell reports whether name is an S-57 base cell (…/<CELL>.000).

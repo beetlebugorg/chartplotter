@@ -3,14 +3,14 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
-
-	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
 )
 
-// emitS101Assets uses the pure-Go S-101 asset emitter in the default CGO-free
-// build. The tile57 build (tile57_assets.go) generates the same files via the
-// libtile57 C ABI instead.
-func emitS101Assets(catalogFS fs.FS, cssName, dir string) ([]string, error) {
-	return assets.EmitS101FS(catalogFS, cssName, dir)
+// emitS101Assets is stubbed in the default CGO-free build: the S-101 client asset
+// emitter now lives in the native libtile57 engine (tile57_assets.go, -tags
+// tile57). The Go asset emitter has been removed, so a CGO-free binary can't emit
+// assets — build with `make build-tile57`.
+func emitS101Assets(_ fs.FS, _, _ string) ([]string, error) {
+	return nil, fmt.Errorf("emit-assets requires a binary built with -tags tile57 (run `make build-tile57`)")
 }
