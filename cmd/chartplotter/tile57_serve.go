@@ -51,7 +51,7 @@ func registerTile57Set(srv *server.Server, name, root, rulesDir string) error {
 			Updates: orderedUpdates(cd.Updates),
 		})
 	}
-	src, err := tile57.OpenCells(inputs, rulesDir, false /*include pick attrs*/)
+	src, err := tile57.OpenCells(inputs, rulesDir, tile57.PickInclude)
 	if err != nil {
 		return err
 	}

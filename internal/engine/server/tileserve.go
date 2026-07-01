@@ -166,3 +166,21 @@ func parseTileSetPath(rest string) (set string, z, x, y uint32, ok bool) {
 func acceptsGzip(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 }
+
+// writeMaybeGzip writes body with contentType, gzip-compressed on the wire when the
+// client accepts it. Large JSON (the engine style is multi-MB) compresses ~10×, so this
+// is worth it for /api/style.json and /api/style-diff. Sets Cache-Control:no-cache; the
+// caller sets any CORS headers first.
+func writeMaybeGzip(w http.ResponseWriter, r *http.Request, contentType string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-cache")
+	if acceptsGzip(r) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		zw := gzip.NewWriter(w)
+		zw.Write(body)
+		zw.Close()
+		return
+	}
+	w.Write(body)
+}

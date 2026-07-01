@@ -13,5 +13,5 @@ func bakeTile57Bundle(input, outDir string, maxZoom int, progress func(tile57.Ba
 	if maxZoom > 0 && maxZoom < 24 {
 		mz = uint8(maxZoom)
 	}
-	return tile57.BakeBundle(input, outDir, "", "", "", 0, mz, false /*include pick attrs*/, progress)
+	return tile57.BakeBundle(input, outDir, "", "", "", 0, mz, tile57.PickInclude, progress)
 }

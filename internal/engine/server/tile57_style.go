@@ -3,7 +3,9 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -21,6 +23,11 @@ import (
 //	glyphs  glyphs URL                (default <origin>/glyphs/{fontstack}/{range}.pbf)
 //	bands   CSV of band ranks to show (default all)
 //
+// The FULL S-52 mariner selection is read from the query too (marinerFromQuery) —
+// the client's DEFAULT_MARINER keys (display categories, contours, boundary/point
+// style, text groups, dates, viewingGroupsOff, sizeScale, …) — so the engine bakes
+// the live display state into the style and the client re-fetches on a toggle.
+//
 // CORS-open like the tile + asset routes so a static-hosted client can fetch it.
 func (s *Server) serveTile57Style(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -29,61 +36,134 @@ func (s *Server) serveTile57Style(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	scheme := tile57.SchemeFromString(q.Get("scheme"))
-	base := requestOrigin(r)
-	tiles := orDefault(q.Get("tiles"), base+"/tiles/tile57/{z}/{x}/{y}.mvt")
-	sprite := orDefault(q.Get("sprite"), base+"/sprite")
-	glyphs := orDefault(q.Get("glyphs"), base+"/glyphs/{fontstack}/{range}.pbf")
-
-	m := tile57.MarinerDefaults()
-	m.Scheme = scheme
-
-	// SCAMIN buckets: feed build_style the set's SCAMIN manifest + a reference
-	// latitude so it emits per-value native-minzoom bucket layers (matching the
-	// offline bundle style). Default to the live "tile57" set; ?set picks another,
-	// ?scamin / ?lat override. nil manifest ⇒ no buckets (back-compat).
-	scamin := parseBands(q.Get("scamin"))
-	lat := 0.0
-	var maxZoom uint32 // 0 ⇒ engine default; the set's real top zoom otherwise
-	if src, ok := s.lookupSet(orDefault(q.Get("set"), "tile57")); ok {
-		meta := src.Meta()
-		maxZoom = uint32(meta.MaxZoom) // live ENC = z18 (berthing); don't clamp to the engine's z16 default
-		if len(scamin) == 0 {
-			scamin = make([]int32, len(meta.Scamin))
-			for i, v := range meta.Scamin {
-				scamin[i] = int32(v)
-			}
-		}
-		lat = (meta.S + meta.N) / 2 // bounds-centre latitude for the scale→zoom map
+	// Only serve an engine style when a LIVE tile57 set exists (serve --tile57 <ENC_ROOT>).
+	// A -tags tile57 binary serving Go-baked packs has no "tile57" set — 404 so the client
+	// falls back to its JS style builder instead of adopting a style whose chart source
+	// (/tiles/tile57/…) has no tiles (which rendered blank).
+	if _, ok := s.lookupSet(orDefault(q.Get("set"), "tile57")); !ok {
+		apiErr(w, http.StatusNotFound, "no live tile57 set (serve with --tile57 <ENC_ROOT>)")
+		return
 	}
-	if v := q.Get("lat"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			lat = f
-		}
+	style, err := s.styleCtx(r, q).build(marinerFromQuery(q))
+	if err != nil {
+		apiErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
+	writeMaybeGzip(w, r, jsonCT, style) // the engine style is multi-MB — gzip on the wire
+}
 
-	// Generate the style with the chart source's maxzoom pinned to the set's real top
-	// zoom. The convenience tile57.Style would clamp the template to the engine's z16
-	// default and drop the finest (berthing) band's z17–18 detail; MapLibre overzooms
-	// above maxzoom for free, so there's no reason to bake that ceiling in below 18.
+// serveTile57StyleDiff returns the minimal MapLibre mutation ops to move the style from
+// one mariner selection to another, so the client applies a toggle IN PLACE
+// (setFilter/setPaintProperty/setLayoutProperty) with no setStyle — no tile reload, no
+// overlay churn, no flicker. This is the host-side stand-in for the engine's future
+// tile57_style_diff (../tile57 specs/style-diff.md): it builds both full styles here and
+// structurally diffs them (style_diff.go). When the ABI lands, only this body changes;
+// the op-array contract to the client is identical.
+//
+//	POST /api/style-diff   body: {"from":"<mariner query>","to":"<mariner query>"}
+//
+// `from`/`to` are url-encoded mariner queries — the same string the client builds for
+// /api/style.json — so the two styles share this request's set/urls/scamin/lat context
+// and differ ONLY in the mariner.
+func (s *Server) serveTile57StyleDiff(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodPost {
+		apiErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		apiErr(w, http.StatusBadRequest, "body must be JSON {from, to}")
+		return
+	}
+	fromQ, err1 := url.ParseQuery(body.From)
+	toQ, err2 := url.ParseQuery(body.To)
+	if err1 != nil || err2 != nil {
+		apiErr(w, http.StatusBadRequest, "from/to must be url-encoded mariner queries")
+		return
+	}
+	if _, ok := s.lookupSet(orDefault(toQ.Get("set"), "tile57")); !ok {
+		apiErr(w, http.StatusNotFound, "no live tile57 set")
+		return
+	}
+	// Shared style context comes from the "to" (new) query — set/urls/scamin/lat/bands.
+	// The engine diffs the two mariners over one structural template (colours resolve
+	// per-mariner from the colortables, so scheme changes ride the diff too).
+	ctx := s.styleCtx(r, toQ)
+	fromM, toM := marinerFromQuery(fromQ), marinerFromQuery(toQ)
+	tmpl, err := tile57.StyleTemplate(toM.Scheme, ctx.tiles, ctx.sprite, ctx.glyphs, 0, ctx.maxZoom)
+	if err != nil {
+		apiErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	ct, err := tile57.ColortablesDefault()
 	if err != nil {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	tmpl, err := tile57.StyleTemplate(scheme, tiles, sprite, glyphs, 0, maxZoom)
+	ops, err := tile57.StyleDiff(tmpl, fromM, toM, ct, ctx.bands, ctx.scamin, ctx.lat)
 	if err != nil {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	style, err := tile57.BuildStyle(tmpl, m, ct, parseBands(q.Get("bands")), scamin, lat)
-	if err != nil {
-		apiErr(w, http.StatusInternalServerError, err.Error())
-		return
+	writeMaybeGzip(w, r, jsonCT, ops)
+}
+
+// tile57StyleCtx is the per-request, mariner-INDEPENDENT style input (URLs, top zoom,
+// SCAMIN manifest, latitude, band filter). Shared by /api/style.json and /api/style-diff
+// so the two styles a diff compares differ ONLY in the mariner.
+type tile57StyleCtx struct {
+	tiles, sprite, glyphs string
+	maxZoom               uint32
+	scamin                []int32
+	lat                   float64
+	bands                 []int32
+}
+
+// styleCtx resolves the shared style context from a request + query: the tile/sprite/
+// glyph URLs, the band filter, and (from the target set) the top zoom, SCAMIN manifest,
+// and centre latitude. ?set picks the set (default "tile57"); ?scamin/?lat override.
+func (s *Server) styleCtx(r *http.Request, q url.Values) tile57StyleCtx {
+	base := requestOrigin(r)
+	// The style targets a specific set: the live "tile57" set by default, or any
+	// registered tile57-baked pack via ?set. The tiles URL derives from that set so the
+	// same engine style renders both the live serve and the bake-and-serve-packs path
+	// (the client uses the tile57 style for ALL tile57 tiles — no JS-builder fallback).
+	set := orDefault(q.Get("set"), "tile57")
+	ctx := tile57StyleCtx{
+		tiles:  orDefault(q.Get("tiles"), base+"/tiles/"+set+"/{z}/{x}/{y}.mvt"),
+		sprite: orDefault(q.Get("sprite"), base+"/sprite"),
+		glyphs: orDefault(q.Get("glyphs"), base+"/glyphs/{fontstack}/{range}.pbf"),
+		scamin: parseBands(q.Get("scamin")),
+		bands:  parseBands(q.Get("bands")),
 	}
-	w.Header().Set("Content-Type", jsonCT)
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(style)
+	if src, ok := s.lookupSet(set); ok {
+		meta := src.Meta()
+		ctx.maxZoom = uint32(meta.MaxZoom) // live ENC = z18 (berthing); don't clamp to the engine's z16 default
+		if len(ctx.scamin) == 0 {
+			ctx.scamin = make([]int32, len(meta.Scamin))
+			for i, v := range meta.Scamin {
+				ctx.scamin[i] = int32(v)
+			}
+		}
+		ctx.lat = (meta.S + meta.N) / 2 // bounds-centre latitude for the scale→zoom map
+	}
+	if v := q.Get("lat"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			ctx.lat = f
+		}
+	}
+	return ctx
+}
+
+// build generates the full MapLibre style for one mariner over the shared context. The
+// chart source's maxzoom is pinned to the set's real top zoom (0 would clamp to the
+// engine's z16 default and drop the finest band's z17–18; MapLibre overzooms for free).
+func (c tile57StyleCtx) build(m tile57.Mariner) ([]byte, error) {
+	return tile57.Style(m.Scheme, c.tiles, c.sprite, c.glyphs, 0, c.maxZoom, m, c.bands, c.scamin, c.lat)
 }
 
 func orDefault(v, def string) string {
@@ -115,4 +195,64 @@ func parseBands(csv string) []int32 {
 		}
 	}
 	return out
+}
+
+// marinerFromQuery builds the S-52 mariner selection from the request query, starting
+// from the engine defaults so any omitted param keeps its default — the client sends
+// its DEFAULT_MARINER state as query params (same key names) so the engine bakes the
+// live display into the style. Bools accept "1"/"true"; floats parse leniently.
+func marinerFromQuery(q url.Values) tile57.Mariner {
+	m := tile57.MarinerDefaults()
+	m.Scheme = tile57.SchemeFromString(q.Get("scheme"))
+	boolP := func(key string, dst *bool) {
+		if v := q.Get(key); v != "" {
+			*dst = v == "1" || v == "true"
+		}
+	}
+	floatP := func(key string, dst *float64) {
+		if f, err := strconv.ParseFloat(q.Get(key), 64); err == nil {
+			*dst = f
+		}
+	}
+	floatP("shallowContour", &m.ShallowContour)
+	floatP("safetyContour", &m.SafetyContour)
+	floatP("deepContour", &m.DeepContour)
+	floatP("safetyDepth", &m.SafetyDepth)
+	boolP("fourShadeWater", &m.FourShadeWater)
+	switch q.Get("depthUnit") {
+	case "ft":
+		m.DepthUnit = tile57.DepthFeet
+	case "m":
+		m.DepthUnit = tile57.DepthMeters
+	}
+	boolP("displayBase", &m.DisplayBase)
+	boolP("displayStandard", &m.DisplayStandard)
+	boolP("displayOther", &m.DisplayOther)
+	boolP("dataQuality", &m.DataQuality)
+	boolP("showInformCallouts", &m.ShowInformCallouts)
+	boolP("showMetaBounds", &m.ShowMetaBounds)
+	boolP("showIsolatedDangersShallow", &m.ShowIsolatedDangersShallow)
+	switch q.Get("boundaryStyle") {
+	case "plain":
+		m.BoundaryStyle = tile57.BoundaryPlain
+	case "symbolized":
+		m.BoundaryStyle = tile57.BoundarySymbolized
+	}
+	boolP("simplifiedPoints", &m.SimplifiedPoints)
+	boolP("showFullSectorLines", &m.ShowFullSectorLines)
+	boolP("textNames", &m.TextNames)
+	boolP("showLightDescriptions", &m.ShowLightDescriptions)
+	boolP("textOther", &m.TextOther)
+	boolP("dateDependent", &m.DateDependent)
+	boolP("highlightDateDependent", &m.HighlightDateDependent)
+	if v := q.Get("dateView"); v != "" {
+		m.DateView = v
+	}
+	boolP("ignoreScamin", &m.IgnoreScamin)
+	// scamin-layers.md: one live-filtered layer per render-type instead of per-value
+	// #sm bucket layers (client rewrites curDenom via setFilter on boundary crossings).
+	boolP("scaminFilterGate", &m.ScaminFilterGate)
+	floatP("sizeScale", &m.SizeScale)
+	m.ViewingGroupsOff = parseBands(q.Get("viewingGroupsOff")) // CSV of vg ids turned off
+	return m
 }
