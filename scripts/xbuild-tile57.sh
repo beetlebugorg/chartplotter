@@ -20,10 +20,6 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TILE57="${TILE57:-$REPO/../tile57}"
 OUT="${OUT:-$REPO/dist}"
 VERSION="${VERSION:-dev}"
-# Build tags. Defaults to just `tile57` (binary needs --s101 at runtime). Callers
-# that have synced the S-101 catalogue into the embed dir pass TAGS="embed_s101
-# tile57" for a self-contained binary (see the make target).
-TAGS="${TAGS:-tile57}"
 # Space-separated "GOOS/GOARCH" list; override for a subset, e.g.
 # PLATFORMS="linux/arm64" scripts/xbuild-tile57.sh
 PLATFORMS="${PLATFORMS:-linux/amd64 linux/arm64 windows/amd64 windows/arm64}"
@@ -67,7 +63,7 @@ for plat in $PLATFORMS; do
   build_lib "$triple"
   CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
     CC="zig cc -target $triple" CXX="zig c++ -target $triple" \
-    go build -tags "$TAGS" -trimpath \
+    go build -trimpath \
       -ldflags "-s -w -X main.version=$VERSION" \
       -o "$OUT/chartplotter_${goos}_${goarch}${ext}" ./cmd/chartplotter
 done

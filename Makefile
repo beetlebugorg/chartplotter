@@ -123,37 +123,16 @@ serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps
 # the same version as `build`; strips symbols (-s -w) and paths (-trimpath) like a
 # release binary. Outputs dist/chartplotter_<os>_<arch>[.exe] (cleaned by `clean`).
-xbuild: ## Cross-compile per platform — both a plain binary (needs --s101) and a self-contained _s101 one (embedded catalogue), into dist/
-	@mkdir -p dist
-	@embed=""; \
-	if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then $(MAKE) --no-print-directory sync-s101; embed=1; \
-	else echo "no S-101 catalogue ($(S101_PC)) — building only the plain (--s101 at runtime) binaries"; fi; \
-	for p in $(PLATFORMS); do \
-	  os=$${p%/*}; arch=$${p#*/}; ext=; [ "$$os" = windows ] && ext=.exe; \
-	  echo "building $$os/$$arch (plain, needs --s101)…"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w $(LDFLAGS)" \
-	    -o "dist/chartplotter_$${os}_$${arch}$$ext" ./cmd/chartplotter || exit 1; \
-	  if [ -n "$$embed" ]; then \
-	    echo "building $$os/$$arch (self-contained, embedded catalogue)…"; \
-	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -tags embed_s101 -trimpath -ldflags "-s -w $(LDFLAGS)" \
-	      -o "dist/chartplotter_$${os}_$${arch}_s101$$ext" ./cmd/chartplotter || exit 1; \
-	  fi; \
-	done
-	@echo "→ dist/"; ls -1 dist/chartplotter_*
-
 # Cross-compile the CGO+libtile57 binary via the Zig C toolchain (`zig cc`) — how
 # the tile57-only build keeps single-command cross-compilation despite needing
 # CGO (specs/tile57-only-engine.md). Covers linux + windows (amd64/arm64), all
 # proven to cross-link from any host with Zig alone. darwin is built NATIVELY on a
 # macOS CI runner: with GOOS=darwin, Go's crypto/x509 links Apple frameworks
-# (Security/CoreFoundation) that Zig doesn't bundle. Self-contained (embedded S-101
-# catalogue) when it's available locally, else plain (needs --s101 at runtime).
-# Needs the ../tile57 symlink + Zig 0.16. Outputs dist/chartplotter_<os>_<arch>[.exe].
-xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
-	@tags="tile57"; \
-	if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then $(MAKE) --no-print-directory sync-s101; tags="embed_s101 tile57"; \
-	else echo "no S-101 catalogue ($(S101_PC)) — cross-building plain (--s101 at runtime) binaries"; fi; \
-	TAGS="$$tags" VERSION="$(VERSION)" TILE57="$(TILE57)" scripts/xbuild-tile57.sh
+# (Security/CoreFoundation) that Zig doesn't bundle. The S-101 catalogue lives in
+# libtile57, so there's no embed step. Needs the ../tile57 symlink + Zig 0.16.
+# Outputs dist/chartplotter_<os>_<arch>[.exe].
+xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
+	VERSION="$(VERSION)" TILE57="$(TILE57)" scripts/xbuild-tile57.sh
 
 serve: build ## Serve the web frontend + provisioning API, S-101 portrayal (HOST/PORT/ASSETS/S101_* overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) \
