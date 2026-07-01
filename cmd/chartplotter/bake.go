@@ -41,10 +41,15 @@ func (c bakeCmd) Run() error {
 		fmt.Fprintln(os.Stderr, "portrayal: S-101 rule engine")
 	}
 
-	// Native libtile57 bundle path (opt-in, -tags tile57): the engine reads the ENC
-	// from disk and writes a self-contained bundle, so it runs BEFORE the in-memory
-	// collectCells the Go baker needs.
+	// Native libtile57 path (opt-in, -tags tile57). With --bands it writes one
+	// gap-clipped PMTiles archive per navigational band (+ manifest) — parity with
+	// the Go baker's per-band output, so the district/demo/widget workflows keep
+	// working. Without --bands it writes a self-contained bundle directory. The
+	// engine reads the ENC from disk, so both run BEFORE the Go baker's collectCells.
 	if c.Tile57 {
+		if c.Bands {
+			return c.runTile57Bands()
+		}
 		return c.runTile57Bundle()
 	}
 
@@ -128,17 +133,9 @@ func (c bakeCmd) Run() error {
 		if auxFile != "" {
 			man["aux"] = auxFile
 		}
-		mf, err := os.Create(c.Manifest)
-		if err != nil {
+		if err := writeManifestJSON(c.Manifest, man); err != nil {
 			return err
 		}
-		enc := json.NewEncoder(mf)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(man); err != nil {
-			mf.Close()
-			return err
-		}
-		mf.Close()
 		fmt.Printf("wrote manifest %s (file=%s)\n", c.Manifest, file)
 	}
 	return nil
@@ -210,21 +207,13 @@ func (c bakeCmd) runBands(cells map[string]baker.CellData, aux map[string][]byte
 	}
 
 	if c.Manifest != "" {
-		mf, err := os.Create(c.Manifest)
-		if err != nil {
-			return err
-		}
-		enc := json.NewEncoder(mf)
-		enc.SetIndent("", "  ")
 		man := map[string]any{"districts": entries}
 		if auxFile != "" {
 			man["aux"] = auxFile
 		}
-		if err := enc.Encode(man); err != nil {
-			mf.Close()
+		if err := writeManifestJSON(c.Manifest, man); err != nil {
 			return err
 		}
-		mf.Close()
 		fmt.Printf("wrote manifest %s\n", c.Manifest)
 	}
 	return nil
@@ -291,6 +280,21 @@ func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
 		}
 	}
 	return dir, func() { os.RemoveAll(dir) }, nil
+}
+
+// writeManifestJSON writes a charts-index.json manifest (indented) to path.
+func writeManifestJSON(path string, man map[string]any) error {
+	mf, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(mf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(man); err != nil {
+		mf.Close()
+		return err
+	}
+	return mf.Close()
 }
 
 // bundleOutDir derives the bundle output DIRECTORY from the -o value: a *.pmtiles /

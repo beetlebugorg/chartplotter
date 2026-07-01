@@ -9,3 +9,8 @@ import "fmt"
 func bakeTile57Bundle(_, _ string, _ int, _ func(stage uint8, done, total int)) (int, [4]float64, error) {
 	return 0, [4]float64{}, fmt.Errorf("--tile57 requires a binary built with -tags tile57 (run `make build-tile57`)")
 }
+
+// runTile57Bands is stubbed in the default CGO-free build (no native baker).
+func (c bakeCmd) runTile57Bands() error {
+	return fmt.Errorf("--tile57 --bands requires a binary built with -tags tile57 (run `make build-tile57`)")
+}
