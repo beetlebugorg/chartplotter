@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -35,19 +37,108 @@ func (s *Server) serveTile57Style(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	// libtile57 is the sole engine, so EVERY registered pack renders from the engine
-	// style — resolve the requested ?set to a real registered set (a live "tile57"
-	// set, an explicit pack, or the sole pack when unspecified). 404 only when there's
-	// nothing to render (or an ambiguous multi-pack install — Phase 5).
-	if _, ok := s.resolveStyleSet(q.Get("set")); !ok {
+	// style. ?set is a CSV of packs (default: all registered) — one for a single-pack
+	// install, several for a multi-pack one (each a self-contained best-available
+	// district bundle). 404 only when nothing is registered.
+	sets := s.resolveStyleSets(q.Get("set"))
+	if len(sets) == 0 {
 		apiErr(w, http.StatusNotFound, "no renderable tile57 set")
 		return
 	}
-	style, err := s.styleCtx(r, q).build(marinerFromQuery(q))
+	m := marinerFromQuery(q)
+	var style []byte
+	var err error
+	if len(sets) == 1 {
+		style, err = s.styleCtxForSet(r, q, sets[0]).build(m)
+	} else {
+		style, err = s.buildMultiStyle(r, q, sets, m)
+	}
 	if err != nil {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeMaybeGzip(w, r, jsonCT, style) // the engine style is multi-MB — gzip on the wire
+}
+
+// buildMultiStyle composes ONE MapLibre style spanning several packs: it builds the
+// engine style for each set (each with that set's own SCAMIN ladder + top zoom) and
+// merges them, namespacing every set's "chart" source + layers so they coexist.
+// The sets are ordered coarse→fine, so a finer district's layers draw over a coarser
+// one where they overlap (districts are normally disjoint, so this rarely matters).
+func (s *Server) buildMultiStyle(r *http.Request, q url.Values, sets []string, m tile57.Mariner) ([]byte, error) {
+	parts := make([]setStyle, 0, len(sets))
+	for _, set := range sets {
+		b, err := s.styleCtxForSet(r, q, set).build(m)
+		if err != nil {
+			continue // a set that fails to build is skipped, not fatal
+		}
+		parts = append(parts, setStyle{set: set, style: b})
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("no set produced a style")
+	}
+	return mergeStyles(parts)
+}
+
+// setStyle is one pack's single-source engine style, tagged with its set name.
+type setStyle struct {
+	set   string
+	style []byte
+}
+
+// mergeStyles merges per-set single-source styles into one multi-source style. Each
+// set's "chart" source becomes "chart-<set>" and each layer's id gets a "--<set>"
+// suffix (source ref rewritten to match); backgrounds are dropped (the client's
+// chrome supplies one) and sprite/glyphs are taken from the first part.
+func mergeStyles(parts []setStyle) ([]byte, error) {
+	out := map[string]any{"version": 8}
+	sources := map[string]any{}
+	layers := make([]any, 0, len(parts)*40)
+	for i, p := range parts {
+		var st map[string]any
+		if err := json.Unmarshal(p.style, &st); err != nil {
+			return nil, err
+		}
+		if i == 0 {
+			for _, k := range []string{"sprite", "glyphs"} {
+				if v, ok := st[k]; ok {
+					out[k] = v
+				}
+			}
+		}
+		if srcs, ok := st["sources"].(map[string]any); ok {
+			for k, v := range srcs {
+				sources[chartSrcKey(k, p.set)] = v
+			}
+		}
+		if lyrs, ok := st["layers"].([]any); ok {
+			for _, l := range lyrs {
+				lm, ok := l.(map[string]any)
+				if !ok || lm["type"] == "background" {
+					continue
+				}
+				if src, ok := lm["source"].(string); ok {
+					lm["source"] = chartSrcKey(src, p.set)
+				}
+				if id, ok := lm["id"].(string); ok {
+					lm["id"] = id + "--" + p.set
+				}
+				layers = append(layers, lm)
+			}
+		}
+	}
+	out["sources"] = sources
+	out["layers"] = layers
+	return json.Marshal(out)
+}
+
+// chartSrcKey namespaces the engine's single "chart" source per set; any other
+// source name (there are none today) passes through.
+func chartSrcKey(name, set string) string {
+	if name == "chart" {
+		return "chart-" + set
+	}
+	return name
 }
 
 // serveTile57StyleDiff returns the minimal MapLibre mutation ops to move the style from
@@ -83,14 +174,17 @@ func (s *Server) serveTile57StyleDiff(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "from/to must be url-encoded mariner queries")
 		return
 	}
-	if _, ok := s.resolveStyleSet(toQ.Get("set")); !ok {
-		apiErr(w, http.StatusNotFound, "no renderable tile57 set")
+	// The in-place diff is single-source only. A multi-pack ?set CSV won't resolve to
+	// one set, so it 404s here and the client falls back to a full style re-fetch.
+	set, ok := s.resolveStyleSet(toQ.Get("set"))
+	if !ok {
+		apiErr(w, http.StatusNotFound, "style-diff is single-set only (multi-pack → full re-fetch)")
 		return
 	}
 	// Shared style context comes from the "to" (new) query — set/urls/scamin/lat/bands.
 	// The engine diffs the two mariners over one structural template (colours resolve
 	// per-mariner from the colortables, so scheme changes ride the diff too).
-	ctx := s.styleCtx(r, toQ)
+	ctx := s.styleCtxForSet(r, toQ, set)
 	fromM, toM := marinerFromQuery(fromQ), marinerFromQuery(toQ)
 	tmpl, err := tile57.StyleTemplate(toM.Scheme, ctx.tiles, ctx.sprite, ctx.glyphs, 0, ctx.maxZoom)
 	if err != nil {
@@ -139,16 +233,42 @@ func (s *Server) resolveStyleSet(requested string) (string, bool) {
 	return requested, false
 }
 
-// styleCtx resolves the shared style context from a request + query: the tile/sprite/
-// glyph URLs, the band filter, and (from the target set) the top zoom, SCAMIN manifest,
-// and centre latitude. ?set picks the set (default "tile57"); ?scamin/?lat override.
-func (s *Server) styleCtx(r *http.Request, q url.Values) tile57StyleCtx {
+// resolveStyleSets resolves the ?set CSV to registered packs for the engine style,
+// ordered coarse→fine by top zoom (so a finer pack's layers draw over a coarser one).
+// An empty or all-unregistered request falls back to EVERY registered pack. Returns
+// nil only when nothing is registered.
+func (s *Server) resolveStyleSets(requested string) []string {
+	var want []string
+	if requested != "" {
+		for _, name := range strings.Split(requested, ",") {
+			if name = strings.TrimSpace(name); name == "" {
+				continue
+			}
+			if _, ok := s.lookupSet(name); ok {
+				want = append(want, name)
+			}
+		}
+	}
+	if len(want) == 0 {
+		want = append(want, s.sets.names()...) // no valid explicit set → all registered
+	}
+	sort.SliceStable(want, func(i, j int) bool { return s.setMaxZoom(want[i]) < s.setMaxZoom(want[j]) })
+	return want
+}
+
+// setMaxZoom is a registered set's top zoom (0 if unknown), for coarse→fine ordering.
+func (s *Server) setMaxZoom(name string) uint8 {
+	if src, ok := s.lookupSet(name); ok {
+		return src.Meta().MaxZoom
+	}
+	return 0
+}
+
+// styleCtxForSet builds the shared style context for a SPECIFIC registered set: the
+// tile/sprite/glyph URLs, the band filter, and (from that set) the top zoom, SCAMIN
+// manifest, and centre latitude. ?scamin/?lat/?tiles override (single-set only).
+func (s *Server) styleCtxForSet(r *http.Request, q url.Values, set string) tile57StyleCtx {
 	base := requestOrigin(r)
-	// The style targets a specific registered set — a live "tile57" set, an explicit
-	// ?set pack, or the sole pack when unspecified/unregistered. The tiles URL derives
-	// from the RESOLVED set (not the raw ?set) so the same engine style renders both
-	// the live serve and any bake-and-serve pack.
-	set, _ := s.resolveStyleSet(q.Get("set"))
 	ctx := tile57StyleCtx{
 		tiles:  orDefault(q.Get("tiles"), base+"/tiles/"+set+"/{z}/{x}/{y}.mvt"),
 		sprite: orDefault(q.Get("sprite"), base+"/sprite"),

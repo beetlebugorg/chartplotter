@@ -1274,15 +1274,14 @@ export class ChartCanvas extends HTMLElement {
   // Probe + adopt the engine style at boot: if /api/style.json serves one (a -tags tile57
   // backend), cache it + record the mariner it reflects. 501/error → Go path (no-op).
   async _initEngineStyle(setNames) {
-    // Target set for the engine style: the live "tile57" serve set, OR a single active
-    // tile57-baked pack (so bake-and-serve tiles ALSO render from the engine style, not
-    // the JS builder — one style, no drift). The engine style is one-source, so adopt it
-    // only for a single set; a multi-pack install (no "tile57" set) falls back to the JS
-    // builder. The server 404s /api/style.json for a non-tile57 pack, so the probe below
-    // is the real gate — this just picks which set to ask about.
+    // libtile57 is the sole engine, so render ALL active packs from the engine style —
+    // the server composes a multi-source style (one chart-<set> source per pack). The
+    // ?set query is a CSV of the active sets; the server 404s only when nothing is
+    // registered, in which case we leave engine mode off (the map stays chrome-only).
     const sets = setNames || ((this._sources && this._sources.serverSets && this._sources.serverSets()) || []);
-    this._engineSet = sets.length === 1 ? sets[0] : (sets.includes("tile57") || sets.length === 0 ? "tile57" : null);
-    if (!this._engineSet) return;
+    this._engineSets = sets;
+    this._engineSet = sets.join(","); // ?set CSV → tiles URLs + per-set scamin
+    if (sets.length === 0) return;
     const style = await this._fetchEngineStyle();
     if (style && Array.isArray(style.layers)) {
       this._engineStyle = style;
@@ -1294,15 +1293,21 @@ export class ChartCanvas extends HTMLElement {
     }
   }
 
-  // The distinct SCAMIN denominators the live tile57 set carries, ascending — the ~19
-  // ladder boundaries the display scale crosses. From the set's TileJSON `scamin` array.
+  // The distinct SCAMIN denominators the active packs carry, ascending — the ~19 ladder
+  // boundaries the display scale crosses (for the filter-gate). UNION across every active
+  // set's TileJSON `scamin` array, so a multi-pack install gates on all their boundaries.
   async _fetchScaminValues() {
-    try {
-      const r = await fetch(this._assets + "tiles/" + (this._engineSet || "tile57") + ".json", { cache: "no-store" });
-      if (!r.ok) return [];
-      const tj = await r.json();
-      return Array.isArray(tj.scamin) ? tj.scamin.slice().sort((a, b) => a - b) : [];
-    } catch (e) { return []; }
+    const sets = (this._engineSets && this._engineSets.length) ? this._engineSets : [this._engineSet].filter(Boolean);
+    const all = new Set();
+    for (const set of sets) {
+      try {
+        const r = await fetch(this._assets + "tiles/" + set + ".json", { cache: "no-store" });
+        if (!r.ok) continue;
+        const tj = await r.json();
+        if (Array.isArray(tj.scamin)) tj.scamin.forEach((v) => all.add(v));
+      } catch (e) { /* offline / older server → skip */ }
+    }
+    return [...all].sort((a, b) => a - b);
   }
 
   // A mariner/scheme change in engine mode: fetch the engine-computed diff (last-applied
