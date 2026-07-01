@@ -84,6 +84,10 @@ tile57-lib: ## Force-rebuild ../tile57/zig-out/lib/libtile57.a (the native engin
 # symlink + Zig 0.16.
 build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; needs the ../tile57 symlink + Zig 0.16)
 	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — create the symlink: ln -s ../chartplotter-native ../tile57"; exit 1; }
+	@# Force the link: go's build-cache action ID does NOT hash external static-lib
+	@# content, so with an existing up-to-date-looking $(BIN) `go build` silently
+	@# skips the relink and a fresh libtile57.a never reaches the output.
+	@rm -f $(BIN)
 	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
 	@echo "→ $(BIN) (native libtile57 engine)"
 
