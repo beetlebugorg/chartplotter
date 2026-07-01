@@ -38,7 +38,6 @@ type Server struct {
 	share          shareStore    // latest "share my view" snapshot (camera + cell list)
 	settings       settingsStore // persisted client display settings (<data>/client-settings.json)
 	Version        string        // build version
-	BakeEngine     string        // "" / "go" → Go baker; "tile57" → native libtile57 bundle bake (-tags tile57 only)
 
 	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
 	imports *importJobs       // background server-side bake jobs (POST /api/import)

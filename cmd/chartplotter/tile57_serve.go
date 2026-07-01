@@ -1,5 +1,3 @@
-//go:build tile57
-
 package main
 
 import (
@@ -12,11 +10,6 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
-
-// tile57Available reports that this binary embeds the libtile57 backend (built
-// with -tags tile57). The CGO-free default build links the stub in
-// tile57_serve_off.go, where this is false.
-const tile57Available = true
 
 // tile57Source adapts the official libtile57 Go binding's *Source to the host's
 // tilesource.TileSource. Tile/Close are promoted from the embedded *Source; only

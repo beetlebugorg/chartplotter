@@ -1,5 +1,3 @@
-//go:build tile57
-
 package server
 
 import (
@@ -15,10 +13,6 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
-
-// bakeTile57Available reports that this binary embeds the native libtile57 bundle
-// baker (built with -tags tile57), so "tile57" is a selectable bake engine.
-const bakeTile57Available = true
 
 // bakeBundleTile57 bakes an import's cells into a self-contained tile57 chart
 // bundle under the set's directory (tiles/chart.pmtiles + per-scheme SCAMIN-

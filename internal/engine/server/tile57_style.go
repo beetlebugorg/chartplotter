@@ -1,5 +1,3 @@
-//go:build tile57
-
 package server
 
 import (
