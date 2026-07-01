@@ -182,12 +182,19 @@ function pickGeomRank(layer) {
   return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[base] ?? 9;
 }
 
-// Order two picked features per S-52 PresLib §10.8.4: higher drawing priority
-// first, then geometric primitive (point < line < area).
+// Order two picked features: geometric primitive first (point < line < area,
+// labels last), then higher drawing priority within the same primitive rank.
+// Priority-first buried point targets under any area with a higher S-52 drawing
+// priority — a LNDARE fill is priority 12, so every symbol on land ranked below
+// the land polygon and features on land were effectively unclickable. A click is
+// aimed at the discrete object under the cursor; the skin-of-the-earth polygon it
+// sits on is context, so the primitive rank wins and §10.8.4's priority ordering
+// applies within each rank.
 function pickCmp(a, b) {
+  const ga = pickGeomRank(a.sourceLayer), gb = pickGeomRank(b.sourceLayer);
+  if (ga !== gb) return ga - gb; // points, then lines, then areas, labels last
   const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
-  if (pa !== pb) return pb - pa; // higher drawing priority (more significant) first
-  return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
+  return pb - pa; // higher drawing priority (more significant) first
 }
 
 // S-57 cell names encode the usage band as the 3rd character (e.g. US[1-6]…):
@@ -1278,9 +1285,10 @@ export class ChartPlotter extends HTMLElement {
   // --- ECDIS cursor pick (S-52 PresLib §10.8) -------------------------------
   // Report on the chart feature(s) under a tapped point. Queries the rendered
   // tiles (so it returns only visible objects — rule 7), dedupes, and sorts by
-  // drawing priority then geometry primitive (rule 9), then hands the stack to
-  // the <pick-report> panel, which decodes + renders it. `ev` is the originating
-  // DOM event (its clientX/Y anchor the panel's out-of-the-way placement).
+  // geometry primitive then drawing priority (see pickCmp — the discrete point
+  // target under the cursor outranks the polygon it sits on), then hands the
+  // stack to the <pick-report> panel, which decodes + renders it. `ev` is the
+  // originating DOM event (its clientX/Y anchor the panel's placement).
   _pickReportAt(point, ev) {
     const map = this._map;
     if (!map) return;
@@ -1317,7 +1325,7 @@ export class ChartPlotter extends HTMLElement {
       const key = (p.class || "") + "|" + (p.cell || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
       const g = groups.get(key);
       if (!g) { groups.set(key, { feat: f, hi: f }); continue; }
-      if (pickCmp(f, g.feat) < 0) g.feat = f;        // higher drawing priority wins the report row
+      if (pickCmp(f, g.feat) < 0) g.feat = f;        // best pick rank wins the report row
       if (hiGeomRank(f) > hiGeomRank(g.hi)) g.hi = f; // richer primitive wins the highlight
     }
     const uniq = [];
