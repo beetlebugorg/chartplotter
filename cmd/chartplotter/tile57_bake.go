@@ -17,7 +17,9 @@ import (
 // maxZoom caps the highest baked zoom (0 = no cap). progress nil uses the lib's
 // built-in console progress. Returns the cell count + bbox (west,south,east,north).
 func bakeTile57Bundle(input, outDir string, maxZoom int, progress func(tile57.BakeProgress)) (int, [4]float64, error) {
-	opts := tile57.BakeOpts{} // zero MinZoom/MaxZoom = no clamp
+	// MaxZoom 24 = the ABI's "no clamp" (bake each cell's full native band); MaxZoom 0
+	// would clamp every band down to z0 — an EMPTY archive. Only narrow on --max-zoom.
+	opts := tile57.BakeOpts{MaxZoom: 24}
 	if maxZoom > 0 && maxZoom < 24 {
 		opts.MaxZoom = uint8(maxZoom)
 	}

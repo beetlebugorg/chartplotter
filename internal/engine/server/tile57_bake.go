@@ -3,6 +3,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -93,10 +94,18 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 		})
 	}
 	created := time.Now().UTC().Format(time.RFC3339)
-	// Zero MinZoom/MaxZoom = the ABI's "no clamp" — bake each cell's full native band.
-	n, _, err := tile57.BakeBundle(encDir, outDir, tile57.BakeOpts{Created: created}, progress)
+	// MaxZoom 24 = the ABI's "no clamp" (each cell's full native band); MaxZoom 0 would
+	// clamp every band down to z0 — an EMPTY archive.
+	n, bbox, err := tile57.BakeBundle(encDir, outDir, tile57.BakeOpts{Created: created, MaxZoom: 24}, progress)
 	if err != nil {
 		return fail(err)
+	}
+	// An inverted/empty bbox (or zero cells) means nothing valid parsed — e.g. a
+	// corrupt cell libtile57 tolerates but that covers nothing. Treat it as a failed
+	// import (don't register an empty pack) and drop the stub bundle it wrote.
+	if n == 0 || bbox[2] <= bbox[0] || bbox[3] <= bbox[1] {
+		os.RemoveAll(outDir)
+		return fail(fmt.Errorf("import produced no coverage (%d cell(s), no valid S-57 data)", n))
 	}
 
 	// Register the bundle's chart.pmtiles as the set (replacing any prior merged or
