@@ -29,7 +29,7 @@ S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build build-tile57 tile57-lib serve-tile57 xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib serve-tile57 xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -157,6 +157,20 @@ xbuild: ## Cross-compile per platform — both a plain binary (needs --s101) and
 	  fi; \
 	done
 	@echo "→ dist/"; ls -1 dist/chartplotter_*
+
+# Cross-compile the CGO+libtile57 binary via the Zig C toolchain (`zig cc`) — how
+# the tile57-only build keeps single-command cross-compilation despite needing
+# CGO (specs/tile57-only-engine.md). Covers linux + windows (amd64/arm64), all
+# proven to cross-link from any host with Zig alone. darwin is built NATIVELY on a
+# macOS CI runner: with GOOS=darwin, Go's crypto/x509 links Apple frameworks
+# (Security/CoreFoundation) that Zig doesn't bundle. Self-contained (embedded S-101
+# catalogue) when it's available locally, else plain (needs --s101 at runtime).
+# Needs the ../tile57 symlink + Zig 0.16. Outputs dist/chartplotter_<os>_<arch>[.exe].
+xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
+	@tags="tile57"; \
+	if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then $(MAKE) --no-print-directory sync-s101; tags="embed_s101 tile57"; \
+	else echo "no S-101 catalogue ($(S101_PC)) — cross-building plain (--s101 at runtime) binaries"; fi; \
+	TAGS="$$tags" VERSION="$(VERSION)" TILE57="$(TILE57)" scripts/xbuild-tile57.sh
 
 serve: build ## Serve the web frontend + provisioning API, S-101 portrayal (HOST/PORT/ASSETS/S101_* overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) \
