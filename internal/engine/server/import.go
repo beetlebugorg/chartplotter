@@ -527,23 +527,13 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 	return cells
 }
 
-// bakeEngine returns the effective bake engine for server imports. The persisted
-// client setting ("bakeEngine", set from the Advanced settings UI) wins; otherwise
-// the launch-flag default (--tile57-bake → BakeEngine) applies. It is forced to
-// "go" unless this binary embeds the native libtile57 baker, so a stray setting on
-// a CGO-free binary can't disable imports.
+// bakeEngine returns the baker used for server imports. libtile57 is the only
+// supported engine: a tile57-capable binary ALWAYS bakes with it. The old
+// per-client "bakeEngine" setting (which could pin "go" and silently downgrade a
+// tile57 server after a few UI bakes — the "reverts to go" bug) is gone. A
+// CGO-free build has no native baker, so it falls back to the Go per-band baker.
 func (s *Server) bakeEngine() string {
-	eng := s.BakeEngine
-	s.settings.load(s.dataDir)
-	if body := s.settings.get(); len(body) > 0 {
-		var peek struct {
-			BakeEngine string `json:"bakeEngine"`
-		}
-		if json.Unmarshal(body, &peek) == nil && peek.BakeEngine != "" {
-			eng = peek.BakeEngine
-		}
-	}
-	if eng == "tile57" && bakeTile57Available {
+	if bakeTile57Available {
 		return "tile57"
 	}
 	return "go"

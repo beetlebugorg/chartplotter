@@ -25,7 +25,6 @@ function coreGet(app, key, def) {
   if (key === "scheme") return app._scheme;
   if (key === "showCellBounds") return app._showCellBounds;
   if (key === "showChartRadar") return app._showChartRadar;
-  if (key === "bakeEngine") return app._bakeEngine;
   // Synthetic S-52 display-category level (§10.2). Base → Standard → All are
   // CUMULATIVE, so the three mariner booleans collapse to one of three levels.
   if (key === "detailLevel") return app._mariner.displayOther ? "other" : (app._mariner.displayStandard ? "standard" : "base");
@@ -47,7 +46,6 @@ function coreSet(app, key, val) {
   if (key === "scheme") return app.applyScheme(val);
   if (key === "showCellBounds") return app._setCellBoundsVisible(val);
   if (key === "showChartRadar") return app._setChartRadarVisible(val);
-  if (key === "bakeEngine") return app.setBakeEngine(val);
   // Cumulative display category (S-52 §10.2): each level implies the ones below
   // it. Base is permanent (displayBase always true); Standard adds the standard
   // set; All adds the "other" category on top. This can never produce the
@@ -276,14 +274,6 @@ export function coreSettingsContributions(app) {
         key: "dateView", type: "date", label: "Viewing date",
         desc: "Evaluate date-dependent features against this date for passage planning (blank = today)",
       },
-      // Server bake engine — shown only when the server reports the native tile57
-      // baker (a -tags tile57 build). tile57 bakes a SCAMIN-bucketed bundle; Go is
-      // the built-in baker.
-      ...((app._bakeEngines || ["go"]).includes("tile57") ? [{
-        key: "bakeEngine", type: "segmented", label: "Bake engine", default: "go",
-        desc: "Engine that bakes imported charts on the server (native tile57 vs the built-in Go baker)",
-        options: [["go", "Go"], ["tile57", "tile57 (native)"]],
-      }] : []),
     ],
   };
 

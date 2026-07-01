@@ -232,8 +232,6 @@ export class ChartPlotter extends HTMLElement {
     this._userBake = null;              // {cells:[…], bounds:[w,s,e,n]} of the map-selected charts-user.pmtiles, or null
     this._showCellBounds = localStorage.getItem("cp-cell-bounds") !== "0"; // coverage boxes when zoomed out past chart data (default ON; opt-out)
     this._showChartRadar = localStorage.getItem("cp-chart-radar") === "1"; // edge pointers to off-screen installed charts (default OFF; opt-in)
-    this._bakeEngine = "go";    // server bake engine ("go" | "tile57"); persisted server-side (Advanced settings)
-    this._bakeEngines = ["go"]; // bake engines the server offers (from /api/health) — gates the Advanced toggle
     this._bandsOff = new Set(loadJSON(LS_BANDS_OFF, [])); // usage bands turned off (hide layers + gate the realtime baker)
     this._hiddenCells = new Set(loadJSON(LS_HIDDEN_CELLS, [])); // individual cells hidden via the per-cell toggle (client filter on baked `cell`)
     this._pxPitch = loadJSON(LS_PX_PITCH, undefined); // calibrated CSS-pixel pitch (mm); undefined → util default (CSS reference)
@@ -320,7 +318,6 @@ export class ChartPlotter extends HTMLElement {
     // is configured below, overriding the localStorage values the constructor seeded
     // (localStorage stays as the offline cache). The widget viewer (offline pmtiles) has no server.
     if (!this._widget) await this._loadServerSettings();
-    if (!this._widget) await this._loadCapabilities();
     this.renderChrome();
 
     // What's already stored? We do NOT eagerly load it (that's the slow part on
@@ -1772,7 +1769,6 @@ export class ChartPlotter extends HTMLElement {
       hiddenCells: [...this._hiddenCells],
       pxPitch: this._pxPitch,
       mariner: this._mariner,
-      bakeEngine: this._bakeEngine,
     };
   }
 
@@ -1806,26 +1802,6 @@ export class ChartPlotter extends HTMLElement {
     if (typeof s.pxPitch === "number" && s.pxPitch > 0) this._pxPitch = s.pxPitch;
     // Merge mariner over the (migrated) defaults; Display Base is always forced on.
     if (s.mariner && typeof s.mariner === "object") this._mariner = { ...this._mariner, ...s.mariner, displayBase: true };
-    if (typeof s.bakeEngine === "string") this._bakeEngine = s.bakeEngine;
-  }
-
-  // Fetch server capabilities at boot so the UI only offers what the server can do —
-  // currently the available bake engines (the native tile57 baker exists only in a
-  // -tags tile57 server build), which gates the Advanced → "Bake engine" toggle.
-  async _loadCapabilities() {
-    try {
-      const r = await fetch(`${this._assets}api/health`, { cache: "no-store" });
-      if (!r.ok) return;
-      const h = await r.json();
-      if (Array.isArray(h.bakeEngines) && h.bakeEngines.length) this._bakeEngines = h.bakeEngines;
-    } catch (e) { /* older server / offline → keep ["go"] */ }
-  }
-
-  // Set the server-side bake engine (Advanced setting). Persisted server-side; the
-  // server reads it when baking imported charts. No client re-render needed.
-  setBakeEngine(v) {
-    this._bakeEngine = v === "tile57" ? "tile57" : "go";
-    this._persistSettings();
   }
 
   // Persist the display settings server-side (shared across screens). Debounced so

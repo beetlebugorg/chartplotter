@@ -93,8 +93,8 @@ func TestAPIHealthAndHostCheck(t *testing.T) {
 	resp, _ := http.Get(ts.URL + "/api/health")
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	// /api/health also advertises server capabilities (version, bakeEngines), so
-	// match the liveness marker rather than an exact body.
+	// /api/health also advertises the server version, so match the liveness
+	// marker rather than an exact body.
 	if !strings.Contains(string(got), `"ok":true`) {
 		t.Errorf("health: got %q", got)
 	}

@@ -235,16 +235,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/api/health":
-		// Also advertises server capabilities the client gates UI on — notably the
-		// selectable bake engines (the native libtile57 bundle baker only exists in a
-		// -tags tile57 build), so the "Advanced → bake engine" toggle shows only when
-		// "tile57" is offered.
-		engines := `["go"]`
-		if bakeTile57Available {
-			engines = `["go","tile57"]`
-		}
 		w.Header().Set("Content-Type", jsonCT)
-		fmt.Fprintf(w, `{"ok":true,"version":%q,"bakeEngines":%s}`, s.Version, engines)
+		fmt.Fprintf(w, `{"ok":true,"version":%q}`, s.Version)
 	case r.URL.Path == "/api/cells":
 		s.serveCells(w, r) // GET: names of cells currently in the server's ENC_ROOT cache
 	case r.URL.Path == "/api/ienc/catalog":
