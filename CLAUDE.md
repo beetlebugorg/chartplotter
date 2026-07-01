@@ -2,31 +2,31 @@
 
 A marine chart plotter in Go. It reads NOAA S-57 ENC cells, draws them with the
 S-101 Portrayal Catalogue, and bakes them into PMTiles vector-tile archives. A
-`<chart-plotter>` web component renders the tiles with MapLibre GL JS. The Go
-backend does all baking; the browser only renders pre-baked tiles. S-102
-bathymetric support is planned.
+`<chart-plotter>` web component renders the tiles with MapLibre GL JS. The native
+`libtile57` engine (Zig, `../tile57` → chartplotter-native) does all tiling,
+portrayal, style, and asset generation, linked into the Go binary via CGO; the
+browser only renders pre-baked tiles. S-102 bathymetric support is planned.
 
 ## Commands
 
-- `make build` — build `bin/chartplotter` (embeds the S-101 catalogue when it is
-  available locally).
+- `make build` — build `bin/chartplotter`. CGO build linking `libtile57` (built on
+  demand from `../tile57` with Zig 0.16); the S-101 catalogue is embedded in the
+  lib, so there's no separate sync/embed step. Needs the `../tile57` symlink + Zig.
+  (`make build-tile57` is a back-compat alias.)
 - `make test` / `make vet` / `make fmt` — run before you commit.
-- `make serve` — build and serve `web/` on `:8080`.
-- `make build-tile57` — OPT-IN CGO build linking the native `tile57` engine
-  (`../tile57` → chartplotter-native) as the tile/asset/style backend (`-tags
-  tile57`). `make serve-tile57 ENC_ROOT=<dir>` serves a live libtile57 set;
-  `cp bake --tile57` / `cp serve --tile57 <ENC_ROOT>` are the runtime flags. Needs
-  the `../tile57` symlink and Zig 0.16.
+- `make serve` — build and serve `web/` on `:8080`. `make serve-tile57 ENC_ROOT=<dir>`
+  also registers a live libtile57 set generated on demand from those cells.
+- `make xbuild` — cross-compile release binaries with `zig cc` (linux + windows,
+  amd64/arm64). darwin is built natively on a macOS CI runner (Go's own
+  `runtime/cgo`/`crypto/x509` link Apple frameworks Zig doesn't bundle).
 
 ## Conventions
 
-- **Stay CGO-free.** Builds run with `CGO_ENABLED=0` (the cross-compiled release
-  binaries depend on it). Use pure-Go libraries only — e.g. `modernc.org/sqlite`,
-  not `mattn/go-sqlite3`. Do not add a dependency that needs cgo. The ONLY
-  exception is the opt-in `-tags tile57` backend (`make build-tile57`), which links
-  the native libtile57 engine via CGO; it is fully build-tagged, so the default
-  build and all release/`xbuild` binaries stay CGO-free. Keep it that way — never
-  let `tile57`-tagged code leak into a file that the default build compiles.
+- **CGO is required.** libtile57 is the sole tile/portrayal engine, linked via CGO,
+  so `CGO_ENABLED=0` no longer builds. Cross-compilation is preserved with **Zig as
+  the C toolchain** (`zig cc`), not by staying CGO-free. Pure-Go deps are still
+  preferred where a native lib isn't the point (e.g. `modernc.org/sqlite`, not
+  `mattn/go-sqlite3`). The `../tile57` checkout + Zig 0.16 are hard build deps.
 - Use https://www.openbridge.no/ for design and icons.
 - Match the style of the code around you.
 - Never run `git add -A` or `git add .`. The repo holds large untracked files
