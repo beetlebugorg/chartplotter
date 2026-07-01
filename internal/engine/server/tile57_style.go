@@ -36,12 +36,12 @@ func (s *Server) serveTile57Style(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	// Only serve an engine style when a LIVE tile57 set exists (serve --tile57 <ENC_ROOT>).
-	// A -tags tile57 binary serving Go-baked packs has no "tile57" set — 404 so the client
-	// falls back to its JS style builder instead of adopting a style whose chart source
-	// (/tiles/tile57/…) has no tiles (which rendered blank).
-	if _, ok := s.lookupSet(orDefault(q.Get("set"), "tile57")); !ok {
-		apiErr(w, http.StatusNotFound, "no live tile57 set (serve with --tile57 <ENC_ROOT>)")
+	// libtile57 is the sole engine, so EVERY registered pack renders from the engine
+	// style — resolve the requested ?set to a real registered set (a live "tile57"
+	// set, an explicit pack, or the sole pack when unspecified). 404 only when there's
+	// nothing to render (or an ambiguous multi-pack install — Phase 5).
+	if _, ok := s.resolveStyleSet(q.Get("set")); !ok {
+		apiErr(w, http.StatusNotFound, "no renderable tile57 set")
 		return
 	}
 	style, err := s.styleCtx(r, q).build(marinerFromQuery(q))
@@ -85,8 +85,8 @@ func (s *Server) serveTile57StyleDiff(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "from/to must be url-encoded mariner queries")
 		return
 	}
-	if _, ok := s.lookupSet(orDefault(toQ.Get("set"), "tile57")); !ok {
-		apiErr(w, http.StatusNotFound, "no live tile57 set")
+	if _, ok := s.resolveStyleSet(toQ.Get("set")); !ok {
+		apiErr(w, http.StatusNotFound, "no renderable tile57 set")
 		return
 	}
 	// Shared style context comes from the "to" (new) query — set/urls/scamin/lat/bands.
@@ -123,16 +123,34 @@ type tile57StyleCtx struct {
 	bands                 []int32
 }
 
+// resolveStyleSet maps a requested ?set to a real registered set for the engine
+// style: the requested set if it's registered, else the sole registered set (the
+// common single-pack case). With the Go engine gone, EVERY pack renders from the
+// engine style — so this no longer refuses a baked pack just because it isn't the
+// live "tile57" set. ok=false only when there's nothing to render or an ambiguous
+// multi-pack install with no matching set (Phase 5: multi-source composition).
+func (s *Server) resolveStyleSet(requested string) (string, bool) {
+	if requested != "" {
+		if _, ok := s.lookupSet(requested); ok {
+			return requested, true
+		}
+	}
+	if names := s.sets.names(); len(names) == 1 {
+		return names[0], true
+	}
+	return requested, false
+}
+
 // styleCtx resolves the shared style context from a request + query: the tile/sprite/
 // glyph URLs, the band filter, and (from the target set) the top zoom, SCAMIN manifest,
 // and centre latitude. ?set picks the set (default "tile57"); ?scamin/?lat override.
 func (s *Server) styleCtx(r *http.Request, q url.Values) tile57StyleCtx {
 	base := requestOrigin(r)
-	// The style targets a specific set: the live "tile57" set by default, or any
-	// registered tile57-baked pack via ?set. The tiles URL derives from that set so the
-	// same engine style renders both the live serve and the bake-and-serve-packs path
-	// (the client uses the tile57 style for ALL tile57 tiles — no JS-builder fallback).
-	set := orDefault(q.Get("set"), "tile57")
+	// The style targets a specific registered set — a live "tile57" set, an explicit
+	// ?set pack, or the sole pack when unspecified/unregistered. The tiles URL derives
+	// from the RESOLVED set (not the raw ?set) so the same engine style renders both
+	// the live serve and any bake-and-serve pack.
+	set, _ := s.resolveStyleSet(q.Get("set"))
 	ctx := tile57StyleCtx{
 		tiles:  orDefault(q.Get("tiles"), base+"/tiles/"+set+"/{z}/{x}/{y}.mvt"),
 		sprite: orDefault(q.Get("sprite"), base+"/sprite"),

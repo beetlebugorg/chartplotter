@@ -1224,7 +1224,10 @@ export class ChartCanvas extends HTMLElement {
     return {
       version: 8,
       glyphs: engine.glyphs || js.glyphs,
-      sprite: engine.sprite,
+      // No `sprite`: the client renders chart symbols via its own SpriteBuilder
+      // (map.addImage from the tile57-custom sprite.json/png fetched separately),
+      // so a MapLibre sprite URL here only makes it fetch a standard @2x atlas that
+      // doesn't exist (404s). icon-image resolves against the addImage'd images.
       sources: { ...chromeSources, ...engine.sources },
       // chrome (bg → basemap → no-data) UNDER the engine chart layers; drop the engine's
       // own background so there is a single (client, scheme-aware) sea background.
