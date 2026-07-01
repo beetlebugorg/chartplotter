@@ -21,17 +21,11 @@ jobs:
           go-version: "1.26"
           cache: true
 
-      # The S-101 Portrayal + Feature Catalogues are IHO material kept out of this
-      # repo. Clone them (public, no auth) into a temp dir and sync into the
-      # gitignored embed dir so GoReleaser builds self-contained (-tags embed_s101)
-      # binaries. The IHO repos declare no license; see THIRD-PARTY-NOTICES.md.
-      - name: Fetch IHO S-101 catalogues
-        run: |
-          git clone --depth 1 https://github.com/iho-ohi/S-101_Portrayal-Catalogue.git "$RUNNER_TEMP/s101-pc"
-          git clone --depth 1 https://github.com/iho-ohi/S-101-Documentation-and-FC.git "$RUNNER_TEMP/s101-fc"
-          make sync-s101 \
-            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
-            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml"
+      # NOTE: this release workflow is STALE — it still cross-compiles CGO-free,
+      # which no longer builds (libtile57 is a CGO dep). It needs the same rework as
+      # .goreleaser.yaml: build libtile57 with Zig per target, single CGO build,
+      # darwin on a macOS runner. The S-101 catalogue now lives inside libtile57, so
+      # there is no more catalogue-sync step.
 
       # quill signs + notarizes the macOS binaries from this Linux runner (no Mac
       # needed). The GoReleaser build hook (scripts/quill-sign.sh) invokes it.

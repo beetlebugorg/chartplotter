@@ -33,9 +33,6 @@ web/chartplotter.wasm
 web/vendor/wasm_exec.js
 web/demo-cell.000
 
-# S-101 catalogue: build-synced into the binary (-tags embed_s101), never committed
-internal/engine/s101catalog/catalog/
-
 # S-101 client portrayal assets: generated at build time (make emit-assets) + serve time, never committed
 web/colortables.json
 web/linestyles.json

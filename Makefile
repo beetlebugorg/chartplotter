@@ -19,15 +19,13 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-# S-101 portrayal for `make serve` (transitional, until the catalogue is embedded).
-# The catalogue + feature catalogue are vendored as siblings of the repo (not
-# committed — IHO DRAFT licence unconfirmed); override the paths if they live
-# elsewhere. Baked tiles carry their portrayal, so S-101 uses its OWN cache dir
-# (a subdir of $(CACHE), still wiped by clear-cache) to avoid mixing with any
-# S-52 tiles; the SOURCE ENC dir (--data) is portrayal-agnostic and stays shared.
+# OPTIONAL external S-101 PortrayalCatalog override (for iterating on symbology
+# rules): pass --s101 <dir> --s101-fc <fc.xml> to serve/bake/emit-assets and both
+# the tiles and the emitted client assets use it instead of libtile57's embedded
+# catalogue. Defaults to sibling checkouts; override if they live elsewhere. Not
+# needed for a normal build — the catalogue lives inside libtile57.
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
-S101_CACHE ?= $(CACHE)/s101
 
 .PHONY: build build-tile57 tile57-lib serve-tile57 xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
@@ -63,21 +61,6 @@ NOAA_JOBS     ?= 5
 NOAA_BANDS  := overview general coastal approach harbor berthing
 NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
-S101_EMBED_DIR := internal/engine/s101catalog/catalog
-# Our own additions to the catalogue (symbols/rules the upstream S-101 PortrayalCatalog
-# lacks, e.g. the NEWOBJ "!" symbol). Committed here and re-applied OVER the upstream
-# sync, so they survive a re-sync and live in this repo — not the external catalogue.
-S101_CUSTOM    := internal/engine/s101catalog/custom-overlay
-
-# Copy the external S-101 catalogue into the (gitignored) embed dir so a
-# `-tags embed_s101` build bakes it into the binary. Files never enter the repo.
-sync-s101: ## Sync the external S-101 PortrayalCatalog + our custom overlay into the embed dir
-	@rm -rf "$(S101_EMBED_DIR)"
-	@mkdir -p "$(S101_EMBED_DIR)/PortrayalCatalog"
-	@cp -a "$(S101_PC)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
-	@cp -a "$(S101_FC)" "$(S101_EMBED_DIR)/FeatureCatalogue.xml"
-	@cp -a "$(S101_CUSTOM)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
-	@echo "synced S-101 catalogue (+ custom overlay) → $(S101_EMBED_DIR)"
 
 # --- native libtile57 engine (the SOLE tile/portrayal/asset engine) -------------
 # TILE57 points at the engine repo via the ../tile57 symlink (→ chartplotter-native);
@@ -134,9 +117,8 @@ serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a
 xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
 	VERSION="$(VERSION)" TILE57="$(TILE57)" scripts/xbuild-tile57.sh
 
-serve: build ## Serve the web frontend + provisioning API, S-101 portrayal (HOST/PORT/ASSETS/S101_* overridable)
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) \
-	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE)
+serve: build ## Serve the web frontend + provisioning API on :8080 (HOST/PORT/ASSETS overridable)
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)
 
 bake-ienc: build $(IENC_PMTILES) ## Bake every IENC cell in $(IENC_SRC) into $(IENC_PMTILES)
 
@@ -243,8 +225,7 @@ demo-chart1: build ## Bake the S-52 ECDIS Chart 1 sheet to tiles for the docs (i
 # range-capable static file server (the widget page makes no /api calls).
 serve-demo: demo ## Preview the static demo bundle locally (range-capable static serve; HOST/PORT overridable)
 	@echo "  Read-only widget demo — open: http://$(HOST):$(PORT)/"
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets "$(DEMO_OUT)" \
-	  $(if $(wildcard $(S101_PC)),--s101 "$(S101_PC)" --s101-fc "$(S101_FC)" --cache "$(S101_CACHE)")
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets "$(DEMO_OUT)"
 
 docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
 	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)
@@ -272,8 +253,7 @@ s64-pages: ## Render S-64 ENC test pages for spec comparison (one PNG per test s
 DOCS_SHOTS_PORT ?= 8199
 docs-shots: build ## Regenerate docs UI screenshots from the live app into docs/static/img/ui/
 	@set -e; \
-	$(BIN) serve --host 127.0.0.1 --port $(DOCS_SHOTS_PORT) --assets web \
-	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE) & \
+	$(BIN) serve --host 127.0.0.1 --port $(DOCS_SHOTS_PORT) --assets web & \
 	srv=$$!; trap "kill $$srv 2>/dev/null || true" EXIT; \
 	for i in $$(seq 1 50); do \
 	  curl -fsS "http://127.0.0.1:$(DOCS_SHOTS_PORT)/api/health" >/dev/null 2>&1 && break; \
@@ -295,8 +275,8 @@ vet:
 # Format with the gofmt of the toolchain go.mod pins (Go 1.26), NOT whatever
 # gofmt happens to be on PATH — gofmt's rules change between Go minor releases,
 # so a stray 1.25 gofmt reintroduces drift that the 1.26 CI check rejects. Invoke
-# gofmt over `.` (not `go fmt ./...`, which skips files behind build tags like
-# embed_s101) so the file set matches the CI `gofmt -l .` gate exactly.
+# gofmt over `.` (not `go fmt ./...`, which can skip build-tagged files) so the
+# file set matches the CI `gofmt -l .` gate exactly.
 fmt:
 	@"$$(go env GOROOT)/bin/gofmt" -w .
 
