@@ -4,31 +4,73 @@ on:
   push:
   pull_request:
 
+# NOTE: libtile57 is now the sole engine, so the build is CGO and links the native
+# static lib from the sibling chartplotter-native repo (built with Zig). This
+# workflow checks that repo out beside chartplotter-go and builds the lib first.
+# If chartplotter-native is PRIVATE, set a repo/PAT secret with read access to it
+# and pass it as `token:` on that checkout (a job's default GITHUB_TOKEN cannot
+# read a different private repo). UNVALIDATED — needs a test push to confirm the
+# setup-zig action version + checkout paths.
 jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter-go
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter-go
+      # The go.mod replace points at ../tile57/bindings/go and the binding's cgo
+      # LDFLAGS at ../../zig-out/lib/libtile57.a, so the native repo must sit at
+      # <workspace>/tile57 (sibling of chartplotter-go).
+      - name: Checkout chartplotter-native (libtile57)
+        uses: actions/checkout@v7
+        with:
+          repository: beetlebugorg/chartplotter-native
+          path: tile57
+          # token: ${{ secrets.NATIVE_REPO_TOKEN }}   # uncomment if private
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: chartplotter-go/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: cd tile57 && zig build
       - name: Format check
-        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+        run: cd chartplotter-go && test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: Vet
-        run: go vet ./...
+        run: cd chartplotter-go && go vet ./...
       - name: Test
-        run: go test ./...
+        run: cd chartplotter-go && go test ./...
       - name: Build
-        run: go build ./...
+        run: cd chartplotter-go && go build ./...
 
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter-go
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter-go
+      - name: Checkout chartplotter-native (libtile57)
+        uses: actions/checkout@v7
+        with:
+          repository: beetlebugorg/chartplotter-native
+          path: tile57
+          # token: ${{ secrets.NATIVE_REPO_TOKEN }}   # uncomment if private
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: chartplotter-go/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: cd tile57 && zig build
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: cd chartplotter-go && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
