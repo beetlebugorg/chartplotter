@@ -106,6 +106,10 @@ const DEFAULT_MARINER = {
   showContourLabels: false,
   dataQuality: false,
   showMetaBounds: false,
+  // S-52 §10.1.10 overscale indication (ON by default): the AP(OVERSC01)
+  // vertical-line hatch over regions whose best displayed data is enlarged past
+  // its compilation scale (engine `oscl` gate / per-band JS overscale layers).
+  showOverscale: true,
   // Fine-grained viewing-group selection (S-52 §14.5): a DENY-LIST of raw viewing-
   // group ids (the baked `vg` tag) the mariner has turned off. Empty = every group
   // shown (default). Driven by the "Viewing groups" settings tab; see viewing-groups.mjs.

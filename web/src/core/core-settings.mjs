@@ -184,6 +184,7 @@ export function coreSettingsContributions(app) {
     get, set,
     items: [
       { key: "showScaleBoundaries", type: "toggle", label: "Scale boundaries", desc: "Outline where more detailed charts exist" },
+      { key: "showOverscale", type: "toggle", label: "Overscale pattern", desc: "Hatch areas displayed beyond their chart's compilation scale" },
       { key: "showMetaBounds", type: "toggle", label: "Metadata boundaries", desc: "Chart coverage & region indicator lines" },
       { key: "showInformCallouts", type: "toggle", label: "Information callouts", desc: "“Additional information available” (i) markers on features that carry notes" },
       { key: "highlightDateDependent", type: "toggle", label: "Highlight date-dependent", desc: "Mark features that carry date conditions with the “d” symbol" },

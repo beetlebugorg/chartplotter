@@ -1051,6 +1051,16 @@ export class ChartCanvas extends HTMLElement {
       if (keys.includes("showScaleBoundaries")) {
         this._eachLayer("scale-boundaries", (id) => this._setVis(id, this._mariner.showScaleBoundaries === false ? "none" : "visible"));
       }
+      // S-52 §10.1.10 overscale pattern: a visibility toggle on the per-band
+      // AP(OVERSC01) layers this (JS-builder) path emits ("overscale@<source>").
+      // Engine mode never reaches here — the toggle rides the style-diff instead.
+      if (keys.includes("showOverscale")) {
+        const vis = this._mariner.showOverscale === false ? "none" : "visible";
+        const style = map.getStyle && map.getStyle();
+        if (style && style.layers) for (const l of style.layers) {
+          if (l.id === "overscale" || l.id.startsWith("overscale@")) this._setVis(l.id, vis);
+        }
+      }
       // S-52 individually-selectable "Other" items, each a plain visibility
       // toggle on its own layer (all default on): spot soundings, light
       // descriptions (LIGHTS06 text), and geographic names / object labels.
@@ -1296,6 +1306,7 @@ export class ChartCanvas extends HTMLElement {
     if (m.depthUnit) p.set("depthUnit", m.depthUnit);
     boolK("displayBase"); boolK("displayStandard"); boolK("displayOther");
     boolK("dataQuality"); boolK("showInformCallouts"); boolK("showMetaBounds"); boolK("showIsolatedDangersShallow");
+    boolK("showOverscale");
     if (m.boundaryStyle) p.set("boundaryStyle", m.boundaryStyle);
     boolK("simplifiedPoints"); boolK("showFullSectorLines");
     boolK("textNames"); boolK("showLightDescriptions"); boolK("textOther");
@@ -1620,12 +1631,16 @@ export class ChartCanvas extends HTMLElement {
 
 // Custom element names must contain a hyphen (HTML spec) — `<chart-plotter>`.
 // Find the tile57 filter-gate SCAMIN clause `[">=", ["coalesce",["get","scamin"],1e12], N]`
-// — and its band-handoff twin `["<", ["coalesce",["get","smax"],0], N]` (carry-down
+// — its band-handoff twin `["<", ["coalesce",["get","smax"],0], N]` (carry-down
 // features from the next-coarser band hide once the display is finer than their
-// handoff scale; ../tile57 band-handoff spec) — anywhere in a MapLibre filter and set
-// each clause's literal N to `denom` (the current display-scale denominator).
-// detectOnly=true just reports whether the SCAMIN clause is present (no mutation).
-// Returns true if the SCAMIN clause was found. Mutates `node` in place.
+// handoff scale; ../tile57 band-handoff spec) — and the overscale third shape
+// `[">", ["coalesce",["get","oscl"],0], N]` (the S-52 §10.1.10 AP(OVERSC01) hatch +
+// the overscaled/at-scale fill split; the at-scale pass wraps it in ["!", …], which
+// this recursion reaches on its own; ../tile57 overscale spec) — anywhere in a
+// MapLibre filter and set each clause's literal N to `denom` (the current
+// display-scale denominator).
+// detectOnly=true just reports whether a gated clause is present (no mutation).
+// Returns true if a clause was found. Mutates `node` in place.
 function setScaminDenom(node, denom, detectOnly) {
   if (!Array.isArray(node)) return false;
   if (node[0] === ">=" && Array.isArray(node[1]) && node[1][0] === "coalesce"
@@ -1637,6 +1652,11 @@ function setScaminDenom(node, denom, detectOnly) {
       && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "smax") {
     if (!detectOnly) node[2] = denom;
     return true; // smax-only layers (carried fills/lines in base layers) need injection too
+  }
+  if (node[0] === ">" && Array.isArray(node[1]) && node[1][0] === "coalesce"
+      && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "oscl") {
+    if (!detectOnly) node[2] = denom;
+    return true; // overscale gate: hatch + fill-areas#oscl / negated fill-areas split
   }
   let found = false;
   for (const c of node) if (setScaminDenom(c, denom, detectOnly)) found = true;

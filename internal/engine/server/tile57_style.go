@@ -376,6 +376,8 @@ func marinerFromQuery(q url.Values) tile57.Mariner {
 	boolP("showInformCallouts", &m.ShowInformCallouts)
 	boolP("showMetaBounds", &m.ShowMetaBounds)
 	boolP("showIsolatedDangersShallow", &m.ShowIsolatedDangersShallow)
+	// S-52 §10.1.10 overscale indication (AP(OVERSC01)) — engine default true.
+	boolP("showOverscale", &m.ShowOverscale)
 	switch q.Get("boundaryStyle") {
 	case "plain":
 		m.BoundaryStyle = tile57.BoundaryPlain

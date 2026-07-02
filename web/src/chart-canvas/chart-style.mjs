@@ -172,7 +172,12 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
     { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}),
       layout: { "fill-sort-key": ["-", ["*", ["coalesce", ["get", "draw_prio"], 0], 1000], ["coalesce", ["get", "drval1"], 0]] },
       paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
-    { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
+    // Exclude OVERSC01: tile57 now bakes the S-52 §10.1.10 overscale hatch (each
+    // cell's M_COVR coverage, tagged `oscl`) into area_patterns. The engine style
+    // gates it on a dedicated `overscale` layer; this generic pattern layer must
+    // not paint it ungated over everything. On this (JS-builder) path the per-band
+    // _pushOverscale layers keep providing the hatch.
+    { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", filter: ["!=", ["get", "pattern_name"], "OVERSC01"], paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
     // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
     // the shallow side of the live safety contour, shown only when the
     // mariner toggle is on. Filter/visibility update on safetyContour /
@@ -516,7 +521,7 @@ export function buildChartLayers({
         // interleaved per band, so a finer band's opaque fill covers it where finer
         // data exists — the hatch is left only on the coarse-only (overscale) patches
         // such as open water shown enlarged. S-52 §10.1.10.2.
-        if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, undefined, bandsHidden, finerBandPresent(set.band));
+        if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, mariner.showOverscale, bandsHidden, finerBandPresent(set.band));
         }
       }
     }
@@ -580,7 +585,7 @@ export function buildChartLayers({
       } else {
         mk("", base, dmin || undefined);
       }
-      if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, undefined, bandsHidden, finerBandPresent(band.slug));
+      if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, mariner.showOverscale, bandsHidden, finerBandPresent(band.slug));
     }
     }
   }
