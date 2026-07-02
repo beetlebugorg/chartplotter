@@ -175,6 +175,7 @@ export class ChartCanvas extends HTMLElement {
     this._engineScaminValues = []; // SCAMIN ladder (from the set tilejson) — the crossing boundaries
     this._scaminBandLast = -1;     // last-applied band index (count of ladder values below curDenom)
     this._scaminApplyT = 0;        // settle timer for the deferred gate apply (see _scaminUpdate)
+    this._scaminLightApplied = false; // a mid-zoom LIGHT apply ran — the settle pass must do a real reload
     this._scaminLayersCache = null; // cached ids of the gated chart layers (filter carries the scamin clause)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
@@ -1462,10 +1463,22 @@ export class ChartCanvas extends HTMLElement {
     const denom = scaleDenomPhysical(this._map.getZoom(), this._map.getCenter().lat, this._pxPitch);
     let band = 0;
     for (const v of values) if (v < denom) band++;
-    if (!force && band === this._scaminBandLast) return;
+    // Mid-gesture (the `move` hook) crossings get a LIGHT apply: sync the new cutoff
+    // to the worker layers so tiles PARSED FROM HERE ON use it, but skip the source
+    // reload — a full setFilter reloads the whole source (re-parse of every loaded
+    // tile + cache reset + symbol re-placement), and doing that up to ~10× inside one
+    // continuous zoom was ~80-90 wasted chart-tile re-parses per gesture whose
+    // results were stale on arrival anyway. Already-loaded tiles keep their old
+    // cutoff until the settle apply — which stays a real (reloading) apply, so the
+    // settled chart is always SCAMIN-exact.
+    const light = !force && this._map.isZooming();
+    // A light apply leaves loaded tiles stale, so a later settle pass must run even
+    // when the band hasn't moved since (the usual dedup would skip it).
+    if (!force && band === this._scaminBandLast && !(this._scaminLightApplied && !light)) return;
     this._scaminBandLast = band;
     this._scaminLastApply = performance.now(); // rate-limits the mid-zoom applies (move hook)
     const map = this._map;
+    let anyLight = false;
     for (const id of this._scaminGatedLayers()) {
       // The gated-layer cache can go stale across style diffs/rebuilds, and
       // MapLibre's getFilter THROWS on a missing id — unguarded, one stale
@@ -1476,7 +1489,23 @@ export class ChartCanvas extends HTMLElement {
       try { f = map.getLayer(id) ? map.getFilter(id) : null; } catch { /* stale id */ }
       if (!f) { this._scaminLayersCache = null; continue; } // recollect next apply
       const nf = JSON.parse(JSON.stringify(f));
-      if (setScaminDenom(nf, denom)) { try { map.setFilter(id, nf, { validate: false }); } catch { /* ignore */ } }
+      if (setScaminDenom(nf, denom)) {
+        if (light && this._scaminLightSetFilter(id, nf)) { anyLight = true; continue; }
+        try { map.setFilter(id, nf, { validate: false }); } catch { /* ignore */ }
+      }
+    }
+    // A successful LIGHT apply did not reload anything, so there are no straggler
+    // parses to sweep — and arming the sweep mid-gesture would reintroduce the
+    // very reload churn the light path exists to avoid. The settle apply below
+    // (a real setFilter pass) arms it as usual.
+    if (anyLight) { this._scaminLightApplied = true; return; }
+    if (!light && this._scaminLightApplied) {
+      // Settle after light applies: the loop above went through the real setFilter,
+      // but MapLibre deep-equal-skips a filter identical to the light-applied one
+      // (same denom → no reload → tiles parsed before the light sync stay stale).
+      // Queue the gated sources for one explicit reload to guarantee exactness.
+      this._scaminLightApplied = false;
+      this._scaminQueueGatedReloads();
     }
     // Straggler sweep: a tile whose worker parse STARTED before this apply's
     // layer broadcast but FINISHED after the reload marked in-view tiles keeps
@@ -1496,6 +1525,41 @@ export class ChartCanvas extends HTMLElement {
         }
       } catch { /* internal API drifted — the next crossing still converges */ }
     });
+  }
+
+  // The internals half of the light apply: set the layer's filter + mark it for the
+  // next worker-layer sync WITHOUT marking its source for reload (map.setFilter does
+  // both — see style._updateLayer). Uses the same style internals the chart-source
+  // manager already duck-types (style.tileManagers); returns false → the caller falls
+  // back to the full setFilter, so a MapLibre upgrade can only lose the optimisation.
+  _scaminLightSetFilter(id, nf) {
+    const st = this._map && this._map.style;
+    const ly = st && st._layers && st._layers[id];
+    if (!ly || typeof ly.setFilter !== "function" || !st._updatedLayers) return false;
+    try { ly.setFilter(nf); } catch { return false; }
+    st._updatedLayers[id] = true;
+    st._changed = true; // flushed by style.update() on the next render frame (we're zooming — frames are flowing)
+    return true;
+  }
+
+  // Force one reload of every source that carries gated layers — the settle-side
+  // counterpart of the light apply. Mirrors what style._updateLayer queues for a real
+  // setFilter (reload entry + paused manager, resumed by _reloadSource in the flush).
+  // Best-effort: if the internals moved, the next real crossing still reloads.
+  _scaminQueueGatedReloads() {
+    const m = this._map, st = m && m.style;
+    if (!st || !st._updatedSources || !st.tileManagers) return;
+    for (const id of this._scaminGatedLayers()) {
+      const ly = st._layers && st._layers[id];
+      const src = ly && ly.source;
+      if (!src || st._updatedSources[src] || !st.tileManagers[src]) continue;
+      st._updatedSources[src] = "reload";
+      st.tileManagers[src].pause();
+      st._changed = true;
+    }
+    // Make sure the flush actually runs — after moveend there may be no render queued.
+    if (typeof m._update === "function") m._update(true);
+    else if (typeof m.triggerRepaint === "function") m.triggerRepaint();
   }
 
   // Cached ids of the chart layers whose filter carries the SCAMIN clause (the gated
