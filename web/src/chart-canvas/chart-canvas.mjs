@@ -1456,8 +1456,14 @@ export class ChartCanvas extends HTMLElement {
     this._scaminLastApply = performance.now(); // rate-limits the mid-zoom applies (move hook)
     const map = this._map;
     for (const id of this._scaminGatedLayers()) {
-      const f = map.getFilter(id);
-      if (!f) continue;
+      // The gated-layer cache can go stale across style diffs/rebuilds, and
+      // MapLibre's getFilter THROWS on a missing id — unguarded, one stale
+      // entry killed this whole loop mid-iteration (silently, in a timer),
+      // freezing every later layer's cutoff at its last-applied denominator
+      // ("light with SCAMIN 499999 dips out at 255000").
+      let f = null;
+      try { f = map.getLayer(id) ? map.getFilter(id) : null; } catch { /* stale id */ }
+      if (!f) { this._scaminLayersCache = null; continue; } // recollect next apply
       const nf = JSON.parse(JSON.stringify(f));
       if (setScaminDenom(nf, denom)) { try { map.setFilter(id, nf, { validate: false }); } catch { /* ignore */ } }
     }
