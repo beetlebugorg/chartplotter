@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"time"
 
-	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 	"github.com/beetlebugorg/chartplotter/internal/engine/auxfiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // bakeBundleTile57 bakes an import's cells into a self-contained tile57 chart

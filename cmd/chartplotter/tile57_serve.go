@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"sort"
 
-	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // tile57Source adapts the official libtile57 Go binding's *Source to the host's

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // bakeTile57Bundle bakes an on-disk ENC input (a .000 cell or a directory of cells)
