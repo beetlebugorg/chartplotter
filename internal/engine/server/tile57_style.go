@@ -145,7 +145,7 @@ func chartSrcKey(name, set string) string {
 // one mariner selection to another, so the client applies a toggle IN PLACE
 // (setFilter/setPaintProperty/setLayoutProperty) with no setStyle — no tile reload, no
 // overlay churn, no flicker. This is the host-side stand-in for the engine's future
-// tile57_style_diff (../tile57 specs/style-diff.md): it builds both full styles here and
+// tile57_style_diff (tile57/specs/style-diff.md): it builds both full styles here and
 // structurally diffs them (style_diff.go). When the ABI lands, only this body changes;
 // the op-array contract to the client is identical.
 //

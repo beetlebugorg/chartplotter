@@ -1633,10 +1633,10 @@ export class ChartCanvas extends HTMLElement {
 // Find the tile57 filter-gate SCAMIN clause `[">=", ["coalesce",["get","scamin"],1e12], N]`
 // — its band-handoff twin `["<", ["coalesce",["get","smax"],0], N]` (carry-down
 // features from the next-coarser band hide once the display is finer than their
-// handoff scale; ../tile57 band-handoff spec) — and the overscale third shape
+// handoff scale; tile57/specs band-handoff spec) — and the overscale third shape
 // `[">", ["coalesce",["get","oscl"],0], N]` (the S-52 §10.1.10 AP(OVERSC01) hatch +
 // the overscaled/at-scale fill split; the at-scale pass wraps it in ["!", …], which
-// this recursion reaches on its own; ../tile57 overscale spec) — anywhere in a
+// this recursion reaches on its own; tile57/specs overscale spec) — anywhere in a
 // MapLibre filter and set each clause's literal N to `denom` (the current
 // display-scale denominator).
 // detectOnly=true just reports whether a gated clause is present (no mutation).
