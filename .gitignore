@@ -1,6 +1,8 @@
 # Build output
 /bin/
 /dist/
+# Release packaging staging (the release workflow's shell packaging step).
+/release-assets/
 *.test
 *.out
 coverage.*
@@ -26,15 +28,17 @@ web/chartplotter.wasm
 # Working design notes / specs (kept local, never committed)
 /specs/
 
+# Local Go workspace override (cross-repo engine hacking against a sibling
+# ../tile57 checkout — see README.md "Developing the engine"); never committed.
+go.work
+go.work.sum
+
 # Editor / OS
 .DS_Store
 .idea/
 .vscode/
 web/vendor/wasm_exec.js
 web/demo-cell.000
-
-# S-101 catalogue: build-synced into the binary (-tags embed_s101), never committed
-internal/engine/s101catalog/catalog/
 
 # S-101 client portrayal assets: generated at build time (make emit-assets) + serve time, never committed
 web/colortables.json
@@ -44,3 +48,12 @@ web/patterns.png
 web/sprite.json
 web/sprite.png
 /testdata/s64-pages-out/
+
+# Local artifacts that must never be committed (restricted IHO test material,
+# local builds, plugin bundles, agent workspaces).
+/chartplotter
+*.cpx
+/examples/
+/testdata/*.zip
+/testdata/*.pdf
+/.claude/

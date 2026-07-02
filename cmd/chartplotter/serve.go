@@ -2,14 +2,10 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
 	"github.com/beetlebugorg/chartplotter/internal/engine/server"
 )
 
@@ -26,50 +22,30 @@ type serveCmd struct {
 	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached baked archives for a clean slate (source ENC is kept)."`
 	S101       string `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Every chart baked by the server (chart library imports) uses this catalogue's symbology, and the matching client assets are served. Requires --s101-fc."`
 	S101FC     string `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
+	Tile57     string `name:"tile57" type:"path" help:"Serve a LIVE libtile57-backed tile set from this ENC_ROOT / .zip / .000, generating MVT on demand from the cells instead of prebaking. Registered as the 'tile57' set (point a client at /tiles/tile57.json)."`
 }
 
 func (c serveCmd) Run() error {
-	// Portrayal is S-101. Pick the catalogue source: an explicit --s101 dir wins
-	// (override / rule iteration); otherwise the build-time embedded catalogue (the
-	// default — `make` builds it in). The baker defaults to the embedded portrayer
-	// on its own (baker.applyPortrayer); here we emit the matching client assets
-	// (colortables/sprite/patterns/linestyles) into a temp dir and serve them.
-	var catalogFS fs.FS
-	var s101AssetDir string // freshly-emitted S-101 client assets (temp dir), or ""
-	switch {
-	case c.S101 != "":
-		if c.S101FC == "" {
-			return fmt.Errorf("--s101 requires --s101-fc")
-		}
-		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
-			return fmt.Errorf("load S-101 catalogue: %w", err)
-		}
-		catalogFS = os.DirFS(c.S101)
-		fmt.Printf("portrayal: S-101 (catalogue=%s)\n", c.S101)
-	case s101catalog.Available():
-		fsys, err := s101catalog.PortrayalFS()
-		if err != nil {
-			return fmt.Errorf("embedded S-101 catalogue: %w", err)
-		}
-		catalogFS = fsys
-		fmt.Println("portrayal: S-101 (embedded catalogue)")
-	default:
-		fmt.Println("portrayal: none embedded — pass --s101 or build with `make` (-tags embed_s101)")
+	// Portrayal is S-101. Emit the client assets (colortables/linestyles/sprite/
+	// patterns) via libtile57's asset baker and serve them as a fallback: an explicit
+	// --s101 PortrayalCatalog dir overrides libtile57's embedded catalogue.
+	catalogDir := c.S101 // "" = libtile57's embedded catalogue
+	assetDir, err := os.MkdirTemp("", "cp-s101-assets-")
+	if err != nil {
+		return err
 	}
-	if catalogFS != nil {
-		assetDir, err := os.MkdirTemp("", "cp-s101-assets-")
-		if err != nil {
-			return err
-		}
-		if _, err := assets.EmitS101FS(catalogFS, "daySvgStyle.css", assetDir); err != nil {
-			return fmt.Errorf("emit S-101 assets: %w", err)
-		}
-		// The emitted S-101 client assets (colortables/linestyles/sprite/patterns)
-		// are a FALLBACK, not a replacement: an explicit --assets dir stays primary
-		// (so a prebaked widget bundle serves its own index.html / charts-index.json /
-		// .pmtiles), this temp dir fills in the generated S-101 files it lacks, and the
-		// embedded bundle backs the rest. Registered on the Server below.
-		s101AssetDir = assetDir
+	if _, err := emitS101Assets(catalogDir, assetDir); err != nil {
+		return fmt.Errorf("emit S-101 assets: %w", err)
+	}
+	// The emitted assets are a FALLBACK, not a replacement: an explicit --assets dir
+	// stays primary (a prebaked widget bundle serves its own index.html /
+	// charts-index.json / .pmtiles), this temp dir fills in the generated S-101 files
+	// it lacks, and the embedded bundle backs the rest. Registered on the Server below.
+	s101AssetDir := assetDir
+	if catalogDir != "" {
+		fmt.Printf("portrayal: S-101 (catalogue=%s)\n", catalogDir)
+	} else {
+		fmt.Println("portrayal: S-101 (libtile57 embedded catalogue)")
 	}
 
 	cacheDir := c.Cache
@@ -95,7 +71,17 @@ func (c serveCmd) Run() error {
 	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote)
 	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
-	srv.ReportStaleCache() // loud warning if any served pack predates this binary
+	srv.EngineCommit = engineCommit // stamped onto every bake + reported by live sets
+	srv.ReportStaleCache()          // loud warning if any served pack predates this binary
+
+	// Optional libtile57 LIVE backend: generate MVT on demand from raw ENC cells
+	// (--tile57 <ENC_ROOT>) instead of serving a prebaked archive. Server chart
+	// imports always bake native libtile57 bundles regardless (it's the sole engine).
+	if c.Tile57 != "" {
+		if err := registerTile57Set(srv, "tile57", c.Tile57, c.S101); err != nil {
+			return err
+		}
+	}
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""

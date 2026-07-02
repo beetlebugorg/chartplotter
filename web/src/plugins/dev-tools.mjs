@@ -27,6 +27,7 @@
 // style rebuild, which the shell re-runs); this just sets their data.
 
 import { esc, copyText, flashBtn } from "../lib/util.mjs";
+import { viewSnapshot, gatesSnapshot, featureSnapshot } from "../lib/debug-snapshot.mjs";
 import { devToolsPanel, featureCard, lockNote, emptyHint, areaHint, areaMore, cycler, STYLE } from "./dev-tools.view.mjs";
 
 export { STYLE };
@@ -495,15 +496,10 @@ export class DevTools {
   }
 
   // Copy a debug snapshot of the current inspector selection — source/layer, baked
-  // properties, GeoJSON geometry, plus the map view — to the clipboard AND POST it
-  // to api/debug so it can be pulled server-side.
+  // properties, GeoJSON geometry, plus the map view and live layer gates — to the
+  // clipboard. Snapshot pieces are shared with the pick report (debug-snapshot.mjs).
   async _copyInspectDebug(btn) {
     const m = this._map;
-    let view = null;
-    if (m) {
-      const c = m.getCenter();
-      view = { center: [+c.lng.toFixed(6), +c.lat.toFixed(6)], zoom: +m.getZoom().toFixed(3), bearing: +m.getBearing().toFixed(1) };
-    }
     const feats = this._inspectFeats || [];
     const pick = this._inspectMulti ? feats.slice(0, 80) : (feats.length ? [feats[Math.min(this._inspectIdx, feats.length - 1)]] : []);
     let render = null;
@@ -516,15 +512,14 @@ export class DevTools {
     }
     const snap = {
       when: new Date().toISOString(),
-      view,
+      view: viewSnapshot(m),
       count: feats.length,
-      features: pick.map((f) => ({ source: f.source, sourceLayer: f.sourceLayer, geometry: f.geometry, properties: f.properties })),
+      features: pick.map(featureSnapshot),
       render,
+      gates: gatesSnapshot(m), // live per-layer SCAMIN/smax denoms (see debug-snapshot.mjs)
     };
-    const assets = this._d.assets || "";
     const text = JSON.stringify(snap, null, 2);
     const ok = await copyText(text);
-    fetch(`${assets}api/debug`, { method: "POST", headers: { "content-type": "application/json" }, body: text }).catch(() => {});
     flashBtn(btn, ok ? "✓" : "✗");
   }
 }

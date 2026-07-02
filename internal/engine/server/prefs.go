@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,13 @@ import (
 // bakeVerExt is the sidecar that records the build version that baked a pack
 // (<pack>.pmtiles.bakever), so startup can flag a cache baked by an older binary.
 const bakeVerExt = ".bakever"
+
+// engineVerExt is the sidecar that records the tile57 ENGINE commit that baked a
+// pack (<pack>.pmtiles.enginever) — bake-time truth, distinct from the running
+// binary's own engine commit. The set's TileJSON reports it so the client can
+// stamp the map with the engine behind the visible tiles (and flag a mixed-bake
+// cache). A pack without the sidecar predates stamping → "pre-stamp".
+const engineVerExt = ".enginever"
 
 // ReportStaleCache logs a loud warning for any served pack whose recorded build
 // version (its <pack>.bakever sidecar) differs from the running binary — the
@@ -87,8 +95,11 @@ func (p *prefs) setDisabled(set string, off bool) {
 	}
 }
 
-// scanPacks walks the cache and returns every baked pack file keyed by set name
-// (basename sans extension) → path. Includes the provider trees plus flat tiles/.
+// scanPacks walks the cache and returns every baked pack file keyed by set name →
+// path. The Go baker writes <PROVIDER>/<PACK>/<set>.pmtiles (set = filename); the
+// native tile57 bundle writes <PROVIDER>/<PACK>/tiles/chart.pmtiles, so its set name
+// is derived from the provider/pack dirs (mirroring setDir) — otherwise every bundle
+// collapses to "chart" and the chart library can't list them after a restart.
 func scanPacks(cacheDir string) map[string]string {
 	out := map[string]string{}
 	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
@@ -99,6 +110,16 @@ func scanPacks(cacheDir string) map[string]string {
 			return nil
 		}
 		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		// tile57 bundle: <cache>/<PROVIDER>/<PACK>/tiles/chart.pmtiles → "provider-pack"
+		// (the reverse of setDir's "<PROVIDER>/<PACK>" layout for a "provider-pack" set).
+		if name == "chart" && filepath.Base(filepath.Dir(path)) == "tiles" {
+			setDir := filepath.Dir(filepath.Dir(path))
+			pack := filepath.Base(setDir)
+			provider := filepath.Base(filepath.Dir(setDir))
+			if provider != "" && provider != "." && pack != "" && pack != "." {
+				name = strings.ToLower(provider) + "-" + strings.ToLower(pack)
+			}
+		}
 		if isSetName(name) {
 			out[name] = path
 		}
@@ -126,6 +147,30 @@ func (s *Server) packPath(set string) (string, bool) {
 	defer s.packsMu.Unlock()
 	p, ok := s.packs[set]
 	return p, ok
+}
+
+// packGen is a baked pack's cache-bust generation token — its archive mtime in
+// unix-nanos, which changes every time the set is re-baked (a fresh file is
+// renamed into place). 0 for a live/dynamic set (no pack file). Both the
+// TileJSON and the engine-style source URL stamp this as ?g so a given tile URL
+// is content-addressed and safe to cache immutably (see serveTile).
+func (s *Server) packGen(set string) int64 {
+	if p, ok := s.packPath(set); ok {
+		if fi, err := os.Stat(p); err == nil {
+			return fi.ModTime().UnixNano()
+		}
+	}
+	return 0
+}
+
+// genQuery renders a packGen token as a tile-URL query suffix: "?g=<n>" for a
+// real (nonzero) generation, "" for a live set (so its URL stays token-free and
+// serveTile keeps it no-cache).
+func genQuery(gen int64) string {
+	if gen == 0 {
+		return ""
+	}
+	return fmt.Sprintf("?g=%d", gen)
 }
 
 func (s *Server) packNames() []string {

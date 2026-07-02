@@ -38,6 +38,15 @@ func (ts *tileSets) register(name string, src tilesource.TileSource) {
 	ts.m[name] = src
 }
 
+// RegisterTileSet registers (or replaces) a tile set under name, served at
+// /tiles/{name}/… exactly like a prebaked archive. It is exposed so an alternate
+// backend — e.g. the optional libtile57 live source compiled in under
+// -tags tile57 — can publish a set the same way discovery registers .pmtiles
+// packs. A replaced backend is closed.
+func (s *Server) RegisterTileSet(name string, src tilesource.TileSource) {
+	s.sets.register(name, src)
+}
+
 // remove unregisters and closes the set named name. Reports whether it existed.
 func (ts *tileSets) remove(name string) bool {
 	ts.mu.Lock()
@@ -166,6 +175,13 @@ func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
 	// (the merged "set" form plus each "set-<slug>" archive).
 	for _, name := range s.setsForDistrict(set) {
 		s.sets.remove(name)
+		// Bake-stamp sidecars live BESIDE the pack file (which for a tile57 bundle is
+		// <dir>/tiles/chart.pmtiles, not <dir>/<name>.pmtiles) — resolve them from the
+		// tracked pack path before packDel forgets it.
+		if p, ok := s.packPath(name); ok {
+			_ = os.Remove(p + bakeVerExt)   // build-version bake stamp
+			_ = os.Remove(p + engineVerExt) // engine-commit bake stamp
+		}
 		s.packDel(name)
 		s.prefs.setDisabled(name, false) // drop any stale disabled flag
 		dir := s.setDir(name)

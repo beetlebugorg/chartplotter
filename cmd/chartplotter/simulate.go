@@ -12,9 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/nmea/sim"
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // simulateCmd runs a NMEA0183 traffic generator over TCP: own-ship instruments
@@ -46,11 +45,11 @@ func (c simulateCmd) Run() error {
 
 	var water *sim.WaterMask
 	if c.Cell != "" {
-		chart, err := loadCell(c.Cell)
+		feats, err := loadWaterFeatures(c.Cell)
 		if err != nil {
 			return fmt.Errorf("load cell %s: %w", c.Cell, err)
 		}
-		if water = sim.NewWaterMask(chart, c.MinDepth); water == nil {
+		if water = sim.NewWaterMask(feats, c.MinDepth); water == nil {
 			fmt.Println("warning: no navigable depth areas (DEPARE ≥ min-depth) in cell; placing traffic unconstrained")
 		}
 	}
@@ -165,9 +164,25 @@ func (h *connHub) broadcast(lines []string) {
 	}
 }
 
-// loadCell parses an S-57 cell from a .000 file or the first .000 inside an
-// exchange-set .zip.
-func loadCell(p string) (*s57.Chart, error) {
+// loadWaterFeatures opens an S-57 cell — a .000 file or the first .000 inside an
+// exchange-set .zip — with the native engine (base edition, no updates) and
+// returns its DEPARE/DRGARE features for the water mask.
+func loadWaterFeatures(p string) ([]tile57.Feature, error) {
+	data, err := readBaseCell(p)
+	if err != nil {
+		return nil, err
+	}
+	src, err := tile57.OpenChartBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	defer src.Close()
+	return src.Features("DEPARE", "DRGARE")
+}
+
+// readBaseCell returns the raw base-cell bytes from a .000 file or the first
+// .000 inside an exchange-set .zip.
+func readBaseCell(p string) ([]byte, error) {
 	if strings.HasSuffix(strings.ToLower(p), ".zip") {
 		zr, err := zip.OpenReader(p)
 		if err != nil {
@@ -185,16 +200,12 @@ func loadCell(p string) (*s57.Chart, error) {
 				if err != nil {
 					return nil, err
 				}
-				return baker.ParseCellBytes(filepath.Base(f.Name), data)
+				return data, nil
 			}
 		}
 		return nil, fmt.Errorf("no .000 cell found in %s", p)
 	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	return baker.ParseCellBytes(filepath.Base(p), data)
+	return os.ReadFile(p)
 }
 
 func parseLatLon(s string) (float64, float64, error) {

@@ -17,11 +17,14 @@
 // listCharts/setScheme/setMariner and its `map` handle) plus the server chart API.
 
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
+import { engineStamp } from "./chart-canvas/chart-sources.mjs"; // engine-commit stamp for the attribution corner
 import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import { featureDebugSnapshot } from "./lib/debug-snapshot.mjs"; // pick report copy-feature JSON (shared with dev-tools Inspect)
 import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
-import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
+import { coreSettingsContributions, vgGroupOn, vgSetGroupOn } from "./core/core-settings.mjs"; // the app's own display settings as contributions + the shared viewing-group toggle path
+import { VgRail } from "./plugins/vg-rail.mjs"; // mid-left viewing-group quick-toggle pill rail
 import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
@@ -105,6 +108,14 @@ const DEFAULT_MARINER = {
   showContourLabels: false,
   dataQuality: false,
   showMetaBounds: false,
+  // S-52 §10.1.10 overscale indication (ON by default): the AP(OVERSC01)
+  // vertical-line hatch over regions whose best displayed data is enlarged past
+  // its compilation scale (engine `oscl` gate / per-band JS overscale layers).
+  showOverscale: true,
+  // Fine-grained viewing-group selection (S-52 §14.5): a DENY-LIST of raw viewing-
+  // group ids (the baked `vg` tag) the mariner has turned off. Empty = every group
+  // shown (default). Driven by the "Viewing groups" settings tab; see viewing-groups.mjs.
+  viewingGroupsOff: [],
   // Display units for non-depth quantities (distance/height/speed/wind/temp).
   // Depth has its own metric/imperial toggle (depthUnit, above). See units.mjs.
   ...UNIT_DEFAULTS,
@@ -171,15 +182,26 @@ const INSPECT_LAYER_LABEL = { point_symbols: "Symbol", soundings: "Sounding", li
 // Geometry-primitive rank for pick-report sorting (rule 9): points, then lines,
 // then areas; labels last. (Decode/render lives in <pick-report>.)
 function pickGeomRank(layer) {
-  return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[layer] ?? 9;
+  // Strip the SCAMIN-variant suffix so tile57's split source-layers (point_symbols_scamin,
+  // lines_scamin, areas_scamin, text_scamin, …) rank like their base layer — otherwise
+  // every SCAMIN feature falls to the unknown rank (9) and the point<line<area tiebreak breaks.
+  const base = String(layer || "").replace(/_scamin$/, "");
+  return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[base] ?? 9;
 }
 
-// Order two picked features per S-52 PresLib §10.8.4: higher drawing priority
-// first, then geometric primitive (point < line < area).
+// Order two picked features: geometric primitive first (point < line < area,
+// labels last), then higher drawing priority within the same primitive rank.
+// Priority-first buried point targets under any area with a higher S-52 drawing
+// priority — a LNDARE fill is priority 12, so every symbol on land ranked below
+// the land polygon and features on land were effectively unclickable. A click is
+// aimed at the discrete object under the cursor; the skin-of-the-earth polygon it
+// sits on is context, so the primitive rank wins and §10.8.4's priority ordering
+// applies within each rank.
 function pickCmp(a, b) {
+  const ga = pickGeomRank(a.sourceLayer), gb = pickGeomRank(b.sourceLayer);
+  if (ga !== gb) return ga - gb; // points, then lines, then areas, labels last
   const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
-  if (pa !== pb) return pb - pa; // higher drawing priority (more significant) first
-  return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
+  return pb - pa; // higher drawing priority (more significant) first
 }
 
 // S-57 cell names encode the usage band as the 3rd character (e.g. US[1-6]…):
@@ -624,6 +646,21 @@ export class ChartPlotter extends HTMLElement {
       plotter: this._plotter,
     });
 
+    // Viewing-group quick toggles: the collapsible mid-left pill rail. Reads and
+    // writes through the SAME path as the Settings "Viewing groups" tab
+    // (vgGroupOn/vgSetGroupOn → applyMariner + server persist), so a pill tap
+    // restyles instantly and syncs to other screens; applyMariner calls
+    // _vgRail.refresh() on every viewingGroupsOff change (either writer). Shell
+    // chrome — not mounted in the hermetic widget viewer (it uses localStorage
+    // for its own fold state).
+    if (!this._widget) {
+      this._vgRail = new VgRail({
+        host: this.shadowRoot.getElementById("vg-rail"),
+        isOn: (id) => vgGroupOn(this, id),
+        setOn: (id, on) => vgSetGroupOn(this, id, on),
+      });
+    }
+
     // Developer tools (Advanced tab) — the first NON-core contributor to the
     // settings registry. A plain class (like the map controllers), built now that
     // the map exists; it registers itself as the Advanced-tab contribution and owns
@@ -960,6 +997,7 @@ export class ChartPlotter extends HTMLElement {
       this._setProgress(null);
       try { await this._renderInstalledSets(); } catch (e) { /* ignore */ }
       if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } }
+      this._updateEngineStamp(); // flushTiles re-fetched the set metas (a re-bake can change the engine)
       if (this._chartLib) this._chartLib.refresh();
     });
   }
@@ -1270,9 +1308,10 @@ export class ChartPlotter extends HTMLElement {
   // --- ECDIS cursor pick (S-52 PresLib §10.8) -------------------------------
   // Report on the chart feature(s) under a tapped point. Queries the rendered
   // tiles (so it returns only visible objects — rule 7), dedupes, and sorts by
-  // drawing priority then geometry primitive (rule 9), then hands the stack to
-  // the <pick-report> panel, which decodes + renders it. `ev` is the originating
-  // DOM event (its clientX/Y anchor the panel's out-of-the-way placement).
+  // geometry primitive then drawing priority (see pickCmp — the discrete point
+  // target under the cursor outranks the polygon it sits on), then hands the
+  // stack to the <pick-report> panel, which decodes + renders it. `ev` is the
+  // originating DOM event (its clientX/Y anchor the panel's placement).
   _pickReportAt(point, ev) {
     const map = this._map;
     if (!map) return;
@@ -1309,7 +1348,7 @@ export class ChartPlotter extends HTMLElement {
       const key = (p.class || "") + "|" + (p.cell || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
       const g = groups.get(key);
       if (!g) { groups.set(key, { feat: f, hi: f }); continue; }
-      if (pickCmp(f, g.feat) < 0) g.feat = f;        // higher drawing priority wins the report row
+      if (pickCmp(f, g.feat) < 0) g.feat = f;        // best pick rank wins the report row
       if (hiGeomRank(f) > hiGeomRank(g.hi)) g.hi = f; // richer primitive wins the highlight
     }
     const uniq = [];
@@ -1345,6 +1384,9 @@ export class ChartPlotter extends HTMLElement {
     const el = document.createElement("pick-report");
     if (typeof el.show !== "function") { console.warn("[pick] <pick-report> not loaded"); return null; }
     this.shadowRoot.appendChild(el);
+    // Copy-feature button: the dev Inspect debug-copy shape, scoped to the selected
+    // feature (includes the live layer gates, so a pasted report is self-diagnosing).
+    el.setSnapshot((f) => featureDebugSnapshot(this._map, f));
     el.addEventListener("pick-feature", (e) => {
       const f = e.detail && e.detail.feature;
       const geom = f ? (f._hiGeom || f.geometry) : null; // trace the object's extent, not the symbol anchor
@@ -1565,8 +1607,27 @@ export class ChartPlotter extends HTMLElement {
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
+    this._updateEngineStamp(); // fresh set metas → re-render the engine-commit stamp
     if (this._chartFinder) this._chartFinder.update(); // packs changed → recompute off-screen pointers
     return active;
+  }
+
+  // Engine-commit stamp beside the NOAA attribution: which tile57 engine commit
+  // baked the ACTIVE sets' visible tiles (each set's TileJSON `engine` — bake-time
+  // truth for packs, the running binary for live sets). One muted commit when every
+  // set agrees; a warn-tinted per-pack list with ✱ markers when they differ (a
+  // partially re-baked cache). Hidden when no set reports one (pmtiles mode, an
+  // older server) and in widget/spec modes (CSS).
+  _updateEngineStamp() {
+    const el = this.shadowRoot && this.shadowRoot.getElementById("engine-stamp");
+    if (!el) return;
+    const metas = (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [];
+    const stamp = engineStamp(metas);
+    el.hidden = !stamp;
+    if (!stamp) return;
+    el.textContent = stamp.text;
+    el.title = stamp.title;
+    el.classList.toggle("mixed", stamp.mixed);
   }
 
   // Wait for a server job (download/bake) to complete, surfacing progress through
@@ -1866,6 +1927,12 @@ export class ChartPlotter extends HTMLElement {
     // Switching units relabels + reconverts the depth fields (still in metres
     // under the hood), so redraw the settings panel.
     if ("depthUnit" in patch) this._settingsDlg && this._settingsDlg.refresh();
+    // Viewing-group deny-list changed (the quick-toggle rail OR the Settings tab —
+    // both write through here): re-sync both surfaces so they never disagree.
+    if ("viewingGroupsOff" in patch) {
+      this._vgRail && this._vgRail.refresh();
+      this._settingsDlg && this._settingsDlg.refresh();
+    }
   }
 
   // -- chrome / panels -----------------------------------------------------

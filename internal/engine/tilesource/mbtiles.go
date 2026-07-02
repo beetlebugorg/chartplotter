@@ -74,7 +74,13 @@ func (m *MBTiles) loadMeta() error {
 			if strings.EqualFold(value, "pbf") {
 				m.meta.Gzipped = true // pbf in mbtiles is gzipped by convention
 			}
+			if strings.EqualFold(value, "mlt") {
+				m.meta.TileType = "mlt" // MLT tiles: hint the client decoder
+			}
 		}
+	}
+	if m.meta.TileType == "" {
+		m.meta.TileType = "mvt" // mbtiles archives here are legacy Go-baked MVT
 	}
 	return rows.Err()
 }

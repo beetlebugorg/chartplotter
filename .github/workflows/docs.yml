@@ -11,6 +11,7 @@ on:
       - "web/**"
       - "cmd/**"
       - "internal/**"
+      - "pkg/**"
       - "scripts/fetch-demo-cells.sh"
       - "Makefile"
       - "go.mod"
@@ -27,16 +28,38 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+# The demo + Chart 1 tiles are baked by the chartplotter binary, which links the
+# native libtile57 engine — so this build needs the same sibling tile57 checkout
+# (with submodules: they fetch the IHO S-101 catalogues from the IHO's own repos)
+# and Zig toolchain as ci.yml. The repo is checked out into a subdirectory so
+# tile57 can sit beside it, matching go.mod's ../tile57/bindings/go replace.
+# NOTE: correct-by-construction but unvalidated until pushed to GitHub.
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+      - name: Checkout tile57 (libtile57 engine)
+        uses: actions/checkout@v7
+        with:
+          repository: beetlebugorg/tile57
+          path: tile57
+          submodules: recursive
 
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
           cache: true
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: cd tile57 && zig build
 
       # Cache the curated NOAA demo-cell downloads (one per band over Annapolis),
       # keyed on the cell list / fetch script so a change re-downloads. Lets the
@@ -45,7 +68,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/demo-cells
-          key: demo-cells-${{ hashFiles('scripts/fetch-demo-cells.sh', 'Makefile') }}
+          key: demo-cells-${{ hashFiles('chartplotter/scripts/fetch-demo-cells.sh', 'chartplotter/Makefile') }}
 
       # Cache the S-52 PresLib "ECDIS Chart 1" source cells (the IHO draft zip is
       # fetched once and extracted), keyed on the fetch script so a change re-pulls.
@@ -53,31 +76,26 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/preslib-cells
-          key: preslib-cells-${{ hashFiles('scripts/fetch-preslib-cells.sh') }}
+          key: preslib-cells-${{ hashFiles('chartplotter/scripts/fetch-preslib-cells.sh') }}
 
       # Build the read-only widget demo bundle into docs/static/demo so Docusaurus
-      # copies it into the published site at /chartplotter/demo/. Needs the S-101
-      # catalogue (IHO material kept out of the repo): clone it and let `make build`
-      # (a dep of `make demo`) embed it. The bundle is pure static files — no backend.
+      # copies it into the published site at /chartplotter/demo/. The S-101
+      # catalogue is embedded in libtile57 (fetched via the tile57 submodules
+      # above), so no catalogue clone or --s101 override is needed. The bundle is
+      # pure static files — no backend.
       - name: Build live demo bundle (docs/static/demo)
         run: |
-          git clone --depth 1 https://github.com/iho-ohi/S-101_Portrayal-Catalogue.git "$RUNNER_TEMP/s101-pc"
-          git clone --depth 1 https://github.com/iho-ohi/S-101-Documentation-and-FC.git "$RUNNER_TEMP/s101-fc"
-          make demo \
-            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
-            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml" \
+          make -C chartplotter demo \
             DEMO_CACHE="$RUNNER_TEMP/demo-cells" \
             DEMO_OUT="docs/static/demo"
 
       # Bake the S-52 "ECDIS Chart 1" reference sheet to tiles into docs/static/chart1
       # (published at /chartplotter/chart1/). The symbol-compliance docs page embeds
-      # it live, reusing the demo bundle's frontend assets. Reuses the S-101 catalogue
-      # cloned above; the source cells come from the IHO PresLib draft (fetched once).
+      # it live, reusing the demo bundle's frontend assets; the source cells come
+      # from the IHO PresLib draft (fetched once).
       - name: Build live Chart 1 tiles (docs/static/chart1)
         run: |
-          make demo-chart1 \
-            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
-            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml" \
+          make -C chartplotter demo-chart1 \
             PRESLIB_CACHE="$RUNNER_TEMP/preslib-cells" \
             DEMO_CHART1_OUT="docs/static/chart1"
 
@@ -85,17 +103,17 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: docs/package-lock.json
+          cache-dependency-path: chartplotter/docs/package-lock.json
       - name: Install
-        working-directory: docs
+        working-directory: chartplotter/docs
         run: npm ci
       - name: Build
-        working-directory: docs
+        working-directory: chartplotter/docs
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: docs/build
+          path: chartplotter/docs/build
 
   deploy:
     needs: build

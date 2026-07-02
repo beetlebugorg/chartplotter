@@ -144,6 +144,10 @@ export class PMTilesArchive {
     if (!okComp(ic) || !okComp(tc)) throw new Error("unsupported PMTiles compression (only none/gzip)");
     this._internalGz = ic === 2;
     this._tileGz = tc === 2;
+    // Stored tile encoding (header byte 99): 1=MVT, 6=MLT (tile57's MLT-default
+    // bake). Drives the vector source's `encoding` hint so maplibre-gl (>=5.12)
+    // decodes MLT natively — tiles always serve bytes-verbatim.
+    this.tileType = head.getUint8(99) === 6 ? "mlt" : "mvt";
     this.minZoom = head.getUint8(100);
     this.maxZoom = head.getUint8(101);
     // Data extent straight from the header (the writer stores it), so we never
@@ -245,6 +249,7 @@ export class MultiArchive {
     this.maxZoom = 16;
     this.bounds = null;
     this.scamin = []; // union of the packs' published SCAMIN manifests
+    this.tileType = "mvt"; // "mlt" when every loaded archive stores MLT tiles
   }
 
   // Add (open) an archive from a Blob/File or a URL string. Returns the opened
@@ -279,6 +284,14 @@ export class MultiArchive {
     this.maxZoom = this.archives.length ? mx : 16;
     this.bounds = b;
     this.scamin = [...sc].sort((x, y) => x - y);
+    // The source `encoding` hint is per-SOURCE, so it can only be "mlt" when
+    // every archive in this band agrees (archives of one bake always do). A
+    // mixed band keeps "mvt" and the MLT archives in it would not decode —
+    // re-bake to one format rather than mixing.
+    this.tileType = this.archives.length && this.archives.every((a) => a.tileType === "mlt") ? "mlt" : "mvt";
+    if (this.archives.some((a) => a.tileType === "mlt") && this.tileType !== "mlt") {
+      console.warn("[chartplotter] mixed MVT/MLT archives in one band source; MLT archives will not render — re-bake to a single format");
+    }
   }
 
   get tileCount() { return this.archives.reduce((s, a) => s + a.tileCount, 0); }

@@ -19,17 +19,15 @@ DOCS_PORT ?= 3000
 # Mirrors server.DefaultCacheDir(): $XDG_CACHE_HOME/chartplotter, else ~/.cache.
 CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 
-# S-101 portrayal for `make serve` (transitional, until the catalogue is embedded).
-# The catalogue + feature catalogue are vendored as siblings of the repo (not
-# committed — IHO DRAFT licence unconfirmed); override the paths if they live
-# elsewhere. Baked tiles carry their portrayal, so S-101 uses its OWN cache dir
-# (a subdir of $(CACHE), still wiped by clear-cache) to avoid mixing with any
-# S-52 tiles; the SOURCE ENC dir (--data) is portrayal-agnostic and stays shared.
+# OPTIONAL external S-101 PortrayalCatalog override (for iterating on symbology
+# rules): pass --s101 <dir> --s101-fc <fc.xml> to serve/bake/emit-assets and both
+# the tiles and the emitted client assets use it instead of libtile57's embedded
+# catalogue. Defaults to sibling checkouts; override if they live elsewhere. Not
+# needed for a normal build — the catalogue lives inside libtile57.
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
-S101_CACHE ?= $(CACHE)/s101
 
-.PHONY: build xbuild test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib serve-tile57 xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -63,59 +61,82 @@ NOAA_JOBS     ?= 5
 NOAA_BANDS  := overview general coastal approach harbor berthing
 NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
-S101_EMBED_DIR := internal/engine/s101catalog/catalog
-# Our own additions to the catalogue (symbols/rules the upstream S-101 PortrayalCatalog
-# lacks, e.g. the NEWOBJ "!" symbol). Committed here and re-applied OVER the upstream
-# sync, so they survive a re-sync and live in this repo — not the external catalogue.
-S101_CUSTOM    := internal/engine/s101catalog/custom-overlay
 
-# Copy the external S-101 catalogue into the (gitignored) embed dir so a
-# `-tags embed_s101` build bakes it into the binary. Files never enter the repo.
-sync-s101: ## Sync the external S-101 PortrayalCatalog + our custom overlay into the embed dir
-	@rm -rf "$(S101_EMBED_DIR)"
-	@mkdir -p "$(S101_EMBED_DIR)/PortrayalCatalog"
-	@cp -a "$(S101_PC)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
-	@cp -a "$(S101_FC)" "$(S101_EMBED_DIR)/FeatureCatalogue.xml"
-	@cp -a "$(S101_CUSTOM)/." "$(S101_EMBED_DIR)/PortrayalCatalog/"
-	@echo "synced S-101 catalogue (+ custom overlay) → $(S101_EMBED_DIR)"
+# --- native libtile57 engine (the SOLE tile/portrayal/asset engine) -------------
+# TILE57 points at the engine repo, by default a sibling ../tile57 checkout (clone
+# github.com/beetlebugorg/tile57 there, with --recurse-submodules for its nested
+# IHO catalogues). go.mod's replace targets ../tile57/bindings/go to match. Override
+# to build against another checkout, e.g. `make TILE57=../tile57-experiment build`
+# (pair it with a gitignored go.work so the Go binding follows; see README.md
+# "Developing the engine"). Its static lib is built on demand with Zig 0.16.
+TILE57     ?= ../tile57
+TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
 
-# Embed the S-101 catalogue when it's available locally (the normal dev/deploy
-# case); otherwise build without it (the binary then needs --s101 at runtime).
-build: ## Build the self-contained shim (embeds web/ + S-101 catalogue) into bin/
-	@if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then \
-	  $(MAKE) --no-print-directory sync-s101; \
-	  echo "building with embedded S-101 catalogue (-tags embed_s101)…"; \
-	  go build -tags embed_s101 -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	else \
-	  echo "S-101 catalogue not found at $(S101_PC); building WITHOUT it (needs --s101 at runtime)"; \
-	  go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter; \
-	fi
+# Engine-commit stamp: the tile57 checkout's HEAD, linked into the binary beside
+# main.version so every bake can record WHICH engine produced its tiles (and the
+# client can flag a mixed-engine cache). Resolves for the default sibling ../tile57
+# AND a TILE57=… override; "unknown" when git can't answer (no sibling checkout,
+# tarball checkout). The `test -e .git` guard matters: git -C into a missing dir
+# would walk up and report THIS repo's HEAD instead of failing (a sibling clone's
+# .git is a real directory, so it resolves cleanly).
+ENGINE_COMMIT ?= $(shell test -e "$(TILE57)/.git" && git -C "$(TILE57)" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
+LDFLAGS += -X main.engineCommit=$(ENGINE_COMMIT)
+
+# Build the static library on demand (only when absent). Needs Zig 0.16 on PATH.
+$(TILE57_LIB):
+	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH and $(TILE57_LIB) missing — install Zig or prebuild the lib"; exit 1; }
+	@echo "building libtile57.a (zig build in $(TILE57))…"
+	cd "$(TILE57)" && zig build
+
+tile57-lib: ## Force-rebuild $(TILE57)/zig-out/lib/libtile57.a (the native engine static lib)
+	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH"; exit 1; }
+	cd "$(TILE57)" && zig build
+
+# Build bin/chartplotter. libtile57 is the sole engine, so this is a CGO build that
+# statically links the native lib; the S-101 catalogue lives inside libtile57, so
+# there is no separate sync/embed step (web/ is still embedded). Needs the sibling
+# ../tile57 checkout + Zig 0.16.
+build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; needs the sibling ../tile57 checkout + Zig 0.16)
+	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — clone github.com/beetlebugorg/tile57 as a sibling directory named tile57 (or set TILE57=<path>)"; exit 1; }
+	@# Force the link: go's build-cache action ID does NOT hash external static-lib
+	@# content, so with an existing up-to-date-looking $(BIN) `go build` silently
+	@# skips the relink and a fresh libtile57.a never reaches the output.
+	@rm -f $(BIN)
+	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
+	@echo "→ $(BIN) (native libtile57 engine)"
+
+# Back-compat alias — libtile57 is now the default engine, so this is just `build`.
+build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
+
+# Build the FULL app WITH libtile57 compiled in and serve it: the web frontend +
+# provisioning / chart-library API, defaulting chart imports to the native tile57
+# Build + serve the full app. Chart imports always bake native libtile57 bundles
+# (the sole engine); no --s101 needed — the catalogue lives in libtile57. Uses the
+# MAIN $(CACHE) (where the tile57 bundle baker writes its packs as
+# <PROVIDER>/<PACK>/tiles/chart.pmtiles). Set ENC_ROOT=<dir/.zip/.000> to ALSO
+# register a LIVE libtile57 set generated on demand (registered as 'tile57';
+# /tiles/tile57.json). Now just `serve` + a cache override — kept as a convenience.
+serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a live libtile57 set
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) --cache $(CACHE) \
+	  $(if $(ENC_ROOT),--tile57 "$(ENC_ROOT)")
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps
 # the same version as `build`; strips symbols (-s -w) and paths (-trimpath) like a
 # release binary. Outputs dist/chartplotter_<os>_<arch>[.exe] (cleaned by `clean`).
-xbuild: ## Cross-compile per platform — both a plain binary (needs --s101) and a self-contained _s101 one (embedded catalogue), into dist/
-	@mkdir -p dist
-	@embed=""; \
-	if [ -d "$(S101_PC)" ] && [ -f "$(S101_FC)" ]; then $(MAKE) --no-print-directory sync-s101; embed=1; \
-	else echo "no S-101 catalogue ($(S101_PC)) — building only the plain (--s101 at runtime) binaries"; fi; \
-	for p in $(PLATFORMS); do \
-	  os=$${p%/*}; arch=$${p#*/}; ext=; [ "$$os" = windows ] && ext=.exe; \
-	  echo "building $$os/$$arch (plain, needs --s101)…"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w $(LDFLAGS)" \
-	    -o "dist/chartplotter_$${os}_$${arch}$$ext" ./cmd/chartplotter || exit 1; \
-	  if [ -n "$$embed" ]; then \
-	    echo "building $$os/$$arch (self-contained, embedded catalogue)…"; \
-	    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -tags embed_s101 -trimpath -ldflags "-s -w $(LDFLAGS)" \
-	      -o "dist/chartplotter_$${os}_$${arch}_s101$$ext" ./cmd/chartplotter || exit 1; \
-	  fi; \
-	done
-	@echo "→ dist/"; ls -1 dist/chartplotter_*
+# Cross-compile the CGO+libtile57 binary via the Zig C toolchain (`zig cc`) — how
+# the tile57-only build keeps single-command cross-compilation despite needing
+# CGO (specs/tile57-only-engine.md). Covers linux + windows (amd64/arm64), all
+# proven to cross-link from any host with Zig alone. darwin is built NATIVELY on a
+# macOS CI runner: with GOOS=darwin, Go's crypto/x509 links Apple frameworks
+# (Security/CoreFoundation) that Zig doesn't bundle. The S-101 catalogue lives in
+# libtile57, so there's no embed step. Needs the sibling ../tile57 checkout + Zig 0.16.
+# Outputs dist/chartplotter_<os>_<arch>[.exe].
+xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
+	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh
 
-serve: build ## Serve the web frontend + provisioning API, S-101 portrayal (HOST/PORT/ASSETS/S101_* overridable)
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) \
-	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE)
+serve: build ## Serve the web frontend + provisioning API on :8080 (HOST/PORT/ASSETS overridable)
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)
 
 bake-ienc: build $(IENC_PMTILES) ## Bake every IENC cell in $(IENC_SRC) into $(IENC_PMTILES)
 
@@ -222,8 +243,7 @@ demo-chart1: build ## Bake the S-52 ECDIS Chart 1 sheet to tiles for the docs (i
 # range-capable static file server (the widget page makes no /api calls).
 serve-demo: demo ## Preview the static demo bundle locally (range-capable static serve; HOST/PORT overridable)
 	@echo "  Read-only widget demo — open: http://$(HOST):$(PORT)/"
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets "$(DEMO_OUT)" \
-	  $(if $(wildcard $(S101_PC)),--s101 "$(S101_PC)" --s101-fc "$(S101_FC)" --cache "$(S101_CACHE)")
+	$(BIN) serve --host $(HOST) --port $(PORT) --assets "$(DEMO_OUT)"
 
 docs: ## Run the documentation site dev server (Docusaurus; DOCS_HOST/DOCS_PORT overridable)
 	cd docs && { [ -d node_modules ] || npm install; } && npm start -- --host $(DOCS_HOST) --port $(DOCS_PORT)
@@ -251,8 +271,7 @@ s64-pages: ## Render S-64 ENC test pages for spec comparison (one PNG per test s
 DOCS_SHOTS_PORT ?= 8199
 docs-shots: build ## Regenerate docs UI screenshots from the live app into docs/static/img/ui/
 	@set -e; \
-	$(BIN) serve --host 127.0.0.1 --port $(DOCS_SHOTS_PORT) --assets web \
-	  --s101 $(S101_PC) --s101-fc $(S101_FC) --cache $(S101_CACHE) & \
+	$(BIN) serve --host 127.0.0.1 --port $(DOCS_SHOTS_PORT) --assets web & \
 	srv=$$!; trap "kill $$srv 2>/dev/null || true" EXIT; \
 	for i in $$(seq 1 50); do \
 	  curl -fsS "http://127.0.0.1:$(DOCS_SHOTS_PORT)/api/health" >/dev/null 2>&1 && break; \
@@ -274,8 +293,8 @@ vet:
 # Format with the gofmt of the toolchain go.mod pins (Go 1.26), NOT whatever
 # gofmt happens to be on PATH — gofmt's rules change between Go minor releases,
 # so a stray 1.25 gofmt reintroduces drift that the 1.26 CI check rejects. Invoke
-# gofmt over `.` (not `go fmt ./...`, which skips files behind build tags like
-# embed_s101) so the file set matches the CI `gofmt -l .` gate exactly.
+# gofmt over `.` (not `go fmt ./...`, which can skip build-tagged files) so the
+# file set matches the CI `gofmt -l .` gate exactly.
 fmt:
 	@"$$(go env GOROOT)/bin/gofmt" -w .
 

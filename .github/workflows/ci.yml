@@ -4,31 +4,69 @@ on:
   push:
   pull_request:
 
+# libtile57 is the sole engine: the build is CGO and statically links the native
+# lib from the public beetlebugorg/tile57 repo, built with Zig 0.16. That repo is
+# checked out as a SIBLING directory named tile57 (go.mod's replace points at
+# ../tile57/bindings/go, and the binding's cgo LDFLAGS at its zig-out/lib), with
+# submodules so the IHO S-101 catalogues are fetched from the IHO's own repos.
+# NOTE: correct-by-construction but unvalidated until pushed to GitHub.
 jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+      - name: Checkout tile57 (libtile57 engine)
+        uses: actions/checkout@v7
+        with:
+          repository: beetlebugorg/tile57
+          path: tile57
+          submodules: recursive
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: cd tile57 && zig build
       - name: Format check
-        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+        run: make -C chartplotter fmt-check
       - name: Vet
-        run: go vet ./...
+        run: make -C chartplotter vet
       - name: Test
-        run: go test ./...
+        run: make -C chartplotter test
       - name: Build
-        run: go build ./...
+        run: make -C chartplotter build
 
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+      - name: Checkout tile57 (libtile57 engine)
+        uses: actions/checkout@v7
+        with:
+          repository: beetlebugorg/tile57
+          path: tile57
+          submodules: recursive
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: cd tile57 && zig build
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: cd chartplotter && go run golang.org/x/vuln/cmd/govulncheck@latest ./...

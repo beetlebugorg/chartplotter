@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 )
 
 // bakeCmd bakes S-57 ENC base cells into a PMTiles archive of MVT tiles, for
@@ -25,200 +24,111 @@ type bakeCmd struct {
 	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
 	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
 	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
+	Format   string   `enum:"mlt,mvt," default:"" help:"Tile encoding: mlt (MapLibre Tile, the engine default) or mvt (Mapbox Vector Tile, for consumers without an MLT decoder). Empty = the engine default (mlt)."`
 	S101     string   `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Requires --s101-fc."`
 	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
+	Tile57   bool     `name:"tile57" help:"Bake with the native libtile57 engine into a self-contained chart BUNDLE (tiles/chart.pmtiles + assets/style-*.json + manifest.json) under -o (treated as a directory). Honors --max-zoom; --bands/--manifest/--overzoom don't apply (the bundle is zoom-banded per cell and self-describing)."`
 }
 
 func (c bakeCmd) Run() error {
-	if c.S101 != "" {
-		if c.S101FC == "" {
-			return fmt.Errorf("--s101 requires --s101-fc")
-		}
-		if err := baker.UseS101Catalog(c.S101, c.S101FC); err != nil {
-			return fmt.Errorf("load S-101 catalogue: %w", err)
-		}
-		fmt.Fprintln(os.Stderr, "portrayal: S-101 rule engine")
-	}
-	cells, aux, err := collectCells(c.In)
-	if err != nil {
-		return err
-	}
-	if len(cells) == 0 {
-		return fmt.Errorf("no .000 base cells found in: %s", strings.Join(c.In, ", "))
-	}
-	nUpd := 0
-	for _, cd := range cells {
-		nUpd += len(cd.Updates)
-	}
-	fmt.Fprintf(os.Stderr, "baking %d cell(s) (%d update file(s) applied)…\n", len(cells), nUpd)
-
-	// Per-band streaming holds only one band's geometry at a time, so it skips the
-	// all-cells BuildBakerWithUpdates entirely.
+	// libtile57 is the sole bake engine. --bands writes one gap-clipped PMTiles
+	// archive per navigational band (+ manifest) so the district/demo/widget
+	// workflows keep working; otherwise a self-contained bundle directory
+	// (tiles/chart.pmtiles + per-scheme style + assets + manifest.json). Both need
 	if c.Bands {
-		return c.runBands(cells, aux)
+		return c.runTile57Bands()
 	}
+	return c.runTile57Bundle()
+}
 
-	b, ok, err := baker.BuildBakerWithUpdates(cells, c.Overzoom, func(name string, err error) {
-		fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
-	})
+// runTile57Bundle bakes the ENC inputs with the native libtile57 engine into a
+// self-contained chart bundle (tiles/chart.pmtiles + per-scheme SCAMIN-bucketed
+// style-*.json + assets + manifest.json) under the output directory. The engine
+// reads the ENC from disk, so a lone directory or .000 is handed over directly and
+// only zips / multiple inputs are staged into a temp directory of cells first.
+func (c bakeCmd) runTile57Bundle() error {
+	input, cleanup, err := c.tile57Input()
 	if err != nil {
 		return err
 	}
-	if len(ok) == 0 {
-		return fmt.Errorf("no cells parsed successfully")
-	}
-	if c.MaxZoom > 0 {
-		b.MaxBakeZoom = uint32(c.MaxZoom)
-	}
+	defer cleanup()
 
-	lastPct := -1
-	pb := baker.BakeToPMTiles(b, func(done, total int) {
-		if total == 0 {
-			return
-		}
-		if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
-			lastPct = pct
-			fmt.Fprintf(os.Stderr, "\r  tiles %d/%d (%d%%)", done, total, pct)
-		}
-	})
-	fmt.Fprintln(os.Stderr)
-
-	f, err := os.Create(c.Out)
+	outDir := bundleOutDir(c.Out)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	// nil progress → the lib's built-in per-band console progress (good CLI output).
+	n, bbox, err := bakeTile57Bundle(input, outDir, c.MaxZoom, c.Format, nil)
 	if err != nil {
 		return err
 	}
-	if err := pb.WriteArchive(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	st, _ := os.Stat(c.Out)
-	fmt.Printf("baked %d cell(s) → %s (%d tiles, %.1f MB)\n", len(ok), c.Out, pb.Count(), float64(st.Size())/(1<<20))
-
-	stem := strings.TrimSuffix(c.Out, filepath.Ext(c.Out))
-	auxFile, err := writeAuxZip(stem, aux)
-	if err != nil {
-		return err
-	}
-
-	if c.Manifest != "" {
-		file := c.BaseURL
-		if file == "" {
-			file = filepath.Base(c.Out)
-		}
-		bb := b.Bounds()
-		man := map[string]any{
-			"districts": []map[string]any{{
-				"file":   file,
-				"band":   "all",
-				"bounds": []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat},
-			}},
-		}
-		if auxFile != "" {
-			man["aux"] = auxFile
-		}
-		mf, err := os.Create(c.Manifest)
-		if err != nil {
-			return err
-		}
-		enc := json.NewEncoder(mf)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(man); err != nil {
-			mf.Close()
-			return err
-		}
-		mf.Close()
-		fmt.Printf("wrote manifest %s (file=%s)\n", c.Manifest, file)
-	}
+	fmt.Printf("baked %d cell(s) → %s/ via libtile57 — bundle: tiles/chart.pmtiles + assets/style-{day,dusk,night}.json + manifest.json (bbox %.4f,%.4f,%.4f,%.4f)\n",
+		n, outDir, bbox[0], bbox[1], bbox[2], bbox[3])
 	return nil
 }
 
-// runBands writes one gap-clipped PMTiles archive per navigational band
-// (<out-stem>-<slug>.pmtiles) plus a manifest tagging each with its band slug, so
-// the frontend loads each into its own chart-<slug> source.
-func (c bakeCmd) runBands(cells map[string]baker.CellData, aux map[string][]byte) error {
-	ext := filepath.Ext(c.Out)
-	stem := strings.TrimSuffix(c.Out, ext)
-	var entries []map[string]any
-	lastPct := -1
+// tile57Input resolves the ENC inputs to a single on-disk path for the bundle
+// baker. A lone existing directory or .000 file is used as-is (no cleanup). Zips,
+// multiple inputs, or anything else are gathered with collectCells and written to a
+// temp directory of cells (returned with a cleanup that removes it).
+func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
+	noop := func() {}
+	if len(c.In) == 1 {
+		if fi, e := os.Stat(c.In[0]); e == nil && (fi.IsDir() || encExt(c.In[0]) == ".000") {
+			return c.In[0], noop, nil
+		}
+	}
+	cells, _, err := collectCells(c.In)
+	if err != nil {
+		return "", noop, err
+	}
+	if len(cells) == 0 {
+		return "", noop, fmt.Errorf("no .000 base cells found in: %s", strings.Join(c.In, ", "))
+	}
+	dir, err := os.MkdirTemp("", "cp-tile57-enc-")
+	if err != nil {
+		return "", noop, err
+	}
+	for name, cd := range cells { // name is "<stem>.000"
+		if err := os.WriteFile(filepath.Join(dir, name), cd.Base, 0o644); err != nil {
+			os.RemoveAll(dir)
+			return "", noop, err
+		}
+		for un, ub := range cd.Updates { // sequential .001+ alongside the base
+			if err := os.WriteFile(filepath.Join(dir, filepath.Base(un)), ub, 0o644); err != nil {
+				os.RemoveAll(dir)
+				return "", noop, err
+			}
+		}
+	}
+	return dir, func() { os.RemoveAll(dir) }, nil
+}
 
-	// Streaming: pass 1 derives coverage per cell; pass 2 re-parses + bakes one band
-	// at a time, so only a single band's geometry + archive is ever resident.
-	bb, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, uint32(c.MaxZoom),
-		func(name string, err error) {
-			fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
-		},
-		func(stage string, done, total int, band string) {
-			if total == 0 {
-				return
-			}
-			if pct := done * 100 / total; pct != lastPct && pct%5 == 0 {
-				lastPct = pct
-				where := band
-				if where == "" {
-					where = "coverage"
-				}
-				fmt.Fprintf(os.Stderr, "\r  %-9s %-8s %d/%d (%d%%)   ", where, stage, done, total, pct)
-			}
-		},
-		func(slug string, pb *pmtiles.Builder) error {
-			out := stem + "-" + slug + ext
-			f, err := os.Create(out)
-			if err != nil {
-				return err
-			}
-			if err := pb.WriteArchive(f); err != nil {
-				f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			st, _ := os.Stat(out)
-			fmt.Fprintf(os.Stderr, "\r")
-			fmt.Printf("  %-9s → %s (%d tiles, %.1f MB)\n", slug, out, pb.Count(), float64(st.Size())/(1<<20))
-			entries = append(entries, map[string]any{
-				"file": filepath.Base(out),
-				"band": slug,
-			})
-			return nil
-		})
+// writeManifestJSON writes a charts-index.json manifest (indented) to path.
+func writeManifestJSON(path string, man map[string]any) error {
+	mf, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	// District bounds (cell-union) are known only after both passes; stamp them
-	// onto every band entry now.
-	for _, e := range entries {
-		e["bounds"] = []float64{bb.MinLon, bb.MinLat, bb.MaxLon, bb.MaxLat}
-	}
-	fmt.Printf("baked %d cell(s) → %d band archive(s)\n", nCells, len(entries))
-
-	auxFile, err := writeAuxZip(stem, aux)
-	if err != nil {
-		return err
-	}
-
-	if c.Manifest != "" {
-		mf, err := os.Create(c.Manifest)
-		if err != nil {
-			return err
-		}
-		enc := json.NewEncoder(mf)
-		enc.SetIndent("", "  ")
-		man := map[string]any{"districts": entries}
-		if auxFile != "" {
-			man["aux"] = auxFile
-		}
-		if err := enc.Encode(man); err != nil {
-			mf.Close()
-			return err
-		}
+	enc := json.NewEncoder(mf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(man); err != nil {
 		mf.Close()
-		fmt.Printf("wrote manifest %s\n", c.Manifest)
+		return err
 	}
-	return nil
+	return mf.Close()
+}
+
+// bundleOutDir derives the bundle output DIRECTORY from the -o value: a *.pmtiles /
+// *.mbtiles path becomes its stem (charts.pmtiles → charts/), otherwise -o is used
+// as the directory verbatim.
+func bundleOutDir(out string) string {
+	switch strings.ToLower(filepath.Ext(out)) {
+	case ".pmtiles", ".mbtiles":
+		return strings.TrimSuffix(out, filepath.Ext(out))
+	default:
+		return out
+	}
 }
 
 // encExt reports the 3-digit S-57 cell extension (".000" base, ".001"+ updates)

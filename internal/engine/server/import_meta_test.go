@@ -20,7 +20,7 @@ func buildExchangeZip(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cat, err := os.ReadFile("../../../pkg/s57/testdata/US5MD1MC_CATALOG.031")
+	cat, err := os.ReadFile("testdata/US5MD1MC_CATALOG.031")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +90,8 @@ func TestImport_NoCatalog(t *testing.T) {
 // TestImport_AutoNameAndMeta exercises the upload metadata wiring (minus HTTP and
 // the bake): extract → derive a CATALOG-identity pack name → extract per-cell
 // metadata → write the sidecar → surface it on /api/packs and /api/pack/<name>.
-// The bake itself needs the S-101 portrayer (-tags embed_s101) and is covered by
-// the baker tests; this replicates the post-bake metadata tail of bakeAndRegister.
+// The bake itself (native libtile57) is exercised elsewhere; this replicates the
+// post-bake metadata tail (ExtractCellMeta → sidecar) independently of a real bake.
 func TestImport_AutoNameAndMeta(t *testing.T) {
 	cacheDir, dataDir := t.TempDir(), t.TempDir()
 	s := New(t.TempDir(), cacheDir, dataDir, false)

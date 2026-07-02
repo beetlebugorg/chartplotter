@@ -307,11 +307,26 @@ export function dateFilter(mariner) {
         true]]];
 }
 
+// Viewing-group selection (S-52 §14.5, fine-grained content control): each feature
+// is baked with its raw viewing-group number `vg` (the most-visible draw's VG, so
+// band(vg) === cat). The mariner DENY-LIST mariner.viewingGroupsOff lists the vg ids
+// turned off; a feature is hidden iff its vg is in that set. A feature with no `vg`
+// (unbanded, or a tile baked before vg existed) always shows. Empty deny-list = no
+// filter. Byte-identical to tile57's viewingGroupFilter (src/chartstyle/chartstyle.zig).
+export function viewingGroupFilter(mariner) {
+  const off = mariner.viewingGroupsOff;
+  if (!off || !off.length) return null;
+  return ["any", ["!", ["has", "vg"]], ["!", ["in", ["get", "vg"], ["literal", off]]]];
+}
+
 // Combine a layer's intrinsic (base) filter with the live category +
 // boundary-style filters (the two client-side portrayal axes baked as
 // per-feature `cat`/`bnd`).
 export function combineFilters(base, mariner) {
   const parts = ["all", categoryFilter(mariner), boundaryFilter(mariner), pointStyleFilter(mariner), sectorLegFilter(mariner)];
+  // Fine-grained viewing-group deny-list (S-52 §14.5) — null when nothing is off.
+  const vgf = viewingGroupFilter(mariner);
+  if (vgf) parts.push(vgf);
   // Date-dependent display (S-52 §10.4.1.1, mandatory + default-on): hide a
   // dated feature outside its validity period for the viewing date. The escape
   // valve mariner.dateDependent === false shows all dates (only dated features

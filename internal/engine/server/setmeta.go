@@ -3,12 +3,13 @@ package server
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // setMetaExt is the per-pack metadata sidecar written beside the band archives
@@ -66,15 +67,27 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
+// catCellStem returns the cell name without extension (e.g. "US5MD1MC") for a
+// base-cell catalogue entry (IMPL "BIN", a .000 file), or "" for updates, text
+// descriptions, and other auxiliary rows. The engine normalises separators to
+// '/', but NOAA records backslashes, so both are handled.
+func catCellStem(e tile57.CatalogEntry) string {
+	base := path.Base(strings.ReplaceAll(e.File, "\\", "/"))
+	if e.Impl != "BIN" || !strings.HasSuffix(strings.ToUpper(base), ".000") {
+		return ""
+	}
+	return base[:len(base)-4]
+}
+
 // catalogPackIdentity derives a stable, friendly pack identity from an
 // exchange-set catalogue: the longest common (alphanumeric) prefix of the base
 // cell names, lowercased — e.g. cells US5MD1MC/US5MD2NW → "us5md". Returns ""
 // when there's no usable shared prefix (≥3 chars) so the caller can fall back to
 // the upload filename. A single cell yields that cell's full stem.
-func catalogPackIdentity(cat *s57.Catalog) string {
+func catalogPackIdentity(cat []tile57.CatalogEntry) string {
 	stems := make([]string, 0)
-	for _, c := range cat.Cells() {
-		if s := c.CellStem(); s != "" {
+	for _, e := range cat {
+		if s := catCellStem(e); s != "" {
 			stems = append(stems, s)
 		}
 	}
@@ -120,19 +133,20 @@ func slug(s string) string {
 // titles are left empty and the CLIENT resolves them from the NOAA master index it
 // already holds (chart-library's _byName); cells stay fully described by their own
 // header (scale/edition/date/agency/coverage) regardless.
-func buildSetMeta(set string, cellMeta map[string]baker.CellMeta, cat *s57.Catalog) SetMeta {
+func buildSetMeta(set string, cellMeta map[string]baker.CellMeta, cat []tile57.CatalogEntry) SetMeta {
 	// Catalogue overlay: stem → long name, stem → bbox.
 	catTitle := map[string]string{}
 	catBox := map[string][4]float64{}
-	if cat != nil {
-		for _, e := range cat.Cells() {
-			stem := e.CellStem()
-			if e.LongName != "" {
-				catTitle[stem] = e.LongName
-			}
-			if e.HasBBox {
-				catBox[stem] = [4]float64{e.West, e.South, e.East, e.North}
-			}
+	for _, e := range cat {
+		stem := catCellStem(e)
+		if stem == "" {
+			continue
+		}
+		if e.LongName != "" {
+			catTitle[stem] = e.LongName
+		}
+		if e.HasBBox {
+			catBox[stem] = e.BBox
 		}
 	}
 

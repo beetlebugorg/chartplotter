@@ -20,7 +20,7 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // Server-side import/bake. POST /api/import takes ENC input — an uploaded
@@ -173,11 +173,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 // from its CATALOG identity (longest common cell-name prefix), falling back to the
 // cells' shared prefix when there's no catalogue, then to "upload". Namespaced
 // under the "user" provider and uniquified against existing packs.
-func (s *Server) deriveUploadSet(cat *s57.Catalog, cells map[string]baker.CellData) string {
-	id := ""
-	if cat != nil {
-		id = catalogPackIdentity(cat)
-	}
+func (s *Server) deriveUploadSet(cat []tile57.CatalogEntry, cells map[string]baker.CellData) string {
+	id := catalogPackIdentity(cat)
 	if id == "" {
 		stems := make([]string, 0, len(cells))
 		for n := range cells {
@@ -282,7 +279,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 
 	var cells map[string]baker.CellData
 	var aux map[string][]byte
-	var cat *s57.Catalog
+	var cat []tile57.CatalogEntry
 
 	if req.ZipURL != "" {
 		// Bulk: stream the one zip (byte progress), then extract + cache its cells.
@@ -446,7 +443,7 @@ func fetchURLProgress(raw string, onProgress func(done, total int)) ([]byte, err
 // importInputs gathers the cells to bake: from an uploaded zip (raw zip body or a
 // multipart "file" field) when one is present, else from the ENC_ROOT cache
 // (optionally narrowed by ?cells=A,B,C).
-func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
+func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[string][]byte, []tile57.CatalogEntry, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		f, _, err := r.FormFile("file")
@@ -476,7 +473,7 @@ func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[s
 // cache before baking, so the ORIGINAL cell files are always kept (re-bakeable
 // after a tile-cache wipe) rather than discarded after an in-memory bake. Passes
 // the (cells, aux, err) triple straight through.
-func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, err error) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
+func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, err error) (map[string]baker.CellData, map[string][]byte, []tile57.CatalogEntry, error) {
 	if err == nil && len(cells) > 0 {
 		s.cacheCells(cells)
 	}
@@ -528,7 +525,7 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 }
 
 // runImport bakes cells into <cache>/tiles/<set>.pmtiles and registers the set.
-func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
+func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, overzoom, applyUpdates bool) {
 	s.bakeAndRegister(jobID, set, cells, aux, cat, overzoom, applyUpdates)
 }
 
@@ -539,7 +536,7 @@ func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, a
 // no-data hatch holes). Each band that produced tiles is written + registered as its
 // own set; the district aux.zip is written once (with the first band). Progress and
 // the terminal state are recorded on the job.
-func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
+func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, overzoom, applyUpdates bool) {
 	fail := func(err error) {
 		log.Printf("import %s (%s): %v", jobID, set, err)
 		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
@@ -552,80 +549,15 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 		}
 		cells = base
 	}
-	_ = overzoom // the per-band streaming bake has no all-bands-to-z0 overzoom mode
-	s.imports.update(jobID, func(j *importJob) {
-		// Open on the "prepare" stage (unit "cells"): the bake starts by parsing
-		// cells for coverage, well before the first tile emits.
-		j.Phase, j.Unit, j.Band, j.Note, j.Done, j.Total = "bake", "cells", "", fmt.Sprintf("Baking %d cell(s)", len(cells)), 0, 0
-	})
 
-	// Drop any STALE merged archive named exactly `set` from a prior (pre-per-band)
-	// bake, so the old single-maxzoom set isn't left serving alongside the new bands.
-	s.removeMergedSet(set)
+	_ = overzoom // the tile57 bundle is zoom-banded per cell; no all-bands-to-z0 mode
 
-	// ONE bake path: the exact streaming per-band bake the CLI (`chartplotter bake
-	// --bands`) uses — same cross-band suppression, same zoom ranges. No server-only
-	// baker variant to drift out of sync.
-	bands, tiles, first := 0, 0, true
-	_, nCells, err := baker.BakeToPMTilesBandsStreaming(cells, 0,
-		func(name string, e error) { log.Printf("import %s: skip %s: %v", jobID, name, e) },
-		func(stage string, done, total int, band string) {
-			// "prepare" = parsing + portraying a band's cells (the gap before any
-			// tile emits); "tiles" = emitting that band's tiles. The unit lets the
-			// client name the stage (Preparing … charts vs Generating … tiles).
-			unit := "tiles"
-			if stage == "prepare" {
-				unit = "cells"
-			}
-			s.imports.update(jobID, func(j *importJob) { j.Done, j.Total, j.Band, j.Unit = done, total, band, unit })
-		},
-		func(slug string, pb *pmtiles.Builder) error {
-			bandSet := set + "-" + slug
-			bandAux := aux
-			if !first { // ship the district aux.zip ONCE, with the first band
-				bandAux = nil
-			}
-			if err := s.writeAndRegister(bandSet, pb, bandAux); err != nil {
-				return err
-			}
-			// Record which cells went into this pack (beside its pmtiles), so
-			// /api/cells?active returns exactly the installed cells — not every
-			// cached cell that overlaps the pack's (often global) bounding box.
-			if err := s.writeSetCells(bandSet, cells); err != nil {
-				log.Printf("import %s: cell manifest %q: %v", jobID, bandSet, err)
-			}
-			first = false
-			bands++
-			tiles += pb.Count()
-			log.Printf("import %s: baked %q (%d tiles)", jobID, bandSet, pb.Count())
-			return nil
-		})
-	if err != nil {
-		fail(err)
-		return
+	// libtile57 is the SOLE bake engine. bakeBundleTile57 bakes a self-contained
+	// bundle per set (tiles + per-scheme style + assets + aux + metadata sidecar +
+	// cell manifest) and records success or a job error itself. A binary built
+	if !s.bakeBundleTile57(jobID, set, cells, aux, cat, applyUpdates) {
+		fail(fmt.Errorf("baking requires a libtile57 build (rebuild with `make build-tile57`)"))
 	}
-	if bands == 0 {
-		fail(fmt.Errorf("no bands produced tiles"))
-		return
-	}
-	s.imports.update(jobID, func(j *importJob) { j.Cells = nCells })
-	s.auxIdx.invalidate() // the district's companion aux.zip changed — re-index /api/aux
-
-	// Per-pack metadata sidecar for the chart library: per-cell scale/edition/date/
-	// agency/coverage (cheap coverage-only parse) overlaid with the catalogue's chart
-	// titles + coverage. Best-effort — a write failure only costs the extracted detail.
-	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
-	cellMeta := baker.ExtractCellMeta(cells, func(name string, e error) {
-		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
-	})
-	meta := buildSetMeta(set, cellMeta, cat)
-	meta.Imported = time.Now().UTC().Format(time.RFC3339)
-	if err := s.writeSetMeta(set, meta); err != nil {
-		log.Printf("import %s: write meta %q: %v", jobID, set, err)
-	}
-
-	log.Printf("import %s: baked district %q (%d cells, %d bands, %d tiles)", jobID, set, nCells, bands, tiles)
-	s.imports.update(jobID, func(j *importJob) { j.State = "done" })
 }
 
 // removeMergedSet drops a stale MERGED archive named exactly `set` (the pre-per-band
@@ -727,6 +659,12 @@ func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder, aux map[strin
 	// tiles from before a baker/portrayal change. Best-effort; absence reads as stale.
 	if s.Version != "" {
 		_ = os.WriteFile(final+bakeVerExt, []byte(s.Version), 0o644)
+	}
+	// Bake-time engine stamp (<pack>.enginever): the tile57 commit THIS binary links,
+	// so the set's TileJSON reports which engine baked these tiles even after the
+	// binary is upgraded (engineForSet). Best-effort, like .bakever.
+	if s.EngineCommit != "" {
+		_ = os.WriteFile(final+engineVerExt, []byte(s.EngineCommit), 0o644)
 	}
 	// Companion aux.zip (best-effort — a missing aux archive only disables pictures
 	// in the pick report, it doesn't break tiles).
@@ -831,7 +769,7 @@ func (s *Server) importEvents(w http.ResponseWriter, r *http.Request) {
 // extractZipCells reads an exchange-set zip held in memory, grouping each cell's
 // base (.000) + updates (.001…) by cell stem and collecting referenced aux files.
 // It mirrors the CLI's collectCells/addZipCells for an in-memory archive.
-func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
+func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte, []tile57.CatalogEntry, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("not a valid zip: %w", err)
@@ -898,10 +836,10 @@ func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte,
 		}
 		cells[stem+".000"] = baker.CellData{Base: a.base, Updates: a.updates}
 	}
-	var cat *s57.Catalog
+	var cat []tile57.CatalogEntry
 	if catalogBytes != nil {
-		if c, err := s57.ParseCatalog(catalogBytes); err == nil {
-			cat = c
+		if entries, err := tile57.CatalogEntries(catalogBytes); err == nil {
+			cat = entries
 		} else {
 			log.Printf("import: CATALOG.031 parse failed (ignored): %v", err)
 		}
