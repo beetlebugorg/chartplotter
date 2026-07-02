@@ -388,17 +388,16 @@ export class ChartCanvas extends HTMLElement {
     };
     window.__chartGL = () => this._logGLDiag();
 
-    // Touch gestures: keep pinch-zoom but start with rotate OFF so a pinch can't
-    // tilt/spin the chart out from under the north-up/course-up/head-up follow
-    // modes (MapLibre's touchZoomRotate couples zoom+rotate on the same two-finger
-    // gesture, which on iOS/iPad fought the orientation lock). setCameraMode gates
-    // it back ON in "free" mode (two-finger twist on touch, right/ctrl-drag on
-    // desktop) via _setRotateGestures — boot is north-up, so it stays off here.
-    // Never pitch: a rotate gesture must not tilt the chart to an oblique view.
+    // Touch/rotate/pitch gestures start OFF so a stray pinch can't spin or tilt the
+    // chart out from under the north-up/course-up/head-up follow modes (MapLibre's
+    // touchZoomRotate couples zoom+rotate on one two-finger gesture, which on
+    // iOS/iPad fought the orientation lock). setCameraMode gates the full set — 3D
+    // bearing + pitch — back ON in "free" mode via _setRotateGestures; boot is
+    // north-up, so they stay off (flat, north-up) here.
     if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
     if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
     if (map.touchPitch && map.touchPitch.disable) map.touchPitch.disable();
-    // Desktop rotation: Shift + left-drag "grab and twist" (free mode only).
+    // Desktop 3D: Shift + left-drag (free mode only) — horizontal rotates, vertical
     // MapLibre's own dragRotate binds ctrl+left / right-button, but neither is
     // reliable cross-platform: on macOS ctrl+click IS the OS secondary click (so
     // ctrl+drag becomes a right-click/context-menu, never a rotate) and right-drag
@@ -847,33 +846,40 @@ export class ChartCanvas extends HTMLElement {
   //   "head-up"   — recentre on the target, chart rotated to the target's heading
   setCameraMode(mode) {
     this._cameraMode = mode || "free";
-    // User rotation is allowed ONLY in free mode — two-finger twist on touch,
-    // right-drag / ctrl+drag on desktop (MapLibre's dragRotate default). In the
-    // follow modes the bearing is owned by the vessel fix, so rotation gestures
-    // stay off or a pinch/drag would fight the orientation lock (see the boot
-    // disable). This is the "gate on the camera mode" the boot comment defers to.
+    // 3D rotation (bearing + pitch) is allowed ONLY in free mode — Shift+drag on
+    // desktop, two-finger twist/tilt on touch. The follow modes are flat and their
+    // bearing is owned by the vessel fix, so the gestures stay off there (a stray
+    // drag would fight the orientation lock). "Gate on the camera mode", per the
+    // boot note.
     this._setRotateGestures(this._cameraMode === "free");
-    if (this._map && this._cameraMode === "north-up") this._map.easeTo({ bearing: 0, duration: 300 });
+    // Leaving free returns to a flat chart; north-up also snaps bearing to 0
+    // (course-/head-up get their bearing from the fix via updateFollow). One
+    // combined easeTo — two separate ones cancel each other.
+    if (this._map && this._cameraMode !== "free") {
+      const cam = { pitch: 0, duration: 300 };
+      if (this._cameraMode === "north-up") cam.bearing = 0;
+      this._map.easeTo(cam);
+    }
     if (this._followFix) this.updateFollow(this._followFix);
     return this._cameraMode;
   }
 
-  // Shift + left-drag rotation (free mode only), installed once at map init.
-  // "Grab and twist": bearing follows the angle the cursor sweeps around the map
-  // centre, so the point you grab tracks under the pointer. drag-pan is suspended
-  // for the twist so it doesn't also translate the map; the two-finger touch
-  // rotate is handled separately by MapLibre (enableRotation in free mode).
+  // Shift + left-drag 3D control (free mode only), installed once at map init:
+  // horizontal drag rotates (bearing), vertical drag tilts (pitch) — the same
+  // model as MapLibre's dragRotate, but on the Shift trigger (see the boot note on
+  // why ctrl/right aren't reliable). Drag up = more oblique. drag-pan is suspended
+  // for the drag so it doesn't also translate the map; touch 3D is handled
+  // separately by MapLibre (touchZoomRotate + touchPitch, enabled in free mode).
   _installFreeRotate(map) {
     if (!map || !map.getCanvasContainer) return;
     const cvs = map.getCanvasContainer();
-    let active = false, startAngle = 0, startBearing = 0;
-    const centreAngle = (e) => {
-      const r = cvs.getBoundingClientRect();
-      return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
-    };
+    const DEG_PER_PX = 0.4;
+    let active = false, startX = 0, startY = 0, startBearing = 0, startPitch = 0, maxPitch = 60;
     const onMove = (e) => {
       if (!active) return;
-      map.setBearing(startBearing - (centreAngle(e) - startAngle)); // twist-follows-cursor
+      map.setBearing(startBearing + (e.clientX - startX) * DEG_PER_PX);
+      const pitch = startPitch - (e.clientY - startY) * DEG_PER_PX; // drag up → more tilt
+      map.setPitch(Math.max(0, Math.min(maxPitch, pitch)));
       e.preventDefault();
     };
     const onUp = () => {
@@ -886,8 +892,10 @@ export class ChartCanvas extends HTMLElement {
     cvs.addEventListener("mousedown", (e) => {
       if (this._cameraMode !== "free" || e.button !== 0 || !e.shiftKey) return;
       active = true;
-      startAngle = centreAngle(e);
+      startX = e.clientX; startY = e.clientY;
       startBearing = map.getBearing();
+      startPitch = map.getPitch();
+      maxPitch = map.getMaxPitch ? map.getMaxPitch() : 60;
       if (map.dragPan && map.dragPan.disable) map.dragPan.disable();
       e.preventDefault();
       e.stopPropagation();
@@ -896,23 +904,26 @@ export class ChartCanvas extends HTMLElement {
     });
   }
 
-  // Enable/disable the user rotation gestures (touch two-finger rotate + desktop
-  // drag-rotate) as one unit. Guarded: the handlers exist only after map init and
-  // some builds gate them, so every call is optional-chained.
+  // Enable/disable the full free-mode 3D gesture set (touch two-finger rotate +
+  // pitch, desktop drag-rotate) as one unit. Guarded: the handlers exist only
+  // after map init and some builds gate them, so every call is optional-chained.
   _setRotateGestures(on) {
     const map = this._map;
     if (!map) return;
     if (on) {
       if (map.touchZoomRotate && map.touchZoomRotate.enableRotation) map.touchZoomRotate.enableRotation();
+      if (map.touchPitch && map.touchPitch.enable) map.touchPitch.enable();
       if (map.dragRotate && map.dragRotate.enable) map.dragRotate.enable();
       // Shift+drag is MapLibre's box-zoom by default — it would fire on the SAME
-      // gesture as our Shift+drag rotate, so box-zoom yields to rotation in free
-      // mode (and comes back in the follow modes, where Shift+drag doesn't twist).
+      // gesture as our Shift+drag 3D control, so box-zoom yields to it in free mode
+      // (and comes back in the follow modes, where Shift+drag doesn't rotate).
       if (map.boxZoom && map.boxZoom.disable) map.boxZoom.disable();
     } else {
       if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
+      if (map.touchPitch && map.touchPitch.disable) map.touchPitch.disable();
       if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
       if (map.boxZoom && map.boxZoom.enable) map.boxZoom.enable();
+      // (the pitch/bearing reset is a single easeTo in setCameraMode)
     }
   }
 
