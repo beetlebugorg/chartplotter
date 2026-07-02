@@ -9,15 +9,23 @@ import (
 	"sync"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/pkg/s57"
 )
+
+// boundsUsable reports whether a parsed cell yielded a non-degenerate bbox (a real
+// extent, not the empty/zero box of a cell whose coverage couldn't be derived).
+func boundsUsable(b s57.Bounds) bool {
+	return b.MaxLon > b.MinLon && b.MaxLat > b.MinLat
+}
 
 // cellIndex is a small, persistent name→bounding-box index over the cached source
 // cells (<dataDir>/ENC_ROOT/<CELL>/<CELL>.000). It lets the server answer "where
 // is cell X" and "which installed cells are active" without re-parsing thousands
-// of cells on every request: each cell's header is read ONCE (the bbox cached to
-// <dataDir>/cells-index.json), then queries hit the in-memory map. Kept
-// deliberately simple — a flat JSON map, not a database; the data is tiny (a few
-// floats per cell) and read-mostly.
+// of cells on every request: each cell is parsed ONCE — only its M_COVR coverage,
+// not the whole cell (see scan) — with the bbox cached to <dataDir>/cells-index
+// .json, then queries hit the in-memory map. Kept deliberately simple — a flat
+// JSON map, not a database; the data is tiny (a few floats per cell) and
+// read-mostly.
 type cellIndex struct {
 	mu       sync.RWMutex
 	cond     *sync.Cond            // broadcast when a scan finishes (for wait())
@@ -126,8 +134,12 @@ func (ci *cellIndex) wait() {
 	ci.mu.Unlock()
 }
 
-// scan reads every cached cell's header once (bbox cached so repeat scans skip the
-// already-indexed) and reconciles: drops index entries for cells no longer on disk.
+// scan derives every cached cell's bbox once (cached, so repeat scans skip the
+// already-indexed) and reconciles: drops index entries for cells no longer on
+// disk. The bbox comes from an M_COVR-only coverage parse — the cell's data
+// coverage is all we need, so we skip building the geometry, R-tree and portrayal
+// of every other feature that a full parse would. A cell with no M_COVR (rare:
+// synthetic/test cells) falls back to a full parse so it still gets a bbox.
 func (ci *cellIndex) scan() {
 	entries, err := os.ReadDir(ci.encRoot)
 	if err != nil {
@@ -148,11 +160,23 @@ func (ci *cellIndex) scan() {
 		if err != nil {
 			continue
 		}
-		chart, err := baker.ParseCellBytes(name, data)
+		// M_COVR-only parse: builds just the coverage rings, not every feature's
+		// geometry — all the bbox needs. nil updates: the index tracks base cells.
+		chart, err := baker.ParseCellCoverage(name, data, nil)
 		if err != nil {
 			continue
 		}
 		b := chart.Bounds()
+		if !boundsUsable(b) {
+			// No M_COVR coverage polygon (rare — synthetic cells omit it). Fall back to
+			// a full parse so the cell still lands in the index with a real bbox.
+			if full, ferr := baker.ParseCellBytes(name, data); ferr == nil {
+				b = full.Bounds()
+			}
+		}
+		if !boundsUsable(b) {
+			continue // still nothing usable; skip rather than index a degenerate box
+		}
 		ci.mu.Lock()
 		ci.bbox[name] = [4]float64{b.MinLon, b.MinLat, b.MaxLon, b.MaxLat}
 		ci.mu.Unlock()

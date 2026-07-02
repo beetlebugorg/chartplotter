@@ -11,9 +11,10 @@ import (
 // For S-57/S-52 implementation details, see IHO S-57 Part 3:
 // https://iho.int/uploads/user/pubs/standards/s-57/31Main.pdf
 type Parser struct {
-	reader io.Reader // Underlying data reader
-	closer io.Closer // Optional closer (for files)
-	offset int64     // Current read offset
+	reader io.Reader              // Underlying data reader
+	closer io.Closer              // Optional closer (for files)
+	offset int64                  // Current read offset
+	ddr    *DataDescriptiveRecord // DDR, parsed lazily by Next on its first call
 }
 
 // NewParser creates a new ISO 8211 parser from an io.Reader
@@ -96,6 +97,24 @@ func (p *Parser) Parse() (*ISO8211File, error) {
 	}
 
 	return result, nil
+}
+
+// Next parses and returns the next data record, reading the file's DDR on the
+// first call. It returns io.EOF after the final record. Unlike Parse — which
+// reads every record up front — Next reads one record at a time, so a caller that
+// only needs the leading records (e.g. the DSID/DSPM dataset-metadata records at
+// the front of an S-57 cell) can stop early without reading the rest of the file.
+//
+// Next and Parse must not be mixed on the same Parser.
+func (p *Parser) Next() (*DataRecord, error) {
+	if p.ddr == nil {
+		ddr, err := p.parseDDR()
+		if err != nil {
+			return nil, err
+		}
+		p.ddr = ddr
+	}
+	return p.parseDataRecord(p.ddr)
 }
 
 // parseDDR parses the Data Descriptive Record (first record in file)

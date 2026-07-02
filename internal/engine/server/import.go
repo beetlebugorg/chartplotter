@@ -615,7 +615,7 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 	// agency/coverage (cheap coverage-only parse) overlaid with the catalogue's chart
 	// titles + coverage. Best-effort — a write failure only costs the extracted detail.
 	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
-	cellMeta := baker.ExtractCellMeta(cells, func(name string, e error) {
+	cellMeta := baker.ExtractCellMeta(cells, cat, func(name string, e error) {
 		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
 	})
 	meta := buildSetMeta(set, cellMeta, cat)
