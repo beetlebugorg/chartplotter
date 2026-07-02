@@ -411,7 +411,15 @@ export class ChartCanvas extends HTMLElement {
     // it lives in this element's shadow root, out of reach of the app's :host([spec]) CSS.
     if (document.querySelector("chart-plotter-app[spec], chart-plotter[spec]")) this._scaleEl.style.display = "none";
     map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
-    map.on("move", () => this._renderScalebar());
+    map.on("move", () => {
+      this._renderScalebar();
+      // While ZOOMING (only — pans wait for settle), a crossed ladder boundary
+      // applies at most every 500ms so a long continuous zoom doesn't render a
+      // stale cutoff all the way to moveend. _scaminUpdate early-returns when
+      // no boundary was crossed, so this is cheap per frame; the settle pass
+      // below still runs the final exact apply.
+      if (map.isZooming() && performance.now() - (this._scaminLastApply || 0) >= 500) this._scaminUpdate();
+    });
     // SCAMIN filter-gate: apply ladder crossings only once the camera SETTLES.
     // Each setFilter on a gated layer forces MapLibre to re-parse every loaded
     // tile of that layer's source in the workers (bucket rebuild + symbol
@@ -1425,6 +1433,7 @@ export class ChartCanvas extends HTMLElement {
     for (const v of values) if (v < denom) band++;
     if (!force && band === this._scaminBandLast) return;
     this._scaminBandLast = band;
+    this._scaminLastApply = performance.now(); // rate-limits the mid-zoom applies (move hook)
     const map = this._map;
     for (const id of this._scaminGatedLayers()) {
       const f = map.getFilter(id);
