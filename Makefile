@@ -72,6 +72,15 @@ NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 TILE57     ?= tile57
 TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
 
+# Engine-commit stamp: the tile57 checkout's HEAD, linked into the binary beside
+# main.version so every bake can record WHICH engine produced its tiles (and the
+# client can flag a mixed-engine cache). Resolves for the vendored submodule AND
+# a TILE57=… override; "unknown" when git can't answer (unpopulated submodule,
+# tarball checkout). The `test -e .git` guard matters: git -C into an EMPTY
+# submodule dir would walk up and report THIS repo's HEAD instead of failing.
+ENGINE_COMMIT ?= $(shell test -e "$(TILE57)/.git" && git -C "$(TILE57)" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
+LDFLAGS += -X main.engineCommit=$(ENGINE_COMMIT)
+
 # Build the static library on demand (only when absent). Needs Zig 0.16 on PATH.
 $(TILE57_LIB):
 	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH and $(TILE57_LIB) missing — install Zig or prebuild the lib"; exit 1; }
@@ -133,7 +142,7 @@ serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a
 # libtile57, so there's no embed step. Needs the tile57 submodule + Zig 0.16.
 # Outputs dist/chartplotter_<os>_<arch>[.exe].
 xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
-	VERSION="$(VERSION)" TILE57="$(TILE57)" scripts/xbuild-tile57.sh
+	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh
 
 serve: build ## Serve the web frontend + provisioning API on :8080 (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)

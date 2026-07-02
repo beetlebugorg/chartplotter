@@ -287,6 +287,15 @@ export const STYLE = `
           text-decoration:underline; text-decoration-color:var(--ui-text-faint); text-underline-offset:2px; }
         #noaa-attr a:hover, #noaa-attr .attr-link:hover { color:var(--ui-accent); }
         #noaa-attr .attr-link { background:none; border:none; padding:0; font:inherit; }
+        /* Engine-commit stamp: which tile57 engine commit baked the visible tiles
+           (from each active set's TileJSON "engine"). Muted beside the disclaimer;
+           warn-tinted when the active sets DISAGREE (a partially re-baked cache).
+           Hidden with no data ([hidden]) and in the widget viewer (dev chrome;
+           spec mode already hides the whole attribution line). */
+        #engine-stamp { color:var(--ui-text-faint); }
+        #engine-stamp::before { content:" · ⚙ "; }
+        #engine-stamp.mixed { color:#c0392b; font-weight:600; }
+        :host([widget]) #engine-stamp { display:none; }
         /* NOAA ENC user-agreement gate (shown before the first download). */
         .modal { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
           background:rgba(15,20,26,.55); backdrop-filter:blur(2px); }
@@ -609,7 +618,7 @@ export const CHROME = `
         <button id="scale-go" type="button">Go</button>
       </div>
       <div id="search" hidden><input id="search-input" type="search" placeholder="Search charts, features, or a coordinate…" autocomplete="off" spellcheck="false"><div id="search-results" hidden></div></div>
-      <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation</div>
+      <div id="noaa-attr"><a href="${NOAA_ENC_URL}" target="_blank" rel="noopener">NOAA ENC®</a> · <button id="attr-terms" class="attr-link" type="button">Terms</button> · not for navigation<span id="engine-stamp" hidden></span></div>
       <!-- The NOAA ENC User Agreement modal moved into <chart-library> (it owns the
            download flow); the "Terms" link reaches into it. -->
       <div id="empty" hidden><div class="card">

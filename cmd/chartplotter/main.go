@@ -18,6 +18,13 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+// engineCommit is the tile57 (libtile57) checkout's commit this binary was built
+// against, stamped via -ldflags "-X main.engineCommit=..." (Makefile
+// ENGINE_COMMIT; handles both the vendored submodule and a TILE57=… override).
+// Every bake records it beside the pack so the client can show which engine
+// commit produced the visible tiles. "unknown" for a bare `go build`.
+var engineCommit = "unknown"
+
 type cli struct {
 	Version     versionCmd     `cmd:"" help:"Print version and embedded-asset info."`
 	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-101 client assets (colortables.json, ...) into a directory."`
@@ -50,7 +57,7 @@ type versionCmd struct{}
 
 func (versionCmd) Run() error {
 	fmt.Printf("chartplotter %s\n", version)
-	fmt.Printf("libtile57 %s (S-101 catalogue embedded)\n", tile57.Version())
+	fmt.Printf("libtile57 %s (engine commit %s, S-101 catalogue embedded)\n", tile57.Version(), engineCommit)
 	return nil
 }
 

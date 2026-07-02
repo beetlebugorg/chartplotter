@@ -14,6 +14,13 @@ import (
 // (<pack>.pmtiles.bakever), so startup can flag a cache baked by an older binary.
 const bakeVerExt = ".bakever"
 
+// engineVerExt is the sidecar that records the tile57 ENGINE commit that baked a
+// pack (<pack>.pmtiles.enginever) — bake-time truth, distinct from the running
+// binary's own engine commit. The set's TileJSON reports it so the client can
+// stamp the map with the engine behind the visible tiles (and flag a mixed-bake
+// cache). A pack without the sidecar predates stamping → "pre-stamp".
+const engineVerExt = ".enginever"
+
 // ReportStaleCache logs a loud warning for any served pack whose recorded build
 // version (its <pack>.bakever sidecar) differs from the running binary — the
 // stale-cache trap, where `make serve` keeps serving tiles baked by older

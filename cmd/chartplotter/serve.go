@@ -71,7 +71,8 @@ func (c serveCmd) Run() error {
 	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote)
 	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
-	srv.ReportStaleCache() // loud warning if any served pack predates this binary
+	srv.EngineCommit = engineCommit // stamped onto every bake + reported by live sets
+	srv.ReportStaleCache()          // loud warning if any served pack predates this binary
 
 	// Optional libtile57 LIVE backend: generate MVT on demand from raw ENC cells
 	// (--tile57 <ENC_ROOT>) instead of serving a prebaked archive. Server chart

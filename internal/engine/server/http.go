@@ -38,6 +38,7 @@ type Server struct {
 	share          shareStore    // latest "share my view" snapshot (camera + cell list)
 	settings       settingsStore // persisted client display settings (<data>/client-settings.json)
 	Version        string        // build version
+	EngineCommit   string        // tile57 engine commit built into this binary ("unknown" without the ldflags stamp)
 
 	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
 	imports *importJobs       // background server-side bake jobs (POST /api/import)
