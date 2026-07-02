@@ -1611,7 +1611,7 @@ function setScaminDenom(node, denom, detectOnly) {
   if (node[0] === "<" && Array.isArray(node[1]) && node[1][0] === "coalesce"
       && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "smax") {
     if (!detectOnly) node[2] = denom;
-    return false; // smax rides along; the scamin clause is the gate marker
+    return true; // smax-only layers (carried fills/lines in base layers) need injection too
   }
   let found = false;
   for (const c of node) if (setScaminDenom(c, denom, detectOnly)) found = true;
