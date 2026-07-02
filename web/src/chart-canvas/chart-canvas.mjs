@@ -1478,6 +1478,24 @@ export class ChartCanvas extends HTMLElement {
       const nf = JSON.parse(JSON.stringify(f));
       if (setScaminDenom(nf, denom)) { try { map.setFilter(id, nf, { validate: false }); } catch { /* ignore */ } }
     }
+    // Straggler sweep: a tile whose worker parse STARTED before this apply's
+    // layer broadcast but FINISHED after the reload marked in-view tiles keeps
+    // buckets built under the old filters — permanently (MapLibre re-parses
+    // only 'loaded' tiles). Symptom: a steady blank chart window (e.g. the z9
+    // band, where the smax/oscl fill partitioning is densest) that appears
+    // flakily at boot and never heals. One extra reload of the chart sources
+    // on the first idle after each apply guarantees convergence.
+    if (this._scaminSweepArmed) return;
+    this._scaminSweepArmed = true;
+    map.once("idle", () => {
+      this._scaminSweepArmed = false;
+      try {
+        const tms = map.style.tileManagers || map.style.sourceCaches;
+        for (const sid of Object.keys(tms)) {
+          if (sid === "chart" || sid.startsWith("chart-")) map.style._reloadSource(sid);
+        }
+      } catch { /* internal API drifted — the next crossing still converges */ }
+    });
   }
 
   // Cached ids of the chart layers whose filter carries the SCAMIN clause (the gated
