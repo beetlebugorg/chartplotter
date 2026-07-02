@@ -77,6 +77,51 @@ export const STYLE = `
         .rbtn:active { transform:scale(.94); }
         .rbtn.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
         .rbtn svg { width:21px; height:21px; display:block; }
+        /* Viewing-group quick-toggle rail (plugins/vg-rail.mjs) — a mid-left
+           vertical stack, clear of the top-left search button and the bottom-left
+           scalebar/attribution. Ghosted until hovered/focused so it doesn't
+           compete with the chart; folds to the single grip button. */
+        #vg-rail { position:absolute; left:calc(10px + env(safe-area-inset-left,0px)); top:50%;
+          transform:translateY(-50%); z-index:6; display:flex; flex-direction:column;
+          align-items:flex-start; gap:6px; opacity:.55; transition:opacity .15s ease; }
+        #vg-rail:hover, #vg-rail:focus-within { opacity:1; }
+        #vg-rail:empty { display:none; } /* widget/spec: never mounted → no dead hover target */
+        .vg-grip { position:relative; flex:none; width:32px; height:32px; border-radius:50%; cursor:pointer; padding:0;
+          display:flex; align-items:center; justify-content:center; color:var(--ui-text-dim);
+          background:color-mix(in srgb, var(--ui-surface) 90%, transparent); border:1px solid var(--ui-border);
+          box-shadow:0 2px 8px rgba(0,0,0,.16); backdrop-filter:blur(6px);
+          touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none;
+          transition:background .12s, color .12s, transform .08s; }
+        .vg-grip svg { width:17px; height:17px; display:block; }
+        @media (hover:hover) { .vg-grip:hover { color:var(--ui-accent); border-color:var(--ui-accent); } }
+        .vg-grip:active { transform:scale(.94); }
+        .vg-grip.on { background:var(--ui-accent); color:var(--ui-accent-text); border-color:var(--ui-accent); }
+        /* Folded rail with groups hidden: amber dot so "the chart is filtered" stays visible. */
+        .vg-grip.filtered:not(.on)::after { content:""; position:absolute; top:1px; right:1px; width:8px; height:8px;
+          border-radius:50%; background:#f0a500; box-shadow:0 0 0 1.5px var(--ui-surface); }
+        .vg-pills { display:grid; grid-template-columns:repeat(2, 1fr); gap:3px; padding:6px;
+          background:color-mix(in srgb, var(--ui-surface) 88%, transparent); border:1px solid var(--ui-border);
+          border-radius:12px; backdrop-filter:blur(6px); box-shadow:0 3px 14px rgba(0,0,0,.2);
+          max-height:min(66vh, calc(100dvh - 220px)); overflow-y:auto; overscroll-behavior:contain;
+          scrollbar-width:thin; }
+        .vg-pills[hidden] { display:none; }
+        .vg-pill { display:flex; align-items:center; gap:4px; min-width:0; padding:2px 7px 2px 5px;
+          border-radius:999px; cursor:pointer; font:600 10px/1.7 system-ui,sans-serif;
+          touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none;
+          transition:background .1s, color .1s; }
+        .vg-pill .vg-glyph { flex:none; font-size:8.5px; line-height:1; }
+        .vg-pill .vg-abbr { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        /* ON = green + ✓; OFF = red + ✕ + struck label — the glyph/strike carry the
+           state for colour-blind users (never colour alone). color-mix over the
+           scheme surface keeps both readable in day/dusk/night. */
+        .vg-pill.on { background:color-mix(in srgb, #1f9d4d 26%, var(--ui-surface)); color:var(--ui-text);
+          border:1px solid color-mix(in srgb, #1f9d4d 55%, var(--ui-surface)); }
+        .vg-pill.on .vg-glyph { color:#1f9d4d; }
+        .vg-pill.off { background:color-mix(in srgb, #c0392b 22%, var(--ui-surface)); color:var(--ui-text-dim);
+          border:1px solid color-mix(in srgb, #c0392b 50%, var(--ui-surface)); }
+        .vg-pill.off .vg-glyph { color:#c0392b; }
+        .vg-pill.off .vg-abbr { text-decoration:line-through; }
+        @media (hover:hover) { .vg-pill:hover { filter:brightness(1.08); } }
         /* Widget mode: a read-only, embeddable chart viewer (a "CDN"/widget deploy).
            Charts load from a configured hosted archive (pmtiles="…" / catalog="…");
            there's no backend, no NOAA download, no in-browser baking, no Dev tools.
@@ -90,7 +135,7 @@ export const STYLE = `
            the status readout, the attribution and the load bar so only the chart shows. */
         :host([spec]) #tl-controls, :host([spec]) #tr-controls, :host([spec]) #br-controls,
         :host([spec]) #databox, :host([spec]) #noaa-attr, :host([spec]) #load-bar,
-        :host([spec]) #toasts { display:none; }
+        :host([spec]) #toasts, :host([spec]) #vg-rail { display:none; }
         .box-sel { position:absolute; z-index:5; border:2px solid var(--ui-accent); background:rgba(21,101,192,.12); pointer-events:none; }
         /* charts panel: action header + "your charts" cards */
         .charts-actions { display:flex; gap:8px; margin-bottom:10px; }
@@ -525,6 +570,9 @@ export const CHROME = `
       </div>
       <!-- Top-right holds the orientation compass only (mounted at runtime). -->
       <div id="tr-controls" class="ctrl-group"></div>
+      <!-- Mid-left viewing-group quick-toggle rail (VgRail mounts here at runtime;
+           shell mode only — stays empty, and hidden, in the widget viewer). -->
+      <div id="vg-rail"></div>
       <!-- Charts · scheme · settings relocated to a bottom-right cluster. -->
       <div id="br-controls" class="ctrl-group">
         <button class="rbtn" id="share-btn" type="button" title="Copy a link to this view" aria-label="Share view">

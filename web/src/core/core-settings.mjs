@@ -16,6 +16,26 @@
 import { UNIT_CATEGORIES, M_TO_FT } from "../lib/units.mjs";
 import { VIEWING_GROUP_SECTIONS, VG_BY_GROUP_ID } from "./viewing-groups.mjs";
 
+// Shared viewing-group read/write — the ONE toggle path, used by both the
+// Settings "Viewing groups" tab (below) and the on-map quick-toggle rail
+// (plugins/vg-rail.mjs). A group reads ON (shown) iff NONE of its vg ids are in
+// the mariner's deny-list; writing routes through app.applyMariner, which
+// restyles instantly and persists (localStorage + /api/settings → other screens).
+export function vgGroupOn(app, groupId) {
+  const vgs = VG_BY_GROUP_ID[groupId] || [];
+  const off = app._mariner.viewingGroupsOff || [];
+  return !vgs.some((v) => off.includes(v));
+}
+
+// Turning a group OFF adds its vg ids to the deny-list; ON removes them. Stored
+// sorted for a stable persisted value.
+export function vgSetGroupOn(app, groupId, on) {
+  const vgs = VG_BY_GROUP_ID[groupId] || [];
+  const off = new Set(app._mariner.viewingGroupsOff || []);
+  for (const v of vgs) on ? off.delete(v) : off.add(v);
+  return app.applyMariner({ viewingGroupsOff: [...off].sort((a, b) => a - b) });
+}
+
 // One shared read path for every core contribution. App-level flags live on the
 // shell; everything else is a mariner setting (pre-merged with DEFAULT_MARINER,
 // so the stored value is always present — `def` is only a belt-and-suspenders
@@ -29,12 +49,8 @@ function coreGet(app, key, def) {
   // CUMULATIVE, so the three mariner booleans collapse to one of three levels.
   if (key === "detailLevel") return app._mariner.displayOther ? "other" : (app._mariner.displayStandard ? "standard" : "base");
   // Synthetic viewing-group toggle (S-52 §14.5): "vg:<groupId>" reads ON (shown)
-  // iff NONE of the group's vg ids are in the mariner's deny-list. See viewing-groups.mjs.
-  if (key.startsWith("vg:")) {
-    const vgs = VG_BY_GROUP_ID[key.slice(3)] || [];
-    const off = app._mariner.viewingGroupsOff || [];
-    return !vgs.some((v) => off.includes(v));
-  }
+  // iff NONE of the group's vg ids are in the mariner's deny-list. See vgGroupOn.
+  if (key.startsWith("vg:")) return vgGroupOn(app, key.slice(3));
   const v = app._mariner[key];
   return v === undefined ? def : v;
 }
@@ -51,14 +67,8 @@ function coreSet(app, key, val) {
   // set; All adds the "other" category on top. This can never produce the
   // non-conformant Standard-off / Other-on state the old multi-select allowed.
   if (key === "detailLevel") return app.applyMariner({ displayBase: true, displayStandard: val !== "base", displayOther: val === "other" });
-  // Viewing-group toggle (S-52 §14.5): turning a group OFF adds its vg ids to the
-  // deny-list; ON removes them. Stored sorted for a stable persisted value.
-  if (key.startsWith("vg:")) {
-    const vgs = VG_BY_GROUP_ID[key.slice(3)] || [];
-    const off = new Set(app._mariner.viewingGroupsOff || []);
-    for (const v of vgs) val ? off.delete(v) : off.add(v);
-    return app.applyMariner({ viewingGroupsOff: [...off].sort((a, b) => a - b) });
-  }
+  // Viewing-group toggle (S-52 §14.5): the shared deny-list write. See vgSetGroupOn.
+  if (key.startsWith("vg:")) return vgSetGroupOn(app, key.slice(3), val);
   return app.applyMariner({ [key]: val });
 }
 

@@ -21,7 +21,8 @@ import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-p
 import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
-import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
+import { coreSettingsContributions, vgGroupOn, vgSetGroupOn } from "./core/core-settings.mjs"; // the app's own display settings as contributions + the shared viewing-group toggle path
+import { VgRail } from "./plugins/vg-rail.mjs"; // mid-left viewing-group quick-toggle pill rail
 import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
@@ -638,6 +639,21 @@ export class ChartPlotter extends HTMLElement {
       map,
       plotter: this._plotter,
     });
+
+    // Viewing-group quick toggles: the collapsible mid-left pill rail. Reads and
+    // writes through the SAME path as the Settings "Viewing groups" tab
+    // (vgGroupOn/vgSetGroupOn → applyMariner + server persist), so a pill tap
+    // restyles instantly and syncs to other screens; applyMariner calls
+    // _vgRail.refresh() on every viewingGroupsOff change (either writer). Shell
+    // chrome — not mounted in the hermetic widget viewer (it uses localStorage
+    // for its own fold state).
+    if (!this._widget) {
+      this._vgRail = new VgRail({
+        host: this.shadowRoot.getElementById("vg-rail"),
+        isOn: (id) => vgGroupOn(this, id),
+        setOn: (id, on) => vgSetGroupOn(this, id, on),
+      });
+    }
 
     // Developer tools (Advanced tab) — the first NON-core contributor to the
     // settings registry. A plain class (like the map controllers), built now that
@@ -1882,6 +1898,12 @@ export class ChartPlotter extends HTMLElement {
     // Switching units relabels + reconverts the depth fields (still in metres
     // under the hood), so redraw the settings panel.
     if ("depthUnit" in patch) this._settingsDlg && this._settingsDlg.refresh();
+    // Viewing-group deny-list changed (the quick-toggle rail OR the Settings tab —
+    // both write through here): re-sync both surfaces so they never disagree.
+    if ("viewingGroupsOff" in patch) {
+      this._vgRail && this._vgRail.refresh();
+      this._settingsDlg && this._settingsDlg.refresh();
+    }
   }
 
   // -- chrome / panels -----------------------------------------------------
