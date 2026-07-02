@@ -20,7 +20,7 @@ var version = "dev"
 
 // engineCommit is the tile57 (libtile57) checkout's commit this binary was built
 // against, stamped via -ldflags "-X main.engineCommit=..." (Makefile
-// ENGINE_COMMIT; handles both the vendored submodule and a TILE57=… override).
+// ENGINE_COMMIT; resolves the default sibling ../tile57 or a TILE57=… override).
 // Every bake records it beside the pack so the client can show which engine
 // commit produced the visible tiles. "unknown" for a bare `go build`.
 var engineCommit = "unknown"

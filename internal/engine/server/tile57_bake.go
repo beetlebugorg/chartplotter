@@ -62,7 +62,7 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 	// band (the engine double-counts a band's tiles across its parallel-gen + serial-
 	// write phases, which would otherwise rewind). A smooth GLOBAL bar needs the
 	// engine to drive bands in bake order (BandIndex is navigational rank, not bake
-	// order, so a global mapping leaps around) — deferred; see tile57/specs host §3.
+	// order, so a global mapping leaps around) — deferred; see ../tile57 spec host §3.
 	curBand, bandDoneMax := -1, 0
 	note := func(verb, noun, band string) string {
 		if band == "" {

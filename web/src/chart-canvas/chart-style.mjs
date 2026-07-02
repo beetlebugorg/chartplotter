@@ -209,7 +209,7 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
     // boundary, so a pack still shows WHERE it covers once SCAMIN has suppressed
     // every in-cell feature. Today the engine emits only M_NSYS (nav-system /
     // IALA A↔B) among the meta classes; the canonical M_COVR data-coverage edge
-    // is requested in tile57/specs/host-canonical-backend.md ("Still needed
+    // is requested in ../tile57 specs/host-canonical-backend.md ("Still needed
     // from the engine" §6 — coverage edge baked to z0 for every pack). _rawFilter
     // makes it bypass combineFilters AND the SCAMIN bucketing, so it draws
     // regardless of the showMetaBounds gate. Capped at z8 → a pure zoom-out

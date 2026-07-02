@@ -59,11 +59,10 @@ chartplotter is built from two repos that work as a pair:
   Go) — the application: the HTTP server and chart library, the `bake`/`serve`
   CLI, NMEA 0183 ingestion, and the `<chart-plotter>` web frontend.
 - **[`tile57`](https://github.com/beetlebugorg/tile57)** (Zig) — the chart
-  engine, vendored here as the `tile57/` **git submodule**. It builds
-  **libtile57**, a native static library that does *all* of the chart work:
-  S-57 decoding, S-101 portrayal, web-Mercator tiling, MLT/MVT encoding, and
-  generating the MapLibre style and client assets (sprites, color tables, line
-  styles, patterns).
+  engine. It builds **libtile57**, a native static library that does *all* of the
+  chart work: S-57 decoding, S-101 portrayal, web-Mercator tiling, MLT/MVT
+  encoding, and generating the MapLibre style and client assets (sprites, color
+  tables, line styles, patterns).
 
 **Naming, once:** *libtile57* is the native engine library, built from the
 *tile57* repo and statically linked into the Go binary via CGO. The Go code is
@@ -122,8 +121,7 @@ the surface to grow and change.
 
 chartplotter is **source-only**: there are no pre-built binaries to download, and
 `go install …@latest` does not work (the build links a native library and uses a
-local `replace` directive). You clone one repo — with submodules — and build
-locally.
+local `replace` directive). You clone two repos and build locally.
 
 **Why no binaries?** The build embeds the **IHO S-101 Portrayal and Feature
 Catalogues** into libtile57. The IHO publishes those catalogues in its own GitHub
@@ -137,37 +135,30 @@ redistributes it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 - **Go 1.26+**
 - **Zig 0.16** (builds libtile57, and serves as the C cross-toolchain)
-- **git** (clones the repo, the vendored engine, and the IHO catalogues)
+- **git** (the engine's submodules fetch the IHO catalogues)
 
 ### Recipe
 
-The tile57 engine is vendored as the `tile57/` **git submodule**, and tile57
-itself has nested submodules (the IHO catalogues) — so clone and update
-**recursively**:
+The two repos must sit **side by side**, with the engine directory named
+`tile57` — this repo's `go.mod` points at `../tile57/bindings/go`, and the
+Makefile builds `../tile57/zig-out/lib/libtile57.a` on demand. A symlink named
+`tile57` pointing at a checkout elsewhere also works.
 
 ```sh
-git clone --recurse-submodules https://github.com/beetlebugorg/chartplotter-go.git
-cd chartplotter-go
+git clone https://github.com/beetlebugorg/tile57.git
+cd tile57
+git submodule update --init --recursive   # fetches the IHO S-101 catalogues
+cd ..
+
+git clone https://github.com/beetlebugorg/chartplotter-go.git
+cd chartplotter
 make build          # zig-builds libtile57, then a CGO go build → bin/chartplotter
 bin/chartplotter version
-```
-
-Already have a clone (or forgot `--recurse-submodules`)? Populate the engine
-in place:
-
-```sh
-git submodule update --init --recursive
 ```
 
 `make build` is the ground truth for how the binary is produced (CGO enabled,
 statically linking libtile57); [CLAUDE.md](CLAUDE.md) and the
 [Makefile](Makefile) describe the build contract.
-
-**Updating the engine pin (maintenance):** the submodule is pinned to a tile57
-commit. `make bump-tile57` moves the pin to tile57's current `origin/main`
-(updating the nested IHO catalogue submodules too) and stages the new pointer —
-review and commit it. Equivalently:
-`git -C tile57 pull origin main && git add tile57`.
 
 ## 🚀 Get started
 
@@ -225,7 +216,7 @@ Run `chartplotter <command> --help` for the full flags.
 S-57 ENC cells (.000 + .001… updates)
    │
    ▼
-libtile57 — the native engine (Zig, the tile57/ submodule, linked via CGO)
+libtile57 — the native engine (Zig, ../tile57, linked via CGO)
    │  ISO 8211 decode → S-57 model → S-101 portrayal →
    │  web-Mercator tiling → MLT/MVT encode →
    │  MapLibre style + sprites/colors/line styles
@@ -265,30 +256,30 @@ bundle).
 
 ### Developing the engine
 
-Day-to-day cross-repo hacking on tile57 works two ways:
+The engine lives in the sibling `../tile57` checkout, and both halves of the build
+already point at it: `go.mod` replaces the Go binding at `../tile57/bindings/go`,
+and the Makefile defaults `TILE57 ?= ../tile57`. So day-to-day engine hacking needs
+no extra wiring — branch, edit, and commit inside `../tile57`, then `make build`
+picks the working tree up as usual.
 
-- **Inside the submodule.** `tile57/` is a full clone of the engine repo — check
-  out a branch there (`git -C tile57 switch main`), edit, commit, and push from
-  within it, and `make build` picks the working tree up as usual. When the
-  engine change lands, bump this repo's pin (`make bump-tile57`) and commit the
-  pointer.
-- **Against a sibling checkout.** If you keep the engine at `../tile57`, point
-  both halves of the build at it: a gitignored `go.work` redirects the Go
-  binding, and `TILE57=../tile57` redirects the Makefile's zig build:
+`go.work` is **optional** here: you only need it to build against a *different*
+engine checkout (not the `../tile57` sibling). To do that, redirect both halves —
+the Go binding via a gitignored `go.work`, and the Makefile's zig build via
+`TILE57=<path>`:
 
-  ```sh
-  cat > go.work <<'EOF'
-  go 1.26.0
+```sh
+cat > go.work <<'EOF'
+go 1.26.0
 
-  use .
+use .
 
-  replace github.com/beetlebugorg/tile57/bindings/go => ../tile57/bindings/go
-  EOF
-  make TILE57=../tile57 build
-  ```
+replace github.com/beetlebugorg/tile57/bindings/go => /path/to/other/tile57/bindings/go
+EOF
+make TILE57=/path/to/other/tile57 build
+```
 
-  `go.work`/`go.work.sum` are gitignored, so the override never leaks into a
-  commit; delete `go.work` to fall back to the vendored submodule.
+`go.work`/`go.work.sum` are gitignored, so the override never leaks into a commit;
+delete `go.work` to fall back to the `../tile57` sibling.
 
 CI runs `gofmt`, `go vet`, `go test`, and the CGO build on every push. Releases
 are **source-only** — a tag produces release notes and a source archive, never

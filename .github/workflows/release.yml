@@ -1,12 +1,12 @@
 name: Release
 
 # chartplotter is SOURCE-ONLY: no binaries are ever published. Built binaries
-# embed the IHO S-101 catalogues (fetched at build time via the vendored tile57
-# submodule's own nested submodules from the IHO's own repositories), and the
-# IHO's redistribution terms are unresolved — see THIRD-PARTY-NOTICES.md. So a
-# tag produces only a GitHub release with generated notes (GitHub attaches the
-# source archives automatically); users clone with --recurse-submodules and
-# build locally per the README.
+# embed the IHO S-101 catalogues (fetched at build time via the tile57 repo's
+# submodules from the IHO's own repositories), and the IHO's redistribution
+# terms are unresolved — see THIRD-PARTY-NOTICES.md. So a tag produces only a
+# GitHub release with generated notes (GitHub attaches the source archives
+# automatically); users clone tile57 + chartplotter and build locally per the
+# README.
 #
 # NOTE: unvalidated until a v* tag is pushed.
 
@@ -33,4 +33,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
             --generate-notes \
-            --notes "**Source-only release.** No binaries are published: built binaries embed the IHO S-101 catalogues, whose redistribution terms are unresolved (see THIRD-PARTY-NOTICES.md). Build from source per the README: \`git clone --recurse-submodules https://github.com/beetlebugorg/chartplotter-go.git\` (the [tile57](https://github.com/beetlebugorg/tile57) engine is a vendored submodule), then \`make build\` (Go 1.26+, Zig 0.16)."
+            --notes "**Source-only release.** No binaries are published: built binaries embed the IHO S-101 catalogues, whose redistribution terms are unresolved (see THIRD-PARTY-NOTICES.md). Build from source per the README: clone [tile57](https://github.com/beetlebugorg/tile57) as a sibling, init its submodules, then \`make build\` (Go 1.26+, Zig 0.16)."

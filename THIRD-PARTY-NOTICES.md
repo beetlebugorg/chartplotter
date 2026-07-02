@@ -9,9 +9,8 @@ informational; the upstream license text governs.
 ## libtile57 (the native chart engine)
 
 The binary statically links **libtile57**, the native S-57/S-101 chart engine
-built from the [tile57](https://github.com/beetlebugorg/tile57) repository,
-vendored here as the `tile57/` git submodule. tile57 is **MIT**-licensed,
-© 2026 Jeremy Collins.
+built from the sibling [tile57](https://github.com/beetlebugorg/tile57)
+repository. tile57 is **MIT**-licensed, © 2026 Jeremy Collins.
 
 tile57 carries its own third-party inventory in its
 [`THIRD_PARTY_LICENSES.md`](https://github.com/beetlebugorg/tile57/blob/main/THIRD_PARTY_LICENSES.md),
