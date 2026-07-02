@@ -398,6 +398,13 @@ export class ChartCanvas extends HTMLElement {
     if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
     if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
     if (map.touchPitch && map.touchPitch.disable) map.touchPitch.disable();
+    // Desktop rotation: Shift + left-drag "grab and twist" (free mode only).
+    // MapLibre's own dragRotate binds ctrl+left / right-button, but neither is
+    // reliable cross-platform: on macOS ctrl+click IS the OS secondary click (so
+    // ctrl+drag becomes a right-click/context-menu, never a rotate) and right-drag
+    // pops the menu; on Wayland ctrl/alt+drag is grabbed by the compositor for
+    // window moves. Shift is free everywhere, so bind our own explicit handler.
+    this._installFreeRotate(map);
 
     // Graphical bar scale, complementing the numeric 1:N readout in the app HUD.
     // Follows the mariner unit setting: metric (m/km) or imperial (ft/mi); MapLibre
@@ -851,6 +858,44 @@ export class ChartCanvas extends HTMLElement {
     return this._cameraMode;
   }
 
+  // Shift + left-drag rotation (free mode only), installed once at map init.
+  // "Grab and twist": bearing follows the angle the cursor sweeps around the map
+  // centre, so the point you grab tracks under the pointer. drag-pan is suspended
+  // for the twist so it doesn't also translate the map; the two-finger touch
+  // rotate is handled separately by MapLibre (enableRotation in free mode).
+  _installFreeRotate(map) {
+    if (!map || !map.getCanvasContainer) return;
+    const cvs = map.getCanvasContainer();
+    let active = false, startAngle = 0, startBearing = 0;
+    const centreAngle = (e) => {
+      const r = cvs.getBoundingClientRect();
+      return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
+    };
+    const onMove = (e) => {
+      if (!active) return;
+      map.setBearing(startBearing - (centreAngle(e) - startAngle)); // twist-follows-cursor
+      e.preventDefault();
+    };
+    const onUp = () => {
+      if (!active) return;
+      active = false;
+      if (map.dragPan && map.dragPan.enable) map.dragPan.enable();
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+    };
+    cvs.addEventListener("mousedown", (e) => {
+      if (this._cameraMode !== "free" || e.button !== 0 || !e.shiftKey) return;
+      active = true;
+      startAngle = centreAngle(e);
+      startBearing = map.getBearing();
+      if (map.dragPan && map.dragPan.disable) map.dragPan.disable();
+      e.preventDefault();
+      e.stopPropagation();
+      window.addEventListener("mousemove", onMove, true);
+      window.addEventListener("mouseup", onUp, true);
+    });
+  }
+
   // Enable/disable the user rotation gestures (touch two-finger rotate + desktop
   // drag-rotate) as one unit. Guarded: the handlers exist only after map init and
   // some builds gate them, so every call is optional-chained.
@@ -860,9 +905,14 @@ export class ChartCanvas extends HTMLElement {
     if (on) {
       if (map.touchZoomRotate && map.touchZoomRotate.enableRotation) map.touchZoomRotate.enableRotation();
       if (map.dragRotate && map.dragRotate.enable) map.dragRotate.enable();
+      // Shift+drag is MapLibre's box-zoom by default — it would fire on the SAME
+      // gesture as our Shift+drag rotate, so box-zoom yields to rotation in free
+      // mode (and comes back in the follow modes, where Shift+drag doesn't twist).
+      if (map.boxZoom && map.boxZoom.disable) map.boxZoom.disable();
     } else {
       if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
       if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
+      if (map.boxZoom && map.boxZoom.enable) map.boxZoom.enable();
     }
   }
 
