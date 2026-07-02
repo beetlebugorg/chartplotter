@@ -97,6 +97,26 @@ func (s *Server) lookupSet(name string) (tilesource.TileSource, bool) {
 	return s.sets.get(name)
 }
 
+// engineForSet reports the tile57 engine commit behind a set's tiles. A baked
+// pack answers with BAKE-TIME truth — the commit stamped into its .enginever
+// sidecar when it was baked ("pre-stamp" for packs baked before stamping) —
+// while a live set (--tile57 / dynamic, no pack path) generates tiles on demand
+// inside the RUNNING binary, so it answers with the build's own engine commit.
+func (s *Server) engineForSet(name string) string {
+	if p, ok := s.packPath(name); ok {
+		if b, err := os.ReadFile(p + engineVerExt); err == nil {
+			if v := strings.TrimSpace(string(b)); v != "" {
+				return v
+			}
+		}
+		return "pre-stamp"
+	}
+	if s.EngineCommit != "" {
+		return s.EngineCommit
+	}
+	return "unknown"
+}
+
 // serveTileJSON returns a minimal TileJSON 3.0 descriptor for a set, so a client
 // can configure its MapLibre source with `url: "/tiles/{set}.json"`.
 func (s *Server) serveTileJSON(w http.ResponseWriter, r *http.Request, name string) {
@@ -143,9 +163,12 @@ func (s *Server) serveTileJSON(w http.ResponseWriter, r *http.Request, name stri
 	}
 	w.Header().Set("Content-Type", jsonCT)
 	w.Header().Set("Cache-Control", "no-cache")
+	// `engine` is the tile57 engine commit behind this set's tiles (bake-time for
+	// packs, the running binary for live sets — see engineForSet). The client's
+	// attribution stamp reads it from this TileJSON, its one per-set metadata fetch.
 	fmt.Fprintf(w,
-		`{"tilejson":"3.0.0","scheme":"xyz","format":%q%s,"tiles":[%q],"minzoom":%d,"maxzoom":%d,"bounds":[%g,%g,%g,%g],"center":[%g,%g,%d]%s}`,
-		format, encodingJSON, tilesURL, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N,
+		`{"tilejson":"3.0.0","scheme":"xyz","format":%q%s,"engine":%q,"tiles":[%q],"minzoom":%d,"maxzoom":%d,"bounds":[%g,%g,%g,%g],"center":[%g,%g,%d]%s}`,
+		format, encodingJSON, s.engineForSet(name), tilesURL, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N,
 		(m.W+m.E)/2, (m.S+m.N)/2, m.MinZoom, scaminJSON,
 	)
 }

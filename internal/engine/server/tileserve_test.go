@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
 
 // writeTestPMTiles drops a prebaked archive with one tile at z/x/y into
@@ -160,6 +161,59 @@ func TestServeTileJSONAndList(t *testing.T) {
 	}
 	if len(list.Sets) != 1 || list.Sets[0] != "charts" {
 		t.Errorf("set list: %v", list.Sets)
+	}
+}
+
+// The TileJSON `engine` field distinguishes BAKE-TIME truth from the running
+// binary: a pack reports the engine commit stamped into its .enginever sidecar
+// when it was baked; a pack without the sidecar (baked before stamping) reports
+// "pre-stamp"; a LIVE set (no pack path — --tile57 / dynamic) generates tiles in
+// the running binary, so it reports the build's own EngineCommit.
+func TestServeTileJSONEngineStamp(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPMTiles(t, dir, "stamped", 8, 10, 20)
+	writeTestPMTiles(t, dir, "legacy", 8, 10, 20)
+	// Bake-time stamp for one pack only (what writeAndRegister/bakeBundleTile57 write).
+	stamped := filepath.Join(tilesDir(dir), "stamped.pmtiles")
+	if err := os.WriteFile(stamped+engineVerExt, []byte("abc123def\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(dir, dir, dir, false)
+	srv.EngineCommit = "fff999000" // the RUNNING binary's engine
+	// A live set: registered without a pack path (like --tile57 / dynamic).
+	live, err := tilesource.Open(filepath.Join(tilesDir(dir), "legacy.pmtiles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.RegisterTileSet("live57", live)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	engineOf := func(set string) string {
+		t.Helper()
+		resp, err := http.Get(ts.URL + "/tiles/" + set + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var tj struct {
+			Engine string `json:"engine"`
+		}
+		if err := json.Unmarshal(got, &tj); err != nil {
+			t.Fatalf("tilejson parse: %v (%s)", err, got)
+		}
+		return tj.Engine
+	}
+	if got := engineOf("stamped"); got != "abc123def" {
+		t.Errorf("stamped pack engine: got %q, want the bake-time sidecar commit", got)
+	}
+	if got := engineOf("legacy"); got != "pre-stamp" {
+		t.Errorf("legacy pack engine: got %q, want \"pre-stamp\"", got)
+	}
+	if got := engineOf("live57"); got != "fff999000" {
+		t.Errorf("live set engine: got %q, want the running binary's EngineCommit", got)
 	}
 }
 

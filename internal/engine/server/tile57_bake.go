@@ -119,6 +119,12 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 	if s.Version != "" {
 		_ = os.WriteFile(chart+bakeVerExt, []byte(s.Version), 0o644)
 	}
+	// Bake-time engine stamp (<pack>.enginever): the tile57 commit THIS binary links,
+	// recorded beside the pack so the set's TileJSON can report which engine baked
+	// these tiles even after the binary is upgraded. Best-effort, like .bakever.
+	if s.EngineCommit != "" {
+		_ = os.WriteFile(chart+engineVerExt, []byte(s.EngineCommit), 0o644)
+	}
 	if err := s.writeSetCells(set, cells); err != nil {
 		log.Printf("import %s: cell manifest %q: %v", jobID, set, err)
 	}

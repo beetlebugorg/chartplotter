@@ -660,6 +660,12 @@ func (s *Server) writeAndRegister(set string, pb *pmtiles.Builder, aux map[strin
 	if s.Version != "" {
 		_ = os.WriteFile(final+bakeVerExt, []byte(s.Version), 0o644)
 	}
+	// Bake-time engine stamp (<pack>.enginever): the tile57 commit THIS binary links,
+	// so the set's TileJSON reports which engine baked these tiles even after the
+	// binary is upgraded (engineForSet). Best-effort, like .bakever.
+	if s.EngineCommit != "" {
+		_ = os.WriteFile(final+engineVerExt, []byte(s.EngineCommit), 0o644)
+	}
 	// Companion aux.zip (best-effort — a missing aux archive only disables pictures
 	// in the pick report, it doesn't break tiles).
 	if len(aux) > 0 {

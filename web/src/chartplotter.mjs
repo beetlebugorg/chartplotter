@@ -17,6 +17,7 @@
 // listCharts/setScheme/setMariner and its `map` handle) plus the server chart API.
 
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
+import { engineStamp } from "./chart-canvas/chart-sources.mjs"; // engine-commit stamp for the attribution corner
 import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
 import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
@@ -995,6 +996,7 @@ export class ChartPlotter extends HTMLElement {
       this._setProgress(null);
       try { await this._renderInstalledSets(); } catch (e) { /* ignore */ }
       if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } }
+      this._updateEngineStamp(); // flushTiles re-fetched the set metas (a re-bake can change the engine)
       if (this._chartLib) this._chartLib.refresh();
     });
   }
@@ -1601,8 +1603,27 @@ export class ChartPlotter extends HTMLElement {
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
+    this._updateEngineStamp(); // fresh set metas → re-render the engine-commit stamp
     if (this._chartFinder) this._chartFinder.update(); // packs changed → recompute off-screen pointers
     return active;
+  }
+
+  // Engine-commit stamp beside the NOAA attribution: which tile57 engine commit
+  // baked the ACTIVE sets' visible tiles (each set's TileJSON `engine` — bake-time
+  // truth for packs, the running binary for live sets). One muted commit when every
+  // set agrees; a warn-tinted per-pack list with ✱ markers when they differ (a
+  // partially re-baked cache). Hidden when no set reports one (pmtiles mode, an
+  // older server) and in widget/spec modes (CSS).
+  _updateEngineStamp() {
+    const el = this.shadowRoot && this.shadowRoot.getElementById("engine-stamp");
+    if (!el) return;
+    const metas = (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [];
+    const stamp = engineStamp(metas);
+    el.hidden = !stamp;
+    if (!stamp) return;
+    el.textContent = stamp.text;
+    el.title = stamp.title;
+    el.classList.toggle("mixed", stamp.mixed);
   }
 
   // Wait for a server job (download/bake) to complete, surfacing progress through

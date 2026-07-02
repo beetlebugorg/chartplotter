@@ -23,6 +23,10 @@ TILE57="${TILE57:-$REPO/tile57}"
 case "$TILE57" in /*) ;; *) TILE57="$REPO/$TILE57" ;; esac
 OUT="${OUT:-$REPO/dist}"
 VERSION="${VERSION:-dev}"
+# Engine-commit stamp (see Makefile ENGINE_COMMIT): make passes it in; a direct
+# script run resolves it the same way. The `-e .git` guard keeps git from walking
+# up into THIS repo when the submodule dir is empty.
+ENGINE_COMMIT="${ENGINE_COMMIT:-$( { test -e "$TILE57/.git" && git -C "$TILE57" rev-parse --short=9 HEAD 2>/dev/null; } || echo unknown)}"
 # Space-separated "GOOS/GOARCH" list; override for a subset, e.g.
 # PLATFORMS="linux/arm64" scripts/xbuild-tile57.sh
 PLATFORMS="${PLATFORMS:-linux/amd64 linux/arm64 windows/amd64 windows/arm64}"
@@ -67,7 +71,7 @@ for plat in $PLATFORMS; do
   CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
     CC="zig cc -target $triple" CXX="zig c++ -target $triple" \
     go build -trimpath \
-      -ldflags "-s -w -X main.version=$VERSION" \
+      -ldflags "-s -w -X main.version=$VERSION -X main.engineCommit=$ENGINE_COMMIT" \
       -o "$OUT/chartplotter_${goos}_${goarch}${ext}" ./cmd/chartplotter
 done
 

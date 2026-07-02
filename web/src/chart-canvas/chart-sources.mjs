@@ -113,6 +113,47 @@ export function bandOfSet(name) {
   return "all";
 }
 
+// engineStamp — the compact ENGINE-COMMIT stamp for the attribution corner: which
+// tile57 engine commit baked the ACTIVE sets' visible tiles. Each set's TileJSON
+// carries `engine` (bake-time truth for packs, stamped when they were baked;
+// "pre-stamp" for packs baked before stamping; the RUNNING binary's commit for
+// live --tile57/dynamic sets). Returns null when no active set reports one
+// (pmtiles mode / an older server) — the stamp hides.
+//   • all sets agree → { text: "<commit>", mixed:false } — one muted commit.
+//   • they DIFFER (a partially re-baked cache — the case the stamp exists for) →
+//     { text: "d5:abc123 d7:def456✱", mixed:true }: one "label:commit" group per
+//     distinct engine, majority first, every minority group marked ✱; the caller
+//     also warn-tints the whole stamp via `mixed`.
+// `title` always carries the full per-set detail for the tooltip.
+export function engineStamp(metas) {
+  const seen = [];
+  for (const m of metas || []) {
+    if (!m || typeof m.engine !== "string" || !m.engine) continue;
+    // Pack label: the set minus its band suffix ("noaa-d5-coastal" → "noaa-d5"),
+    // minus the noaa- provider prefix ("d5") — short enough for the corner.
+    const name = m.name || "";
+    const band = bandOfSet(name);
+    let pack = name;
+    if (band !== "all" && pack.endsWith("-" + band)) pack = pack.slice(0, -(band.length + 1));
+    seen.push({ set: name, label: pack.replace(/^noaa-/, "") || pack, engine: m.engine });
+  }
+  if (!seen.length) return null;
+  const title = "Engine commit that baked each active set:\n" + seen.map((e) => `${e.set}: ${e.engine}`).join("\n");
+  const groups = new Map(); // engine → { engine, labels:[…], count }
+  for (const e of seen) {
+    let g = groups.get(e.engine);
+    if (!g) groups.set(e.engine, (g = { engine: e.engine, labels: [], count: 0 }));
+    if (!g.labels.includes(e.label)) g.labels.push(e.label);
+    g.count++;
+  }
+  if (groups.size === 1) return { text: seen[0].engine, mixed: false, title };
+  // Mixed bake: majority group first (ties broken by commit for stability); every
+  // group after the majority carries the ✱ disagreement marker.
+  const ordered = [...groups.values()].sort((a, b) => b.count - a.count || (a.engine < b.engine ? -1 : 1));
+  const text = ordered.map((g, i) => `${g.labels.join(",")}:${g.engine}${i ? "✱" : ""}`).join(" ");
+  return { text, mixed: true, title: title + "\n✱ differs from the majority engine — a partial re-bake" };
+}
+
 export class ChartSources {
   constructor({ assets, getMap, rebuild, getPxPitch }) {
     this.assets = assets;     // resolved assets base URL (trailing "/")
@@ -179,7 +220,7 @@ export class ChartSources {
     // GENERATION (?g=<mtime>) — re-fetching this JSON (it's no-cache) after a re-bake
     // yields a new URL, so pointing the source at it bypasses every tile cache by
     // content. Falls back to the plain URL if the server omits it.
-    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name), encoding: "mvt" };
+    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name), encoding: "mvt", engine: "" };
     try {
       const base = new URL(this.assets, location.href).href;
       const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
@@ -190,6 +231,11 @@ export class ChartSources {
         if (Array.isArray(tj.scamin)) meta.scamin = tj.scamin; // SCAMIN manifest → per-set bucket layers (no runtime collect)
         if (Array.isArray(tj.tiles) && tj.tiles[0]) meta.tiles = tj.tiles[0];
         if (tj.encoding === "mlt") meta.encoding = "mlt"; // MLT set → source `encoding` hint (native MLT decode)
+        // The tile57 engine commit behind this set's tiles: bake-time for packs
+        // ("pre-stamp" for pre-stamping bakes), the running binary for live sets.
+        // Drives the attribution engine stamp (engineStamp below); "" = an older
+        // server that doesn't report it (the stamp hides).
+        if (typeof tj.engine === "string") meta.engine = tj.engine;
       }
     } catch (e) { /* keep defaults */ }
     return meta;
