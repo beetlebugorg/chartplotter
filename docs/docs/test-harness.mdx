@@ -1,0 +1,55 @@
+---
+id: test-harness
+title: Test harness (symbol compliance)
+sidebar_position: 5
+---
+
+import TestHarness from '@site/src/components/TestHarness';
+
+# ENC symbology review harness
+
+Pick a scenario and see our **live render** — drawn by our S-101 portrayal engine,
+scaled to the cell's compilation scale — **beside the official IHO reference plot**. The
+per-scenario mariner display settings are shown above our render, so it's an
+apples-to-apples diff against the spec's own figures.
+
+<TestHarness />
+
+:::tip
+**⤢ Fullscreen** gives you the full three-pane view for serious side-by-side
+comparison. **◀ / ▶** (or **↑ / ↓**, or click a row) step through scenarios — both our
+render and the reference plot advance together.
+:::
+
+## What's in it
+
+Two suites, both rendered chrome-free in the read-only `spec` widget:
+
+- **Chart 1** — the IHO S-52 Presentation Library's reference symbol sheet (ECDIS
+  "Chart 1"), a single synthetic ENC that exercises **every symbol, line style, area
+  fill, and text instruction** the portrayal catalogue can produce, laid out in
+  labelled panels. Each panel maps to a reference plot in the Presentation Library
+  (Part I §16, doc pages 238–253). The colour-test panels come in **Day** and **Dusk** —
+  the same tiles, restyled instantly, because colours are stored as S-101 colour
+  *names*, not fixed RGB.
+- **S-64** — the IHO ENC test dataset's cells that have a comparable reference screen
+  plot: the §3.1 Base / Standard / Other display-category sheets (every object class)
+  and the §3.2 invalid-object display. The dataset's behavioural/procedural tests
+  (power-up, overlap, scale-minimum, settings, non-official data) have nothing to diff a
+  render against, and the §5/6/7 *detection* cases are out of scope — so they're omitted.
+
+## Reproducing it
+
+The harness is the interactive face of a repeatable, headless test. The same scenario
+manifest drives the spec-diff PNGs (`make preslib-chart1`, `make s64-pages`). To build
+the tiles + reference crops this page needs — with the S-52 PresLib digital-files zip
+and the S-64 ENC test-dataset zip in `testdata/` — run:
+
+```bash
+make docs-harness   # builds Chart 1 + S-64 tiles + widget assets + ref-plot crops into docs/static/
+make docs           # build / serve the Docusaurus site
+```
+
+Until those assets exist, the page shows a short build-it hint in place of the live
+widget. The generated tiles and PDF-derived reference crops are git-ignored (large, and
+derived from copyrighted source material).
