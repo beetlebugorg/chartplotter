@@ -86,10 +86,10 @@ to a Raspberry Pi on a boat.
 - **Adjust the chart live.** Switch Day, Dusk, and Night palettes and toggle
   mariner settings — depth shading, soundings, contours, safety-depth danger
   highlighting — and the map restyles at once, without regenerating tiles.
-- **Builds to one self-contained binary.** The S-101 catalogue is compiled into
-  libtile57 and the web frontend is embedded in the Go binary, so the
-  `chartplotter` you build runs from a single file — you supply only the ENC
-  cells. (You build that binary yourself; see the release policy below.)
+- **Ships as one self-contained binary.** The S-101 catalogue is compiled into
+  libtile57 and the web frontend is embedded in the Go binary, so `chartplotter`
+  runs from a single file — you supply only the ENC cells. Download a per-platform
+  build from the releases page, or build it yourself (see below).
 - **Runs a server.** The built-in HTTP server downloads NOAA cells, bakes tiles
   in the background, and serves the frontend with byte-range support.
 - **Live position and AIS (early).** Point a **NMEA 0183** feed at the server
@@ -117,19 +117,22 @@ of the chart — **instrument gauges**, custom overlays, routes, and more — wi
 forking the core. NMEA 0183 own-ship and AIS are the first slice of that; expect
 the surface to grow and change.
 
-## 📦 Build from source
+## 📦 Install & build
 
-chartplotter is **source-only**: there are no pre-built binaries to download, and
-`go install …@latest` does not work (the build links a native library and uses a
-local `replace` directive). You clone two repos and build locally.
+**Download a binary.** Every tagged release publishes a self-contained
+`chartplotter` for **linux, macOS, and windows** (amd64 + arm64) on the
+[releases page](https://github.com/beetlebugorg/chartplotter-go/releases): unpack
+the archive for your platform and run it — the S-101 catalogue and web frontend
+are baked in, so you supply only the ENC cells.
 
-**Why no binaries?** The build embeds the **IHO S-101 Portrayal and Feature
-Catalogues** into libtile57. The IHO publishes those catalogues in its own GitHub
-repositories, but with **no declared license**, so the right to *redistribute*
-them (and therefore any binary that embeds them) is unresolved. The build fetches
-the catalogues via git submodules **directly from IHO's own repositories**, so
-each user obtains the IHO material from the IHO — this project never
-redistributes it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Those published binaries embed the **IHO S-101 Portrayal and Feature Catalogues**
+(compiled into libtile57 from the IHO's own GitHub repositories, which declare no
+license); the project distributes them as an accepted position — see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+**Build it yourself.** `go install …@latest` does not work — the build links a
+native library and uses a local `replace` directive — so you clone two repos and
+build locally.
 
 ### Requirements
 
@@ -281,9 +284,10 @@ make TILE57=/path/to/other/tile57 build
 `go.work`/`go.work.sum` are gitignored, so the override never leaks into a commit;
 delete `go.work` to fall back to the `../tile57` sibling.
 
-CI runs `gofmt`, `go vet`, `go test`, and the CGO build on every push. Releases
-are **source-only** — a tag produces release notes and a source archive, never
-binaries (see the release policy above).
+CI runs `gofmt`, `go vet`, `go test`, and the CGO build on every push. Pushing a
+`v*` tag cross-builds the per-platform binaries (linux + windows via `zig cc`,
+macOS natively on a Mac runner) and publishes them, with generated notes, through
+GoReleaser — see [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## 📚 Documentation
 
@@ -302,7 +306,8 @@ Noto Sans (OFL 1.1), OpenBridge icons (CC BY 4.0), and a GSHHG coastline basemap
 (LGPL). NOAA ENC charts are U.S. public domain and **not for navigation**.
 
 The **IHO S-101 Portrayal & Feature Catalogues** are © IHO and are *not* in
-either repository; the build fetches them from the IHO's own repositories via
-git submodules and compiles them into your locally-built binary. Their
-redistribution terms are unresolved, which is why no binaries are published. See
+either repository; the build fetches them from the IHO's own repositories via git
+submodules and compiles them into libtile57 — and therefore into both
+locally-built and published binaries. The IHO declares no license; the project
+distributes the resulting binaries as an accepted position. See
 [**THIRD-PARTY-NOTICES.md**](THIRD-PARTY-NOTICES.md) for the full inventory.

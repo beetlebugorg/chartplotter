@@ -6,19 +6,24 @@ sidebar_position: 2
 
 # Installation
 
-chartplotter is **source-only**: you build it yourself from two repositories.
-There are no pre-built binaries, and `go install …@latest` does not work — the
-build statically links a native library and uses a local `replace` directive.
+The quickest path is to **download a release**: every tagged release publishes a
+self-contained `chartplotter` for **linux, macOS, and windows** (amd64 + arm64)
+on the [releases page](https://github.com/beetlebugorg/chartplotter-go/releases).
+Unpack the archive for your platform and run it — the web frontend and the S-101
+catalogue are compiled in, so you supply only the ENC cells. To build it
+yourself instead, follow [Build from source](#build-from-source) below.
+`go install …@latest` does **not** work — the build statically links a native
+library and uses a local `replace` directive.
 
-:::info Why no binaries?
+:::info About the embedded IHO catalogues
 
 The build embeds the **IHO S-101 Portrayal and Feature Catalogues** into the
 chart engine. The IHO publishes those catalogues in its own GitHub repositories
-with **no declared license**, so the right to *redistribute* them — and any
-binary that embeds them — is unresolved. Instead, the build fetches the
-catalogues via git submodules **directly from the IHO's own repositories**, so
-you obtain the IHO material from the IHO and the project never redistributes
-it.
+with **no declared license**. The build fetches them via git submodules directly
+from the IHO's own repositories, and the resulting binaries — both what you build
+locally and what the project publishes on the releases page — embed that IHO
+material. The project distributes those binaries as an accepted position; see
+[THIRD-PARTY-NOTICES.md](https://github.com/beetlebugorg/chartplotter-go/blob/main/THIRD-PARTY-NOTICES.md).
 
 :::
 

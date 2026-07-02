@@ -87,9 +87,11 @@ it contains originate from the IHO S-57 Object and Attribute Catalogue.
 
 ## IHO S-101 Portrayal Catalogue and Feature Catalogue
 
-> **License status: unresolved.** Treat this section as a known open item, not a
-> cleared right to redistribute. It is the reason this project is
-> **source-only** and publishes **no binaries**.
+> **License status: undeclared.** The IHO publishes these catalogues with no
+> license statement, so redistribution rights are not formally cleared — treat
+> this as a known open item. The project nonetheless **distributes binaries that
+> embed the catalogue** as an accepted position; if the IHO clarifies or objects
+> to its terms, this section and that decision must be revisited.
 
 chartplotter portrays charts using the **IHO S-101 Portrayal Catalogue** and
 **Feature Catalogue** (the symbols, color profiles, drawing rules, and feature
@@ -102,7 +104,8 @@ i.e. all rights reserved):
 - Portrayal Catalogue — <https://github.com/iho-ohi/S-101_Portrayal-Catalogue>
 - Feature Catalogue — <https://github.com/iho-ohi/S-101-Documentation-and-FC>
 
-How the project handles them — **fetch at build, never redistribute**:
+How the project handles them — **fetch from the IHO at build, embed, and
+distribute the built binaries**:
 
 - **Not in either repository.** Neither this repo nor
   [tile57](https://github.com/beetlebugorg/tile57) commits any IHO catalogue
@@ -111,14 +114,15 @@ How the project handles them — **fetch at build, never redistribute**:
   `vendor/S-101-Documentation-and-FC`), so
   `git submodule update --init --recursive` fetches the material **directly
   from the IHO's own repositories** onto the builder's machine.
-- **Embedded in locally-built binaries.** Building libtile57 compiles the
-  fetched catalogue into the library, and every `chartplotter` binary links
-  libtile57 — so **any built binary embeds IHO material**.
-- **No binaries are distributed.** Because the redistribution rights are
-  unresolved, the project publishes no pre-built binaries and no `_s101`
-  variants; releases are source-only. Each user obtains the IHO material from
-  the IHO at build time.
+- **Embedded in every binary.** Building libtile57 compiles the fetched
+  catalogue into the library, and every `chartplotter` binary links libtile57 —
+  so **any built binary embeds IHO material**, whether built locally or on CI.
+- **Distributed in published binaries.** Tagged releases publish per-platform
+  `chartplotter` binaries built on CI, where the runner obtains the catalogue
+  from the IHO's own repositories at build time. Those released binaries
+  therefore embed IHO material, and the project distributes them as an accepted
+  position despite the undeclared license.
 
 The IHO copyright and reproduction policy is at <https://iho.int>. If the IHO
-clarifies the catalogues' license terms, this section — and the source-only
-release policy — should be revisited.
+clarifies (or objects to) the catalogues' redistribution terms, this section —
+and the decision to distribute binaries — must be revisited.
