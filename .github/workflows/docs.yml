@@ -7,7 +7,8 @@ on:
       - "docs/**"
       - ".github/workflows/docs.yml"
       # The live demo is built from the app + bake pipeline and deployed under the
-      # docs site, so redeploy when any of those change too.
+      # docs site, so redeploy when any of those change too — including a bump of
+      # the vendored tile57 engine pin.
       - "web/**"
       - "cmd/**"
       - "internal/**"
@@ -16,6 +17,8 @@ on:
       - "Makefile"
       - "go.mod"
       - "go.sum"
+      - "tile57"
+      - ".gitmodules"
   workflow_dispatch:
 
 permissions:
@@ -29,31 +32,23 @@ concurrency:
   cancel-in-progress: true
 
 # The demo + Chart 1 tiles are baked by the chartplotter binary, which links the
-# native libtile57 engine — so this build needs the same sibling tile57 checkout
-# (with submodules: they fetch the IHO S-101 catalogues from the IHO's own repos)
-# and Zig toolchain as ci.yml. The repo is checked out into a subdirectory so
-# tile57 can sit beside it, matching go.mod's ../tile57/bindings/go replace.
+# native libtile57 engine from the vendored tile57/ submodule — one recursive
+# checkout fetches it plus its nested IHO S-101 catalogue submodules (from the
+# IHO's own repos); the Zig toolchain matches ci.yml.
 # NOTE: correct-by-construction but unvalidated until pushed to GitHub.
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout chartplotter
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
-          path: chartplotter
-      - name: Checkout tile57 (libtile57 engine)
-        uses: actions/checkout@v7
-        with:
-          repository: beetlebugorg/tile57
-          path: tile57
           submodules: recursive
 
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
           cache: true
-          cache-dependency-path: chartplotter/go.sum
+          cache-dependency-path: go.sum
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -68,7 +63,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/demo-cells
-          key: demo-cells-${{ hashFiles('chartplotter/scripts/fetch-demo-cells.sh', 'chartplotter/Makefile') }}
+          key: demo-cells-${{ hashFiles('scripts/fetch-demo-cells.sh', 'Makefile') }}
 
       # Cache the S-52 PresLib "ECDIS Chart 1" source cells (the IHO draft zip is
       # fetched once and extracted), keyed on the fetch script so a change re-pulls.
@@ -76,16 +71,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/preslib-cells
-          key: preslib-cells-${{ hashFiles('chartplotter/scripts/fetch-preslib-cells.sh') }}
+          key: preslib-cells-${{ hashFiles('scripts/fetch-preslib-cells.sh') }}
 
       # Build the read-only widget demo bundle into docs/static/demo so Docusaurus
       # copies it into the published site at /chartplotter/demo/. The S-101
-      # catalogue is embedded in libtile57 (fetched via the tile57 submodules
-      # above), so no catalogue clone or --s101 override is needed. The bundle is
-      # pure static files — no backend.
+      # catalogue is embedded in libtile57 (fetched via the recursive submodule
+      # checkout above), so no catalogue clone or --s101 override is needed. The
+      # bundle is pure static files — no backend.
       - name: Build live demo bundle (docs/static/demo)
         run: |
-          make -C chartplotter demo \
+          make demo \
             DEMO_CACHE="$RUNNER_TEMP/demo-cells" \
             DEMO_OUT="docs/static/demo"
 
@@ -95,7 +90,7 @@ jobs:
       # from the IHO PresLib draft (fetched once).
       - name: Build live Chart 1 tiles (docs/static/chart1)
         run: |
-          make -C chartplotter demo-chart1 \
+          make demo-chart1 \
             PRESLIB_CACHE="$RUNNER_TEMP/preslib-cells" \
             DEMO_CHART1_OUT="docs/static/chart1"
 
@@ -103,17 +98,17 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: chartplotter/docs/package-lock.json
+          cache-dependency-path: docs/package-lock.json
       - name: Install
-        working-directory: chartplotter/docs
+        working-directory: docs
         run: npm ci
       - name: Build
-        working-directory: chartplotter/docs
+        working-directory: docs
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: chartplotter/docs/build
+          path: docs/build
 
   deploy:
     needs: build
