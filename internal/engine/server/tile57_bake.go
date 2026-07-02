@@ -10,7 +10,6 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/auxfiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
@@ -21,7 +20,7 @@ import (
 // sidecar + cell manifest — so a tile57-baked pack is as complete in the chart
 // library as a Go-baked one. Returns true once it has handled the bake (success OR
 // a recorded error); false only if there's nothing to do.
-func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, applyUpdates bool) bool {
+func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, applyUpdates bool) bool {
 	if len(cells) == 0 {
 		return false
 	}

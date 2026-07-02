@@ -20,7 +20,7 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	"github.com/beetlebugorg/chartplotter/internal/engine/pmtiles"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // Server-side import/bake. POST /api/import takes ENC input — an uploaded
@@ -173,11 +173,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 // from its CATALOG identity (longest common cell-name prefix), falling back to the
 // cells' shared prefix when there's no catalogue, then to "upload". Namespaced
 // under the "user" provider and uniquified against existing packs.
-func (s *Server) deriveUploadSet(cat *s57.Catalog, cells map[string]baker.CellData) string {
-	id := ""
-	if cat != nil {
-		id = catalogPackIdentity(cat)
-	}
+func (s *Server) deriveUploadSet(cat []tile57.CatalogEntry, cells map[string]baker.CellData) string {
+	id := catalogPackIdentity(cat)
 	if id == "" {
 		stems := make([]string, 0, len(cells))
 		for n := range cells {
@@ -282,7 +279,7 @@ func (s *Server) runImportFetch(jobID string, req importFetchReq) {
 
 	var cells map[string]baker.CellData
 	var aux map[string][]byte
-	var cat *s57.Catalog
+	var cat []tile57.CatalogEntry
 
 	if req.ZipURL != "" {
 		// Bulk: stream the one zip (byte progress), then extract + cache its cells.
@@ -446,7 +443,7 @@ func fetchURLProgress(raw string, onProgress func(done, total int)) ([]byte, err
 // importInputs gathers the cells to bake: from an uploaded zip (raw zip body or a
 // multipart "file" field) when one is present, else from the ENC_ROOT cache
 // (optionally narrowed by ?cells=A,B,C).
-func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
+func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[string][]byte, []tile57.CatalogEntry, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		f, _, err := r.FormFile("file")
@@ -476,7 +473,7 @@ func (s *Server) importInputs(r *http.Request) (map[string]baker.CellData, map[s
 // cache before baking, so the ORIGINAL cell files are always kept (re-bakeable
 // after a tile-cache wipe) rather than discarded after an in-memory bake. Passes
 // the (cells, aux, err) triple straight through.
-func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, err error) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
+func (s *Server) cacheExtracted(cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, err error) (map[string]baker.CellData, map[string][]byte, []tile57.CatalogEntry, error) {
 	if err == nil && len(cells) > 0 {
 		s.cacheCells(cells)
 	}
@@ -528,7 +525,7 @@ func (s *Server) cachedCellData(csv string) map[string]baker.CellData {
 }
 
 // runImport bakes cells into <cache>/tiles/<set>.pmtiles and registers the set.
-func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
+func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, overzoom, applyUpdates bool) {
 	s.bakeAndRegister(jobID, set, cells, aux, cat, overzoom, applyUpdates)
 }
 
@@ -539,7 +536,7 @@ func (s *Server) runImport(jobID, set string, cells map[string]baker.CellData, a
 // no-data hatch holes). Each band that produced tiles is written + registered as its
 // own set; the district aux.zip is written once (with the first band). Progress and
 // the terminal state are recorded on the job.
-func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat *s57.Catalog, overzoom, applyUpdates bool) {
+func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, overzoom, applyUpdates bool) {
 	fail := func(err error) {
 		log.Printf("import %s (%s): %v", jobID, set, err)
 		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
@@ -766,7 +763,7 @@ func (s *Server) importEvents(w http.ResponseWriter, r *http.Request) {
 // extractZipCells reads an exchange-set zip held in memory, grouping each cell's
 // base (.000) + updates (.001…) by cell stem and collecting referenced aux files.
 // It mirrors the CLI's collectCells/addZipCells for an in-memory archive.
-func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte, *s57.Catalog, error) {
+func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte, []tile57.CatalogEntry, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("not a valid zip: %w", err)
@@ -833,10 +830,10 @@ func extractZipCells(data []byte) (map[string]baker.CellData, map[string][]byte,
 		}
 		cells[stem+".000"] = baker.CellData{Base: a.base, Updates: a.updates}
 	}
-	var cat *s57.Catalog
+	var cat []tile57.CatalogEntry
 	if catalogBytes != nil {
-		if c, err := s57.ParseCatalog(catalogBytes); err == nil {
-			cat = c
+		if entries, err := tile57.CatalogEntries(catalogBytes); err == nil {
+			cat = entries
 		} else {
 			log.Printf("import: CATALOG.031 parse failed (ignored): %v", err)
 		}
