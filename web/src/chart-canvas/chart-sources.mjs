@@ -179,7 +179,7 @@ export class ChartSources {
     // GENERATION (?g=<mtime>) — re-fetching this JSON (it's no-cache) after a re-bake
     // yields a new URL, so pointing the source at it bypasses every tile cache by
     // content. Falls back to the plain URL if the server omits it.
-    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name) };
+    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name), encoding: "mvt" };
     try {
       const base = new URL(this.assets, location.href).href;
       const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
@@ -189,6 +189,7 @@ export class ChartSources {
         if (Array.isArray(tj.bounds) && tj.bounds.length === 4) meta.bounds = tj.bounds; // [w,s,e,n] — host zoom-cap
         if (Array.isArray(tj.scamin)) meta.scamin = tj.scamin; // SCAMIN manifest → per-set bucket layers (no runtime collect)
         if (Array.isArray(tj.tiles) && tj.tiles[0]) meta.tiles = tj.tiles[0];
+        if (tj.encoding === "mlt") meta.encoding = "mlt"; // MLT set → source `encoding` hint (native MLT decode)
       }
     } catch (e) { /* keep defaults */ }
     return meta;
@@ -507,6 +508,12 @@ export class ChartSources {
       if (!src || !arc || src.maxzoom === undefined) continue;
       src.maxzoom = arc.maxZoom;
       if (slug === "all") src.minzoom = arc.minZoom;
+      // Tile-encoding hint, applied IN PLACE like the zooms: archives load after
+      // the initial style build, so an MLT archive (the tile57 default bake
+      // format) must switch the live source's decoder too — the worker reads
+      // source.encoding per tile load, and the refresh() that follows re-requests
+      // every tile. sourcesDict bakes the same hint into full style rebuilds.
+      src.encoding = arc.tileType === "mlt" ? "mlt" : "mvt";
     }
   }
 
@@ -590,16 +597,26 @@ export class ChartSources {
         // tiles), so it's cheap. Per-SCAMIN bucket layers gate the exact display scale.
         minzoom: 0,
         maxzoom: (archive && archive.maxZoom) || band.bake,
+        // MLT archives (the tile57 default bake format) hint MapLibre's native MLT
+        // decoder; MVT (the MapLibre default) adds nothing. Bytes serve verbatim.
+        ...(archive && archive.tileType === "mlt" ? { encoding: "mlt" } : {}),
       };
     }
     if (this._server) {
-      // One source per active pack, MVT pulled live from /tiles/{set}. minzoom/
-      // maxzoom are the set's REAL range (from its TileJSON) so MapLibre overzooms
-      // the deepest baked tile instead of requesting empty tiles past the bake. With
-      // no packs we add no chart sources (a vector source with an empty `tiles` array
-      // makes MapLibre crash); the no-data hatch shows through.
+      // One source per active pack, tiles pulled live from /tiles/{set} in the
+      // set's stored encoding (the TileJSON `encoding` hint selects the decoder).
+      // minzoom/maxzoom are the set's REAL range (from its TileJSON) so MapLibre
+      // overzooms the deepest baked tile instead of requesting empty tiles past the
+      // bake. With no packs we add no chart sources (a vector source with an empty
+      // `tiles` array makes MapLibre crash); the no-data hatch shows through.
       for (const set of this._serverSets) {
-        sources["chart-" + set.name] = { type: "vector", tiles: [set.tiles || this._serverTilesUrl(set.name)], minzoom: set.min, maxzoom: set.max };
+        sources["chart-" + set.name] = {
+          type: "vector",
+          tiles: [set.tiles || this._serverTilesUrl(set.name)],
+          minzoom: set.min,
+          maxzoom: set.max,
+          ...(set.encoding === "mlt" ? { encoding: "mlt" } : {}),
+        };
       }
     }
     return sources;

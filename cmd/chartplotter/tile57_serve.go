@@ -23,11 +23,15 @@ func (t tile57Source) Meta() tilesource.TileMeta {
 		MinZoom: m.MinZoom, MaxZoom: m.MaxZoom,
 		W: m.W, S: m.S, E: m.E, N: m.N,
 		Gzipped: m.Gzipped, Scamin: m.Scamin,
+		TileType: m.TileType,
 	}
 }
 
 // registerTile57Set opens the ENC inputs under root with libtile57 and registers
-// a live tile set (MVT generated on demand from the cells, no prebake) under name.
+// a live tile set (tiles generated on demand from the cells, no prebake) under
+// name. The live set gets the same format knob as the bake: it generates the
+// engine-default encoding (MLT), and the set's TileJSON/style carry the matching
+// `encoding` hint from Meta.TileType — the wire format IS the generated format.
 // libtile57's streaming Open reads an ENC_ROOT dir / single .000 from disk on
 // demand; a .zip or other input is first staged into a temp ENC dir (kept for the
 // source's lifetime). rulesDir is unused — the engine uses its embedded catalogue.
@@ -62,10 +66,18 @@ func registerTile57Set(srv *server.Server, name, root, rulesDir string) error {
 	if err != nil {
 		return err
 	}
+	// Live generation follows the bake default (MLT). Cell-backed charts open
+	// generating MVT for embedder back-compat, so opt the live set in explicitly;
+	// TILE57_LIVE_FORMAT=mvt keeps the old MVT wire format if ever needed.
+	format := tile57.FormatDefault
+	if os.Getenv("TILE57_LIVE_FORMAT") == "mvt" {
+		format = tile57.FormatMVT
+	}
+	src.SetTileFormat(format)
 	srv.RegisterTileSet(name, tile57Source{src})
 	info := src.Info()
-	fmt.Printf("tile57: live set %q (libtile57 %s, zoom %d..%d)\n",
-		name, tile57.Version(), info.MinZoom, info.MaxZoom)
+	fmt.Printf("tile57: live set %q (libtile57 %s, zoom %d..%d, %s tiles)\n",
+		name, tile57.Version(), info.MinZoom, info.MaxZoom, info.TileType.Encoding())
 	return nil
 }
 

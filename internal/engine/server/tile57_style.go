@@ -186,7 +186,7 @@ func (s *Server) serveTile57StyleDiff(w http.ResponseWriter, r *http.Request) {
 	// per-mariner from the colortables, so scheme changes ride the diff too).
 	ctx := s.styleCtxForSet(r, toQ, set)
 	fromM, toM := marinerFromQuery(fromQ), marinerFromQuery(toQ)
-	tmpl, err := tile57.StyleTemplate(toM.Scheme, ctx.tiles, ctx.sprite, ctx.glyphs, ctx.minZoom, ctx.maxZoom)
+	tmpl, err := tile57.StyleTemplate(toM.Scheme, ctx.tiles, ctx.sprite, ctx.glyphs, ctx.minZoom, ctx.maxZoom, ctx.encoding)
 	if err != nil {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -205,14 +205,18 @@ func (s *Server) serveTile57StyleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 // tile57StyleCtx is the per-request, mariner-INDEPENDENT style input (URLs, zoom
-// span, SCAMIN manifest, latitude, band filter). Shared by /api/style.json and
-// /api/style-diff so the two styles a diff compares differ ONLY in the mariner.
+// span, SCAMIN manifest, latitude, band filter, tile encoding). Shared by
+// /api/style.json and /api/style-diff so the two styles a diff compares differ
+// ONLY in the mariner.
 type tile57StyleCtx struct {
 	tiles, sprite, glyphs string
 	minZoom, maxZoom      uint32
 	scamin                []int32
 	lat                   float64
 	bands                 []int32
+	// The set's tile encoding (FormatMLT for an MLT-default bake) — the engine
+	// emits `"encoding":"mlt"` on the chart source so maplibre-gl decodes MLT.
+	encoding tile57.TileFormat
 }
 
 // resolveStyleSet maps a requested ?set to a real registered set for the engine
@@ -280,6 +284,7 @@ func (s *Server) styleCtxForSet(r *http.Request, q url.Values, set string) tile5
 		meta := src.Meta()
 		ctx.minZoom = uint32(meta.MinZoom) // the set's real tile floor — MapLibre requests nothing below the source minzoom
 		ctx.maxZoom = uint32(meta.MaxZoom) // live ENC = z18 (berthing); don't clamp to the engine's z16 default
+		ctx.encoding = tile57.EncodingFormat(meta.TileType)
 		if len(ctx.scamin) == 0 {
 			ctx.scamin = make([]int32, len(meta.Scamin))
 			for i, v := range meta.Scamin {
@@ -302,7 +307,7 @@ func (s *Server) styleCtxForSet(r *http.Request, q url.Values, set string) tile5
 // source), and maxzoom 0 would clamp to the engine's z16 default and drop the finest
 // band's z17–18 (MapLibre overzooms for free).
 func (c tile57StyleCtx) build(m tile57.Mariner) ([]byte, error) {
-	return tile57.Style(m.Scheme, c.tiles, c.sprite, c.glyphs, c.minZoom, c.maxZoom, m, c.bands, c.scamin, c.lat)
+	return tile57.Style(m.Scheme, c.tiles, c.sprite, c.glyphs, c.minZoom, c.maxZoom, c.encoding, m, c.bands, c.scamin, c.lat)
 }
 
 func orDefault(v, def string) string {

@@ -69,9 +69,17 @@ func (s *Server) serveTileSet(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent) // blank/missing tile
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.mapbox-vector-tile")
+	// Tiles serve BYTES-VERBATIM in the set's stored encoding (no transcode).
+	// MLT has no registered media type, so an .mvt URL carrying MLT bytes goes
+	// out as application/octet-stream — MapLibre keys its decoder off the source
+	// `encoding` hint (style/TileJSON), never the content type.
+	if src.Meta().TileType == "mlt" {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	} else {
+		w.Header().Set("Content-Type", "application/vnd.mapbox-vector-tile")
+	}
 	w.Header().Set("Cache-Control", "no-cache")
-	// The backend returns decompressed MVT; gzip on the wire when the client asks,
+	// The backend returns decompressed tiles; gzip on the wire when the client asks,
 	// to claw back the size advantage prebaked archives store the tiles with.
 	if acceptsGzip(r) {
 		w.Header().Set("Content-Encoding", "gzip")
@@ -125,11 +133,19 @@ func (s *Server) serveTileJSON(w http.ResponseWriter, r *http.Request, name stri
 		}
 		scaminJSON = `,"scamin":[` + strings.Join(parts, ",") + `]`
 	}
+	// Tile-encoding hint: an MLT set (the tile57 default bake format) advertises
+	// `"encoding":"mlt"` — maplibre-gl (>=5.12) propagates the TileJSON field onto
+	// the vector source and switches its worker to the native MLT decoder. MVT
+	// sets emit nothing extra (the MapLibre default), keeping their TileJSON as-is.
+	format, encodingJSON := "pbf", ""
+	if m.TileType == "mlt" {
+		format, encodingJSON = "mlt", `,"encoding":"mlt"`
+	}
 	w.Header().Set("Content-Type", jsonCT)
 	w.Header().Set("Cache-Control", "no-cache")
 	fmt.Fprintf(w,
-		`{"tilejson":"3.0.0","scheme":"xyz","format":"pbf","tiles":[%q],"minzoom":%d,"maxzoom":%d,"bounds":[%g,%g,%g,%g],"center":[%g,%g,%d]%s}`,
-		tilesURL, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N,
+		`{"tilejson":"3.0.0","scheme":"xyz","format":%q%s,"tiles":[%q],"minzoom":%d,"maxzoom":%d,"bounds":[%g,%g,%g,%g],"center":[%g,%g,%d]%s}`,
+		format, encodingJSON, tilesURL, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N,
 		(m.W+m.E)/2, (m.S+m.N)/2, m.MinZoom, scaminJSON,
 	)
 }

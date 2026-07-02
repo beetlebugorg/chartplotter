@@ -35,6 +35,11 @@ type TileMeta struct {
 	W, S, E, N       float64  // lon/lat bounds (degrees)
 	Gzipped          bool     // tile bodies are gzip-compressed
 	Scamin           []uint32 // distinct SCAMIN denominators present (from JSON metadata)
+	// TileType is the stored tile encoding: "mvt" or "mlt" (a tile57 MLT-default
+	// bake); "" for an unrecognised header type. Serving stays bytes-verbatim
+	// either way — this only drives the TileJSON/style `encoding` hint (and the
+	// tile content type) so maplibre-gl picks the matching decoder.
+	TileType string
 }
 
 // Open opens a .pmtiles file for reading. Close releases the file handle.
@@ -92,13 +97,14 @@ func NewReader(src io.ReaderAt, size int64) (*Reader, error) {
 		dataOff: dataOff,
 		tileGz:  h[98] == compressionGzip,
 		meta: TileMeta{
-			MinZoom: h[100],
-			MaxZoom: h[101],
-			W:       float64(int32(binary.LittleEndian.Uint32(h[102:106]))) / 1e7,
-			S:       float64(int32(binary.LittleEndian.Uint32(h[106:110]))) / 1e7,
-			E:       float64(int32(binary.LittleEndian.Uint32(h[110:114]))) / 1e7,
-			N:       float64(int32(binary.LittleEndian.Uint32(h[114:118]))) / 1e7,
-			Gzipped: h[98] == compressionGzip,
+			MinZoom:  h[100],
+			MaxZoom:  h[101],
+			W:        float64(int32(binary.LittleEndian.Uint32(h[102:106]))) / 1e7,
+			S:        float64(int32(binary.LittleEndian.Uint32(h[106:110]))) / 1e7,
+			E:        float64(int32(binary.LittleEndian.Uint32(h[110:114]))) / 1e7,
+			N:        float64(int32(binary.LittleEndian.Uint32(h[114:118]))) / 1e7,
+			Gzipped:  h[98] == compressionGzip,
+			TileType: tileTypeName(h[99]),
 		},
 	}
 	// JSON metadata (between metaOff and leafOff): parse the SCAMIN manifest so the

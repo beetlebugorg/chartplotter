@@ -12,16 +12,29 @@ import (
 
 // bakeTile57Bundle bakes an on-disk ENC input (a .000 cell or a directory of cells)
 // into a self-contained chart bundle under outDir via the native libtile57 engine.
-// maxZoom caps the highest baked zoom (0 = no cap). progress nil uses the lib's
-// built-in console progress. Returns the cell count + bbox (west,south,east,north).
-func bakeTile57Bundle(input, outDir string, maxZoom int, progress func(tile57.BakeProgress)) (int, [4]float64, error) {
+// maxZoom caps the highest baked zoom (0 = no cap). format selects the tile
+// encoding ("mlt"/"mvt"; "" = the engine default, MLT). progress nil uses the
+// lib's built-in console progress. Returns the cell count + bbox (w,s,e,n).
+func bakeTile57Bundle(input, outDir string, maxZoom int, format string, progress func(tile57.BakeProgress)) (int, [4]float64, error) {
 	// MaxZoom 24 = the ABI's "no clamp" (bake each cell's full native band); MaxZoom 0
 	// would clamp every band down to z0 — an EMPTY archive. Only narrow on --max-zoom.
-	opts := tile57.BakeOpts{MaxZoom: 24}
+	opts := tile57.BakeOpts{MaxZoom: 24, Format: bakeFormat(format)}
 	if maxZoom > 0 && maxZoom < 24 {
 		opts.MaxZoom = uint8(maxZoom)
 	}
 	return tile57.BakeBundle(input, outDir, opts, progress)
+}
+
+// bakeFormat maps the --format flag to the engine's bake format. "" = the engine
+// default (MLT); "mvt" keeps the legacy Mapbox Vector Tile output.
+func bakeFormat(format string) tile57.TileFormat {
+	switch format {
+	case "mvt":
+		return tile57.FormatMVT
+	case "mlt":
+		return tile57.FormatMLT
+	}
+	return tile57.FormatDefault
 }
 
 // runTile57Bands bakes the ENC inputs into one gap-clipped PMTiles archive PER
@@ -95,7 +108,7 @@ func (c bakeCmd) runTile57Bands() error {
 		if c.MaxZoom > 0 && uint32(c.MaxZoom) < bb.Max {
 			maxZ = uint8(c.MaxZoom)
 		}
-		data, err := tile57.BakePmtiles(acc.cells, tile57.BakeOpts{MinZoom: minZ, MaxZoom: maxZ}, nil)
+		data, err := tile57.BakePmtiles(acc.cells, tile57.BakeOpts{MinZoom: minZ, MaxZoom: maxZ, Format: bakeFormat(c.Format)}, nil)
 		if err != nil {
 			// A band whose cells cover nothing at its zooms produces no tiles; skip it
 			// (the same as the Go baker emitting no archive for an empty band).

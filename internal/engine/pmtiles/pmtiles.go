@@ -23,10 +23,23 @@ import (
 
 const (
 	tileTypeMVT     uint8 = 1
+	tileTypeMLT     uint8 = 6 // tile57's MLT (MapLibre Tile) header type
 	compressionNone uint8 = 1
 	compressionGzip uint8 = 2
 	leafSize              = 4096
 )
+
+// tileTypeName maps a PMTiles header tile-type byte to the vector-source
+// `encoding` vocabulary ("mvt"/"mlt"; "" for non-vector/unknown types).
+func tileTypeName(t uint8) string {
+	switch t {
+	case tileTypeMVT:
+		return "mvt"
+	case tileTypeMLT:
+		return "mlt"
+	}
+	return ""
+}
 
 // ZxyToTileID maps (z,x,y) to a PMTiles tile id: tiles below this zoom plus the
 // Hilbert-curve index within the zoom. Matches the spec's zxy_to_tileid.

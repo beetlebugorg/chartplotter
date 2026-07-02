@@ -24,6 +24,7 @@ type bakeCmd struct {
 	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
 	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
 	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
+	Format   string   `enum:"mlt,mvt," default:"" help:"Tile encoding: mlt (MapLibre Tile, the engine default) or mvt (Mapbox Vector Tile, for consumers without an MLT decoder). Empty = the engine default (mlt)."`
 	S101     string   `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Requires --s101-fc."`
 	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
 	Tile57   bool     `name:"tile57" help:"(requires a -tags tile57 build) Bake with the native libtile57 engine into a self-contained chart BUNDLE (tiles/chart.pmtiles + assets/style-*.json + manifest.json) under -o (treated as a directory). Honors --max-zoom; --bands/--manifest/--overzoom don't apply (the bundle is zoom-banded per cell and self-describing)."`
@@ -58,7 +59,7 @@ func (c bakeCmd) runTile57Bundle() error {
 		return err
 	}
 	// nil progress → the lib's built-in per-band console progress (good CLI output).
-	n, bbox, err := bakeTile57Bundle(input, outDir, c.MaxZoom, nil)
+	n, bbox, err := bakeTile57Bundle(input, outDir, c.MaxZoom, c.Format, nil)
 	if err != nil {
 		return err
 	}

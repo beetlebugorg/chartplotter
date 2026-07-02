@@ -162,3 +162,59 @@ func TestServeTileJSONAndList(t *testing.T) {
 		t.Errorf("set list: %v", list.Sets)
 	}
 }
+
+// An MLT archive (the tile57 default bake format; PMTiles header tile_type 6)
+// must advertise `"encoding":"mlt"` in its TileJSON — the hint maplibre-gl
+// propagates onto the vector source to select its native MLT decoder — and its
+// tiles (bytes-verbatim, no transcode) go out as application/octet-stream since
+// MLT has no registered media type.
+func TestServeTileSetMLT(t *testing.T) {
+	dir := t.TempDir()
+	body := writeTestPMTiles(t, dir, "mltcharts", 8, 10, 20)
+	// The Go pmtiles Builder always writes tile_type MVT (it only bakes legacy
+	// archives); flip header byte 99 to 6 (MLT) — what a tile57 MLT bake stores.
+	path := filepath.Join(tilesDir(dir), "mltcharts.pmtiles")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[99] = 6
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(New(dir, dir, dir, false))
+	defer ts.Close()
+
+	resp, _ := http.Get(ts.URL + "/tiles/mltcharts.json")
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var tj struct {
+		Format   string `json:"format"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(got, &tj); err != nil {
+		t.Fatalf("tilejson parse: %v (%s)", err, got)
+	}
+	if tj.Encoding != "mlt" || tj.Format != "mlt" {
+		t.Errorf(`tilejson encoding/format: got %q/%q, want "mlt"/"mlt" (%s)`, tj.Encoding, tj.Format, got)
+	}
+
+	req, _ := http.NewRequest("GET", ts.URL+"/tiles/mltcharts/8/10/20.mvt", nil)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tile, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("tile status: got %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("MLT tile content-type: got %q, want application/octet-stream", ct)
+	}
+	if !bytes.Equal(tile, body) {
+		t.Errorf("MLT tile body must serve verbatim: got %q, want %q", tile, body)
+	}
+}
