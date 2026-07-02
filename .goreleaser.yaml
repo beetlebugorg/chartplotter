@@ -1,0 +1,90 @@
+# GoReleaser configuration for chartplotter — https://goreleaser.com
+#
+# chartplotter is a CGO build that statically links the native libtile57 engine,
+# so GoReleaser CANNOT compile it itself (it cannot CGO-cross-compile). The
+# release binaries are cross-built AHEAD of this step and dropped into dist/
+# under the exact names the prebuilt `path` below expects:
+#   - linux + windows, amd64/arm64 — `make xbuild` (zig cc) → scripts/xbuild-tile57.sh
+#   - darwin amd64/arm64           — built natively on a macOS runner
+# GoReleaser only PACKAGES those binaries into archives + checksums; it does not
+# build them. See .github/workflows/release.yml for the three-job matrix.
+#
+# `builder: prebuilt` is a GoReleaser PRO feature, so the release workflow runs
+# the goreleaser-pro distribution with a GORELEASER_KEY. main.version and
+# main.engineCommit are ALREADY stamped into the prebuilt binaries via ldflags
+# (scripts/xbuild-tile57.sh + the macOS job), so there is NO ldflag injection
+# here — the prebuilt builder cannot re-inject ldflags, and must not, or the
+# already-stamped version/engine-commit would be lost.
+#
+# NOTE: correct-by-construction but UNVALIDATED until a real v* tag is pushed —
+# the prebuilt builder needs the CI-built binaries present in dist/ first.
+#
+# TODO(signing): the retired config signed + notarized the macOS binaries with
+# quill (scripts/quill-sign.sh, since deleted). That hook is deliberately NOT
+# re-added here. Re-introduce macOS notarization before advertising the darwin
+# builds as Gatekeeper-clean.
+version: 2
+
+project_name: chartplotter
+
+# GoReleaser writes its own output to dist-release/ so that `--clean` (which wipes
+# the configured dist dir) does NOT delete the prebuilt binaries the CI jobs place
+# in dist/. The prebuilt `path` below reads from dist/; the two must stay separate.
+dist: dist-release
+
+builds:
+  - id: chartplotter
+    builder: prebuilt
+    binary: chartplotter
+    # prebuilt has NO goos/goarch defaults — the full 6-target matrix is explicit.
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+    prebuilt:
+      # MUST match scripts/xbuild-tile57.sh output (chartplotter_${goos}_${goarch}${ext},
+      # ext=.exe for windows) and the darwin names the macOS job emits.
+      path: dist/chartplotter_{{ .Os }}_{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}
+
+archives:
+  - id: chartplotter
+    ids: [chartplotter]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - THIRD-PARTY-NOTICES.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  # Repo is auto-detected from the git remote, so this targets whatever repo the
+  # tag was pushed to (no owner/name mismatch to maintain).
+  draft: false
+  prerelease: auto
