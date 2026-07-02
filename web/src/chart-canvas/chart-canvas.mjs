@@ -174,6 +174,7 @@ export class ChartCanvas extends HTMLElement {
     })();
     this._engineScaminValues = []; // SCAMIN ladder (from the set tilejson) — the crossing boundaries
     this._scaminBandLast = -1;     // last-applied band index (count of ladder values below curDenom)
+    this._scaminApplyT = 0;        // settle timer for the deferred gate apply (see _scaminUpdate)
     this._scaminLayersCache = null; // cached ids of the gated chart layers (filter carries the scamin clause)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
@@ -410,7 +411,19 @@ export class ChartCanvas extends HTMLElement {
     // it lives in this element's shadow root, out of reach of the app's :host([spec]) CSS.
     if (document.querySelector("chart-plotter-app[spec], chart-plotter[spec]")) this._scaleEl.style.display = "none";
     map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
-    map.on("move", () => { this._renderScalebar(); this._scaminUpdate(); });
+    map.on("move", () => this._renderScalebar());
+    // SCAMIN filter-gate: apply ladder crossings only once the camera SETTLES.
+    // Each setFilter on a gated layer forces MapLibre to re-parse every loaded
+    // tile of that layer's source in the workers (bucket rebuild + symbol
+    // re-placement + GPU re-upload) — measured at ~68 setFilter calls and 4
+    // full source reloads per crossing on a multi-set install, ~110ms of
+    // main-thread time each, several times per zoom gesture. Firing that
+    // mid-gesture was the "jumpy zoom" + symbols-blink storm; at settle it is
+    // ONE coalesced apply, and MapLibre keeps the old buckets on screen while
+    // the reload happens. movestart cancels a pending apply so a resumed
+    // gesture never reloads underneath itself.
+    map.on("movestart", () => clearTimeout(this._scaminApplyT));
+    map.on("moveend", () => this._scaminApplySettled(120));
 
     // Surface MapLibre's own errors (style/source/tile/WebGL) to the console —
     // otherwise a failed texture upload is silent (renders black).
@@ -1374,11 +1387,31 @@ export class ChartCanvas extends HTMLElement {
     }
   }
 
+  // Schedule the settle-deferred gate apply `delay` ms out. If the style is still
+  // mid-load when the timer fires (tiles streaming right after a zoom gesture),
+  // _scaminUpdate's isStyleLoaded guard would silently drop the crossing — so poll
+  // until the style is ready. movestart clears the timer (gesture resumed).
+  _scaminApplySettled(delay) {
+    clearTimeout(this._scaminApplyT);
+    this._scaminApplyT = setTimeout(() => {
+      const m = this._map;
+      if (!this._scaminGate || !this._engineMode || !m) return;
+      if (!m.isStyleLoaded || !m.isStyleLoaded()) { this._scaminApplySettled(250); return; }
+      this._scaminUpdate();
+    }, delay);
+  }
+
   // Re-inject the current display-scale denominator (curDenom) into every gated chart
   // layer's SCAMIN clause, but ONLY when curDenom has crossed a SCAMIN-ladder boundary
-  // since the last apply (≤19 boundaries across a full zoom sweep — usually 0 per move).
-  // curDenom is the physical display-scale denominator (zoom + lat + calibrated pxPitch —
-  // the same scale the HUD readout shows). This is the client half of scamin-layers.md.
+  // since the last apply (≤19 boundaries across a full zoom sweep). curDenom is the
+  // physical display-scale denominator (zoom + lat + calibrated pxPitch — the same scale
+  // the HUD readout shows). This is the client half of scamin-layers.md.
+  //
+  // COST: each setFilter here makes MapLibre reload the layer's whole SOURCE (worker
+  // re-parse of every loaded tile + symbol re-placement), so this must only run from
+  // the settle-deferred moveend hook or the force paths (boot/restyle/rebuild) — never
+  // per move frame. With N active sets there are ~17×N gated layers but still one
+  // reload per source; the setFilter loop itself is main-thread (validation skipped).
   _scaminUpdate(force) {
     // Only in engine mode, and only once the style is loaded (getStyle() is undefined
     // and setFilter throws before that — the `move`/`load` hooks can fire mid-load).
@@ -1397,7 +1430,7 @@ export class ChartCanvas extends HTMLElement {
       const f = map.getFilter(id);
       if (!f) continue;
       const nf = JSON.parse(JSON.stringify(f));
-      if (setScaminDenom(nf, denom)) { try { map.setFilter(id, nf); } catch { /* ignore */ } }
+      if (setScaminDenom(nf, denom)) { try { map.setFilter(id, nf, { validate: false }); } catch { /* ignore */ } }
     }
   }
 
