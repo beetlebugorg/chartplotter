@@ -360,6 +360,14 @@ export class ChartCanvas extends HTMLElement {
       // Attribution bottom-left so the bottom-right corner is free for the app's
       // scale/zoom readout.
       attributionControl: { position: "bottom-left" },
+      // Keep tiles across the full zoom range (z3.5–18 = 15 levels) so zooming in
+      // and out finds previously-rendered tiles already in cache rather than
+      // re-requesting them. The default (5) is too narrow for a chart plotter where
+      // users routinely swing between overview and approach scales.
+      maxTileCacheZoomLevels: 20,
+      // Tile fade-in duration. The default 300ms makes pan feel laggy as new tiles
+      // fade in slowly; 100ms is still smooth but noticeably snappier.
+      fadeDuration: 100,
     });
     this._map = map;
     this.map = map; // public handle
