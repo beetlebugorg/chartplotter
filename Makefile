@@ -82,10 +82,13 @@ tile57-lib: ## Force-rebuild $(TILE57)/zig-out/lib/libtile57.a (the native engin
 	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH"; exit 1; }
 	cd "$(TILE57)" && zig build
 
-# Move the tile57 submodule pin to the engine's current origin/main (nested IHO
-# catalogue submodules follow). Stages the new pointer; review + commit it.
+# Move the tile57 submodule pin to the engine's current origin/main, then sync
+# its nested IHO catalogue submodules to the pins THAT commit records (a plain
+# `--remote --recursive` would instead drift the catalogues to their own mains).
+# Stages the new pointer; review + commit it.
 bump-tile57: ## Bump the tile57 submodule pin to the engine's origin/main and stage the pointer
-	git submodule update --remote --recursive tile57
+	git submodule update --remote tile57
+	git -C tile57 submodule update --init --recursive
 	git add tile57
 	@echo "tile57 pinned to $$(git -C tile57 rev-parse --short HEAD) — commit the staged pointer"
 
