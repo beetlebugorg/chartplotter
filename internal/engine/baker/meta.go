@@ -1,3 +1,9 @@
+// Package baker holds the S-57 cell metadata helpers shared by the server chart
+// library, the cell index, and the tile57 bake paths — per-cell header metadata
+// via the native engine (tile57_chart_cells) and the compilation-scale →
+// navigational-band mapping (bands.go) — plus the CellData staging type. It does
+// not parse S-57 itself: libtile57 is the sole S-57 reader and tile/portrayal
+// engine; the Go side only stages .000/.NNN bytes for it.
 package baker
 
 import (
@@ -9,6 +15,14 @@ import (
 
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
+
+// CellData is a base cell (.000) plus its sequential update files (.001, .002, …)
+// keyed by filename. Updates are applied in order to bring the cell to its current
+// edition.
+type CellData struct {
+	Base    []byte
+	Updates map[string][]byte
+}
 
 // CellMeta is the per-cell metadata extracted at import time for the chart
 // library to display: the cell's S-57 header identity (DSID/DSPM after the
