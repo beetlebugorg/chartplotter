@@ -16,7 +16,7 @@ require golang.org/x/sync v0.21.0 // indirect
 
 require (
 	github.com/adrianmo/go-nmea v1.3.0 // indirect
-	github.com/beetlebugorg/chartplotter-native/bindings/go v0.0.0
+	github.com/beetlebugorg/tile57/bindings/go v0.0.0
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -31,4 +31,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/beetlebugorg/chartplotter-native/bindings/go => ../tile57/bindings/go
+replace github.com/beetlebugorg/tile57/bindings/go => ../tile57/bindings/go

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tile57 "github.com/beetlebugorg/chartplotter-native/bindings/go"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 

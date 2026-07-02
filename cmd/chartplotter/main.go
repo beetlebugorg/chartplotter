@@ -12,7 +12,7 @@ import (
 
 	"github.com/alecthomas/kong"
 
-	tile57 "github.com/beetlebugorg/chartplotter-native/bindings/go"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".

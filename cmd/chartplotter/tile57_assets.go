@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	tile57 "github.com/beetlebugorg/chartplotter-native/bindings/go"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // emitS101Assets writes the client asset files (colortables/linestyles/sprite/
