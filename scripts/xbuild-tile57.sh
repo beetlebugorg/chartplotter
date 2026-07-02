@@ -17,9 +17,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# Engine checkout: the vendored tile57/ submodule by default; a relative override
+# Engine checkout: the sibling ../tile57 by default; a relative override
 # (e.g. TILE57=../tile57 from make) is resolved against the repo root.
-TILE57="${TILE57:-$REPO/tile57}"
+TILE57="${TILE57:-$REPO/../tile57}"
 case "$TILE57" in /*) ;; *) TILE57="$REPO/$TILE57" ;; esac
 OUT="${OUT:-$REPO/dist}"
 VERSION="${VERSION:-dev}"
@@ -32,7 +32,7 @@ ENGINE_COMMIT="${ENGINE_COMMIT:-$( { test -e "$TILE57/.git" && git -C "$TILE57" 
 PLATFORMS="${PLATFORMS:-linux/amd64 linux/arm64 windows/amd64 windows/arm64}"
 
 command -v zig >/dev/null 2>&1 || { echo "zig (0.16) not on PATH"; exit 1; }
-[ -f "$TILE57/include/tile57.h" ] || { echo "missing $TILE57 — populate the engine submodule: git submodule update --init --recursive"; exit 1; }
+[ -f "$TILE57/include/tile57.h" ] || { echo "missing $TILE57 — clone github.com/beetlebugorg/tile57 as a sibling directory named tile57 (or set TILE57=<path>)"; exit 1; }
 
 # GOOS/GOARCH → Zig target triple.
 zig_triple() {

@@ -27,7 +27,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 tile57-lib bump-tile57 serve-tile57 xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib serve-tile57 xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -63,21 +63,22 @@ NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
 
 # --- native libtile57 engine (the SOLE tile/portrayal/asset engine) -------------
-# TILE57 points at the engine repo — by default the vendored tile57/ git submodule
-# (populate with `git submodule update --init --recursive`). Override to build
-# against another checkout, e.g. `make TILE57=../tile57 build` for the sibling
-# cross-repo dev flow (pair it with a gitignored go.work so the Go binding follows;
-# see README.md "Developing the engine"). Its static lib is built on demand with
-# Zig 0.16.
-TILE57     ?= tile57
+# TILE57 points at the engine repo, by default a sibling ../tile57 checkout (clone
+# github.com/beetlebugorg/tile57 there, with --recurse-submodules for its nested
+# IHO catalogues). go.mod's replace targets ../tile57/bindings/go to match. Override
+# to build against another checkout, e.g. `make TILE57=../tile57-experiment build`
+# (pair it with a gitignored go.work so the Go binding follows; see README.md
+# "Developing the engine"). Its static lib is built on demand with Zig 0.16.
+TILE57     ?= ../tile57
 TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
 
 # Engine-commit stamp: the tile57 checkout's HEAD, linked into the binary beside
 # main.version so every bake can record WHICH engine produced its tiles (and the
-# client can flag a mixed-engine cache). Resolves for the vendored submodule AND
-# a TILE57=… override; "unknown" when git can't answer (unpopulated submodule,
-# tarball checkout). The `test -e .git` guard matters: git -C into an EMPTY
-# submodule dir would walk up and report THIS repo's HEAD instead of failing.
+# client can flag a mixed-engine cache). Resolves for the default sibling ../tile57
+# AND a TILE57=… override; "unknown" when git can't answer (no sibling checkout,
+# tarball checkout). The `test -e .git` guard matters: git -C into a missing dir
+# would walk up and report THIS repo's HEAD instead of failing (a sibling clone's
+# .git is a real directory, so it resolves cleanly).
 ENGINE_COMMIT ?= $(shell test -e "$(TILE57)/.git" && git -C "$(TILE57)" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
 LDFLAGS += -X main.engineCommit=$(ENGINE_COMMIT)
 
@@ -91,22 +92,12 @@ tile57-lib: ## Force-rebuild $(TILE57)/zig-out/lib/libtile57.a (the native engin
 	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH"; exit 1; }
 	cd "$(TILE57)" && zig build
 
-# Move the tile57 submodule pin to the engine's current origin/main, then sync
-# its nested IHO catalogue submodules to the pins THAT commit records (a plain
-# `--remote --recursive` would instead drift the catalogues to their own mains).
-# Stages the new pointer; review + commit it.
-bump-tile57: ## Bump the tile57 submodule pin to the engine's origin/main and stage the pointer
-	git submodule update --remote tile57
-	git -C tile57 submodule update --init --recursive
-	git add tile57
-	@echo "tile57 pinned to $$(git -C tile57 rev-parse --short HEAD) — commit the staged pointer"
-
 # Build bin/chartplotter. libtile57 is the sole engine, so this is a CGO build that
 # statically links the native lib; the S-101 catalogue lives inside libtile57, so
-# there is no separate sync/embed step (web/ is still embedded). Needs the tile57
-# submodule populated + Zig 0.16.
-build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; needs the tile57 submodule + Zig 0.16)
-	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — populate the engine submodule: git submodule update --init --recursive"; exit 1; }
+# there is no separate sync/embed step (web/ is still embedded). Needs the sibling
+# ../tile57 checkout + Zig 0.16.
+build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; needs the sibling ../tile57 checkout + Zig 0.16)
+	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — clone github.com/beetlebugorg/tile57 as a sibling directory named tile57 (or set TILE57=<path>)"; exit 1; }
 	@# Force the link: go's build-cache action ID does NOT hash external static-lib
 	@# content, so with an existing up-to-date-looking $(BIN) `go build` silently
 	@# skips the relink and a fresh libtile57.a never reaches the output.
@@ -139,7 +130,7 @@ serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a
 # proven to cross-link from any host with Zig alone. darwin is built NATIVELY on a
 # macOS CI runner: with GOOS=darwin, Go's crypto/x509 links Apple frameworks
 # (Security/CoreFoundation) that Zig doesn't bundle. The S-101 catalogue lives in
-# libtile57, so there's no embed step. Needs the tile57 submodule + Zig 0.16.
+# libtile57, so there's no embed step. Needs the sibling ../tile57 checkout + Zig 0.16.
 # Outputs dist/chartplotter_<os>_<arch>[.exe].
 xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
 	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh

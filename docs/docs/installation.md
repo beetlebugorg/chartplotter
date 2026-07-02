@@ -6,10 +6,9 @@ sidebar_position: 2
 
 # Installation
 
-chartplotter is **source-only**: you build it yourself from one repository (with
-its vendored engine submodule). There are no pre-built binaries, and
-`go install …@latest` does not work — the build statically links a native
-library and uses a local `replace` directive.
+chartplotter is **source-only**: you build it yourself from two repositories.
+There are no pre-built binaries, and `go install …@latest` does not work — the
+build statically links a native library and uses a local `replace` directive.
 
 :::info Why no binaries?
 
@@ -27,34 +26,33 @@ it.
 
 - **Go 1.26 or newer.**
 - **Zig 0.16** — builds the native `libtile57` chart engine.
-- **git** — clones the repo, the vendored engine, and the IHO catalogue
-  submodules.
+- **git** — clones the repos and the engine's IHO catalogue submodules.
 
 ## Build from source
 
-chartplotter is two repos that build as one:
+chartplotter is two repos that must sit **side by side**:
 
 - `chartplotter` (Go) — the app: server, CLI, web frontend.
 - `tile57` (Zig) — the chart engine, built as the `libtile57` static library.
-  It is **vendored as the `tile57/` git submodule**, pinned to a known-good
-  engine commit, and it has nested submodules of its own (the IHO catalogues).
+  It has nested submodules of its own (the IHO catalogues).
 
-So one **recursive** clone fetches everything:
-
-```sh
-# 1. The app, the engine, and the IHO catalogues, in one clone.
-git clone --recurse-submodules https://github.com/beetlebugorg/chartplotter-go.git
-cd chartplotter-go
-
-# 2. Build: zig-builds libtile57, then a CGO go build.
-make build
-```
-
-If you already cloned without `--recurse-submodules`, populate the engine in
-place:
+The app's `go.mod` points at `../tile57/bindings/go`, and its Makefile builds
+`../tile57/zig-out/lib/libtile57.a` on demand — so the engine checkout (or a
+symlink to it) must be a **sibling directory named `tile57`**.
 
 ```sh
+# 1. The engine, with its IHO catalogue submodules.
+git clone https://github.com/beetlebugorg/tile57.git
+cd tile57
 git submodule update --init --recursive
+cd ..
+
+# 2. The app, as a sibling.
+git clone https://github.com/beetlebugorg/chartplotter-go.git
+cd chartplotter
+
+# 3. Build: zig-builds libtile57, then a CGO go build.
+make build
 ```
 
 The build writes the binary to `bin/chartplotter`. Check that it works:
@@ -67,16 +65,11 @@ It prints the chartplotter version and the libtile57 engine version. The binary
 is self-contained — the web frontend and the S-101 catalogue are compiled in —
 so you can copy it to your `PATH` and run it anywhere on the same platform.
 
-## Keeping the engine up to date
+If you keep the engine checkout somewhere else, symlink it into place instead:
 
-`git pull` alone does not move submodules: after pulling, run
-`git submodule update --init --recursive` to sync the engine to the commit the
-repo pins.
-
-If you maintain the repo and want to advance the pin to the engine's latest
-`main`, `make bump-tile57` fetches it (nested catalogues included) and stages
-the new pointer for you to commit — equivalent to
-`git -C tile57 pull origin main && git add tile57`.
+```sh
+ln -s /path/to/your/tile57-checkout ../tile57
+```
 
 ## Memory and disk
 
