@@ -78,7 +78,18 @@ func (s *Server) serveTileSet(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/vnd.mapbox-vector-tile")
 	}
-	w.Header().Set("Cache-Control", "no-cache")
+	// Tiles are immutable per bake generation: the ?g token in the tile URL (the
+	// pack archive's mtime, stamped into the TileJSON serveTileJSON emits) changes
+	// on every re-bake, so a given tile URL always maps to identical bytes and can
+	// cache forever. The live/dynamic set carries no generation (?g absent or 0)
+	// and regenerates tiles on demand, so it stays revalidate-always. Keying the
+	// policy off the token — not pack-vs-live plumbing — ties it exactly to the
+	// content-addressing guarantee that makes long caching safe.
+	if g := r.URL.Query().Get("g"); g != "" && g != "0" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	// The backend returns decompressed tiles; gzip on the wire when the client asks,
 	// to claw back the size advantage prebaked archives store the tiles with.
 	if acceptsGzip(r) {

@@ -60,6 +60,28 @@ func TestServeTileSet(t *testing.T) {
 	if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
 		t.Errorf("missing CORS header")
 	}
+	// No ?g generation token → revalidate-always (live/dynamic set semantics).
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("tile without ?g: cache-control got %q, want no-cache", cc)
+	}
+
+	// A ?g generation token → the tile URL is content-addressed, so cache it
+	// immutably (baked-pack semantics; the client busts by a new ?g on re-bake).
+	req, _ = http.NewRequest("GET", ts.URL+"/tiles/charts/8/10/20.mvt?g=1699999999", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Errorf("tile with ?g: cache-control got %q, want immutable", cc)
+	}
+	// A zero token is treated as no generation (not immutable).
+	resp, _ = http.Get(ts.URL + "/tiles/charts/8/10/20.mvt?g=0")
+	resp.Body.Close()
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("tile with ?g=0: cache-control got %q, want no-cache", cc)
+	}
 
 	// The .mvt suffix is optional.
 	resp, _ = http.Get(ts.URL + "/tiles/charts/8/10/20")
