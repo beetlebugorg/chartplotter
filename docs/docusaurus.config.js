@@ -34,7 +34,7 @@ const config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.js',
           editUrl:
-            'https://github.com/beetlebugorg/chartplotter/tree/main/docs/',
+            'https://github.com/beetlebugorg/chartplotter-go/tree/main/docs/',
         },
         blog: false,
         theme: {
@@ -56,7 +56,7 @@ const config = {
             position: 'right',
           },
           {
-            href: 'https://github.com/beetlebugorg/chartplotter',
+            href: 'https://github.com/beetlebugorg/chartplotter-go',
             label: 'GitHub',
             position: 'right',
           },
@@ -78,11 +78,11 @@ const config = {
             items: [
               {
                 label: 'GitHub',
-                href: 'https://github.com/beetlebugorg/chartplotter',
+                href: 'https://github.com/beetlebugorg/chartplotter-go',
               },
               {
                 label: 'Releases',
-                href: 'https://github.com/beetlebugorg/chartplotter/releases',
+                href: 'https://github.com/beetlebugorg/chartplotter-go/releases',
               },
             ],
           },

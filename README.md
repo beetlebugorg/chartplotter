@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml"><img src="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://goreportcard.com/report/github.com/beetlebugorg/chartplotter"><img src="https://goreportcard.com/badge/github.com/beetlebugorg/chartplotter" alt="Go Report Card"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/beetlebugorg/chartplotter" alt="License"></a>
+  <a href="https://github.com/beetlebugorg/chartplotter-go/actions/workflows/ci.yml"><img src="https://github.com/beetlebugorg/chartplotter-go/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://goreportcard.com/report/github.com/beetlebugorg/chartplotter-go"><img src="https://goreportcard.com/badge/github.com/beetlebugorg/chartplotter-go" alt="Go Report Card"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/beetlebugorg/chartplotter-go" alt="License"></a>
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@ panning, zooming, switching palettes — and never touches the raw charts again.
 
 chartplotter is built from two repos that work as a pair:
 
-- **[`chartplotter`](https://github.com/beetlebugorg/chartplotter)** (this repo,
+- **[`chartplotter`](https://github.com/beetlebugorg/chartplotter-go)** (this repo,
   Go) — the application: the HTTP server and chart library, the `bake`/`serve`
   CLI, NMEA 0183 ingestion, and the `<chart-plotter>` web frontend.
 - **[`tile57`](https://github.com/beetlebugorg/tile57)** (Zig) — the chart
@@ -150,7 +150,7 @@ cd tile57
 git submodule update --init --recursive   # fetches the IHO S-101 catalogues
 cd ..
 
-git clone https://github.com/beetlebugorg/chartplotter.git
+git clone https://github.com/beetlebugorg/chartplotter-go.git
 cd chartplotter
 make build          # zig-builds libtile57, then a CGO go build → bin/chartplotter
 bin/chartplotter version

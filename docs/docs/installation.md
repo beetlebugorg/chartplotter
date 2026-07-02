@@ -47,7 +47,7 @@ git submodule update --init --recursive
 cd ..
 
 # 2. The app, as a sibling.
-git clone https://github.com/beetlebugorg/chartplotter.git
+git clone https://github.com/beetlebugorg/chartplotter-go.git
 cd chartplotter
 
 # 3. Build: zig-builds libtile57, then a CGO go build.
