@@ -92,7 +92,7 @@ A few choices shape the whole project:
 
 | Path | What lives there |
 | --- | --- |
-| `../tile57` | The native engine (separate repo, Zig): S-57 decode, S-101 portrayal, tiling, MLT/MVT encode, style + asset generation. Linked as `libtile57.a`. |
+| `tile57/` | The native engine (separate repo, Zig, vendored as a git submodule): S-57 decode, S-101 portrayal, tiling, MLT/MVT encode, style + asset generation. Linked as `libtile57.a`. |
 | `pkg/iso8211` | A pure-Go ISO 8211 reader, kept for cell *metadata* (headers, coverage) — not for portrayal. |
 | `pkg/s57` | The Go S-57 cell model, slimmed to metadata and simulator needs (e.g. depth areas for the traffic simulator). |
 | `internal/engine/baker` | Cell metadata + parse helpers: base + update grouping, header/coverage extraction, and the compilation-scale → navigational-band mapping. It does not bake tiles. |

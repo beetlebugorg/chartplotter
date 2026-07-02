@@ -17,7 +17,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-TILE57="${TILE57:-$REPO/../tile57}"
+# Engine checkout: the vendored tile57/ submodule by default; a relative override
+# (e.g. TILE57=../tile57 from make) is resolved against the repo root.
+TILE57="${TILE57:-$REPO/tile57}"
+case "$TILE57" in /*) ;; *) TILE57="$REPO/$TILE57" ;; esac
 OUT="${OUT:-$REPO/dist}"
 VERSION="${VERSION:-dev}"
 # Space-separated "GOOS/GOARCH" list; override for a subset, e.g.
@@ -25,7 +28,7 @@ VERSION="${VERSION:-dev}"
 PLATFORMS="${PLATFORMS:-linux/amd64 linux/arm64 windows/amd64 windows/arm64}"
 
 command -v zig >/dev/null 2>&1 || { echo "zig (0.16) not on PATH"; exit 1; }
-[ -f "$TILE57/include/tile57.h" ] || { echo "missing $TILE57 — symlink ../tile57 → chartplotter-native"; exit 1; }
+[ -f "$TILE57/include/tile57.h" ] || { echo "missing $TILE57 — populate the engine submodule: git submodule update --init --recursive"; exit 1; }
 
 # GOOS/GOARCH → Zig target triple.
 zig_triple() {

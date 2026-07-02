@@ -31,4 +31,8 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/beetlebugorg/tile57/bindings/go => ../tile57/bindings/go
+// The engine binding lives in the vendored tile57 submodule (git submodule
+// update --init --recursive). For cross-repo hacking against a sibling checkout,
+// override with a gitignored go.work instead of editing this replace — see
+// README.md "Developing the engine".
+replace github.com/beetlebugorg/tile57/bindings/go => ./tile57/bindings/go
