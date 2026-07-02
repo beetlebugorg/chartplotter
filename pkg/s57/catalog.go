@@ -27,8 +27,6 @@ type CatalogEntry struct {
 	File     string  // path as recorded (e.g. "US5MD1MC\\US5MD1MC.000")
 	LongName string  // LFIL — the human chart title (e.g. "Annapolis Harbor")
 	Impl     string  // "BIN" (a cell), "ASC", or "TXT" (auxiliary text)
-	CRC      string  // CRCS — the file's CRC (hex), if present
-	Comment  string  // COMT
 	HasBBox  bool    // true when SLAT/WLON/NLAT/ELON were all present
 	West     float64 // WLON
 	South    float64 // SLAT
@@ -71,37 +69,9 @@ func (c *Catalog) Cells() []CatalogEntry {
 	return out
 }
 
-// Bounds returns the union bounding box [west, south, east, north] of every
-// cell entry that carries coverage, and false if none did.
-func (c *Catalog) Bounds() (bb [4]float64, ok bool) {
-	first := true
-	for _, e := range c.Entries {
-		if !e.HasBBox {
-			continue
-		}
-		if first {
-			bb = [4]float64{e.West, e.South, e.East, e.North}
-			first = false
-			ok = true
-			continue
-		}
-		bb[0] = min(bb[0], e.West)
-		bb[1] = min(bb[1], e.South)
-		bb[2] = max(bb[2], e.East)
-		bb[3] = max(bb[3], e.North)
-	}
-	return bb, ok
-}
-
 // ParseCatalog parses a CATALOG.031 exchange-set catalogue from raw bytes.
 func ParseCatalog(data []byte) (*Catalog, error) {
 	return parseCatalogISO(iso8211.MemFS{"/CATALOG.031": data}, "/CATALOG.031")
-}
-
-// ParseCatalogFS parses a CATALOG.031 from a filesystem (e.g. an unzipped
-// ENC_ROOT or os.DirFS), matching ParseFS for cells.
-func ParseCatalogFS(fsys fs.FS, filename string) (*Catalog, error) {
-	return parseCatalogISO(fsys, filename)
 }
 
 func parseCatalogISO(fsys fs.FS, filename string) (*Catalog, error) {
@@ -185,8 +155,6 @@ func decodeCATD(raw []byte) (CatalogEntry, bool) {
 			e.Impl = impl
 		}
 	}
-	e.CRC = field(parts, 7)
-	e.Comment = field(parts, 8)
 	return e, true
 }
 

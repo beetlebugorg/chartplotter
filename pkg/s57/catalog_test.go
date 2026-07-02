@@ -50,10 +50,6 @@ func TestParseCatalog_NOAA(t *testing.T) {
 			t.Errorf("%s = %f, want %f", b.name, b.got, b.want)
 		}
 	}
-	if c.CRC == "" {
-		t.Error("expected a CRCS value on the cell entry")
-	}
-
 	// The auxiliary text descriptions are present but are NOT cells.
 	var txt int
 	for _, e := range cat.Entries {
@@ -66,24 +62,5 @@ func TestParseCatalog_NOAA(t *testing.T) {
 	}
 	if txt == 0 {
 		t.Error("expected at least one TXT auxiliary entry")
-	}
-}
-
-func TestCatalogBounds(t *testing.T) {
-	data, err := os.ReadFile("testdata/US5MD1MC_CATALOG.031")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cat, err := ParseCatalog(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bb, ok := cat.Bounds()
-	if !ok {
-		t.Fatal("expected a union bbox")
-	}
-	// Single cell → union equals that cell.
-	if bb != [4]float64{-76.5, 38.925, -76.425, 39.0} {
-		t.Errorf("Bounds = %v", bb)
 	}
 }

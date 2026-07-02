@@ -10,8 +10,7 @@ func TestSOUNDGWith3DCoordinates(t *testing.T) {
 	// Parse test chart from test/ directory
 	chartPath := "../../testdata/US4MD81M.000"
 
-	parser := s57.NewParser()
-	chart, err := parser.Parse(chartPath)
+	chart, err := s57.ParseWithOptions(chartPath, s57.DefaultParseOptions())
 	if err != nil {
 		t.Fatalf("Failed to parse chart: %v", err)
 	}

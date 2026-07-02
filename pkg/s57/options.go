@@ -18,17 +18,6 @@ type ParseOptions struct {
 	// Set to false to parse only the base cell without updates.
 	ApplyUpdates bool
 
-	// ValidateConformance promotes S-57 / ISO-8211 spec deviations from non-fatal
-	// warnings (the default; see Chart.Warnings) to a parse error. Default false.
-	ValidateConformance bool
-
-	// MaskCoastlineCoincidentBoundaries derives coastline-coincident edge masking
-	// for area features (S-57 Appendix B.1 Annex A §17 scenario 2). When true, an
-	// area feature's drawn boundary edge whose RCID is also referenced by a COALNE
-	// feature is dropped from BoundaryLines (the fill/Coordinates stay intact). The
-	// coast-definer LNDARE is exempt. Default is false. The baker enables this.
-	MaskCoastlineCoincidentBoundaries bool
-
 	// Fs is the filesystem to use for reading files.
 	// If nil, the OS filesystem is used (iso8211.OSFS()).
 	// This allows custom io/fs.FS implementations for testing or specialized
@@ -37,7 +26,7 @@ type ParseOptions struct {
 	// Example with an in-memory filesystem:
 	//   fsys := iso8211.MemFS{"/test.000": data}
 	//   opts := s57.ParseOptions{Fs: fsys}
-	//   chart, err := s57.NewParser().ParseWithOptions("/test.000", opts)
+	//   chart, err := s57.ParseWithOptions("/test.000", opts)
 	Fs fs.FS
 }
 

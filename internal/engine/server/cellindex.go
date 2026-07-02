@@ -148,7 +148,7 @@ func (ci *cellIndex) scan() {
 		if err != nil {
 			continue
 		}
-		chart, err := baker.ParseCellBytes(name, data)
+		chart, err := baker.ParseCellCoverage(name, data, nil)
 		if err != nil {
 			continue
 		}

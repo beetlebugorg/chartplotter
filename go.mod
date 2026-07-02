@@ -7,14 +7,12 @@ toolchain go1.26.4
 require (
 	github.com/BertoldVdb/go-ais v0.4.0
 	github.com/alecthomas/kong v1.15.0
-	github.com/dhconnelly/rtreego v1.2.0
-	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
-	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
-	github.com/srwiley/scanFT v0.0.0-20220128184157-0d1ee492111f
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.43.0
 	modernc.org/sqlite v1.53.0
 )
+
+require golang.org/x/sync v0.21.0 // indirect
 
 require (
 	github.com/adrianmo/go-nmea v1.3.0 // indirect
@@ -26,9 +24,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

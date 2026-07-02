@@ -6,9 +6,6 @@ package baker
 // baker. The slugs + zoom spans MUST match the frontend's CHART_BANDS so each
 // per-band archive loads into its chart-<slug> source.
 
-// ZoomRange is a baked [min,max] Web-Mercator zoom span.
-type ZoomRange struct{ Min, Max uint32 }
-
 // Band is a NOAA ENC navigational-purpose band. Each bakes over its own zoom
 // range and overzooms above max client-side.
 type Band uint8
@@ -21,26 +18,6 @@ const (
 	BandHarbor
 	BandBerthing
 )
-
-// ZoomRange returns the band's native [minzoom, maxzoom] — the scale range the
-// band's cells are compiled for. Adjacent bands overlap by one zoom at the
-// endpoints.
-func (b Band) ZoomRange() ZoomRange {
-	switch b {
-	case BandOverview:
-		return ZoomRange{0, 7}
-	case BandGeneral:
-		return ZoomRange{7, 9}
-	case BandCoastal:
-		return ZoomRange{9, 11}
-	case BandApproach:
-		return ZoomRange{11, 13}
-	case BandHarbor:
-		return ZoomRange{13, 16}
-	default: // berthing
-		return ZoomRange{16, 18}
-	}
-}
 
 // BakeBand is one navigational-purpose band's identity for per-band archive
 // baking: its frontend slug and native [Min,Max] zoom span.

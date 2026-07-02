@@ -2,8 +2,6 @@ package parser
 
 import (
 	"encoding/binary"
-	"strconv"
-	"strings"
 
 	"github.com/beetlebugorg/chartplotter/pkg/iso8211"
 )
@@ -28,7 +26,6 @@ type spatialRecord struct {
 	VectorPointers []vectorPointer // VRPT pointers to other spatial records
 	RecordVersion  int             // RVER - record version number
 	UpdateInstr    int             // RUIN - update instruction
-	Quapos         int             // QUAPOS quality of position (S-57 spatial-level ATTV); 0 if absent
 }
 
 // spatialType represents the type of spatial record
@@ -97,28 +94,7 @@ func parseSpatialRecordInternal(record *iso8211.DataRecord, comf int32, somf int
 		spatialRec.VectorPointers = parseVectorPointers(vrptData)
 	}
 
-	// Parse ATTV (spatial-level attributes) — QUAPOS lives here, not on the
-	// feature. Same ATTL+ATVL layout as a feature's ATTF, so reuse parseAttributes.
-	if attvData, ok := record.Fields["ATTV"]; ok {
-		if q, ok := atoiAttr(parseAttributes(attvData)["QUAPOS"]); ok {
-			spatialRec.Quapos = q
-		}
-	}
-
 	return spatialRec
-}
-
-// atoiAttr reads an S-57 attribute value (parsed as a string) as an int.
-func atoiAttr(v interface{}) (int, bool) {
-	s, ok := v.(string)
-	if !ok {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return 0, false
-	}
-	return n, true
 }
 
 // parseCoordinates2D extracts 2D coordinates from SG2D field

@@ -85,11 +85,6 @@ type chartData struct {
 	// Index for fast lookup during updates
 	// CRITICAL: Must use composite key (AGEN, FIDN, FIDS) because FIDN alone is not unique
 	featuresByID map[featureID]*featureRecord
-
-	// warnings collects non-fatal spec-conformance deviations (see conformance.go),
-	// shared with the parse phase so update-time checks (e.g. RVER sequencing) land
-	// in the same list. May be nil in code paths that don't track conformance.
-	warnings *conformance
 }
 
 // applyUpdate applies a single update file to the chart data
@@ -208,15 +203,6 @@ func applyFeatureUpdate(chart *chartData, record *iso8211.DataRecord, fridData [
 		// Per S-57 §8.4.2.2 (31Main.pdf p85): MODIFY only updates fields present in the update record
 		// We must selectively update fields rather than wholesale replacement
 
-		// RVER sequencing (§8.4.2.1): an update record's version must be exactly one
-		// higher than the target it modifies. A gap/mismatch means an update was
-		// skipped or applied out of order — reported, not fatal (we still apply it).
-		if featureRec.RecordVersion != existing.RecordVersion+1 {
-			chart.warnings.addf("8.4.2.1", "RVER_SEQUENCE_FEATURE",
-				"feature (AGEN=%d, FIDN=%d) MODIFY version %d is not target version %d + 1",
-				featureRec.AGEN, featureRec.FIDN, featureRec.RecordVersion, existing.RecordVersion)
-		}
-
 		// Always update these core identification fields
 		existing.RecordVersion = featureRec.RecordVersion
 		existing.UpdateInstr = featureRec.UpdateInstr
@@ -295,13 +281,6 @@ func applySpatialUpdate(chart *chartData, record *iso8211.DataRecord, vridData [
 		// Per S-57 §8.4.3.2 (31Main.pdf p88): MODIFY only updates fields present in the update record
 		// We must selectively merge fields rather than wholesale replacement
 		// This is critical - update records may omit fields that should be preserved!
-
-		// RVER sequencing (§8.4.3.1): mirror the feature-record rule for vectors.
-		if spatialRec.RecordVersion != existing.RecordVersion+1 {
-			chart.warnings.addf("8.4.3.1", "RVER_SEQUENCE_SPATIAL",
-				"spatial record %v MODIFY version %d is not target version %d + 1",
-				key, spatialRec.RecordVersion, existing.RecordVersion)
-		}
 
 		// Always update core identification fields
 		existing.RecordVersion = spatialRec.RecordVersion
