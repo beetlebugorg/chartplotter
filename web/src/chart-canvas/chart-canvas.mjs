@@ -991,6 +991,12 @@ export class ChartCanvas extends HTMLElement {
   // once and immutable. Colour scheme is separate (setScheme).
   setMariner(settings) {
     this._mariner = { ...this._mariner, ...settings };
+    // The no-data hatch is CLIENT chrome (grafted under the engine chart
+    // layers), so its toggle must apply in BOTH modes — the engine style-diff
+    // below knows nothing about the nodata layer and silently dropped it.
+    if ("showNoData" in settings && this._map) {
+      this._eachLayer("nodata", (id) => this._setVis(id, this._mariner.showNoData === false ? "none" : "visible"));
+    }
     // tile57 engine mode: the display state lives in the engine-generated style, so a
     // toggle is an engine-computed diff applied in place (no JS in-place updaters).
     if (this._engineMode) { this._engineRestyle(); return; }
