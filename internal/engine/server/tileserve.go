@@ -65,8 +65,22 @@ func (s *Server) serveTileSet(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Cache policy first, so it rides the 204 too: an EMPTY tile at a given ?g is
+	// as content-addressed as a full one (emptiness is baked into that generation),
+	// and empty ocean tiles are the MAJORITY of a viewport's grid — caching those
+	// 204s saves the most round-trips. Tiles are immutable per bake generation: the
+	// ?g token in the URL (the pack archive's mtime) changes on every re-bake, so a
+	// given tile URL always maps to identical bytes/emptiness and can cache forever.
+	// The live/dynamic set carries no generation (?g absent or 0) and regenerates on
+	// demand, so it stays no-cache. Keying off the token — not pack-vs-live plumbing
+	// — ties the policy exactly to the content-addressing guarantee.
+	if g := r.URL.Query().Get("g"); g != "" && g != "0" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	if len(body) == 0 {
-		w.WriteHeader(http.StatusNoContent) // blank/missing tile
+		w.WriteHeader(http.StatusNoContent) // blank/missing tile (still cacheable per ?g)
 		return
 	}
 	// Tiles serve BYTES-VERBATIM in the set's stored encoding (no transcode).
@@ -77,18 +91,6 @@ func (s *Server) serveTileSet(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	} else {
 		w.Header().Set("Content-Type", "application/vnd.mapbox-vector-tile")
-	}
-	// Tiles are immutable per bake generation: the ?g token in the tile URL (the
-	// pack archive's mtime, stamped into the TileJSON serveTileJSON emits) changes
-	// on every re-bake, so a given tile URL always maps to identical bytes and can
-	// cache forever. The live/dynamic set carries no generation (?g absent or 0)
-	// and regenerates tiles on demand, so it stays revalidate-always. Keying the
-	// policy off the token — not pack-vs-live plumbing — ties it exactly to the
-	// content-addressing guarantee that makes long caching safe.
-	if g := r.URL.Query().Get("g"); g != "" && g != "0" {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
 	}
 	// The backend returns decompressed tiles; gzip on the wire when the client asks,
 	// to claw back the size advantage prebaked archives store the tiles with.
@@ -147,13 +149,7 @@ func (s *Server) serveTileJSON(w http.ResponseWriter, r *http.Request, name stri
 	// re-bake, gets a new ?g, and its tile URLs change — so the browser/MapLibre tile
 	// caches are bypassed by content, not a fragile client-side counter. serveTile
 	// ignores the query, so ?g is purely a cache key.
-	gen := int64(0)
-	if p, ok := s.packPath(name); ok {
-		if fi, err := os.Stat(p); err == nil {
-			gen = fi.ModTime().UnixNano()
-		}
-	}
-	tilesURL := fmt.Sprintf("%s://%s/tiles/%s/{z}/{x}/{y}.mvt?g=%d", scheme, r.Host, name, gen)
+	tilesURL := fmt.Sprintf("%s://%s/tiles/%s/{z}/{x}/{y}.mvt%s", scheme, r.Host, name, genQuery(s.packGen(name)))
 	// SCAMIN manifest (from the archive metadata): the client builds one native-
 	// minzoom bucket layer per value at load — no runtime probe/collect/setStyle.
 	scaminJSON := ""

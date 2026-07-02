@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -146,6 +147,30 @@ func (s *Server) packPath(set string) (string, bool) {
 	defer s.packsMu.Unlock()
 	p, ok := s.packs[set]
 	return p, ok
+}
+
+// packGen is a baked pack's cache-bust generation token — its archive mtime in
+// unix-nanos, which changes every time the set is re-baked (a fresh file is
+// renamed into place). 0 for a live/dynamic set (no pack file). Both the
+// TileJSON and the engine-style source URL stamp this as ?g so a given tile URL
+// is content-addressed and safe to cache immutably (see serveTile).
+func (s *Server) packGen(set string) int64 {
+	if p, ok := s.packPath(set); ok {
+		if fi, err := os.Stat(p); err == nil {
+			return fi.ModTime().UnixNano()
+		}
+	}
+	return 0
+}
+
+// genQuery renders a packGen token as a tile-URL query suffix: "?g=<n>" for a
+// real (nonzero) generation, "" for a live set (so its URL stays token-free and
+// serveTile keeps it no-cache).
+func genQuery(gen int64) string {
+	if gen == 0 {
+		return ""
+	}
+	return fmt.Sprintf("?g=%d", gen)
 }
 
 func (s *Server) packNames() []string {

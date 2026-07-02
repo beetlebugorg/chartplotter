@@ -274,7 +274,10 @@ func (s *Server) setMaxZoom(name string) uint8 {
 func (s *Server) styleCtxForSet(r *http.Request, q url.Values, set string) tile57StyleCtx {
 	base := requestOrigin(r)
 	ctx := tile57StyleCtx{
-		tiles:  orDefault(q.Get("tiles"), base+"/tiles/"+set+"/{z}/{x}/{y}.mvt"),
+		// Stamp the bake-generation token onto the default tile URL so engine-mode
+		// tiles are content-addressed and cacheable exactly like the TileJSON path
+		// (serveTile keys immutable caching on ?g). A ?tiles override is used verbatim.
+		tiles:  orDefault(q.Get("tiles"), fmt.Sprintf("%s/tiles/%s/{z}/{x}/{y}.mvt%s", base, set, genQuery(s.packGen(set)))),
 		sprite: orDefault(q.Get("sprite"), base+"/sprite"),
 		glyphs: orDefault(q.Get("glyphs"), base+"/glyphs/{fontstack}/{range}.pbf"),
 		scamin: parseBands(q.Get("scamin")),

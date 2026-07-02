@@ -90,11 +90,15 @@ func TestServeTileSet(t *testing.T) {
 		t.Errorf("no-suffix tile: got %d, want 200", resp.StatusCode)
 	}
 
-	// A blank/missing tile → 204.
-	resp, _ = http.Get(ts.URL + "/tiles/charts/8/0/0.mvt")
+	// A blank/missing tile → 204, and it still carries the cache header (an empty
+	// tile is content-addressed per ?g just like a full one — cache the ocean).
+	resp, _ = http.Get(ts.URL + "/tiles/charts/8/0/0.mvt?g=1699999999")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("missing tile: got %d, want 204", resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Errorf("empty tile with ?g: cache-control got %q, want immutable", cc)
 	}
 
 	// An unknown set → 404.
