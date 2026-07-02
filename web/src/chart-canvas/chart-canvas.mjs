@@ -905,7 +905,18 @@ export class ChartCanvas extends HTMLElement {
     // path when the source manager rebuilds. Reset engine state, re-probe for `names`.
     this._engineMode = false; this._engineStyle = null; this._engineSet = null; this._scaminLayersCache = null;
     await this._initEngineStyle(Array.isArray(names) ? names : (names ? [names] : []));
-    return this._sources.setServerSets(names);
+    const active = await this._sources.setServerSets(names);
+    // The source rebuild re-applies the engine style with the SCAMIN filter-gate at its
+    // baked curDenom=0 (show-all). Re-inject the live display-scale cutoff once that new
+    // style has settled — this is the one setStyle path that enters engine mode, and
+    // unlike _engineRestyle/_engineRebuild it had no post-apply _scaminUpdate. Without
+    // it a fresh boot (or set-switch) shows the fully-ungated, over-cluttered chart —
+    // every SCAMIN-gated sounding/symbol drawn regardless of scale — until the first
+    // `move` fires _scaminUpdate. See scamin-layers.md (client half of the filter-gate).
+    if (this._scaminGate && this._engineMode && this._map) {
+      this._map.once("idle", () => { this._scaminLayersCache = null; this._scaminUpdate(true); });
+    }
+    return active;
   }
 
   // Convenience: render a single server set (or none). See setServerSets.
