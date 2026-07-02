@@ -1595,15 +1595,23 @@ export class ChartCanvas extends HTMLElement {
 
 // Custom element names must contain a hyphen (HTML spec) — `<chart-plotter>`.
 // Find the tile57 filter-gate SCAMIN clause `[">=", ["coalesce",["get","scamin"],1e12], N]`
-// anywhere in a MapLibre filter and set its literal N to `denom` (the current display-scale
-// denominator). detectOnly=true just reports whether the clause is present (no mutation).
-// Returns true if the clause was found. Mutates `node` in place.
+// — and its band-handoff twin `["<", ["coalesce",["get","smax"],0], N]` (carry-down
+// features from the next-coarser band hide once the display is finer than their
+// handoff scale; ../tile57 band-handoff spec) — anywhere in a MapLibre filter and set
+// each clause's literal N to `denom` (the current display-scale denominator).
+// detectOnly=true just reports whether the SCAMIN clause is present (no mutation).
+// Returns true if the SCAMIN clause was found. Mutates `node` in place.
 function setScaminDenom(node, denom, detectOnly) {
   if (!Array.isArray(node)) return false;
   if (node[0] === ">=" && Array.isArray(node[1]) && node[1][0] === "coalesce"
       && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "scamin") {
     if (!detectOnly) node[2] = denom;
     return true;
+  }
+  if (node[0] === "<" && Array.isArray(node[1]) && node[1][0] === "coalesce"
+      && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "smax") {
+    if (!detectOnly) node[2] = denom;
+    return false; // smax rides along; the scamin clause is the gate marker
   }
   let found = false;
   for (const c of node) if (setScaminDenom(c, denom, detectOnly)) found = true;
