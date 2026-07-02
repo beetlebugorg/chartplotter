@@ -514,12 +514,34 @@ export class DevTools {
         pointSymbolsInView: cnt(["point_symbols"]),
       };
     }
+    // Live SCAMIN/smax gate denominators per gated layer — a feature "in the
+    // tile but not rendered" is almost always a gate question, so the snapshot
+    // should answer it directly (frozen denoms diagnosed a phantom-cutoff bug).
+    const gates = {};
+    if (m && m.getStyle) {
+      try {
+        for (const l of (m.getStyle().layers || [])) {
+          if (!l.filter) continue;
+          const s = JSON.stringify(l.filter);
+          if (!s.includes('"scamin"') && !s.includes('"smax"')) continue;
+          let sc = null, sm = null;
+          (function walk(n) {
+            if (!Array.isArray(n)) return;
+            if (n[0] === ">=" && JSON.stringify(n[1]).includes('"scamin"')) sc = n[2];
+            if (n[0] === "<" && JSON.stringify(n[1]).includes('"smax"')) sm = n[2];
+            n.forEach(walk);
+          })(l.filter);
+          gates[l.id] = { scamin: typeof sc === "number" ? Math.round(sc) : sc, smax: typeof sm === "number" ? Math.round(sm) : sm };
+        }
+      } catch (e) { gates.error = String(e); }
+    }
     const snap = {
       when: new Date().toISOString(),
       view,
       count: feats.length,
       features: pick.map((f) => ({ source: f.source, sourceLayer: f.sourceLayer, geometry: f.geometry, properties: f.properties })),
       render,
+      gates,
     };
     const assets = this._d.assets || "";
     const text = JSON.stringify(snap, null, 2);
