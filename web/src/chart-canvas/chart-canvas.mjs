@@ -451,7 +451,7 @@ export class ChartCanvas extends HTMLElement {
     map.on("idle", () => this._sources._refreshScaminBuckets());
     map.on("load", async () => {
       this._renderScalebar(); // initial draw (the move hook only fires on movement)
-      this._scaminLayersCache = null; this._scaminUpdate(true); // engine gate: initial SCAMIN cutoff
+      this._scaminForceWhenReady(); // engine gate: initial SCAMIN cutoff
       // Images are registered LAZILY via the styleimagemissing handler above —
       // only the symbols/patterns actually referenced by visible tiles enter
       // MapLibre's icon atlas. Eagerly registering all ~750 (724 symbols + 26
@@ -663,7 +663,7 @@ export class ChartCanvas extends HTMLElement {
     // The gated layers' base filter carries the SCAMIN clause at curDenom=0 (show-all);
     // re-inject the live cutoff so a mariner toggle doesn't reveal everything until the
     // next pan/zoom. Cheap (~1 setFilter per gated layer, ~16), only when the gate is on.
-    if (this._scaminGate) { this._scaminLayersCache = null; this._scaminUpdate(true); }
+    if (this._scaminGate) this._scaminForceWhenReady();
   }
 
   // Update a chart layer's base filter and re-apply it combined with the live
@@ -943,7 +943,7 @@ export class ChartCanvas extends HTMLElement {
     // every SCAMIN-gated sounding/symbol drawn regardless of scale — until the first
     // `move` fires _scaminUpdate. See scamin-layers.md (client half of the filter-gate).
     if (this._scaminGate && this._engineMode && this._map) {
-      this._map.once("idle", () => { this._scaminLayersCache = null; this._scaminUpdate(true); });
+      this._map.once("idle", () => this._scaminForceWhenReady());
     }
     return active;
   }
@@ -1391,14 +1391,28 @@ export class ChartCanvas extends HTMLElement {
       for (const op of ops) this._applyStyleOp(op);
       this._applyOpsToCached(ops);
       this._lastMariner = to;
-      // The diff rewrote gated layers' filters back to curDenom=0 (show-all) — re-inject
-      // the live SCAMIN cutoff so a toggle doesn't reveal everything until the next zoom.
-      this._scaminLayersCache = null;
-      this._scaminUpdate(true);
+      // The diff rewrote gated layers' filters back to their baked placeholders
+      // (scamin: show-all; smax: show-NOTHING) — re-inject the live cutoff,
+      // retrying past the mid-load window the diff ops themselves create.
+      this._scaminForceWhenReady();
     } catch (e) {
       console.warn("[engine-restyle] full rebuild:", e.message);
       await this._engineRebuild();
     }
+  }
+
+  // Force-apply the gate cutoff, retrying past mid-load windows. A style-diff
+  // (mariner/VG toggle) rewrites gated filters with their baked placeholders —
+  // the smax clause's placeholder (0) hides EVERYTHING until the live denom is
+  // injected, and the 35 setFilter ops the diff just applied leave the style
+  // mid-load, so a bare _scaminUpdate(true) silently no-ops and the chart
+  // stays blank until the next crossing (user: "map goes away until refresh").
+  _scaminForceWhenReady() {
+    const m = this._map;
+    if (!m) return;
+    if (!m.isStyleLoaded || !m.isStyleLoaded()) { m.once("idle", () => this._scaminForceWhenReady()); return; }
+    this._scaminLayersCache = null;
+    this._scaminUpdate(true);
   }
 
   // Schedule the settle-deferred gate apply `delay` ms out. If the style is still
@@ -1493,11 +1507,10 @@ export class ChartCanvas extends HTMLElement {
     if (!style || !this._map) return;
     this._engineStyle = style;
     // Don't setStyle mid-load (re-entrancy → "already running"); defer to the next idle.
-    if (!this._map.isStyleLoaded()) { this._map.once("idle", () => { this._map.setStyle(this.buildStyle(), { diff: true }); this._lastMariner = this._marinerQuery(); this._scaminLayersCache = null; this._scaminUpdate(true); }); return; }
+    if (!this._map.isStyleLoaded()) { this._map.once("idle", () => { this._map.setStyle(this.buildStyle(), { diff: true }); this._lastMariner = this._marinerQuery(); this._scaminForceWhenReady(); }); return; }
     this._map.setStyle(this.buildStyle(), { diff: true });
     this._lastMariner = this._marinerQuery();
-    this._scaminLayersCache = null;
-    this._scaminUpdate(true); // re-inject the SCAMIN cutoff after the new style loads
+    this._scaminForceWhenReady(); // re-inject the cutoff once the new style settles
   }
 
   // The JS S-52 style builder — the Go-backend render path. Assembles the chart layers
