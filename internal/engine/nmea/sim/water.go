@@ -1,14 +1,16 @@
 package sim
 
 import (
+	"encoding/json"
 	"math"
 	"math/rand"
+	"strconv"
 
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
-// WaterMask is the navigable-water footprint of an S-57 cell: the exterior rings
-// of depth areas (DEPARE/DRGARE) deep enough to float a vessel (DRVAL1 ≥ minDepth).
+// WaterMask is the navigable-water footprint of an S-57 cell: the rings of depth
+// areas (DEPARE/DRGARE) deep enough to float a vessel (DRVAL1 ≥ minDepth).
 // Targets and routes are sampled inside it so simulated traffic stays in real
 // channels — on the water and off the shoals — not driving over land.
 //
@@ -27,30 +29,42 @@ type ringPoly struct {
 	minLon, minLat, maxLon, maxLat float64
 }
 
-// NewWaterMask collects navigable depth-area polygons from a parsed chart. A
-// DEPARE is kept when its shoalest depth (DRVAL1) is ≥ minDepth (m); DEPARE with
-// no DRVAL1 and dredged areas (DRGARE) are kept. Returns nil if the cell has no
-// usable depth areas (caller falls back to unconstrained placement).
-func NewWaterMask(chart *s57.Chart, minDepth float64) *WaterMask {
+// NewWaterMask collects navigable depth-area polygons from a chart's DEPARE/
+// DRGARE features (tile57 Source.Features GeoJSON). A DEPARE is kept when its
+// shoalest depth (DRVAL1) is ≥ minDepth (m); DEPARE with no DRVAL1 and dredged
+// areas (DRGARE) are kept. Returns nil if the cell has no usable depth areas
+// (caller falls back to unconstrained placement).
+//
+// All of a polygon's rings go into the mask: IsWater is a union test, and a hole
+// ring's interior is a subset of its exterior's, so including holes changes
+// nothing (as before, islands inside a depth area still test as water) while
+// multi-patch areas keep every patch.
+func NewWaterMask(feats []tile57.Feature, minDepth float64) *WaterMask {
 	var rings [][][2]float64
-	for _, f := range chart.Features() {
-		switch f.ObjectClass() {
+	for _, f := range feats {
+		switch f.Class {
 		case "DRGARE":
 		case "DEPARE":
-			if d, ok := f.Attribute("DRVAL1"); ok {
-				if v, ok2 := toFloat(d); ok2 && v < minDepth {
+			if d, ok := f.Attrs["DRVAL1"]; ok {
+				if v, err := strconv.ParseFloat(d, 64); err == nil && v < minDepth {
 					continue
 				}
 			}
 		default:
 			continue
 		}
-		for _, r := range f.Geometry().Rings {
-			if r.Usage != 1 && r.Usage != 3 {
-				continue
-			}
-			poly := make([][2]float64, 0, len(r.Coordinates))
-			for _, c := range r.Coordinates {
+		if f.Type != "Polygon" {
+			continue
+		}
+		var g struct {
+			Coordinates [][][]float64 `json:"coordinates"`
+		}
+		if json.Unmarshal(f.Geometry, &g) != nil {
+			continue
+		}
+		for _, r := range g.Coordinates {
+			poly := make([][2]float64, 0, len(r))
+			for _, c := range r {
 				if len(c) >= 2 {
 					poly = append(poly, [2]float64{c[0], c[1]})
 				}
@@ -130,18 +144,4 @@ func pointInPoly(x, y float64, poly [][2]float64) bool {
 		}
 	}
 	return in
-}
-
-func toFloat(v any) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case float32:
-		return float64(n), true
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	}
-	return 0, false
 }

@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,15 +23,18 @@ func TestWaterMask_Synthetic(t *testing.T) {
 }
 
 func TestWaterMask_RealCell(t *testing.T) {
-	// pkg/s57 ships a Chesapeake test cell — build a mask and confirm sampled
+	// The repo ships a Chesapeake test cell — build a mask and confirm sampled
 	// traffic lands in navigable depth areas.
 	data, err := os.ReadFile("../../../../testdata/US4MD81M.000")
 	if err != nil {
 		t.Skip("test cell not available")
 	}
-	chart, err := baker.ParseCellBytes("US4MD81M.000", data)
+	src, err := tile57.OpenChartBytes(data)
 	require.NoError(t, err)
-	m := NewWaterMask(chart, 2)
+	defer src.Close()
+	feats, err := src.Features("DEPARE", "DRGARE")
+	require.NoError(t, err)
+	m := NewWaterMask(feats, 2)
 	require.NotNil(t, m, "cell should yield navigable depth areas")
 	t.Logf("depth-area polygons: %d  bounds lat[%.3f,%.3f] lon[%.3f,%.3f]", len(m.polys), m.minLat, m.maxLat, m.minLon, m.maxLon)
 
