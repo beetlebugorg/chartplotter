@@ -4,73 +4,69 @@ on:
   push:
   pull_request:
 
-# NOTE: libtile57 is now the sole engine, so the build is CGO and links the native
-# static lib from the sibling chartplotter-native repo (built with Zig). This
-# workflow checks that repo out beside chartplotter-go and builds the lib first.
-# If chartplotter-native is PRIVATE, set a repo/PAT secret with read access to it
-# and pass it as `token:` on that checkout (a job's default GITHUB_TOKEN cannot
-# read a different private repo). UNVALIDATED — needs a test push to confirm the
-# setup-zig action version + checkout paths.
+# libtile57 is the sole engine: the build is CGO and statically links the native
+# lib from the public beetlebugorg/tile57 repo, built with Zig 0.16. That repo is
+# checked out as a SIBLING directory named tile57 (go.mod's replace points at
+# ../tile57/bindings/go, and the binding's cgo LDFLAGS at its zig-out/lib), with
+# submodules so the IHO S-101 catalogues are fetched from the IHO's own repos.
+# NOTE: correct-by-construction but unvalidated until pushed to GitHub.
 jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout chartplotter-go
+      - name: Checkout chartplotter
         uses: actions/checkout@v7
         with:
-          path: chartplotter-go
-      # The go.mod replace points at ../tile57/bindings/go and the binding's cgo
-      # LDFLAGS at ../../zig-out/lib/libtile57.a, so the native repo must sit at
-      # <workspace>/tile57 (sibling of chartplotter-go).
-      - name: Checkout chartplotter-native (libtile57)
+          path: chartplotter
+      - name: Checkout tile57 (libtile57 engine)
         uses: actions/checkout@v7
         with:
-          repository: beetlebugorg/chartplotter-native
+          repository: beetlebugorg/tile57
           path: tile57
-          # token: ${{ secrets.NATIVE_REPO_TOKEN }}   # uncomment if private
+          submodules: recursive
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
-          cache-dependency-path: chartplotter-go/go.sum
+          cache-dependency-path: chartplotter/go.sum
       - name: Install Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - name: Build libtile57
         run: cd tile57 && zig build
       - name: Format check
-        run: cd chartplotter-go && test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+        run: make -C chartplotter fmt-check
       - name: Vet
-        run: cd chartplotter-go && go vet ./...
+        run: make -C chartplotter vet
       - name: Test
-        run: cd chartplotter-go && go test ./...
+        run: make -C chartplotter test
       - name: Build
-        run: cd chartplotter-go && go build ./...
+        run: make -C chartplotter build
 
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout chartplotter-go
+      - name: Checkout chartplotter
         uses: actions/checkout@v7
         with:
-          path: chartplotter-go
-      - name: Checkout chartplotter-native (libtile57)
+          path: chartplotter
+      - name: Checkout tile57 (libtile57 engine)
         uses: actions/checkout@v7
         with:
-          repository: beetlebugorg/chartplotter-native
+          repository: beetlebugorg/tile57
           path: tile57
-          # token: ${{ secrets.NATIVE_REPO_TOKEN }}   # uncomment if private
+          submodules: recursive
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
-          cache-dependency-path: chartplotter-go/go.sum
+          cache-dependency-path: chartplotter/go.sum
       - name: Install Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - name: Build libtile57
         run: cd tile57 && zig build
       - name: Vulnerability scan
-        run: cd chartplotter-go && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: cd chartplotter && go run golang.org/x/vuln/cmd/govulncheck@latest ./...

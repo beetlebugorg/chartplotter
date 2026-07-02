@@ -18,7 +18,8 @@ real-world navigation.**
 
 :::
 
-**chartplotter** is a marine chart engine written in Go. It turns official NOAA
+**chartplotter** is a marine chart plotter: a Go application built around
+**tile57**, a native chart engine written in Zig. It turns official NOAA
 nautical charts into fast, offline map tiles that you can view in a web browser.
 
 The chart below is **live** — official NOAA charts of Annapolis, Maryland, running
@@ -30,16 +31,18 @@ static, embeddable, no server.
 
 It reads **S-57** electronic navigational chart (ENC) cells, draws them with the
 **S-101 Portrayal Catalogue** — the modern IHO standard for how charts look — and
-writes the result to a single **PMTiles** archive of vector tiles. A small web
+writes the result to **PMTiles** archives of vector tiles. A small web
 component built on [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/)
 draws the chart.
 
 ## Goal
 
-Implement the IHO chart standards — **S-57** (ENC data), **S-101** portrayal (the
-successor to S-52), and the wider **S-100 / S-102** family — in **pure Go**, with
-**minimal dependencies and no CGO**, so the whole thing cross-compiles to a single
-static binary for any platform with just `GOOS`/`GOARCH`.
+Implement the IHO chart standards — **S-57** (ENC data) and **S-101** portrayal
+(the successor to S-52), with the wider **S-100 / S-102** family planned — as a
+fast, low-memory native engine (**libtile57**, from the
+[tile57](https://github.com/beetlebugorg/tile57) repo) wrapped by a small Go
+server, so one locally-built binary bakes and serves real charts on anything
+from a laptop to a Raspberry Pi on a boat.
 
 ## What it does
 
@@ -53,8 +56,10 @@ static binary for any platform with just `GOOS`/`GOARCH`.
 - **Applies chart settings in the browser.** Depth shading, soundings, depth
   contours, and danger highlights all come from data baked into the tiles. You
   generate the tiles once and adjust these settings live.
-- **Ships as one binary.** The S-101 catalogue is built into the program. You do
-  not install extra data files.
+- **Builds to one self-contained binary.** The S-101 catalogue and the web
+  frontend are built into the program, so the binary you build runs from a
+  single file. (You build it yourself — the project publishes no binaries; see
+  [Installation](./installation.md) for why.)
 - **Shows live position and AIS (early).** Point a NMEA 0183 feed at the server
   over TCP and it draws your own ship and basic AIS targets on the chart; a
   `simulate` command generates traffic for testing.
@@ -96,5 +101,7 @@ Use chartplotter if you want to:
 | **S-57** | The international file format for electronic navigational charts. NOAA distributes U.S. charts as S-57 cells. |
 | **ENC cell** | One S-57 chart file, named like `US4MD81M.000`. |
 | **S-101** | The IHO standard that defines how to draw an ENC: colors, symbols, and line styles. Its Portrayal Catalogue holds those rules. |
-| **MVT** | Mapbox Vector Tile. A compact binary format for map data. |
+| **libtile57** | The native chart engine (from the [tile57](https://github.com/beetlebugorg/tile57) repo, written in Zig) that does all decoding, portrayal, and tiling. It is statically linked into the Go binary. |
+| **MLT** | MapLibre Tile. The compact binary tile format chartplotter bakes by default; MapLibre GL JS 5.12+ decodes it. |
+| **MVT** | Mapbox Vector Tile. The older vector-tile format, available with `bake --format mvt`. |
 | **PMTiles** | A single-file archive that holds many vector tiles. You can serve it with simple byte-range requests. |

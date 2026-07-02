@@ -1,5 +1,15 @@
 name: Release
 
+# chartplotter is SOURCE-ONLY: no binaries are ever published. Built binaries
+# embed the IHO S-101 catalogues (fetched at build time via the tile57 repo's
+# submodules from the IHO's own repositories), and the IHO's redistribution
+# terms are unresolved — see THIRD-PARTY-NOTICES.md. So a tag produces only a
+# GitHub release with generated notes (GitHub attaches the source archives
+# automatically); users clone tile57 + chartplotter and build locally per the
+# README.
+#
+# NOTE: unvalidated until a v* tag is pushed.
+
 on:
   push:
     tags:
@@ -9,43 +19,18 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  source-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
-          cache: true
-
-      # NOTE: this release workflow is STALE — it still cross-compiles CGO-free,
-      # which no longer builds (libtile57 is a CGO dep). It needs the same rework as
-      # .goreleaser.yaml: build libtile57 with Zig per target, single CGO build,
-      # darwin on a macOS runner. The S-101 catalogue now lives inside libtile57, so
-      # there is no more catalogue-sync step.
-
-      # quill signs + notarizes the macOS binaries from this Linux runner (no Mac
-      # needed). The GoReleaser build hook (scripts/quill-sign.sh) invokes it.
-      - name: Install quill
-        run: |
-          go install github.com/anchore/quill/cmd/quill@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+      - name: Create source-only release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing/notarization (quill). Set these as repo secrets; if they
-          # are absent the hook skips signing and the release still builds.
-          QUILL_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
-          QUILL_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
-          QUILL_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-          QUILL_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          QUILL_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            --notes "**Source-only release.** No binaries are published: built binaries embed the IHO S-101 catalogues, whose redistribution terms are unresolved (see THIRD-PARTY-NOTICES.md). Build from source per the README: clone [tile57](https://github.com/beetlebugorg/tile57) as a sibling, init its submodules, then \`make build\` (Go 1.26+, Zig 0.16)."
