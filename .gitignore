@@ -26,6 +26,11 @@ web/chartplotter.wasm
 # Working design notes / specs (kept local, never committed)
 /specs/
 
+# Local Go workspace override (cross-repo engine hacking against a sibling
+# ../tile57 checkout — see README.md "Developing the engine"); never committed.
+go.work
+go.work.sum
+
 # Editor / OS
 .DS_Store
 .idea/
