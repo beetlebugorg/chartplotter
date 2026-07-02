@@ -388,14 +388,16 @@ export class ChartCanvas extends HTMLElement {
     };
     window.__chartGL = () => this._logGLDiag();
 
-    // Touch gestures: keep pinch-zoom but DROP two-finger rotate (and drag-rotate)
-    // so a pinch can't tilt/spin the chart out from under the north-up/course-up/
-    // head-up follow modes (setCameraMode/updateFollow). MapLibre's default
-    // touchZoomRotate couples zoom+rotate on the same two-finger gesture, which on
-    // iOS/iPad constantly fought the orientation lock. If free rotation is wanted
-    // later, gate this on the camera mode instead of disabling outright.
+    // Touch gestures: keep pinch-zoom but start with rotate OFF so a pinch can't
+    // tilt/spin the chart out from under the north-up/course-up/head-up follow
+    // modes (MapLibre's touchZoomRotate couples zoom+rotate on the same two-finger
+    // gesture, which on iOS/iPad fought the orientation lock). setCameraMode gates
+    // it back ON in "free" mode (two-finger twist on touch, right/ctrl-drag on
+    // desktop) via _setRotateGestures — boot is north-up, so it stays off here.
+    // Never pitch: a rotate gesture must not tilt the chart to an oblique view.
     if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
     if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
+    if (map.touchPitch && map.touchPitch.disable) map.touchPitch.disable();
 
     // Graphical bar scale, complementing the numeric 1:N readout in the app HUD.
     // Follows the mariner unit setting: metric (m/km) or imperial (ft/mi); MapLibre
@@ -838,9 +840,30 @@ export class ChartCanvas extends HTMLElement {
   //   "head-up"   — recentre on the target, chart rotated to the target's heading
   setCameraMode(mode) {
     this._cameraMode = mode || "free";
+    // User rotation is allowed ONLY in free mode — two-finger twist on touch,
+    // right-drag / ctrl+drag on desktop (MapLibre's dragRotate default). In the
+    // follow modes the bearing is owned by the vessel fix, so rotation gestures
+    // stay off or a pinch/drag would fight the orientation lock (see the boot
+    // disable). This is the "gate on the camera mode" the boot comment defers to.
+    this._setRotateGestures(this._cameraMode === "free");
     if (this._map && this._cameraMode === "north-up") this._map.easeTo({ bearing: 0, duration: 300 });
     if (this._followFix) this.updateFollow(this._followFix);
     return this._cameraMode;
+  }
+
+  // Enable/disable the user rotation gestures (touch two-finger rotate + desktop
+  // drag-rotate) as one unit. Guarded: the handlers exist only after map init and
+  // some builds gate them, so every call is optional-chained.
+  _setRotateGestures(on) {
+    const map = this._map;
+    if (!map) return;
+    if (on) {
+      if (map.touchZoomRotate && map.touchZoomRotate.enableRotation) map.touchZoomRotate.enableRotation();
+      if (map.dragRotate && map.dragRotate.enable) map.dragRotate.enable();
+    } else {
+      if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
+      if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
+    }
   }
 
   // Push the latest target fix {lng, lat, courseDeg?, headingDeg?} from a tracking
