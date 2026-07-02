@@ -41,3 +41,12 @@ web/patterns.png
 web/sprite.json
 web/sprite.png
 /testdata/s64-pages-out/
+
+# Local artifacts that must never be committed (restricted IHO test material,
+# local builds, plugin bundles, agent workspaces).
+/chartplotter
+*.cpx
+/examples/
+/testdata/*.zip
+/testdata/*.pdf
+/.claude/

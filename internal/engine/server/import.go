@@ -558,7 +558,6 @@ func (s *Server) bakeAndRegister(jobID, set string, cells map[string]baker.CellD
 	// libtile57 is the SOLE bake engine. bakeBundleTile57 bakes a self-contained
 	// bundle per set (tiles + per-scheme style + assets + aux + metadata sidecar +
 	// cell manifest) and records success or a job error itself. A binary built
-	// without it (the CGO-free default) can't bake — the stub returns false.
 	if !s.bakeBundleTile57(jobID, set, cells, aux, cat, applyUpdates) {
 		fail(fmt.Errorf("baking requires a libtile57 build (rebuild with `make build-tile57`)"))
 	}

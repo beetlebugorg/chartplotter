@@ -25,7 +25,7 @@ func TestWaterMask_Synthetic(t *testing.T) {
 func TestWaterMask_RealCell(t *testing.T) {
 	// pkg/s57 ships a Chesapeake test cell — build a mask and confirm sampled
 	// traffic lands in navigable depth areas.
-	data, err := os.ReadFile("../../../../pkg/s57/testdata/US4MD81M.000")
+	data, err := os.ReadFile("../../../../testdata/US4MD81M.000")
 	if err != nil {
 		t.Skip("test cell not available")
 	}

@@ -23,7 +23,7 @@ type cli struct {
 	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-101 client assets (colortables.json, ...) into a directory."`
 	CatalogJSON catalogJSONCmd `cmd:"" name:"catalog-json" help:"Distil NOAA ENCProdCat.xml into a compact catalog.json."`
 	Bake        bakeCmd        `cmd:"" name:"bake" help:"Bake S-57 ENC cells (.zip/.000/dir) into a PMTiles archive for a prebaked deployment."`
-	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static + wasm) + the NOAA cell proxy."`
+	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static) + the NOAA cell proxy."`
 	Simulate    simulateCmd    `cmd:"" name:"simulate" help:"Run a NMEA0183 traffic generator over TCP (own-ship + AIS targets) for testing."`
 }
 
@@ -36,7 +36,6 @@ type emitAssetsCmd struct {
 func (c emitAssetsCmd) Run() error {
 	// Emit the client assets via the native libtile57 asset baker: c.S101 "" uses
 	// libtile57's embedded S-101 catalogue, else an on-disk PortrayalCatalog dir.
-	// A CGO-free build has no asset baker and errors via the stub.
 	files, err := emitS101Assets(c.S101, c.Dir)
 	if err != nil {
 		return err

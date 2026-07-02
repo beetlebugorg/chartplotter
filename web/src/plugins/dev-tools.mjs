@@ -524,7 +524,6 @@ export class DevTools {
     const assets = this._d.assets || "";
     const text = JSON.stringify(snap, null, 2);
     const ok = await copyText(text);
-    fetch(`${assets}api/debug`, { method: "POST", headers: { "content-type": "application/json" }, body: text }).catch(() => {});
     flashBtn(btn, ok ? "✓" : "✗");
   }
 }

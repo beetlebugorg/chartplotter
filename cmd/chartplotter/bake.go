@@ -27,7 +27,7 @@ type bakeCmd struct {
 	Format   string   `enum:"mlt,mvt," default:"" help:"Tile encoding: mlt (MapLibre Tile, the engine default) or mvt (Mapbox Vector Tile, for consumers without an MLT decoder). Empty = the engine default (mlt)."`
 	S101     string   `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Requires --s101-fc."`
 	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
-	Tile57   bool     `name:"tile57" help:"(requires a -tags tile57 build) Bake with the native libtile57 engine into a self-contained chart BUNDLE (tiles/chart.pmtiles + assets/style-*.json + manifest.json) under -o (treated as a directory). Honors --max-zoom; --bands/--manifest/--overzoom don't apply (the bundle is zoom-banded per cell and self-describing)."`
+	Tile57   bool     `name:"tile57" help:"Bake with the native libtile57 engine into a self-contained chart BUNDLE (tiles/chart.pmtiles + assets/style-*.json + manifest.json) under -o (treated as a directory). Honors --max-zoom; --bands/--manifest/--overzoom don't apply (the bundle is zoom-banded per cell and self-describing)."`
 }
 
 func (c bakeCmd) Run() error {
@@ -35,7 +35,6 @@ func (c bakeCmd) Run() error {
 	// archive per navigational band (+ manifest) so the district/demo/widget
 	// workflows keep working; otherwise a self-contained bundle directory
 	// (tiles/chart.pmtiles + per-scheme style + assets + manifest.json). Both need
-	// a -tags tile57 build; a CGO-free binary errors via the stub.
 	if c.Bands {
 		return c.runTile57Bands()
 	}
