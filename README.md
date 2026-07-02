@@ -1,13 +1,12 @@
 <h1 align="center">chartplotter</h1>
 
 <p align="center">
-  <b>⚓ A marine chart plotter, in Go.</b><br>
-  Generate offline vector-tile archives from NOAA S-57 ENC cells and render them in the browser.
+  <b>⚓ A marine chart plotter.</b><br>
+  Turn NOAA S-57 ENC cells into offline vector-tile charts and render them in the browser.
 </p>
 
 <p align="center">
   <a href="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml"><img src="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/beetlebugorg/chartplotter/releases"><img src="https://img.shields.io/github/v/release/beetlebugorg/chartplotter?sort=semver" alt="Release"></a>
   <a href="https://goreportcard.com/report/github.com/beetlebugorg/chartplotter"><img src="https://goreportcard.com/badge/github.com/beetlebugorg/chartplotter" alt="Go Report Card"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/beetlebugorg/chartplotter" alt="License"></a>
 </p>
@@ -42,45 +41,65 @@ in a web browser, online or fully offline.
 
 It reads **S-57** electronic navigational chart (ENC) cells and draws them with the
 **S-101 Portrayal Catalogue**, the modern IHO standard for how charts look. It
-writes the result to a single **PMTiles** archive of **Mapbox Vector Tiles**. A small
-`<chart-plotter>` web component, built on
+writes the result to **PMTiles** archives of vector tiles — **MapLibre Tiles
+(MLT)** by default, **Mapbox Vector Tiles (MVT)** on request — plus a matching
+MapLibre style. A `<chart-plotter>` web component, built on
 [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/), draws the chart.
 
 In short: the heavy lifting happens once, up front. chartplotter reads the raw NOAA
-charts and renders every feature — its colors, symbols, and lines — into map tiles,
-saved as a single file on your machine. After that the browser only *displays* those
-tiles — panning, zooming, switching palettes — and never touches the raw charts again.
+charts and renders every feature — its colors, symbols, and lines — into map tiles
+saved on your machine. After that the browser only *displays* those tiles —
+panning, zooming, switching palettes — and never touches the raw charts again.
+
+## 🧱 Two repositories, one program
+
+chartplotter is built from two repos that work as a pair:
+
+- **[`chartplotter`](https://github.com/beetlebugorg/chartplotter)** (this repo,
+  Go) — the application: the HTTP server and chart library, the `bake`/`serve`
+  CLI, NMEA 0183 ingestion, and the `<chart-plotter>` web frontend.
+- **[`tile57`](https://github.com/beetlebugorg/tile57)** (Zig) — the chart
+  engine. It builds **libtile57**, a native static library that does *all* of the
+  chart work: S-57 decoding, S-101 portrayal, web-Mercator tiling, MLT/MVT
+  encoding, and generating the MapLibre style and client assets (sprites, color
+  tables, line styles, patterns).
+
+**Naming, once:** *libtile57* is the native engine library, built from the
+*tile57* repo and statically linked into the Go binary via CGO. The Go code is
+the hub around it; the browser only renders what the engine baked.
 
 ## 🎯 Goal
 
-Implement the IHO chart standards — **S-57** (ENC data), **S-101** portrayal (the
-successor to S-52), and the wider **S-100 / S-102** family — in **pure Go**, with
-**minimal dependencies and no CGO**, so the whole thing **cross-compiles to a single
-static binary** for any platform with `GOOS`/`GOARCH` and nothing else to install.
+Implement the IHO chart standards — **S-57** (ENC data) and **S-101** portrayal
+(the successor to S-52), with the wider **S-100 / S-102** family planned — as a
+fast, low-memory native engine (tile57, in Zig) wrapped by a small Go server, so
+one locally-built binary bakes and serves real charts on anything from a laptop
+to a Raspberry Pi on a boat.
 
 ## ✨ Features
 
-- **A complete chart pipeline.** chartplotter does every step: ISO 8211 decode, the
-  S-57 feature model, S-101 portrayal, web-Mercator tiling, vector-tile encode, and a
-  streaming PMTiles writer.
-- **Works offline.** Generate one `.pmtiles` archive for a region, then serve or ship
-  it. You do not need a tile server to view it.
-- **Adjust the chart live.** Switch Day, Dusk, and Night palettes and toggle mariner
-  settings — depth shading, soundings, contours, safety-depth danger highlighting — and
-  the map restyles at once. Colors are stored as S-101 names and settings ride along as
-  tile attributes, so the viewer applies your changes without regenerating the tiles.
-- **Ships as one binary.** The S-101 catalogue *and* the web frontend build into the
-  program. A self-contained `chartplotter serve` needs no files on disk — you supply
-  only the ENC cells.
-- **Runs a server.** The built-in HTTP server downloads NOAA cells, generates tiles in
-  the background, and serves the frontend with byte-range support.
-- **Live position and AIS (early).** Point a **NMEA 0183** feed at the server (over
-  TCP) and it shows your **own ship** and **basic AIS targets** on the chart. A
-  built-in `simulate` command generates traffic for testing.
-- **Draws the whole symbol set.** It renders the complete S-52 Presentation Library
-  **ECDIS "Chart 1"** reference sheet — every symbol, line style, area fill, and
-  colour — drawn by the same pipeline that bakes real NOAA charts and diffed against
-  the spec's own plots. [See the rendered sheet →](https://beetlebugorg.github.io/chartplotter/chart1)
+- **A complete chart pipeline.** libtile57 does every step: ISO 8211 decode, the
+  S-57 feature model, S-101 portrayal, tiling, MLT/MVT encode, PMTiles output,
+  and the matching MapLibre style + symbol assets.
+- **Works offline.** Bake a region once, then serve or ship it. You do not need
+  an internet connection to view it.
+- **Adjust the chart live.** Switch Day, Dusk, and Night palettes and toggle
+  mariner settings — depth shading, soundings, contours, safety-depth danger
+  highlighting — and the map restyles at once, without regenerating tiles.
+- **Builds to one self-contained binary.** The S-101 catalogue is compiled into
+  libtile57 and the web frontend is embedded in the Go binary, so the
+  `chartplotter` you build runs from a single file — you supply only the ENC
+  cells. (You build that binary yourself; see the release policy below.)
+- **Runs a server.** The built-in HTTP server downloads NOAA cells, bakes tiles
+  in the background, and serves the frontend with byte-range support.
+- **Live position and AIS (early).** Point a **NMEA 0183** feed at the server
+  (over TCP) and it shows your **own ship** and **basic AIS targets** on the
+  chart. A built-in `simulate` command generates traffic for testing.
+- **Draws the whole symbol set.** It renders the complete S-52 Presentation
+  Library **ECDIS "Chart 1"** reference sheet — every symbol, line style, area
+  fill, and colour — drawn by the same engine that bakes real NOAA charts and
+  diffed against the spec's own plots.
+  [See the rendered sheet →](https://beetlebugorg.github.io/chartplotter/chart1)
 
 <p align="center">
   <a href="https://beetlebugorg.github.io/chartplotter/chart1" title="How chartplotter renders the S-52 ECDIS Chart 1 symbol sheet">
@@ -98,61 +117,81 @@ of the chart — **instrument gauges**, custom overlays, routes, and more — wi
 forking the core. NMEA 0183 own-ship and AIS are the first slice of that; expect
 the surface to grow and change.
 
-## 📦 Install
+## 📦 Build from source
 
-### Pre-built binaries
+chartplotter is **source-only**: there are no pre-built binaries to download, and
+`go install …@latest` does not work (the build links a native library and uses a
+local `replace` directive). You clone two repos and build locally.
 
-Download an archive for your platform from the
-[**Releases**](https://github.com/beetlebugorg/chartplotter/releases) page, extract it,
-and put `chartplotter` on your `PATH`. Each platform ships two builds:
+**Why no binaries?** The build embeds the **IHO S-101 Portrayal and Feature
+Catalogues** into libtile57. The IHO publishes those catalogues in its own GitHub
+repositories, but with **no declared license**, so the right to *redistribute*
+them (and therefore any binary that embeds them) is unresolved. The build fetches
+the catalogues via git submodules **directly from IHO's own repositories**, so
+each user obtains the IHO material from the IHO — this project never
+redistributes it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-- **`…_s101`** — self-contained: embeds the S-101 catalogue, runs with no extra
-  files. (That catalogue is IHO material; see
-  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).)
-- **plain** — needs `--s101 <PortrayalCatalog dir>` at runtime, pointing at your
-  own copy of the catalogue.
+### Requirements
 
-### With go install
+- **Go 1.26+**
+- **Zig 0.16** (builds libtile57, and serves as the C cross-toolchain)
+- **git** (the engine's submodules fetch the IHO catalogues)
 
-Requires **Go 1.26+**.
+### Recipe
+
+The two repos must sit **side by side**, with the engine directory named
+`tile57` — this repo's `go.mod` points at `../tile57/bindings/go`, and the
+Makefile builds `../tile57/zig-out/lib/libtile57.a` on demand. A symlink named
+`tile57` pointing at a checkout elsewhere also works.
 
 ```sh
-go install github.com/beetlebugorg/chartplotter/cmd/chartplotter@latest
-```
+git clone https://github.com/beetlebugorg/tile57.git
+cd tile57
+git submodule update --init --recursive   # fetches the IHO S-101 catalogues
+cd ..
 
-### From source
-
-```sh
 git clone https://github.com/beetlebugorg/chartplotter.git
 cd chartplotter
-make build          # -> bin/chartplotter (embeds the catalogue if it is available)
+make build          # zig-builds libtile57, then a CGO go build → bin/chartplotter
 bin/chartplotter version
 ```
 
+`make build` is the ground truth for how the binary is produced (CGO enabled,
+statically linking libtile57); [CLAUDE.md](CLAUDE.md) and the
+[Makefile](Makefile) describe the build contract.
+
 ## 🚀 Get started
 
-The frontend is built into the binary, so one file is all you need. Start the server
-and open the viewer:
+The frontend is built into the binary, so one file is all you need. Start the
+server and open the viewer:
 
 ```sh
-chartplotter serve
+bin/chartplotter serve
 # open http://127.0.0.1:8080 → pick a region → it downloads and builds tiles → the chart appears
 ```
 
 The server writes everything it generates to your cache directory
 (`~/.cache/chartplotter`), never into the binary's assets.
 
-You can also build a standalone archive yourself with the `bake` command:
+You can also bake charts yourself with the `bake` command:
 
 ```sh
-# Generate one archive from cells, a directory, or a NOAA ENC zip.
-chartplotter bake -o charts.pmtiles US4MD81M.000
+# Bake cells, a directory, or a NOAA ENC zip into a self-contained chart bundle
+# (charts/tiles/chart.pmtiles + per-scheme styles + assets + manifest).
+chartplotter bake -o charts US4MD81M.000
 
-# Generate one archive per navigational band (best-available display).
+# Or write one gap-clipped PMTiles archive per navigational band
+# (best-available display), as the static demo/widget workflows use.
 chartplotter bake --bands -o charts.pmtiles US5MD_ENCs.zip
 ```
 
-To develop the frontend, serve the assets from disk instead of the embedded bundle:
+Tiles are encoded as **MLT (MapLibre Tiles)** by default, which needs MapLibre
+GL JS **5.12 or newer** to decode (the bundled viewer vendors 5.24.0, so nothing
+to do there). If you want tiles for a consumer without an MLT decoder, bake with
+`--format mvt`.
+
+To develop the frontend, serve the assets from disk instead of the embedded
+bundle:
 
 ```sh
 chartplotter serve --assets web
@@ -162,11 +201,11 @@ chartplotter serve --assets web
 
 | Command | What it does |
 | --- | --- |
-| `version` | Print the version and whether the S-101 catalogue is embedded. |
+| `version` | Print the chartplotter and libtile57 versions. |
 | `emit-assets DIR` | Write the S-101 client assets (color tables, sprites, line styles, patterns) to a directory. |
 | `catalog-json IN.xml OUT.json` | Distil NOAA `ENCProdCat.xml` into a compact `catalog.json`. |
-| `bake -o OUT.pmtiles IN…` | Generate a PMTiles archive from S-57 cells, directories, or NOAA ENC zips. |
-| `serve [--host] [--port] [--assets DIR]` | Serve the web frontend, the baking API, and the NOAA cell proxy. |
+| `bake -o OUT IN…` | Bake S-57 cells, directories, or NOAA ENC zips into a chart bundle (or per-band PMTiles with `--bands`). |
+| `serve [--host] [--port] [--assets DIR] [--tile57 ENC]` | Serve the web frontend, the baking API, and the NOAA cell proxy; `--tile57` adds a live, bake-on-demand tile set from raw cells. |
 | `simulate` | Run an NMEA 0183 traffic generator over TCP (own-ship + AIS targets) for testing. |
 
 Run `chartplotter <command> --help` for the full flags.
@@ -174,19 +213,23 @@ Run `chartplotter <command> --help` for the full flags.
 ## 🧭 How it works
 
 ```
-S-57 ENC cell (.000)
-   │  ISO 8211 decode             pkg/iso8211
+S-57 ENC cells (.000 + .001… updates)
+   │
    ▼
-S-57 feature + geometry model     pkg/s57
-   │  S-101 portrayal             pkg/s100, internal/engine/s101
+libtile57 — the native engine (Zig, ../tile57, linked via CGO)
+   │  ISO 8211 decode → S-57 model → S-101 portrayal →
+   │  web-Mercator tiling → MLT/MVT encode →
+   │  MapLibre style + sprites/colors/line styles
    ▼
-Primitive drawing list (lat/lon)  internal/engine/portrayal
-   │  project + clip              internal/engine/tile
+Chart bundles: PMTiles + style-{day,dusk,night}.json + assets
+   │
    ▼
-Mapbox Vector Tiles               internal/engine/mvt
-   │  dedup + streaming write     internal/engine/pmtiles
+Go server (this repo) — the hub
+   │  chart library & background bakes, /tiles + /api,
+   │  settings, NMEA 0183 / AIS, aux attachments, plugins
    ▼
-charts.pmtiles  ───────────────▶  <chart-plotter> / MapLibre GL JS  (web/)
+<chart-plotter> web component (web/) — MapLibre GL JS
+   renders the pre-baked tiles; no portrayal in the browser
 ```
 
 Read the [**Architecture**](https://beetlebugorg.github.io/chartplotter/architecture)
@@ -197,16 +240,23 @@ layer and field contract the frontend depends on.
 ## 🛠️ Development
 
 ```sh
-make build      # build bin/chartplotter
+make build      # zig-build libtile57 + CGO go build → bin/chartplotter
 make test       # go test ./...
 make vet        # go vet ./...
 make fmt        # gofmt -w .
 make serve      # build + serve web/ on :8080
+make xbuild     # cross-compile with `zig cc` (linux + windows, amd64/arm64)
 ```
 
-CI runs `gofmt`, `go vet`, `go test`, and `go build` on every push. When you push a
-`v*` tag, [GoReleaser](https://goreleaser.com/) cuts a release with binaries for Linux,
-macOS, and Windows on amd64 and arm64.
+CGO is required — libtile57 is the sole tile/portrayal engine, so
+`CGO_ENABLED=0` does not build. Cross-compilation still works with **Zig as the
+C toolchain** (`make xbuild` covers linux and windows; darwin must be built
+natively on a Mac, because Go's `crypto/x509` links Apple frameworks Zig doesn't
+bundle).
+
+CI runs `gofmt`, `go vet`, `go test`, and the CGO build on every push. Releases
+are **source-only** — a tag produces release notes and a source archive, never
+binaries (see the release policy above).
 
 ## 📚 Documentation
 
@@ -216,14 +266,16 @@ install, the CLI reference, the chart pipeline, and the vector-tile schema.
 
 ## 📄 License
 
-chartplotter's own code is [MIT](LICENSE) © Jeremy Collins.
+chartplotter's own code is [MIT](LICENSE) © Jeremy Collins, and so is the
+[tile57](https://github.com/beetlebugorg/tile57) engine it links.
 
-It bundles third-party software and data under their own licenses — all Go
+It bundles third-party software and data under their own licenses — the Go
 dependencies are permissive (MIT / BSD-3-Clause), plus MapLibre GL JS (BSD),
-Noto Sans (OFL), OpenBridge icons (CC BY 4.0), and a GSHHG coastline basemap
+Noto Sans (OFL 1.1), OpenBridge icons (CC BY 4.0), and a GSHHG coastline basemap
 (LGPL). NOAA ENC charts are U.S. public domain and **not for navigation**.
 
-The **IHO S-101 Portrayal & Feature Catalogue** is © IHO and is *not* included in
-this repository; a draft copy is embedded only in opt-in `_s101` builds, and its
-redistribution terms are still to be confirmed. See
+The **IHO S-101 Portrayal & Feature Catalogues** are © IHO and are *not* in
+either repository; the build fetches them from the IHO's own repositories via
+git submodules and compiles them into your locally-built binary. Their
+redistribution terms are unresolved, which is why no binaries are published. See
 [**THIRD-PARTY-NOTICES.md**](THIRD-PARTY-NOTICES.md) for the full inventory.
