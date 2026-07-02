@@ -8,7 +8,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // cellIndex is a small, persistent name→bounding-box index over the cached source
@@ -144,17 +144,17 @@ func (ci *cellIndex) scan() {
 		if _, ok := ci.get(name); ok {
 			continue // already indexed (forget() drops a re-imported cell so it re-parses)
 		}
-		data, err := os.ReadFile(filepath.Join(ci.encRoot, name, name+".000"))
+		src, err := tile57.Open(filepath.Join(ci.encRoot, name, name+".000"))
 		if err != nil {
 			continue
 		}
-		chart, err := baker.ParseCellCoverage(name, data, nil)
-		if err != nil {
+		infos, err := src.Cells()
+		src.Close()
+		if err != nil || len(infos) == 0 {
 			continue
 		}
-		b := chart.Bounds()
 		ci.mu.Lock()
-		ci.bbox[name] = [4]float64{b.MinLon, b.MinLat, b.MaxLon, b.MaxLat}
+		ci.bbox[name] = infos[0].BBox
 		ci.mu.Unlock()
 		added++
 		if added%200 == 0 {
