@@ -19,6 +19,7 @@
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
 import { engineStamp } from "./chart-canvas/chart-sources.mjs"; // engine-commit stamp for the attribution corner
 import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import { featureDebugSnapshot } from "./lib/debug-snapshot.mjs"; // pick report copy-feature JSON (shared with dev-tools Inspect)
 import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
@@ -1383,6 +1384,9 @@ export class ChartPlotter extends HTMLElement {
     const el = document.createElement("pick-report");
     if (typeof el.show !== "function") { console.warn("[pick] <pick-report> not loaded"); return null; }
     this.shadowRoot.appendChild(el);
+    // Copy-feature button: the dev Inspect debug-copy shape, scoped to the selected
+    // feature (includes the live layer gates, so a pasted report is self-diagnosing).
+    el.setSnapshot((f) => featureDebugSnapshot(this._map, f));
     el.addEventListener("pick-feature", (e) => {
       const f = e.detail && e.detail.feature;
       const geom = f ? (f._hiGeom || f.geometry) : null; // trace the object's extent, not the symbol anchor

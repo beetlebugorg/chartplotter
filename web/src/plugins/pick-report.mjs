@@ -11,9 +11,11 @@
 //   • emits "pick-feature" (the displayed feature, for the map highlight) and
 //     "pick-close" so the shell can sync the map.
 //
-// Public API: setCatalogue(cat) · setUnits(prefs) · show(feats, anchor{x,y}) · hide().
+// Public API: setCatalogue(cat) · setUnits(prefs) · setSnapshot(fn) ·
+// show(feats, anchor{x,y}) · hide().
 
 import { convertHeight, convertDistance, convertSpeed, unitSuffix, M_TO_FT } from "../lib/units.mjs";
+import { copyText, flashBtn } from "../lib/util.mjs";
 
 // Attributes whose numeric value carries a physical unit we let the mariner pick.
 // Each maps to a category whose canonical source unit matches the ENC encoding:
@@ -90,6 +92,9 @@ const STYLE = `
     padding:3px 5px; border-radius:7px; margin:-3px -5px -3px 0;
     touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .x:hover { background:var(--ui-hover,#f0f3f6); color:var(--ui-text,#2a2f35); }
+  /* The copy-feature button shares the close button's chrome, one step smaller;
+     zero the .x negative right margin so the head gap spaces the pair evenly. */
+  .copy { font-size:14px; margin-right:0; }
   .name { padding:13px 16px 0; font-size:13.5px; color:var(--ui-accent,#1565c0); font-weight:600; line-height:1.3; }
   .meta { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:11px 16px; }
   .cell { font-size:12px; color:var(--ui-text-dim,#7a828b); }
@@ -129,6 +134,7 @@ export class PickReport extends HTMLElement {
     this._admin = false;
     this._userPos = null; // {left,top} once the mariner drags it; cleared on close
     this._aux = null;     // AuxStore for TXTDSC/PICREP external files (optional)
+    this._snapshot = null; // shell-supplied debug-snapshot builder (copy button)
     this._renderSeq = 0;  // guards async aux fills against a newer render
     // NB: a custom-element constructor must not set attributes (incl. `hidden`) —
     // the spec forbids it ("result must not have attributes"). Hide in connectedCallback.
@@ -140,6 +146,7 @@ export class PickReport extends HTMLElement {
       <div class="head" part="head">
         <span class="grip" aria-hidden="true">⠿</span>
         <div class="title" id="title"></div>
+        <button class="x copy" id="copy" title="Copy feature data (JSON)" type="button" hidden>⧉</button>
         <button class="x" id="close" title="Close" type="button">✕</button>
       </div>
       <div id="name"></div>
@@ -148,6 +155,8 @@ export class PickReport extends HTMLElement {
       <div id="adminWrap"></div>`;
     const $ = (id) => this.shadowRoot.getElementById(id);
     $("close").onclick = () => this.hide();
+    $("copy").onclick = (e) => this._copyFeature(e.currentTarget);
+    $("copy").hidden = !this._snapshot; // covers setSnapshot-before-connect ordering
     this._initDrag(this.shadowRoot.querySelector(".head"));
     // Delegate clicks for the dynamic nav / admin controls.
     this.shadowRoot.addEventListener("click", (e) => {
@@ -187,6 +196,30 @@ export class PickReport extends HTMLElement {
   // Optional: without it (or for a feature whose file isn't in the set) the report
   // falls back to showing the raw filename.
   setAux(aux) { this._aux = aux || null; if (!this.hidden) this._render(); }
+
+  // The shell's debug-snapshot builder for the copy-feature button: fn(feature) →
+  // the machine-readable object to copy (featureDebugSnapshot in
+  // debug-snapshot.mjs — { when, view, feature, gates }). This element has no map
+  // handle of its own, so the view/gates context is injected like the catalogue.
+  // The copy button only shows once a builder is supplied.
+  setSnapshot(fn) {
+    this._snapshot = typeof fn === "function" ? fn : null;
+    const b = this.shadowRoot && this.shadowRoot.getElementById("copy");
+    if (b) b.hidden = !this._snapshot;
+  }
+
+  // Copy the SELECTED feature's debug snapshot — the same self-diagnosing JSON the
+  // dev-tools Inspect copy produces, scoped to this one feature — with a ✓/✗ flash
+  // on the button for feedback.
+  async _copyFeature(btn) {
+    const f = this._feats[Math.min(this._idx, this._feats.length - 1)];
+    let ok = false;
+    try {
+      const snap = f && this._snapshot ? this._snapshot(f) : null;
+      if (snap) ok = await copyText(JSON.stringify(snap, null, 2));
+    } catch (e) { ok = false; }
+    flashBtn(btn, ok ? "✓" : "✗");
+  }
 
   // Show the report for a feature stack; `anchor` is the picked point {x,y} in
   // viewport pixels, used for out-of-the-way auto-placement.
