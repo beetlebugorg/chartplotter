@@ -20,7 +20,7 @@ func buildExchangeZip(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cat, err := os.ReadFile("../../../pkg/s57/testdata/US5MD1MC_CATALOG.031")
+	cat, err := os.ReadFile("testdata/US5MD1MC_CATALOG.031")
 	if err != nil {
 		t.Fatal(err)
 	}
