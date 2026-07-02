@@ -1,13 +1,13 @@
 name: Release
 
 # chartplotter publishes per-platform binaries on every v* tag. The binary is a
-# CGO build that statically links the native libtile57 engine, so GoReleaser
-# cannot cross-compile it — the binaries are built HERE, ahead of GoReleaser, and
-# GoReleaser's `prebuilt` builder only PACKAGES them:
+# CGO build that statically links the native libtile57 engine and can't be
+# cross-compiled by an off-the-shelf builder, so the binaries are cross-built HERE
+# per platform, then a plain shell step archives + checksums + releases them:
 #
 #   xbuild (ubuntu)  → linux + windows, amd64/arm64  via `make xbuild` (zig cc)
 #   macos  (arm64)   → darwin amd64/arm64            built with native apple clang
-#   release (ubuntu) → downloads both artifact sets into dist/, runs GoReleaser Pro
+#   release (ubuntu) → downloads both artifact sets, archives + checksums + release
 #
 # The engine is the public github.com/beetlebugorg/tile57 (its submodules hold the
 # IHO S-101 catalogues); it is checked out as a SIBLING dir named tile57 so go.mod's
@@ -15,11 +15,11 @@ name: Release
 # layout as ci.yml / docs.yml. main.version + main.engineCommit are stamped into
 # every binary via ldflags (preserved across all three jobs).
 #
-# `builder: prebuilt` is a GoReleaser PRO feature, so the release job uses the
-# goreleaser-pro distribution + a GORELEASER_KEY secret (see .goreleaser.yaml).
+# Packaging is plain shell (tar/zip + checksums + gh release) — no GoReleaser, no
+# paid license — so nothing here depends on a GoReleaser Pro key.
 #
 # NOTE: correct-by-construction but UNVALIDATED until a real v* tag is pushed —
-# nothing runs on push/PR, and the prebuilt packaging needs the CI-built binaries.
+# nothing runs on push/PR, and packaging needs the CI-built binaries.
 
 on:
   push:
@@ -140,7 +140,11 @@ jobs:
           path: chartplotter/dist/chartplotter_darwin_*
           if-no-files-found: error
 
-  # ---- package + publish: GoReleaser Pro packages the prebuilt binaries --------
+  # ---- package + publish: plain shell (no GoReleaser, no paid license) ---------
+  # The binaries are already built by the two jobs above; this just archives each
+  # (tar.gz for unix, zip for windows), writes checksums.txt, and creates the
+  # GitHub release with all of it attached. (GoReleaser's prebuilt builder would do
+  # the same packaging but is Pro-only; shell keeps the release path license-free.)
   release:
     runs-on: ubuntu-latest
     needs: [xbuild, macos]
@@ -151,9 +155,8 @@ jobs:
           path: chartplotter
           fetch-depth: 0
 
-      # Land ALL six prebuilt binaries into chartplotter/dist/ where the prebuilt
-      # `path` in .goreleaser.yaml expects them. GoReleaser writes its own output
-      # to dist-release/, so `--clean` does not wipe these.
+      # Land all six prebuilt binaries into dist/ (naming: chartplotter_{os}_{arch}
+      # [.exe], from xbuild-tile57.sh + the macos job).
       - name: Download prebuilt binaries
         uses: actions/download-artifact@v4
         with:
@@ -161,20 +164,46 @@ jobs:
           merge-multiple: true
           path: chartplotter/dist
 
-      # upload-artifact does not preserve the executable bit; restore it so the
-      # archived unix binaries are runnable straight out of the archive.
-      - name: Restore executable bit
-        run: chmod +x chartplotter/dist/chartplotter_* || true
+      # Archive each binary alongside README + LICENSE + THIRD-PARTY-NOTICES, then
+      # one checksums.txt over the archives. tar.gz for unix, zip for windows.
+      # upload-artifact drops the exec bit, so it's restored before archiving.
+      - name: Package archives + checksums
+        working-directory: chartplotter
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          out=release-assets
+          mkdir -p "$out"
+          for bin in dist/chartplotter_*; do
+            base="$(basename "$bin")"          # chartplotter_linux_amd64[.exe]
+            platform="${base#chartplotter_}"   # linux_amd64[.exe]
+            stage="$(mktemp -d)"
+            cp README.md LICENSE THIRD-PARTY-NOTICES.md "$stage/"
+            if [ "${base##*.}" = "exe" ]; then
+              platform="${platform%.exe}"
+              cp "$bin" "$stage/chartplotter.exe"
+              ( cd "$stage" && zip -q -r - . ) > "$out/chartplotter_${tag}_${platform}.zip"
+            else
+              cp "$bin" "$stage/chartplotter"
+              chmod +x "$stage/chartplotter"
+              tar -czf "$out/chartplotter_${tag}_${platform}.tar.gz" -C "$stage" .
+            fi
+            rm -rf "$stage"
+          done
+          ( cd "$out" && sha256sum chartplotter_* > checksums.txt )
+          ls -1 "$out"
 
-      # `prebuilt` is a Pro-only builder, so use the goreleaser-pro distribution.
-      # GoReleaser does NOT rebuild — the prebuilt builder just imports dist/.
-      - name: Run GoReleaser (Pro, prebuilt)
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser-pro
-          version: "~> v2"
-          workdir: chartplotter
-          args: release --clean
+      - name: Create GitHub release
+        working-directory: chartplotter
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --verify-tag \
+            --generate-notes \
+            --notes "Per-platform binaries below. Each embeds the IHO S-101 catalogue (via the tile57 engine) — see THIRD-PARTY-NOTICES.md. Building from source per the README is the alternative." \
+            release-assets/*
+
+# TODO(signing): binaries are unsigned/unnotarized (the old quill hook was removed
+# with the source-only pivot). macOS users hit Gatekeeper until notarization is
+# wired back in.

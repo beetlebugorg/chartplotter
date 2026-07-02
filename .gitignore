@@ -1,9 +1,8 @@
 # Build output
 /bin/
 /dist/
-# GoReleaser output dir (kept separate from /dist/ so `--clean` doesn't wipe the
-# prebuilt binaries CI drops in /dist/ — see .goreleaser.yaml).
-/dist-release/
+# Release packaging staging (the release workflow's shell packaging step).
+/release-assets/
 *.test
 *.out
 coverage.*

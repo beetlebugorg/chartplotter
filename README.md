@@ -286,8 +286,10 @@ delete `go.work` to fall back to the `../tile57` sibling.
 
 CI runs `gofmt`, `go vet`, `go test`, and the CGO build on every push. Pushing a
 `v*` tag cross-builds the per-platform binaries (linux + windows via `zig cc`,
-macOS natively on a Mac runner) and publishes them, with generated notes, through
-GoReleaser — see [`.github/workflows/release.yml`](.github/workflows/release.yml).
+macOS natively on a Mac runner), then archives + checksums them and publishes a
+GitHub release with generated notes — see
+[`.github/workflows/release.yml`](.github/workflows/release.yml). Binaries embed
+the IHO S-101 catalogue; see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
 ## 📚 Documentation
 
