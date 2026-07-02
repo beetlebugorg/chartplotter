@@ -18,6 +18,7 @@ import { BAND_COLOR, BAND_MINZOOM } from "../lib/bands.mjs";
 
 const BANDS = ["general", "coastal", "approach", "harbor", "berthing"];
 const MIN_BOX_PX = 26; // a box never renders smaller than this on screen
+const REGROW_MS = 200; // during a continuous zoom, re-grow the boxes at most 5×/s
 
 export class CoverageBoxes {
   constructor({ map, visible }) {
@@ -25,9 +26,25 @@ export class CoverageBoxes {
     this._visible = visible !== false;
     this._raw = [];
     this._raf = 0;
+    this._regrowT = 0;   // trailing re-grow timer (covers the end of a gesture)
+    this._lastApply = 0; // performance.now() of the last actual setData
+    this._lastSig = null; // signature of the last-pushed features (skip no-op setData)
     // The boxes have a per-zoom minimum on-screen size, so re-grow them as the zoom
-    // changes. Hooked once (the map persists across style rebuilds); rAF-throttled.
-    this._onZoom = () => { if (this._raf) return; this._raf = requestAnimationFrame(() => { this._raf = 0; this._apply(); }); };
+    // changes. Hooked once (the map persists across style rebuilds). Throttled to
+    // REGROW_MS with a trailing apply: the old per-frame (rAF) cadence made every
+    // animation frame of a zoom gesture setData() this source, and each setData
+    // re-tiles the geojson in a worker AND reloads every inst-bounds tile across
+    // its 11 layers (5 of them symbol layers → re-placement). Measured on a
+    // continuous z8→16 easeTo, that was ~70-85% of ALL tile churn in the gesture
+    // (~230-410 tile reloads vs ~120 real chart loads) — the map got choppier the
+    // faster it rendered. _apply() also skips identical output, so the common
+    // zoomed-in case (every footprint ≥ MIN_BOX_PX) does no work at all.
+    this._onZoom = () => {
+      if (!this._visible || this._raf || this._regrowT) return;
+      const wait = this._lastApply + REGROW_MS - performance.now();
+      if (wait > 0) { this._regrowT = setTimeout(() => { this._regrowT = 0; this._apply(); }, wait); return; }
+      this._raf = requestAnimationFrame(() => { this._raf = 0; this._apply(); });
+    };
     map.on("zoom", this._onZoom);
   }
 
@@ -36,6 +53,7 @@ export class CoverageBoxes {
   addLayers() {
     const map = this.map;
     if (!map.getSource("inst-bounds")) map.addSource("inst-bounds", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    this._lastSig = null; // a rebuilt style starts from an empty source — must re-push
     const vis = this._visible ? "visible" : "none";
     // Per-band fill/line, auto-hidden at the band's native min zoom (maxzoom) where
     // the real chart takes over.
@@ -81,12 +99,23 @@ export class CoverageBoxes {
 
   // Replace the coverage features. Raw (true) footprints are kept; _apply() pushes
   // them with the per-zoom minimum size.
-  setFeatures(raw) { this._raw = raw || []; this._apply(); }
+  setFeatures(raw) { this._raw = raw || []; this._lastSig = null; this._apply(); }
 
   _apply() {
     const src = this.map.getSource("inst-bounds");
     if (!src) return;
-    src.setData({ type: "FeatureCollection", features: this._raw.map((f) => minSizeBox(this.map, f, MIN_BOX_PX)) });
+    const features = this._raw.map((f) => minSizeBox(this.map, f, MIN_BOX_PX));
+    // Skip the setData when the grown output is unchanged. minSizeBox returns the
+    // RAW feature object itself whenever the footprint is already big enough on
+    // screen, so the signature only stringifies the (few, usually zero) boxed
+    // geometries — zoomed in past the point where every footprint ≥ MIN_BOX_PX,
+    // a whole zoom gesture is a no-op here.
+    let sig = "";
+    for (let i = 0; i < features.length; i++) if (features[i] !== this._raw[i]) sig += i + ":" + JSON.stringify(features[i].geometry.coordinates) + ";";
+    if (this._lastSig !== null && sig === this._lastSig) return;
+    this._lastSig = sig;
+    this._lastApply = performance.now();
+    src.setData({ type: "FeatureCollection", features });
   }
 
   setVisible(on) {
@@ -94,6 +123,7 @@ export class CoverageBoxes {
     const map = this.map, vis = on ? "visible" : "none";
     for (const band of BANDS) for (const pre of ["inst-fill-", "inst-line-", "inst-label-"]) if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
     if (map.getLayer("inst-outline")) map.setLayoutProperty("inst-outline", "visibility", vis);
+    if (on) this._apply(); // re-grow: the zoom hook is idle while hidden
   }
 
   // A coverage box under `point` that we're zoomed OUT of (its chart detail hasn't
@@ -138,6 +168,7 @@ export class CoverageBoxes {
   destroy() {
     this.map.off("zoom", this._onZoom);
     if (this._raf) cancelAnimationFrame(this._raf);
+    if (this._regrowT) clearTimeout(this._regrowT);
   }
 }
 
