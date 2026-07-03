@@ -1627,17 +1627,21 @@ export class ChartCanvas extends HTMLElement {
       this._scaminLightApplied = false;
       this._scaminQueueGatedReloads();
     }
-    // Straggler sweep: a tile whose worker parse STARTED before this apply's
-    // layer broadcast but FINISHED after the reload marked in-view tiles keeps
-    // buckets built under the old filters — permanently (MapLibre re-parses
-    // only 'loaded' tiles). Symptom: a steady blank chart window (e.g. the z9
-    // band, where the smax/oscl fill partitioning is densest) that appears
-    // flakily at boot and never heals. One extra reload of the chart sources
-    // on the first idle after each apply guarantees convergence.
-    if (this._scaminSweepArmed) return;
+    // Straggler sweep: a tile whose worker parse STARTED before the apply's layer
+    // broadcast but FINISHED after the reload keeps buckets built under the old
+    // filters — permanently (MapLibre re-parses only 'loaded' tiles). Symptom: a
+    // steady blank chart window that appears flakily at BOOT and never heals. That
+    // race is a ONE-TIME boot condition (once the layers are broadcast, later tiles
+    // parse correctly), so sweep the chart sources ONCE on the first idle after the
+    // first apply — NOT on every zoom settle. The old per-apply sweep re-reloaded
+    // (re-fetched + re-parsed) every tile of every source on every band crossing,
+    // which on a multi-pack install was a huge chunk of the "tiles crawl in after
+    // you stop scrolling" lag.
+    if (this._scaminSwept || this._scaminSweepArmed) return;
     this._scaminSweepArmed = true;
     map.once("idle", () => {
       this._scaminSweepArmed = false;
+      this._scaminSwept = true;
       try {
         const tms = map.style.tileManagers || map.style.sourceCaches;
         for (const sid of Object.keys(tms)) {
