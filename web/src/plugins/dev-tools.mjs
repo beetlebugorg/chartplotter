@@ -243,7 +243,15 @@ export class DevTools {
       // Hover preview is a mouse affordance only (no hovering on touch).
       if (ev.pointerType && ev.pointerType !== "mouse") return;
       if (!this._inspectMode || this._inspectLocked || this._areaCleanup) return;
-      this._inspectAt(ptOf(ev), false);
+      // rAF-throttle: a mouse sweep fires pointermove 60-120x/s, and each
+      // _inspectAt is a queryRenderedFeatures — coalesce to at most ONE query
+      // per frame against the latest position.
+      this._hoverPt = ptOf(ev);
+      if (this._hoverRaf) return;
+      this._hoverRaf = requestAnimationFrame(() => {
+        this._hoverRaf = 0;
+        if (this._hoverPt && this._inspectMode && !this._inspectLocked && !this._areaCleanup) this._inspectAt(this._hoverPt, false);
+      });
     };
     this._onPointerUp = (ev) => {
       if (!boxStart) {
@@ -284,6 +292,7 @@ export class DevTools {
       if (this._onPointerUp) { c.removeEventListener("pointerup", this._onPointerUp); c.removeEventListener("pointercancel", this._onPointerUp); }
     }
     if (this._onClick) map.off("click", this._onClick);
+    if (this._hoverRaf) { cancelAnimationFrame(this._hoverRaf); this._hoverRaf = 0; }
   }
 
   // Arm/disarm feature-inspect interaction (crosshair, hover/click capture,
@@ -324,7 +333,11 @@ export class DevTools {
     if (!map) return;
     // Accept a MapLibre Point (from the click event) or a plain {x,y} (pointer events).
     const pt = (point && typeof point.x === "number") ? [point.x, point.y] : point;
-    const feats = map.queryRenderedFeatures(pt).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
+    // Restrict to the chart layers so MapLibre skips the basemap/overlay/no-data
+    // layers (the filter below is still a safety net if the cached list is stale).
+    const only = this._d.plotter && this._d.plotter.chartLayerIds ? this._d.plotter.chartLayerIds() : null;
+    const feats = (only && only.length ? map.queryRenderedFeatures(pt, { layers: only }) : map.queryRenderedFeatures(pt))
+      .filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
     if (!feats.length) {
       if (lock) return;
       this._inspectLastKey = "";

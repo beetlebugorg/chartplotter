@@ -1323,7 +1323,9 @@ export class ChartPlotter extends HTMLElement {
     // target than a mouse. The box is screen-space, so it's zoom-independent.
     const r = ev && ev.pointerType === "touch" ? 14 : 6;
     const area = [[point.x - r, point.y - r], [point.x + r, point.y + r]];
-    const feats = map.queryRenderedFeatures(area).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
+    const only = this._plotter && this._plotter.chartLayerIds ? this._plotter.chartLayerIds() : null;
+    const feats = (only && only.length ? map.queryRenderedFeatures(area, { layers: only }) : map.queryRenderedFeatures(area))
+      .filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
     // Collapse the per-source-layer representations of one S-57 object — its area
     // fill, boundary line and centred symbol arrive as separate features that all
     // share class/cell/objnam/s57 — into a single pick entry, so stepping the

@@ -176,7 +176,7 @@ export class ChartCanvas extends HTMLElement {
     this._scaminBandLast = -1;     // last-applied band index (count of ladder values below curDenom)
     this._scaminApplyT = 0;        // settle timer for the deferred gate apply (see _scaminUpdate)
     this._scaminLightApplied = false; // a mid-zoom LIGHT apply ran — the settle pass must do a real reload
-    this._scaminLayersCache = null; // cached ids of the gated chart layers (filter carries the scamin clause)
+    this._scaminLayersCache = null; this._chartLayerIdsCache = null; // cached ids of the gated chart layers (filter carries the scamin clause)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
     this._layerVis = {};     // chart layer id → intended (mariner) visibility, so band on/off restores it
@@ -1017,7 +1017,7 @@ export class ChartCanvas extends HTMLElement {
     // Re-evaluate the engine style for the NEW active set(s) first (a tile57-baked pack
     // renders from the engine style, not the JS builder), so buildStyle picks the right
     // path when the source manager rebuilds. Reset engine state, re-probe for `names`.
-    this._engineMode = false; this._engineStyle = null; this._engineSet = null; this._scaminLayersCache = null;
+    this._engineMode = false; this._engineStyle = null; this._engineSet = null; this._scaminLayersCache = null; this._chartLayerIdsCache = null;
     await this._initEngineStyle(Array.isArray(names) ? names : (names ? [names] : []));
     const active = await this._sources.setServerSets(names);
     // The source rebuild re-applies the engine style with the SCAMIN filter-gate at its
@@ -1507,7 +1507,7 @@ export class ChartCanvas extends HTMLElement {
     const m = this._map;
     if (!m) return;
     if (!m.isStyleLoaded || !m.isStyleLoaded()) { m.once("idle", () => this._scaminForceWhenReady()); return; }
-    this._scaminLayersCache = null;
+    this._scaminLayersCache = null; this._chartLayerIdsCache = null;
     this._scaminUpdate(true);
   }
 
@@ -1571,7 +1571,7 @@ export class ChartCanvas extends HTMLElement {
       // ("light with SCAMIN 499999 dips out at 255000").
       let f = null;
       try { f = map.getLayer(id) ? map.getFilter(id) : null; } catch { /* stale id */ }
-      if (!f) { this._scaminLayersCache = null; continue; } // recollect next apply
+      if (!f) { this._scaminLayersCache = null; this._chartLayerIdsCache = null; continue; } // recollect next apply
       const nf = JSON.parse(JSON.stringify(f));
       if (setScaminDenom(nf, denom)) {
         if (light && this._scaminLightSetFilter(id, nf)) { anyLight = true; continue; }
@@ -1657,6 +1657,24 @@ export class ChartCanvas extends HTMLElement {
       if (l.filter && setScaminDenom(JSON.parse(JSON.stringify(l.filter)), 0, true)) out.push(l.id);
     }
     return (this._scaminLayersCache = out);
+  }
+
+  // Cached ids of every layer drawn from a chart source (point_symbols, soundings,
+  // lines, areas, text, complex_lines, area_patterns, sector_lines — across the
+  // live "chart" source and per-band "chart-<slug>" sources). Passing these to
+  // queryRenderedFeatures({layers}) lets MapLibre skip the basemap / OSM / no-data /
+  // overlay layers entirely, so the hot pick + inspect-hover paths query only what
+  // they'll keep instead of querying ALL layers and filtering by source afterward.
+  // Cache nulled on every style diff/rebuild (alongside _scaminLayersCache).
+  chartLayerIds() {
+    if (this._chartLayerIdsCache) return this._chartLayerIdsCache;
+    const style = this._map && this._map.getStyle();
+    if (!style || !style.layers) return []; // style not ready — don't cache the empty result
+    const out = [];
+    for (const l of style.layers) {
+      if (l.source && String(l.source).startsWith("chart") && !l.id.startsWith("scaminprobe")) out.push(l.id);
+    }
+    return (this._chartLayerIdsCache = out);
   }
 
   // Apply one engine diff op to the live map (ops only reference engine chart layers;
