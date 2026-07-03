@@ -1368,6 +1368,8 @@ export class ChartCanvas extends HTMLElement {
     const chrome = js.layers.filter((l) => !isChart(l.source));
     const chromeSources = {};
     for (const [k, v] of Object.entries(js.sources)) if (!isChart(k)) chromeSources[k] = v;
+    const sources = { ...chromeSources, ...engine.sources };
+    this._applySourceBounds(sources); // per-pack bounds → skip non-covering packs' tile requests
     return {
       version: 8,
       glyphs: engine.glyphs || js.glyphs,
@@ -1375,7 +1377,7 @@ export class ChartCanvas extends HTMLElement {
       // (map.addImage from the tile57-custom sprite.json/png fetched separately),
       // so a MapLibre sprite URL here only makes it fetch a standard @2x atlas that
       // doesn't exist (404s). icon-image resolves against the addImage'd images.
-      sources: { ...chromeSources, ...engine.sources },
+      sources,
       // chrome (bg → basemap → no-data) UNDER the engine chart layers; drop the engine's
       // own background so there is a single (client, scheme-aware) sea background.
       layers: [...chrome, ...engine.layers.filter((l) => l.type !== "background")],
@@ -1437,7 +1439,27 @@ export class ChartCanvas extends HTMLElement {
       this._lastMariner = this._marinerQuery();
       // SCAMIN ladder (the boundary-crossing set) from the set's TileJSON, for the
       // filter-gate controller (_scaminUpdate). Best-effort — empty → gate shows all.
+      // This ALSO collects each set's bounds (this._setBounds) from the same fetch,
+      // applied to the chart sources in _engineStyleMerged (below).
       this._engineScaminValues = await this._fetchScaminValues();
+    }
+  }
+
+  // Inject each active set's geographic bounds onto its chart-<set> vector source,
+  // so MapLibre only requests tiles from packs whose coverage intersects the view.
+  // Without bounds, every viewport tile position is requested from ALL active packs
+  // — 8 of 9 return empty 204s but still saturate the browser's 6-connection pool,
+  // so tiles at a new zoom crawl in ("everything appears a second after you stop
+  // scrolling"). Applied in the merge so it survives a style rebuild.
+  _applySourceBounds(sources) {
+    if (!sources || !this._setBounds) return;
+    const sets = this._engineSets || [];
+    for (const set of sets) {
+      const b = this._setBounds[set];
+      if (!b) continue;
+      // Multi-pack sources are `chart-<slug>`; a single live set is just `chart`.
+      const src = sources["chart-" + set] || (sets.length === 1 ? sources["chart"] : null);
+      if (src && src.type === "vector") src.bounds = b;
     }
   }
 
@@ -1447,12 +1469,14 @@ export class ChartCanvas extends HTMLElement {
   async _fetchScaminValues() {
     const sets = (this._engineSets && this._engineSets.length) ? this._engineSets : [this._engineSet].filter(Boolean);
     const all = new Set();
+    this._setBounds = {};
     for (const set of sets) {
       try {
         const r = await fetch(this._assets + "tiles/" + set + ".json", { cache: "no-store" });
         if (!r.ok) continue;
         const tj = await r.json();
         if (Array.isArray(tj.scamin)) tj.scamin.forEach((v) => all.add(v));
+        if (Array.isArray(tj.bounds) && tj.bounds.length === 4) this._setBounds[set] = tj.bounds;
       } catch (e) { /* offline / older server → skip */ }
     }
     return [...all].sort((a, b) => a - b);
