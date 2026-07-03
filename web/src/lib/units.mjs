@@ -76,7 +76,10 @@ export function format(cat, value, prefs) {
     default: v = value;
   }
   if (unit === "Bft") return "Bft " + Math.round(v);
-  const dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  // Feet read as whole numbers on charts, so drop a decimal vs metric (a 12.3 ft
+  // depth shows "12 ft", not "12.3 ft"); sub-10 ft keeps one for shoal detail.
+  let dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  if (unit === "ft") dec = Math.max(0, dec - 1);
   return `${trim(v.toFixed(dec))} ${unitSuffix(unit)}`;
 }
 
