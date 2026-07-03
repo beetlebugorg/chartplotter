@@ -421,7 +421,10 @@ export class ChartCanvas extends HTMLElement {
     if (document.querySelector("chart-plotter-app[spec], chart-plotter[spec]")) this._scaleEl.style.display = "none";
     map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
     map.on("move", () => {
-      this._renderScalebar();
+      // `move` fires several times per frame; coalesce the scalebar redraw to one
+      // rAF (it rebuilds DOM, and _renderScalebar skips when the bar is unchanged
+      // — which it usually is, since the bar only steps at zoom boundaries).
+      if (!this._scalebarRaf) this._scalebarRaf = requestAnimationFrame(() => { this._scalebarRaf = 0; this._renderScalebar(); });
       // While ZOOMING (only — pans wait for settle), a crossed ladder boundary
       // applies at most every 500ms so a long continuous zoom doesn't render a
       // stale cutoff all the way to moveend. _scaminUpdate early-returns when
@@ -569,7 +572,10 @@ export class ChartCanvas extends HTMLElement {
     const dark = this.token("SCLBR", "#e8820c"), light = this.token("CHGRD", "#dfe3e7");
     let bar = "";
     for (let i = 0; i < 4; i++) bar += `<span style="background:${i % 2 ? light : dark}"></span>`;
-    el.innerHTML = `<div class="s52sb-label">${dist} ${unitSuffix(unit)}</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
+    const html = `<div class="s52sb-label">${dist} ${unitSuffix(unit)}</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
+    // The bar only changes at zoom-step boundaries (and on unit/scheme change), so
+    // most move frames produce identical HTML — skip the re-parse when unchanged.
+    if (html !== this._lastScalebarHtml) { el.innerHTML = html; this._lastScalebarHtml = html; }
   }
 
   // SAFCON01 (S-52 §13.2.13): the depth-contour value label. Drawn client-side

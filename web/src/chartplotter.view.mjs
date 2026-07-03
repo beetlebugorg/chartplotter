@@ -330,6 +330,12 @@ export const STYLE = `
           box-shadow:0 4px 18px rgba(0,0,0,.18);
           font:11px system-ui,sans-serif; color:var(--ui-text); }
         #databox[hidden] { display:none; }
+        /* ?fps overlay — top-right, out of the way, monospace, amber when low. */
+        .fps-meter { position:absolute; bottom:calc(var(--botbar-h) + 8px); right:8px; z-index:9;
+          pointer-events:none; font:11px ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap;
+          padding:3px 7px; border-radius:7px; color:#8fe3a0;
+          background:rgba(0,0,0,.62); }
+        .fps-meter[data-low="1"] { color:#ffb454; }
         /* Live band·scale·zoom·position readout — fixed-width fields + tabular
            figures so panning/zooming never reflows the card. The card width is
            FIXED (above) so it never grows/shrinks as the message changes; the

@@ -45,6 +45,7 @@ import { HudController } from "./plugins/hud.mjs"; // status readout + overscale
 import { WheelZoom } from "./plugins/wheel-zoom.mjs"; // scroll-wheel zoom: band detent + elastic floor
 import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { OrientationControl } from "./plugins/orientation-control.mjs"; // compass: north-up / free orientation
+import { FpsMeter } from "./plugins/fps-meter.mjs"; // ?fps — live FPS/frame-time overlay
 import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
 import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
 import { loadJSON, maxZoomForScaleFloor, FLOOR_GIVE, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
@@ -645,6 +646,11 @@ export class ChartPlotter extends HTMLElement {
       map,
       plotter: this._plotter,
     });
+
+    // ?fps — opt-in live FPS/frame-time overlay for perf measurement.
+    if (new URLSearchParams(location.search).has("fps")) {
+      this._fps = new FpsMeter({ host: this.shadowRoot.getElementById("map") });
+    }
 
     // Viewing-group quick toggles: the collapsible mid-left pill rail. Reads and
     // writes through the SAME path as the Settings "Viewing groups" tab
