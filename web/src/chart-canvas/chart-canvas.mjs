@@ -370,6 +370,12 @@ export class ChartCanvas extends HTMLElement {
       // Tile fade-in duration. The default 300ms makes pan feel laggy as new tiles
       // fade in slowly; 100ms is still smooth but noticeably snappier.
       fadeDuration: 100,
+      // Load tiles DURING a zoom gesture, not only after it settles. MapLibre's
+      // default (true) cancels/defers new-zoom tile requests while zooming and only
+      // fires them at moveend, so the finer tiles crawl in ~1s AFTER you stop
+      // scrolling ("everything appears a second after scrolling stops"). Off = the
+      // tiles stream in as you zoom, so they're ready (or nearly) when you stop.
+      cancelPendingTileRequestsWhileZooming: false,
     });
     this._map = map;
     this.map = map; // public handle
