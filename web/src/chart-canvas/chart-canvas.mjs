@@ -172,6 +172,19 @@ export class ChartCanvas extends HTMLElement {
       try { return !new URLSearchParams(location.search).has("noScaminGate"); }
       catch (e) { return true; }
     })();
+    // ?scaminmerge (A/B): collapse the SCAMIN filter-gate/bucket layer explosion
+    // (~18 kinds × up to 33 SCAMIN values × N packs) down to ~1 layer per kind by
+    // asking the engine for its MERGED zoom-expression gate (empty manifest →
+    // style.zig zoom_gate). That clause self-gates on the live zoom, so the entire
+    // client SCAMIN injection path (_scaminUpdate / _scaminApplySettled /
+    // _scaminForceWhenReady + the straggler sweep) is UNNECESSARY and disabled below
+    // — no setFilter, no source reload on zoom. Trade-off: integer-zoom snap (the
+    // clause steps at whole zoom levels, not the exact physical crossing). Like
+    // _ignoreScamin, a per-page-load constant (change the URL + reload to flip).
+    this._scaminMerged = (() => {
+      try { return new URLSearchParams(location.search).has("scaminmerge"); }
+      catch (e) { return false; }
+    })();
     this._engineScaminValues = []; // SCAMIN ladder (from the set tilejson) — the crossing boundaries
     this._scaminBandLast = -1;     // last-applied band index (count of ladder values below curDenom)
     this._scaminApplyT = 0;        // settle timer for the deferred gate apply (see _scaminUpdate)
@@ -1412,7 +1425,10 @@ export class ChartCanvas extends HTMLElement {
     boolK("dateDependent"); boolK("highlightDateDependent");
     if (m.dateView) p.set("dateView", m.dateView);
     if (this._ignoreScamin) p.set("ignoreScamin", "1");
-    if (this._scaminGate) p.set("scaminFilterGate", "1");
+    // Merged mode asks the engine for the zoom-expression gate (empty manifest,
+    // filter-gate off) instead of the per-value/filter-gate bucket layers.
+    if (this._scaminMerged) p.set("scaminMerge", "1");
+    else if (this._scaminGate) p.set("scaminFilterGate", "1");
     p.set("sizeScale", String(this._featureSizeScale()));
     if (m.viewingGroupsOff && m.viewingGroupsOff.length) p.set("viewingGroupsOff", m.viewingGroupsOff.join(","));
     return p.toString();
@@ -1540,6 +1556,9 @@ export class ChartCanvas extends HTMLElement {
   // mid-load, so a bare _scaminUpdate(true) silently no-ops and the chart
   // stays blank until the next crossing (user: "map goes away until refresh").
   _scaminForceWhenReady() {
+    // Merged mode's engine style self-gates on the live zoom (zoom-expression clause),
+    // so there is no client cutoff to inject — every force path is a no-op.
+    if (this._scaminMerged) return;
     const m = this._map;
     if (!m) return;
     if (!m.isStyleLoaded || !m.isStyleLoaded()) { m.once("idle", () => this._scaminForceWhenReady()); return; }
@@ -1553,6 +1572,7 @@ export class ChartCanvas extends HTMLElement {
   // until the style is ready. movestart clears the timer (gesture resumed).
   _scaminApplySettled(delay) {
     clearTimeout(this._scaminApplyT);
+    if (this._scaminMerged) return; // merged mode self-gates on zoom — no settle apply
     this._scaminApplyT = setTimeout(() => {
       const m = this._map;
       if (!this._scaminGate || !this._engineMode || !m) return;
@@ -1573,6 +1593,10 @@ export class ChartCanvas extends HTMLElement {
   // per move frame. With N active sets there are ~17×N gated layers but still one
   // reload per source; the setFilter loop itself is main-thread (validation skipped).
   _scaminUpdate(force) {
+    // Merged mode: the engine's zoom-expression gate hides/shows features itself, so
+    // there is nothing to setFilter — early-return kills the whole injection loop
+    // (this also covers the mid-zoom `move` hook, which funnels through here).
+    if (this._scaminMerged) return;
     // Only in engine mode, and only once the style is loaded (getStyle() is undefined
     // and setFilter throws before that — the `move`/`load` hooks can fire mid-load).
     if (!this._scaminGate || !this._engineMode || !this._map) return;
