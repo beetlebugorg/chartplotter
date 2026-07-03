@@ -1757,7 +1757,11 @@ export class ChartCanvas extends HTMLElement {
 
     const basemap = this.getAttribute("basemap") || "none";
     if (basemap === "osm") {
-      sources.osm = { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap contributors" };
+      // Fetch OSM raster tiles through the server proxy (same-origin): OSM's tile
+      // policy 403s direct browser requests that can't set an identifying
+      // User-Agent (a forbidden fetch header); the server sets a compliant one.
+      const osmUrl = new URL(this._assets + "osm/{z}/{x}/{y}.png", location.href).href;
+      sources.osm = { type: "raster", tileSize: 256, maxzoom: 19, tiles: [osmUrl], attribution: "© OpenStreetMap contributors" };
       layers.push({ id: "osm", type: "raster", source: "osm", paint: this._osmRasterPaint() });
     } else if (basemap === "osmvec" && this._osmvecArchive) {
       // Hosted OSM vector (Protomaps schema). Styled per source-layer (no kind

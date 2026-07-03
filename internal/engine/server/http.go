@@ -117,6 +117,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAPI(lw, r)
 	case strings.HasPrefix(r.URL.Path, "/tiles/"):
 		s.serveTileSet(lw, r)
+	case strings.HasPrefix(r.URL.Path, "/osm/"):
+		// Proxy the OSM raster basemap through the server: a browser can't set the
+		// User-Agent that OSM's tile policy requires (it's a forbidden request
+		// header), so direct tile.openstreetmap.org fetches get 403'd. The server
+		// fetches them with a compliant, app-identifying UA and streams them back
+		// from same-origin.
+		s.serveOSM(lw, r)
 	default:
 		s.serveAsset(lw, r)
 	}
