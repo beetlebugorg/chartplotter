@@ -1,0 +1,54 @@
+# Docker build context trimming. The image build only needs the Go source, the
+# embedded web assets (web/embed.go go:embed list), go.mod/go.sum, and
+# scripts/xbuild-tile57.sh — everything else just bloats the context. The tile57
+# engine is git-cloned inside the builder, not copied from here.
+
+# VCS + agent/editor state
+.git/
+.github/
+.claude/
+.idea/
+.vscode/
+.DS_Store
+
+# Build output / release staging
+bin/
+dist/
+release-assets/
+*.test
+*.out
+coverage.*
+
+# Local Go workspace override (must never reach the builder — it would repoint the
+# engine replace at a path that doesn't exist in the image).
+go.work
+go.work.sum
+
+# Baked tile archives + generated (non-embedded) client assets
+*.pmtiles
+web/*.pmtiles
+web/colortables.json
+web/linestyles.json
+web/patterns.json
+web/patterns.png
+web/sprite.json
+web/sprite.png
+web/chartplotter.wasm
+web/charts-index.json
+web/charts-user.*
+
+# Large test/data material + local artifacts (not needed to build the binary)
+testdata/
+examples/
+*.cpx
+/chartplotter
+
+# The docs site (Docusaurus) is not part of the binary build
+docs/node_modules/
+docs/build/
+docs/.docusaurus/
+
+# Docker + compose files themselves
+Dockerfile
+.dockerignore
+compose.yaml

@@ -117,6 +117,35 @@ of the chart — **instrument gauges**, custom overlays, routes, and more — wi
 forking the core. NMEA 0183 own-ship and AIS are the first slice of that; expect
 the surface to grow and change.
 
+## 🐳 Run with Docker
+
+The simplest way to run chartplotter — and the primary path for the
+**server-hub-on-a-boat** model (a Raspberry Pi, laptop, or mini PC that holds all
+chart state while every screen just points a browser at it) — is the published
+container image:
+
+```sh
+docker run -p 8080:8080 -v chartplotter-data:/data \
+  ghcr.io/beetlebugorg/chartplotter
+# open http://localhost:8080
+```
+
+Or with Docker Compose ([`compose.yaml`](compose.yaml)):
+
+```sh
+docker compose up -d
+```
+
+The image is **multi-arch** (`linux/amd64` + `linux/arm64`), so the same command
+runs on a Raspberry Pi and on an amd64 box. It's built `FROM scratch` around a
+**fully-static musl binary**, so it's tiny — essentially just the ~26 MB binary
+plus a CA bundle. The named `/data` volume holds the ENC source, baked tiles, and
+settings, and survives image upgrades. **macOS / Windows** users run the same
+image via **Docker Desktop** — no native Mac/Windows binary needed.
+
+Native binaries (below) remain available as a secondary option for bare-metal
+installs.
+
 ## 📦 Install & build
 
 **Download a binary.** Every tagged release publishes a self-contained
@@ -249,7 +278,15 @@ make vet        # go vet ./...
 make fmt        # gofmt -w .
 make serve      # build + serve web/ on :8080
 make xbuild     # cross-compile with `zig cc` (linux + windows, amd64/arm64)
+make musl       # fully-static musl binaries (linux amd64+arm64) for the Docker image
 ```
+
+The container image is built `FROM scratch` around the static musl binary (`make
+musl` / the [`Dockerfile`](Dockerfile)); the engine is git-cloned inside the
+builder, so no sibling checkout is needed to `docker build`. `zig cc`
+cross-compiles both arches from one native builder — no QEMU — and
+[`.github/workflows/docker.yml`](.github/workflows/docker.yml) pushes the
+multi-arch image to GHCR on each `v*` tag.
 
 CGO is required — libtile57 is the sole tile/portrayal engine, so
 `CGO_ENABLED=0` does not build. Cross-compilation still works with **Zig as the
