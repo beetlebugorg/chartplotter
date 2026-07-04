@@ -160,35 +160,28 @@ export class DevTools {
     const chartLib = d.chartLib ? d.chartLib() : null;
     let packs = [];
     try { packs = ((await fetch(`${assets}api/packs`).then((r) => (r.ok ? r.json() : null))) || {}).packs || []; } catch (e) { /* offline */ }
-    // Load the IENC catalogue so we know each installed river pack's cells.
-    if (packs.some((p) => p.name.startsWith("ienc-"))) { try { await (chartLib ? chartLib._iencCatalog() : Promise.resolve()); } catch (e) { /* skip ienc */ } }
-    const iencPacks = (chartLib ? chartLib._providerPacks("ienc") : null) || [];
-    // Per-cell disabled set: cells the user hid stay out of the rebake, so a
-    // rebuilt district only contains its ENABLED cells.
-    const hidden = d.hiddenCells ? (d.hiddenCells() || new Set()) : new Set();
-    const enabled = (names) => names.filter((n) => !hidden.has(n));
-    const todo = [];
-    for (const p of packs) {
-      const m = /^noaa-d(\d+)$/.exec(p.name);
-      if (m) { const names = enabled(d.districtCellNames ? d.districtCellNames(+m[1]) : []); if (names.length) todo.push({ set: p.name, label: d.setLabel(p.name), names }); continue; }
-      if (p.name.startsWith("ienc-")) {
-        const pk = iencPacks.find((x) => x.key === p.name);
-        const names = enabled(pk && pk.cells ? pk.cells.map((c) => c.name) : []);
-        if (names.length) todo.push({ set: p.name, label: d.setLabel(p.name), names });
-      }
-    }
+    // Provider-enc-root: /api/packs lists one entry per PROVIDER (noaa/ienc/user),
+    // each already holding its districts under <provider>/ENC_ROOT/<district>/. A
+    // whole-provider re-bake from those cached cells is POST /api/import?set=<provider>
+    // with NO body — the server re-bakes every district into the provider's one
+    // archive (import.go: "no cells → re-bake the provider from its cached ENC_ROOT").
+    // (Per-cell hides are a display filter now and no longer prune the bake — remove a
+    // district to prune. The old per-district cell-list rebake matched pack names
+    // that no longer exist, so "Rebuild all charts" silently did nothing.)
+    const todo = packs.map((p) => p.name).filter(Boolean);
     if (!todo.length) { if (btn) flashBtn(btn, "nothing to rebuild"); return; }
     this._busy = true;
     if (d.setTask) d.setTask(true);
     this._refreshPanel(); // disable the button while running
     let done = 0;
-    for (const j of todo) {
-      if (d.setProgress) d.setProgress({ label: "Rebuilding charts", pill: `Rebuilding ${j.label}`, sub: `${done + 1} of ${todo.length} · ${j.names.length} charts`, frac: done / todo.length });
+    for (const prov of todo) {
+      const label = d.setLabel ? d.setLabel(prov) : prov;
+      if (d.setProgress) d.setProgress({ label: "Rebuilding charts", pill: `Rebuilding ${label}`, sub: `${done + 1} of ${todo.length}`, frac: done / todo.length });
       try {
-        const res = await fetch(`${assets}api/import?set=${encodeURIComponent(j.set)}&cells=${encodeURIComponent(j.names.join(","))}`, { method: "POST" });
+        const res = await fetch(`${assets}api/import?set=${encodeURIComponent(prov)}`, { method: "POST" });
         const job = await res.json().catch(() => ({}));
-        if (job.job && d.pollImport) await d.pollImport(job.job, (p) => d.setProgress && d.setProgress(p), j.label);
-      } catch (e) { console.warn("[rebuild]", j.set, e); }
+        if (job.job && d.pollImport) await d.pollImport(job.job, (p) => d.setProgress && d.setProgress(p), label);
+      } catch (e) { console.warn("[rebuild]", prov, e); }
       done++;
     }
     this._busy = false;
