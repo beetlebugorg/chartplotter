@@ -91,12 +91,39 @@ export function seabedTokenExpr(mariner) {
     "DEPIT"];
 }
 
+// A colour token may carry a ",<alpha>" suffix: S-101 ColorFill emits "TOKEN,alpha"
+// (e.g. "TRFCF,0.75" for traffic-separation zones; also "CHGRF,0.5", "NODTA,0.5"),
+// and the alpha rides in the same color_token property. Match the palette on the
+// BASE token (before the comma) — else "TRFCF,0.75" != "TRFCF" and the fill falls to
+// the opaque magenta FALLBACK — and fold the alpha into an rgba fill colour
+// (fill-opacity is not data-driven in MapLibre; fill-color is). A token with no comma
+// is matched whole, exactly as before (no regression for opaque fills).
+export function colorTokenFill(prop, palette) {
+  const t = palette || {};
+  const cases = [];
+  let n = 0;
+  for (const tok in t) { cases.push(tok, t[tok]); n++; }
+  if (!n) return FALLBACK;
+  // Both `case` branches must be the same type, and to-rgba needs a `color`; palette
+  // values are hex strings, so wrap the match in to-color.
+  return ["let", "ct", ["coalesce", ["get", prop], ""],
+    ["let", "ci", ["index-of", ",", ["var", "ct"]],
+      ["case",
+        ["<", ["var", "ci"], 0], ["to-color", ["match", ["var", "ct"], ...cases, FALLBACK]],
+        ["let", "c", ["to-color", ["match", ["slice", ["var", "ct"], 0, ["var", "ci"]], ...cases, FALLBACK]],
+          ["rgba",
+            ["at", 0, ["to-rgba", ["var", "c"]]],
+            ["at", 1, ["to-rgba", ["var", "c"]]],
+            ["at", 2, ["to-rgba", ["var", "c"]]],
+            ["to-number", ["slice", ["var", "ct"], ["+", ["var", "ci"], 1]]]]]]]];
+}
+
 // Fill colour for the `areas` layer: depth areas (carry drval1) shade live via
-// SEABED01; everything else uses its baked colour token.
+// SEABED01; everything else uses its baked colour token (which may carry a ",alpha").
 export function areasFillColor(palette, mariner) {
   return ["case",
     ["has", "drval1"], colorMatch(seabedTokenExpr(mariner), undefined, palette),
-    colorExpr("color_token", undefined, palette)];
+    colorTokenFill("color_token", palette)];
 }
 
 // SHALLOW_PATTERN filter: depth areas on the shallow side of the live safety
