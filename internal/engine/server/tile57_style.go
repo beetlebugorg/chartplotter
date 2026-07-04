@@ -36,10 +36,11 @@ func (s *Server) serveTile57Style(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	// libtile57 is the sole engine, so EVERY registered pack renders from the engine
-	// style. ?set is a CSV of packs (default: all registered) — one for a single-pack
-	// install, several for a multi-pack one (each a self-contained best-available
-	// district bundle). 404 only when nothing is registered.
+	// libtile57 is the sole engine, so EVERY registered provider renders from the engine
+	// style. ?set is a CSV of PROVIDERS (default: all registered) — one for a single-
+	// provider install, several across providers (each a self-contained best-available
+	// provider archive; districts live inside one archive, not as separate sources). 404
+	// only when nothing is registered.
 	sets := s.resolveStyleSets(q.Get("set"))
 	if len(sets) == 0 {
 		apiErr(w, http.StatusNotFound, "no renderable tile57 set")
@@ -60,11 +61,14 @@ func (s *Server) serveTile57Style(w http.ResponseWriter, r *http.Request) {
 	writeMaybeGzip(w, r, jsonCT, style) // the engine style is multi-MB — gzip on the wire
 }
 
-// buildMultiStyle composes ONE MapLibre style spanning several packs: it builds the
-// engine style for each set (each with that set's own SCAMIN ladder + top zoom) and
-// merges them, namespacing every set's "chart" source + layers so they coexist.
-// The sets are ordered coarse→fine, so a finer district's layers draw over a coarser
-// one where they overlap (districts are normally disjoint, so this rarely matters).
+// buildMultiStyle composes ONE MapLibre style spanning several PROVIDERS: it builds the
+// engine style for each provider set (each with its own SCAMIN ladder + top zoom) and
+// merges them, namespacing every set's "chart" source + layers so they coexist. The
+// sets are ordered coarse→fine, so a finer provider's layers draw over a coarser one
+// where they overlap. Within a provider, best-available across cells/districts is
+// already resolved inside its single archive (the baker's finestCsclAt), so this cross-
+// source merge now only spans the handful of installed providers (noaa/ienc/user),
+// which are normally geographically disjoint — the per-district explosion is gone.
 func (s *Server) buildMultiStyle(r *http.Request, q url.Values, sets []string, m tile57.Mariner) ([]byte, error) {
 	parts := make([]setStyle, 0, len(sets))
 	for _, set := range sets {

@@ -7,13 +7,16 @@ sidebar_position: 2
 # Installation
 
 The quickest path is to **download a release**: every tagged release publishes a
-self-contained `chartplotter` for **linux, macOS, and windows** (amd64 + arm64)
-on the [releases page](https://github.com/beetlebugorg/chartplotter-go/releases).
-Unpack the archive for your platform and run it — the web frontend and the S-101
-catalogue are compiled in, so you supply only the ENC cells. To build it
-yourself instead, follow [Build from source](#build-from-source) below.
-`go install …@latest` does **not** work — the build statically links a native
-library and uses a local `replace` directive.
+self-contained `chartplotter` for **linux and windows** (amd64 + arm64) on the
+[releases page](https://github.com/beetlebugorg/chartplotter/releases). Unpack
+the archive for your platform and run it — the web frontend and the S-101
+catalogue are compiled in, so you supply only the ENC cells. **macOS** is not
+shipped as a prebuilt binary (the engine links Apple frameworks Zig can't
+cross-compile); Mac users run the [Docker image](#run-with-docker-recommended)
+or [build from source](#build-from-source). To build it yourself on any platform,
+follow [Build from source](#build-from-source) below. `go install …@latest` does
+**not** work — the build statically links a native library and uses a local
+`replace` directive.
 
 :::info About the embedded IHO catalogues
 
@@ -23,7 +26,7 @@ with **no declared license**. The build fetches them via git submodules directly
 from the IHO's own repositories, and the resulting binaries — both what you build
 locally and what the project publishes on the releases page — embed that IHO
 material. The project distributes those binaries as an accepted position; see
-[THIRD-PARTY-NOTICES.md](https://github.com/beetlebugorg/chartplotter-go/blob/main/THIRD-PARTY-NOTICES.md).
+[THIRD-PARTY-NOTICES.md](https://github.com/beetlebugorg/chartplotter/blob/main/THIRD-PARTY-NOTICES.md).
 
 :::
 
@@ -40,7 +43,7 @@ docker run -p 8080:8080 -v chartplotter-data:/data \
 # open http://localhost:8080
 ```
 
-Or with Docker Compose, using the [`compose.yaml`](https://github.com/beetlebugorg/chartplotter-go/blob/main/compose.yaml)
+Or with Docker Compose, using the [`compose.yaml`](https://github.com/beetlebugorg/chartplotter/blob/main/compose.yaml)
 in the repo:
 
 ```sh
@@ -90,7 +93,7 @@ git submodule update --init --recursive
 cd ..
 
 # 2. The app, as a sibling.
-git clone https://github.com/beetlebugorg/chartplotter-go.git
+git clone https://github.com/beetlebugorg/chartplotter.git
 cd chartplotter
 
 # 3. Build: zig-builds libtile57, then a CGO go build.
@@ -112,6 +115,29 @@ If you keep the engine checkout somewhere else, symlink it into place instead:
 ```sh
 ln -s /path/to/your/tile57-checkout ../tile57
 ```
+
+### Make targets
+
+The [`Makefile`](https://github.com/beetlebugorg/chartplotter/blob/main/Makefile)
+is the ground truth for the build — `make build` zig-builds `libtile57` on demand
+and links it into the CGO binary, so there is no separate engine-build step. The
+targets you'll use most:
+
+| Target | What it does |
+| --- | --- |
+| `make build` | Build `bin/chartplotter` (zig-builds `libtile57`, then a CGO `go build`). |
+| `make test` | `go test ./...`. |
+| `make vet` | `go vet ./...`. |
+| `make fmt` | `gofmt -w .`. |
+| `make serve` | Build, then serve the web frontend on `:8080` (`HOST`/`PORT`/`ASSETS` overridable). |
+| `make xbuild` | Cross-compile release binaries with `zig cc` (linux + windows, amd64/arm64). |
+| `make musl` | Fully-static musl binaries (linux amd64 + arm64) for the `FROM scratch` Docker image. |
+
+Run `make fmt vet test` before you commit. `make xbuild` deliberately skips
+macOS — Go's `crypto/x509` links Apple frameworks Zig can't cross-compile, so a
+Mac binary must be built natively on a Mac. See
+[`CLAUDE.md`](https://github.com/beetlebugorg/chartplotter/blob/main/CLAUDE.md)
+for the full build contract.
 
 ## Memory and disk
 

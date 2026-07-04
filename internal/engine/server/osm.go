@@ -34,7 +34,7 @@ func (s *Server) serveOSM(w http.ResponseWriter, r *http.Request) {
 	}
 	// OSM's policy: a valid, identifying User-Agent (an app name + contact/URL).
 	req.Header.Set("User-Agent", s.osmUserAgent())
-	req.Header.Set("Referer", "https://github.com/beetlebugorg/chartplotter-go")
+	req.Header.Set("Referer", "https://github.com/beetlebugorg/chartplotter")
 
 	resp, err := osmClient.Do(req)
 	if err != nil {
@@ -60,7 +60,7 @@ func (s *Server) osmUserAgent() string {
 	if v == "" {
 		v = "dev"
 	}
-	return "chartplotter/" + v + " (+https://github.com/beetlebugorg/chartplotter-go)"
+	return "chartplotter/" + v + " (+https://github.com/beetlebugorg/chartplotter)"
 }
 
 var osmClient = &http.Client{Timeout: 15 * time.Second}

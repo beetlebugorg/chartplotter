@@ -108,25 +108,31 @@ func TestImport_AutoNameAndMeta(t *testing.T) {
 		t.Fatalf("cells = %d, want 1", len(cells))
 	}
 
-	// CATALOG identity → single cell → "user-us5md1mc".
+	// CATALOG identity → single cell → pack key "user-us5md1mc" (provider "user",
+	// district "us5md1mc").
 	set := s.deriveUploadSet(cat, cells)
 	if set != "user-us5md1mc" {
 		t.Fatalf("deriveUploadSet = %q, want user-us5md1mc", set)
 	}
+	provider, district := providerOf(set), districtOf(set)
 
-	// The post-bake metadata tail (bakeAndRegister does exactly this after baking).
+	// The post-bake metadata tail (bakeProvider → registerBakedSet does exactly this):
+	// the sidecar is keyed by the PROVIDER, one archive per provider.
 	cellMeta := baker.ExtractCellMeta(cells, nil)
-	meta := buildSetMeta(set, cellMeta, cat)
+	meta := buildSetMeta(provider, cellMeta, cat)
 	meta.Imported = "2026-06-25T00:00:00Z"
-	if err := s.writeSetMeta(set, meta); err != nil {
+	if err := s.writeSetMeta(provider, meta); err != nil {
 		t.Fatal(err)
 	}
-	// Register a band-set so the district lists on /api/packs (a real bake does this
-	// via packAdd; the empty path makes the bounds-open skip gracefully).
-	s.packAdd(set+"-harbor", "")
+	// Create the district ENC_ROOT folder so /api/packs lists it, and register the
+	// provider set (empty path → the bounds-open skips gracefully).
+	if err := os.MkdirAll(s.districtDir(provider, district), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.packAdd(provider, "")
 
 	// The metadata sidecar carries the catalogue title + extracted header fields.
-	m, ok := s.readSetMeta(set)
+	m, ok := s.readSetMeta(provider)
 	if !ok {
 		t.Fatal("no metadata sidecar written")
 	}
@@ -146,17 +152,20 @@ func TestImport_AutoNameAndMeta(t *testing.T) {
 		t.Errorf("per-cell detail wrong: %+v", m.Cells)
 	}
 
-	// /api/packs lists the pack with its merged metadata.
+	// /api/packs lists the PROVIDER with its merged metadata + its installed district.
 	rec := httptest.NewRecorder()
 	s.handlePacks(rec, httptest.NewRequest("GET", "/api/packs", nil))
 	body := rec.Body.String()
-	if !strings.Contains(body, `"name":"user-us5md1mc"`) || !strings.Contains(body, `"title":"Annapolis Harbor"`) {
+	if !strings.Contains(body, `"name":"user"`) || !strings.Contains(body, `"title":"Annapolis Harbor"`) {
 		t.Errorf("/api/packs missing pack or title: %s", body)
 	}
+	if !strings.Contains(body, `"districts":["us5md1mc"]`) {
+		t.Errorf("/api/packs missing district listing: %s", body)
+	}
 
-	// /api/pack/<name> returns the full detail incl. per-cell list.
+	// /api/pack/<provider> returns the full detail incl. per-cell list.
 	rec = httptest.NewRecorder()
-	s.handlePackDetail(rec, httptest.NewRequest("GET", "/api/pack/"+set, nil))
+	s.handlePackDetail(rec, httptest.NewRequest("GET", "/api/pack/"+provider, nil))
 	if rec.Code != 200 {
 		t.Fatalf("pack detail status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -164,7 +173,7 @@ func TestImport_AutoNameAndMeta(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("pack detail JSON: %v", err)
 	}
-	if got.Set != set || len(got.Cells) != 1 {
+	if got.Set != provider || len(got.Cells) != 1 {
 		t.Errorf("pack detail = %+v", got)
 	}
 }

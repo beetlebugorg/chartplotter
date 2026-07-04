@@ -81,6 +81,14 @@ export const STYLE = `
   .pk-btn.ghost { background:var(--ui-surface); color:var(--ui-text-dim); border:1px solid var(--ui-border-strong); }
   .pk-btn.ghost:hover { background:#fdeceb; color:#c0392b; border-color:#e2b6b1; }
   .pk-btn.mini { padding:5px 9px; font-size:11.5px; }
+  .mcol-head-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .dl-selected.hidden { display:none; }
+  .pk-check { flex:none; width:16px; height:16px; margin:0; cursor:pointer; accent-color:var(--ui-accent); }
+  .dl-banner { margin-top:7px; }
+  .dl-bar { height:5px; border-radius:3px; background:var(--ui-surface-2); overflow:hidden; }
+  .dl-bar > span { display:block; height:100%; background:var(--ui-accent); transition:width .25s ease; }
+  .dl-txt { margin-top:3px; font-size:11px; color:var(--ui-text-dim); display:flex; justify-content:space-between; gap:8px; }
+  .dl-txt .dl-detail { flex:none; opacity:.85; }
   /* Spinner used in the Downloading button + list badge. */
   .pk-spin { width:12px; height:12px; flex:none; border-radius:50%;
     border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:dlspin .8s linear infinite; }
@@ -213,9 +221,37 @@ export function providersCol(providers) {
   return `<div class="mcol"><div class="mcol-h">Source</div>${rows}</div>`;
 }
 
-// Pane-2 header: provider name + one-line meta (catalogue date/count etc).
-export function packsHeader({ providerName, line }) {
-  return `<div class="mcol-head"><div class="mcol-h">${esc(providerName)}</div><div class="mcol-meta">${esc(line)}</div></div>`;
+// Pane-2 header: provider name + one-line meta (catalogue date/count etc). When the
+// provider supports multi-select (NOAA/IENC), it also carries the "Download selected"
+// batch action — always rendered so it can be toggled in place (hidden at count 0), so
+// checking a box never re-renders the column (no map flicker / lost focus).
+export function packsHeader({ providerName, line, selectable, selectedCount, batch }) {
+  const n = selectedCount || 0;
+  const busy = batch && batch.busy;
+  // The one download action for the whole selection. Hidden while a batch runs — the
+  // banner below takes its place so a download is obviously in progress IN the dialog
+  // (the notification toast renders under the drawer, so it's easy to miss).
+  const action = selectable && !busy
+    ? `<button class="pk-btn mini dl-selected${n ? "" : " hidden"}" data-download-selected${n ? "" : " disabled"}>⬇ Download selected${n ? ` (${n})` : ""}</button>`
+    : "";
+  const banner = busy ? dlBanner(batch) : "";
+  return `<div class="mcol-head"><div class="mcol-head-row"><div class="mcol-h">${esc(providerName)}</div>${action}</div><div class="mcol-meta">${esc(line)}</div>${banner}</div>`;
+}
+
+// In-dialog download progress banner (a bar + "which pack / N of M · what step" line),
+// updated in place by _updateBatchProgress so ticking never re-renders the column.
+export function dlBanner(batch) {
+  const pct = Math.max(0, Math.min(100, Math.round((batch.frac || 0) * 100)));
+  return `<div class="dl-banner"><div class="dl-bar"><span style="width:${pct}%"></span></div>` +
+    `<div class="dl-txt"><span class="dl-sub">${esc(batch.sub || "Downloading…")}</span><span class="dl-detail">${esc(batch.detail || "")}</span></div></div>`;
+}
+
+// Detail-pane "select for download" toggle (a not-yet-installed pack). Feeds the single
+// batch action — there is no per-pack download button anymore.
+export function selectBtn(key, selected) {
+  return selected
+    ? `<button class="pk-btn queued" data-select="${esc(key)}">☑ Selected — tap to remove</button>`
+    : `<button class="pk-btn" data-select="${esc(key)}">☐ Select for download</button>`;
 }
 
 // Status pill for a pack row. State is fully resolved by the logic:
@@ -238,11 +274,15 @@ export function userPackRow(pk, { selPack, badge }) {
 }
 
 // One ordinary pack row (NOAA/IENC). The logic resolves the class suffix, the
-// (possibly search-rewritten) sub line, the data-cg attr, and the badge HTML.
-//   row: { key, title, cls, sub, cg, badge }
+// (possibly search-rewritten) sub line, the data-cg attr, and the badge HTML. A
+// not-yet-installed pack (row.selectable) gets a multi-select checkbox.
+//   row: { key, title, cls, sub, cg, badge, selectable, checked }
 export function packRow(row) {
+  const check = row.selectable
+    ? `<input type="checkbox" class="pk-check" data-check="${esc(row.key)}"${row.checked ? " checked" : ""} aria-label="Select ${esc(row.title)}">`
+    : "";
   return `<div class="m-row${row.cls}" data-pack="${esc(row.key)}"${row.cg ? ` data-cg="${row.cg}"` : ""} role="button" tabindex="0">
-        <span class="m-info"><span class="m-name">${esc(row.title)}</span><span class="m-sub">${row.sub}</span></span>${row.badge}</div>`;
+        ${check}<span class="m-info"><span class="m-name">${esc(row.title)}</span><span class="m-sub">${row.sub}</span></span>${row.badge}</div>`;
 }
 
 // Pane 2 wrapper: the header + the already-rendered rows (or an .m-empty).
@@ -255,15 +295,6 @@ export function emptyRow(text) {
   return `<div class="m-empty">${text}</div>`;
 }
 
-// The Download button for a pack key, by queue state.
-//   { downloading, queued }  (booleans; not-both)
-export function downloadBtn(key, { downloading, queued }) {
-  if (downloading)
-    return `<button class="pk-btn downloading" data-getpack="${esc(key)}" disabled><span class="pk-spin"></span>Downloading…</button>`;
-  if (queued)
-    return `<button class="pk-btn queued" data-getpack="${esc(key)}" disabled>Queued</button>`;
-  return `<button class="pk-btn" data-getpack="${esc(key)}">⬇ Download</button>`;
-}
 
 // Detail pane: empty-state ("Select a chart pack.").
 export function detailEmpty() {

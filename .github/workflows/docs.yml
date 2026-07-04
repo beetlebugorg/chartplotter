@@ -29,25 +29,25 @@ concurrency:
   cancel-in-progress: true
 
 # The demo + Chart 1 tiles are baked by the chartplotter binary, which links the
-# native libtile57 engine — so this build needs the same sibling tile57 checkout
-# (with submodules: they fetch the IHO S-101 catalogues from the IHO's own repos)
-# and Zig toolchain as ci.yml. The repo is checked out into a subdirectory so
-# tile57 can sit beside it, matching go.mod's ../tile57/bindings/go replace.
+# native libtile57 engine — so this build needs the ./tile57 engine submodule (its
+# own submodules fetch the IHO S-101 catalogues from the IHO's own repos) and the
+# Zig toolchain, same as ci.yml. `submodules: recursive` checks it out at the
+# committed pin, then it's floated to the engine's latest main (matching go.mod's
+# ./tile57/bindings/go replace).
 # NOTE: correct-by-construction but unvalidated until pushed to GitHub.
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout chartplotter
+      - name: Checkout chartplotter (+ tile57 engine submodule)
         uses: actions/checkout@v7
         with:
           path: chartplotter
-      - name: Checkout tile57 (libtile57 engine)
-        uses: actions/checkout@v7
-        with:
-          repository: beetlebugorg/tile57
-          path: tile57
           submodules: recursive
+      - name: Float tile57 submodule to latest main
+        run: |
+          git -C chartplotter submodule update --remote tile57
+          git -C chartplotter submodule update --init --recursive tile57
 
       - uses: actions/setup-go@v6
         with:
@@ -59,7 +59,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Build libtile57
-        run: cd tile57 && zig build
+        run: make -C chartplotter tile57-lib
 
       # Cache the curated NOAA demo-cell downloads (one per band over Annapolis),
       # keyed on the cell list / fetch script so a change re-downloads. Lets the

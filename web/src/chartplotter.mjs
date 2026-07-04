@@ -47,7 +47,7 @@ import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart
 import { OrientationControl } from "./plugins/orientation-control.mjs"; // compass: north-up / free orientation
 import { FpsMeter } from "./plugins/fps-meter.mjs"; // ?fps — live FPS/frame-time overlay
 import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
-import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
+import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale, bandForCellName } from "./lib/bands.mjs";
 import { loadJSON, maxZoomForScaleFloor, FLOOR_GIVE, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 import { STYLE, CHROME } from "./chartplotter.view.mjs"; // shell chrome (CSS + static markup)
@@ -735,6 +735,17 @@ export class ChartPlotter extends HTMLElement {
       this.saveView();
       this._assessCoverage();
       this._hud.updateZoomCap(); // clamp zoom-in to the finest band covering the new view
+      if (!this._widget && this._showCellBounds && this._coverage) this._refreshInstalledBounds();
+    });
+    // The rendered-cell coverage query needs tiles LOADED, so re-run once the map goes
+    // idle (tiles settled). Throttled — idle can fire often — and a no-op when the
+    // winning-cell set is unchanged (setFeatures de-dups).
+    map.on("idle", () => {
+      if (this._widget || !this._showCellBounds || !this._coverage) return;
+      const now = performance.now();
+      if (now - (this._covIdleAt || 0) < 250) return;
+      this._covIdleAt = now;
+      this._refreshInstalledBounds();
     });
 
     // Off-screen chart pointers: edge pointers to installed charts not in view
@@ -1239,13 +1250,8 @@ export class ChartPlotter extends HTMLElement {
         // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
         // it so a pick/coverage tap doesn't fire under an active inspect lock.
         if (this._devTools && this._devTools.inspecting) return;
-        // (The Charts cell-picker tap-to-preview-a-district branch was removed with
-        // the main-map cell picker; the <chart-library> panel is the chart surface.)
-        // Zoomed out over an installed-chart coverage marker → fly to that chart at
-        // its detail zoom (so you can find + open installed charts without knowing
-        // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
-        if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
-        // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
+        // The coverage/cell-boundary overlay is a passive debug layer — a tap always
+        // runs the default ECDIS cursor pick (S-52 PresLib §10.8), never flies.
         this._pickReportAt(e.point, e.originalEvent);
       });
     }
@@ -1602,13 +1608,16 @@ export class ChartPlotter extends HTMLElement {
     // Active (enabled-pack) cells WITH bounds — the search catalog, so you can find
     // an installed chart by name and fly to it (esp. on a blank/no-basemap map).
     this._activeCells = await this._api.activeCells();
-    // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
-    // district and the server fans to its band-sets.
+    // Provider-enc-root: /api/packs keys on the PROVIDER (noaa/ienc/user) — one baked
+    // archive per provider, districts are subfolders inside it. Enable/disable/remove
+    // operate at provider (+ per-district delete) level.
     this._installedSets = new Set(packs.map((p) => p.name));
     this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
-    this._packsMeta = packs; // {name,enabled,bands,bounds} — drives the coverage boxes (incl. disabled packs)
-    // Rendering needs each enabled district's PER-BAND tile sets (noaa-d5-general …),
-    // listed in `bands` ("all" for a bandless/merged pack → the bare set name).
+    this._packsMeta = packs; // {name,enabled,districts,bounds} — drives the coverage boxes (incl. disabled)
+    // Rendering: ONE vector source per enabled provider (chart-<provider>). Best-available
+    // across cells/districts is resolved inside the single archive by the baker, so there
+    // are no per-band or per-district sub-sources to composite. (`bands` is legacy — a
+    // provider pack has none, so this collapses to the bare provider name.)
     const active = packs.filter((p) => p.enabled).flatMap((p) =>
       (p.bands && p.bands.length ? p.bands : ["all"]).map((b) => (b === "all" ? p.name : `${p.name}-${b}`)));
     if (this._plotter) await this._plotter.setServerSets(active);
@@ -1679,12 +1688,8 @@ export class ChartPlotter extends HTMLElement {
   _refreshInstalledBounds() {
     if (!this._coverage) return; // coverage overlay not set up yet
     const feats = [];
-    // Per-CELL footprints are the widget (pmtiles) path only. In SERVER mode we draw
-    // one box per ENABLED pack (below) instead — a full NOAA install has thousands
-    // of cells, and a box per cell (re-projected to its min on-screen size on every
-    // zoom frame) would freeze the map. Per-cell boxes also ignore the enabled flag,
-    // so they'd keep showing a disabled district's coverage. Per-pack boxes fix both.
     if (this._widget) {
+      // Widget (pmtiles) path: per-cell footprints from the local catalogue.
       for (const name of this._installed) {
         const bb = this._cellLocation(name); // catalog footprint
         if (!bb) continue;
@@ -1698,32 +1703,82 @@ export class ChartPlotter extends HTMLElement {
           geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
         });
       }
-    }
-    // Server mode has no per-cell footprints, so the list above is empty here.
-    // Add ONE coverage box per ENABLED pack from /api/packs
-    // (which carries each pack's union bounds + bands). Tag with the pack's COARSEST
-    // band (bands[0], coarse→fine from the server) for the click-to-fly zoom + the
-    // band-capped fill. DISABLED packs render nothing on the map, so they get no
-    // boundary either. An enabled full NOAA stack (overview/general band) hides its
-    // fill at coarse zoom (no stray box); a standalone set keeps its box until you
-    // zoom into its detail.
-    for (const p of this._packsMeta || []) {
-      if (!p.enabled) continue; // disabled packs aren't drawn → no coverage box
-      const bb = p.bounds;
-      if (!Array.isArray(bb) || bb.length !== 4) continue;
-      const coarsest = (p.bands && p.bands[0]) || "harbor";
-      const band = BANDS.includes(coarsest) ? coarsest : "harbor"; // "all"/unknown → large-scale
-      const [w, s, e, n] = bb;
-      feats.push({
-        type: "Feature",
-        properties: { name: p.name, band, status: "ready" },
-        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
-      });
+    } else {
+      // SERVER mode: only the cells currently rendering in view (best-available
+      // winners), each as a band-coloured, name-labelled footprint box — so you can see
+      // which chart owns a spot. Refreshed on moveend + idle (tiles must be loaded for
+      // the rendered-cell query to be accurate).
+      for (const f of this._serverCellFeatures()) feats.push(f);
     }
     // Hand the TRUE footprints to the coverage controller, which pushes them with a
     // per-zoom minimum on-screen size so a tiny cell never shrinks to an invisible
     // speck when zoomed out.
     if (this._coverage) this._coverage.setFeatures(feats);
+  }
+
+  // The cell names ACTUALLY RENDERING in the current view — the best-available
+  // WINNERS. Every baked feature carries a `cell` pick-attr, so the distinct `cell`
+  // values under the chart layers are exactly the cells whose data is on screen (a
+  // coarse cell fully covered by finer ones contributes nothing → not listed). Returns
+  // a Set, or null when the chart layers aren't queryable yet (style not ready).
+  _renderedCellNames() {
+    const map = this._map;
+    if (!map || !map.getStyle) return null;
+    let style;
+    try { style = map.getStyle(); } catch { return null; }
+    const layers = (style.layers || [])
+      .filter((l) => l.source && (l.source === "chart" || String(l.source).startsWith("chart-")))
+      .map((l) => l.id)
+      .filter((id) => map.getLayer(id));
+    if (!layers.length) return null;
+    let feats;
+    try { feats = map.queryRenderedFeatures({ layers }); } catch { return null; }
+    const set = new Set();
+    for (const f of feats) { const c = f.properties && f.properties.cell; if (c) set.add(c); }
+    return set;
+  }
+
+  // Per-CELL coverage features for SERVER mode: ONLY the cells currently rendering
+  // (best-available winners in view), each as its full footprint box, band-coloured +
+  // name-labelled so you can see exactly which chart owns a spot (e.g. which cell won
+  // where a light drops out). Footprints come from the active-cell index; band from
+  // the cell's compilation scale (the baker's bandForScale) when known, else its
+  // usage-band name digit. Falls back to one coarse provider box only while the chart
+  // layers aren't queryable yet.
+  _serverCellFeatures() {
+    const rendered = this._renderedCellNames();
+    if (rendered === null) return this._providerBoxFeatures(); // style not ready → coarse box
+    const byName = new Map((this._activeCells || []).map((c) => [c.n, c.bb]));
+    const feats = [];
+    for (const name of rendered) {
+      const bb = byName.get(name);
+      if (!Array.isArray(bb) || bb.length !== 4) continue; // footprint not indexed yet
+      const cat = this._byName.get(name);
+      const scale = (cat && typeof cat.s === "number" && cat.s) || 0;
+      const band = scale ? bandForScale(scale) : bandForCellName(name);
+      const [w, s, e, n] = bb;
+      feats.push({
+        type: "Feature",
+        properties: { name, band },
+        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+      });
+    }
+    return feats;
+  }
+
+  // One coarse box per enabled provider (the fallback when per-cell isn't available).
+  _providerBoxFeatures() {
+    const feats = [];
+    for (const p of this._packsMeta || []) {
+      if (!p.enabled || !Array.isArray(p.bounds) || p.bounds.length !== 4) continue;
+      const [w, s, e, n] = p.bounds;
+      feats.push({
+        type: "Feature",
+        properties: { name: p.name, band: "general", status: "ready" },
+        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+      });
+    }
+    return feats;
   }
 
   // Show/hide the installed-chart coverage overlay.

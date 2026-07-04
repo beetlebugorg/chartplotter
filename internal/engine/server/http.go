@@ -42,6 +42,7 @@ type Server struct {
 
 	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
 	imports *importJobs       // background server-side bake jobs (POST /api/import)
+	bakeMu  sync.Mutex        // serializes bakes: two imports must not interleave cross-pack peer rewrites / shared context
 	packsMu sync.Mutex        // guards packs
 	packs   map[string]string // ALL baked packs on disk: set name → pmtiles path
 	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
@@ -65,6 +66,8 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if dataDir == "" {
 		dataDir = cacheDir
 	}
+	migrateLegacyENCRoot(dataDir)             // one-time: retired flat ENC_ROOT → loose/cells (before indexing)
+	migrateProviderEncRoot(dataDir, cacheDir) // one-time: per-district-pack layout → per-provider ENC_ROOT
 	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex(), cellIdx: newCellIndex(dataDir)}
 	s.cellIdx.build() // backfill cell bounds in the background (kick spawns its own goroutine)
 	// Discover every baked pack on disk (provider trees + flat tiles/), then
@@ -88,7 +91,35 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if len(s.packs) > 0 {
 		log.Printf("tilesets: %d pack(s) on disk, %d enabled (from %s)", len(s.packs), n, cacheDir)
 	}
+	s.rebakeMissingProviders() // self-heal: bake any provider with an ENC_ROOT but no bundle (post-migration)
 	return s
+}
+
+// rebakeMissingProviders bakes, in the background, any provider that has an ENC_ROOT on
+// disk but no baked bundle registered — e.g. after migrateProviderEncRoot dropped the
+// old per-pack bundles, or a download that never finished baking. The provider's charts
+// reappear without a re-download (the ENC_ROOT is preserved). A no-op when nothing is
+// missing (the common case), so it's cheap on a normal start.
+func (s *Server) rebakeMissingProviders() {
+	var missing []string
+	for _, prov := range s.installedProviders() {
+		if _, ok := s.packPath(prov); !ok {
+			missing = append(missing, prov)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	go func() {
+		for _, prov := range missing {
+			job := s.imports.create(prov)
+			s.bakeMu.Lock()
+			if s.bakeProvider(job.ID, prov) {
+				s.imports.update(job.ID, func(j *importJob) { j.State = "done" })
+			}
+			s.bakeMu.Unlock()
+		}
+	}()
 }
 
 // Close releases server-held resources (open tile-set archives). Safe to call once
@@ -282,7 +313,9 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/set/enable" || r.URL.Path == "/api/set/disable":
 		s.handleSetEnabled(w, r) // POST: show/hide a pack on the map (data kept)
 	case r.URL.Path == "/api/set":
-		s.handleDeleteSet(w, r) // DELETE: unregister a tile set + remove its baked files
+		s.handleDeleteSet(w, r) // DELETE: uninstall a whole provider (baked bundle + ENC_ROOT)
+	case r.URL.Path == "/api/district":
+		s.handleDeleteDistrict(w, r) // DELETE: remove one district + re-bake the provider
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
 	default:
@@ -311,7 +344,7 @@ func (s *Server) serveCell(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "url must be from a known chart provider")
 		return
 	}
-	data, _, err := loadCellCached(chartHTTPClient, s.dataDir, name, rawURL)
+	data, _, err := loadCellCached(chartHTTPClient, s.looseCellsDir(), name, rawURL)
 	if err != nil {
 		apiErr(w, http.StatusBadGateway, err.Error())
 		return

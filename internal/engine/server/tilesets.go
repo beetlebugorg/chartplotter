@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -89,60 +88,6 @@ func (ts *tileSets) closeAll() {
 	ts.m = map[string]tilesource.TileSource{}
 }
 
-// bandSlugs is the fixed COARSE→FINE band order. A registered tile SET is named
-// "<district>-<slug>" (one archive per nav-purpose band, so coarse-band-only areas
-// keep tiles above the merged archive's single maxzoom). "all" is the catch-all for
-// a name that doesn't end in a known band (a merged set, or a non-banded
-// import). bandOrder ranks a slug for the sorted /api/packs listing.
-var bandSlugs = []string{"overview", "general", "coastal", "approach", "harbor", "berthing"}
-
-func bandOrder(slug string) int {
-	for i, s := range bandSlugs {
-		if s == slug {
-			return i
-		}
-	}
-	return len(bandSlugs) // "all" sorts last
-}
-
-// splitSet splits a registered set name into its logical district + band. If the
-// name ends in "-<knownband>", district = the prefix and band = that slug; otherwise
-// the whole name is the district and band = "all" (a merged set or a non-banded
-// local import). The district is the API-facing pack name (/api/packs, the
-// enable/disable/delete ?set=); band is the per-archive suffix.
-func splitSet(name string) (district, band string) {
-	for _, slug := range bandSlugs {
-		if suf := "-" + slug; strings.HasSuffix(name, suf) && len(name) > len(suf) {
-			return name[:len(name)-len(suf)], slug
-		}
-	}
-	return name, "all"
-}
-
-// setsForDistrict returns every registered set name belonging to district d (its
-// merged form "d" plus each band-set "d-<slug>"), so enable/disable/delete can fan
-// out across a district's per-band archives. Looks at both the live registry and the
-// on-disk pack list (a disabled band-set isn't registered but still has a pack).
-func (s *Server) setsForDistrict(d string) []string {
-	seen := map[string]bool{}
-	for _, n := range s.packNames() {
-		if dist, _ := splitSet(n); dist == d {
-			seen[n] = true
-		}
-	}
-	for _, n := range s.sets.names() {
-		if dist, _ := splitSet(n); dist == d {
-			seen[n] = true
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // isSetName accepts a safe single path component for a set name: letters, digits,
 // '-', '_', '.' (but no separators or traversal).
 func isSetName(s string) bool {
@@ -171,103 +116,91 @@ func (s *Server) handleDeleteSet(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "bad set name")
 		return
 	}
-	// ?set= is the DISTRICT — fan out the delete across every one of its band-sets
-	// (the merged "set" form plus each "set-<slug>" archive).
-	for _, name := range s.setsForDistrict(set) {
-		s.sets.remove(name)
-		// Bake-stamp sidecars live BESIDE the pack file (which for a tile57 bundle is
-		// <dir>/tiles/chart.pmtiles, not <dir>/<name>.pmtiles) — resolve them from the
-		// tracked pack path before packDel forgets it.
-		if p, ok := s.packPath(name); ok {
-			_ = os.Remove(p + bakeVerExt)   // build-version bake stamp
-			_ = os.Remove(p + engineVerExt) // engine-commit bake stamp
-		}
-		s.packDel(name)
-		s.prefs.setDisabled(name, false) // drop any stale disabled flag
-		dir := s.setDir(name)
-		_ = os.Remove(filepath.Join(dir, name+".pmtiles"))
-		_ = os.Remove(filepath.Join(dir, name+".aux.zip"))
-		_ = os.Remove(filepath.Join(dir, name+".cells.json")) // the per-set cell manifest
-		_ = os.Remove(dir)                                    // best-effort: drop the pack dir if now empty
-	}
-	// Drop the district's metadata sidecar (<district>.meta.json), which lives in
-	// the district's own setDir, separate from the per-band dirs above.
-	mdir := s.setDir(set)
-	_ = os.Remove(filepath.Join(mdir, set+setMetaExt))
-	_ = os.Remove(mdir)
-	s.auxIdx.invalidate() // a district's companion aux.zip is gone — re-index /api/aux
-	// The active search (?active=1) now drops these cells: packDel removed the pack and
-	// we deleted its manifest, so enabledPackCells() no longer counts them. The source
-	// cells stay in ENC_ROOT, so the raw index keeps their bounds for a future re-bake;
-	// reconcile here only prunes cells whose source is actually gone.
-	s.cellIdx.rebuild()
+	// ?set= is a PROVIDER — a full uninstall drops the baked bundle (cache) AND the
+	// whole ENC_ROOT source tree (data), every district. To remove a single district
+	// (keeping the rest), the client calls DELETE /api/district instead.
+	s.dropProviderSet(providerOf(set))
 	w.Header().Set("Content-Type", jsonCT)
 	io.WriteString(w, `{"ok":true}`)
 }
 
-// handlePacks lists every installed pack with its enabled state, so the client can
-// show disabled packs (kept on disk, hidden from the map) for management. A pack is a
-// logical DISTRICT (e.g. "noaa-d5"); its per-band archives ("noaa-d5-general", …) are
-// grouped into ONE entry with the bands it produced, coarse→fine. A district is
-// enabled iff ANY of its band-sets is enabled (enable/disable fan out to all bands,
-// so they move together — see handleSetEnabled).
+// handleDeleteDistrict removes ONE district from a provider (DELETE
+// /api/district?provider=&district=): it deletes the district's ENC_ROOT subfolder
+// and re-bakes the provider from what remains (dropping the provider set entirely if
+// that was its last district). Delete reclaims disk; re-download to restore. The
+// re-bake runs as a background job the client follows via /api/import/status.
+func (s *Server) handleDeleteDistrict(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		apiErr(w, http.StatusMethodNotAllowed, "DELETE only")
+		return
+	}
+	provider := providerOf(r.URL.Query().Get("provider"))
+	district := r.URL.Query().Get("district")
+	if !isSetName(provider) || !isDistrictName(district) {
+		apiErr(w, http.StatusBadRequest, "need provider + district")
+		return
+	}
+	if _, err := os.Stat(s.districtDir(provider, district)); err != nil {
+		apiErr(w, http.StatusNotFound, "no such district")
+		return
+	}
+	job := s.imports.create(provider)
+	go func() {
+		s.bakeMu.Lock()
+		defer s.bakeMu.Unlock()
+		if err := os.RemoveAll(s.districtDir(provider, district)); err != nil {
+			s.imports.update(job.ID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
+			return
+		}
+		s.auxIdx.invalidate() // the district's aux content is gone — re-index /api/aux
+		if s.bakeProvider(job.ID, provider) {
+			s.imports.update(job.ID, func(j *importJob) { j.State = "done" })
+		}
+	}()
+	w.Header().Set("Content-Type", jsonCT)
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, `{"ok":true,"job":%q}`, job.ID)
+}
+
+// handlePacks lists every installed PROVIDER (GET /api/packs) with its enabled state,
+// geographic bounds, extracted metadata, and its installed DISTRICTS (the ENC_ROOT
+// subfolder names — the district→cell map is the folder listing itself). One entry per
+// provider; districts are download/delete units under it, not separately toggled.
 func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
-	// Group registered band-sets by district, collecting each district's bands and
-	// whether any band is enabled (not disabled).
-	type pack struct {
-		bands      []string
-		enabled    bool
-		w, s, e, n float64
-		hasBounds  bool
-	}
-	byDistrict := map[string]*pack{}
-	var order []string // first-seen district order, then re-sorted below
+	// The installable unit is the provider: union of providers with a baked bundle and
+	// providers with an ENC_ROOT on disk (a download that hasn't finished baking yet).
+	seen := map[string]bool{}
 	for _, name := range s.packNames() {
-		d, band := splitSet(name)
-		p := byDistrict[d]
-		if p == nil {
-			p = &pack{}
-			byDistrict[d] = p
-			order = append(order, d)
-		}
-		p.bands = append(p.bands, band)
-		if !s.prefs.isDisabled(name) {
-			p.enabled = true
-		}
-		// Union each band-set's geographic bounds so the client can outline a pack's
-		// coverage even while it's DISABLED (its tiles aren't served, but the boundary
-		// still marks "you have this chart here, currently off"). Read straight from
-		// the archive on disk — disabled packs aren't in the live set registry.
-		if path, ok := s.packPath(name); ok {
-			if src, err := tilesource.Open(path); err == nil {
-				m := src.Meta()
-				_ = tilesource.Close(src)
-				if !p.hasBounds {
-					p.w, p.s, p.e, p.n, p.hasBounds = m.W, m.S, m.E, m.N, true
-				} else {
-					p.w, p.s = math.Min(p.w, m.W), math.Min(p.s, m.S)
-					p.e, p.n = math.Max(p.e, m.E), math.Max(p.n, m.N)
-				}
-			}
-		}
+		seen[providerOf(name)] = true
 	}
-	sort.Strings(order)
+	for _, prov := range s.installedProviders() {
+		seen[prov] = true
+	}
+	providers := make([]string, 0, len(seen))
+	for p := range seen {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+
 	w.Header().Set("Content-Type", jsonCT)
 	fmt.Fprint(w, `{"packs":[`)
-	for i, d := range order {
+	for i, prov := range providers {
 		if i > 0 {
 			fmt.Fprint(w, ",")
 		}
-		p := byDistrict[d]
-		sort.Slice(p.bands, func(a, b int) bool { return bandOrder(p.bands[a]) < bandOrder(p.bands[b]) })
-		fmt.Fprintf(w, `{"name":%q,"enabled":%t`, d, p.enabled)
-		if p.hasBounds {
-			fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, p.w, p.s, p.e, p.n)
+		fmt.Fprintf(w, `{"name":%q,"enabled":%t`, prov, !s.prefs.isDisabled(prov))
+		// Bounds straight from the baked archive on disk — works even while DISABLED (its
+		// tiles aren't served, but the boundary still marks "you have this chart here").
+		if path, ok := s.packPath(prov); ok {
+			if src, err := tilesource.Open(path); err == nil {
+				m := src.Meta()
+				_ = tilesource.Close(src)
+				fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, m.W, m.S, m.E, m.N)
+			}
 		}
-		// Extracted per-pack metadata (title/agency/scale range/counts/imported date),
-		// from the <pack>.meta.json sidecar written at import. Cells are omitted from
-		// the list view — fetch GET /api/pack/<name> for the full per-cell detail.
-		if m, ok := s.readSetMeta(d); ok {
+		// Extracted metadata (title/agency/scale range/counts/imported date), from the
+		// <provider>.meta.json sidecar. Cells omitted here — GET /api/pack/<provider>.
+		if m, ok := s.readSetMeta(prov); ok {
 			if m.Title != "" {
 				fmt.Fprintf(w, `,"title":%q`, m.Title)
 			}
@@ -284,21 +217,23 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, `,"imported":%q`, m.Imported)
 			}
 		}
-		fmt.Fprint(w, `,"bands":[`)
-		for j, band := range p.bands {
+		// Installed districts (ENC_ROOT subfolder names) so the client can mark which of
+		// a provider's districts are present and offer per-district download/delete.
+		fmt.Fprint(w, `,"districts":[`)
+		for j, d := range s.providerDistricts(prov) {
 			if j > 0 {
 				fmt.Fprint(w, ",")
 			}
-			fmt.Fprintf(w, "%q", band)
+			fmt.Fprintf(w, "%q", d)
 		}
 		fmt.Fprint(w, "]}")
 	}
 	fmt.Fprint(w, "]}")
 }
 
-// handlePackDetail returns the full extracted metadata for one pack, including the
-// per-cell list (GET /api/pack/<name>). 404s when the pack has no metadata sidecar
-// (e.g. baked before metadata extraction existed, or a built-in pack).
+// handlePackDetail returns the full extracted metadata for one provider, including the
+// per-cell list (GET /api/pack/<provider>). 404s when the provider has no metadata
+// sidecar (e.g. baked before metadata extraction existed).
 func (s *Server) handlePackDetail(w http.ResponseWriter, r *http.Request) {
 	const prefix = "/api/pack/"
 	name := strings.TrimPrefix(r.URL.Path, prefix)
@@ -306,7 +241,7 @@ func (s *Server) handlePackDetail(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "bad pack name")
 		return
 	}
-	m, ok := s.readSetMeta(name)
+	m, ok := s.readSetMeta(providerOf(name))
 	if !ok {
 		apiErr(w, http.StatusNotFound, "no metadata for pack")
 		return
@@ -315,9 +250,9 @@ func (s *Server) handlePackDetail(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(m)
 }
 
-// handleSetEnabled shows or hides a pack on the map (POST /api/set/enable|disable
-// ?set=NAME). The baked data is kept; disabling just unregisters it so /tiles/{set}
-// stops serving + the client stops rendering it. Persists to prefs.
+// handleSetEnabled shows or hides a PROVIDER on the map (POST /api/set/enable|disable
+// ?set=<provider>). The baked data is kept; disabling just unregisters it so
+// /tiles/{provider} stops serving + the client stops rendering it. Persists to prefs.
 func (s *Server) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		apiErr(w, http.StatusMethodNotAllowed, "POST only")
@@ -328,41 +263,36 @@ func (s *Server) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusBadRequest, "bad set name")
 		return
 	}
+	provider := providerOf(set)
 	enable := strings.HasSuffix(r.URL.Path, "/enable")
-	// ?set= is the DISTRICT — fan out to every one of its band-sets so a district's
-	// per-band archives toggle together. Disabled state persists per band-set (so it
-	// survives a restart), keyed by the registered set name, not the district.
-	for _, name := range s.setsForDistrict(set) {
-		s.prefs.setDisabled(name, !enable)
-		if enable {
-			if path, ok := s.packPath(name); ok {
-				if _, live := s.sets.get(name); !live {
-					if src, err := tilesource.Open(path); err == nil {
-						s.sets.register(name, src)
-					} else {
-						apiErr(w, http.StatusInternalServerError, err.Error())
-						return
-					}
+	s.prefs.setDisabled(provider, !enable)
+	if enable {
+		if path, ok := s.packPath(provider); ok {
+			if _, live := s.sets.get(provider); !live {
+				if src, err := tilesource.Open(path); err == nil {
+					s.sets.register(provider, src)
+				} else {
+					apiErr(w, http.StatusInternalServerError, err.Error())
+					return
 				}
 			}
-		} else {
-			s.sets.remove(name)
 		}
+	} else {
+		s.sets.remove(provider)
 	}
 	w.Header().Set("Content-Type", jsonCT)
-	fmt.Fprintf(w, `{"ok":true,"set":%q,"enabled":%t}`, set, enable)
+	fmt.Fprintf(w, `{"ok":true,"set":%q,"enabled":%t}`, provider, enable)
 }
 
-// serveCells returns the names of cells currently in the server's ENC_ROOT source
-// store. The client uses this so its installed-set (and the persisted baked sets)
-// survive a page reload — the cells live server-side in the XDG data dir.
-// serveCells returns the installed source cells. The "cells" array is every
-// cached cell name (back-compat: the installed list). "bbox" maps each INDEXED
-// cell to its [W,S,E,N] footprint (fills in as the background index backfills),
-// so the client can search a cell by name and fly to it. With ?active=1 the
-// result is restricted to cells whose footprint overlaps an ENABLED pack — i.e.
-// charts actually on the map right now (and only those that are indexed, since an
-// un-indexed cell has no footprint to test or fly to).
+// serveCells returns the names of cells currently in the server's per-pack cells/
+// source store. The client uses this so its installed-set (and the persisted baked
+// sets) survive a page reload — the cells live server-side in the XDG data dir.
+// The "cells" array is every cached cell name (back-compat: the installed list).
+// "bbox" maps each INDEXED cell to its [W,S,E,N] footprint (fills in as the background
+// index backfills), so the client can search a cell by name and fly to it. With
+// ?active=1 the result is restricted to cells whose footprint overlaps an ENABLED
+// pack — i.e. charts actually on the map right now (and only those that are indexed,
+// since an un-indexed cell has no footprint to test or fly to).
 func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
 	active := r.URL.Query().Get("active") == "1"
 	var inPack map[string]bool // cells baked into enabled packs (exact, from manifests)
@@ -371,14 +301,10 @@ func (s *Server) serveCells(w http.ResponseWriter, r *http.Request) {
 		inPack, legacy = s.enabledPackCells()
 	}
 	_, idx := s.cellIdx.snapshot()
-	entries, _ := os.ReadDir(filepath.Join(s.dataDir, "ENC_ROOT"))
-	names := make([]string, 0, len(entries))
+	stems := s.cachedCellStems()
+	names := make([]string, 0, len(stems))
 	boxes := make(map[string][4]float64)
-	for _, e := range entries {
-		if !e.IsDir() || !isCellName(e.Name()) {
-			continue
-		}
-		n := e.Name()
+	for _, n := range stems {
 		box, has := idx[n]
 		if active {
 			// Active = actually baked into an enabled pack. Prefer the exact per-pack

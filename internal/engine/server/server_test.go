@@ -55,7 +55,7 @@ func TestServeStaticAndRange(t *testing.T) {
 func TestServeCell(t *testing.T) {
 	dir := t.TempDir()
 	cell := []byte("S57-CELL-BYTES")
-	cp := filepath.Join(dir, "ENC_ROOT", "US5MD1MC", "US5MD1MC.000")
+	cp := filepath.Join(dir, "loose", "cells", "US5MD1MC.000")
 	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestShareAndUpload(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("put cell: got %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "ENC_ROOT", "US5MD1MC", "US5MD1MC.000")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "loose", "cells", "US5MD1MC.000")); err != nil {
 		t.Errorf("uploaded cell not cached: %v", err)
 	}
 	resp, _ = http.Get(ts.URL + "/api/cell/US5MD1MC")

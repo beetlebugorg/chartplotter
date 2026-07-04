@@ -2,18 +2,23 @@ name: Release
 
 # chartplotter publishes per-platform binaries on every v* tag. The binary is a
 # CGO build that statically links the native libtile57 engine and can't be
-# cross-compiled by an off-the-shelf builder, so the binaries are cross-built HERE
-# per platform, then a plain shell step archives + checksums + releases them:
+# cross-compiled by an off-the-shelf builder, so the binaries are cross-built HERE,
+# then a plain shell step archives + checksums + releases them:
 #
 #   xbuild (ubuntu)  → linux + windows, amd64/arm64  via `make xbuild` (zig cc)
-#   macos  (arm64)   → darwin amd64/arm64            built with native apple clang
-#   release (ubuntu) → downloads both artifact sets, archives + checksums + release
+#   release (ubuntu) → downloads the artifact set, archives + checksums + release
+#
+# macOS is intentionally NOT built: with GOOS=darwin, Go's crypto/x509 + runtime/cgo
+# link Apple's Security/CoreFoundation frameworks, which Zig doesn't bundle, so darwin
+# can't be cross-built with zig cc and would need a paid macOS runner. Mac users build
+# from source per the README.
 #
 # The engine is the public github.com/beetlebugorg/tile57 (its submodules hold the
-# IHO S-101 catalogues); it is checked out as a SIBLING dir named tile57 so go.mod's
-# ../tile57/bindings/go replace and the binding's cgo LDFLAGS resolve — the same
-# layout as ci.yml / docs.yml. main.version + main.engineCommit are stamped into
-# every binary via ldflags (preserved across all three jobs).
+# IHO S-101 catalogues); it is the ./tile57 git submodule so go.mod's
+# ./tile57/bindings/go replace and the binding's cgo LDFLAGS resolve — the same
+# layout as ci.yml. `submodules: recursive` checks it out at the committed pin, then
+# it's floated to the engine's latest main. main.version + main.engineCommit are
+# stamped into every binary via ldflags (preserved across both jobs).
 #
 # Packaging is plain shell (tar/zip + checksums + gh release) — no GoReleaser, no
 # paid license — so nothing here depends on a GoReleaser Pro key.
@@ -34,19 +39,18 @@ jobs:
   xbuild:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout chartplotter
+      - name: Checkout chartplotter (+ tile57 engine submodule)
         uses: actions/checkout@v7
         with:
           path: chartplotter
           fetch-depth: 0
-      # The engine sits beside chartplotter as ../tile57 (go.mod replaces the
-      # binding at ../tile57/bindings/go); its submodules carry the IHO catalogues.
-      - name: Checkout tile57 (libtile57 engine)
-        uses: actions/checkout@v7
-        with:
-          repository: beetlebugorg/tile57
-          path: tile57
+          # ./tile57 submodule (go.mod replaces the binding at ./tile57/bindings/go);
+          # its own submodules carry the IHO catalogues.
           submodules: recursive
+      - name: Float tile57 submodule to latest main
+        run: |
+          git -C chartplotter submodule update --remote tile57
+          git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
@@ -60,9 +64,9 @@ jobs:
       # xbuild-tile57.sh builds libtile57 per target with zig, then links each
       # binary with `zig cc`, emitting dist/chartplotter_${goos}_${goarch}${ext}
       # (ext=.exe for windows) for linux+windows amd64/arm64, stamping VERSION +
-      # ENGINE_COMMIT (the Makefile derives ENGINE_COMMIT from ../tile57 HEAD).
+      # ENGINE_COMMIT (the Makefile derives ENGINE_COMMIT from the tile57 submodule HEAD).
       - name: Cross-build linux + windows binaries
-        run: make -C chartplotter xbuild TILE57=../tile57 VERSION="${{ github.ref_name }}"
+        run: make -C chartplotter xbuild TILE57=tile57 VERSION="${{ github.ref_name }}"
 
       - name: Upload linux + windows binaries
         uses: actions/upload-artifact@v4
@@ -71,83 +75,14 @@ jobs:
           path: chartplotter/dist/chartplotter_*
           if-no-files-found: error
 
-  # ---- darwin (amd64/arm64): built natively on macOS with apple clang ----------
-  # darwin is NOT cross-built by xbuild: with GOOS=darwin, Go's own crypto/x509 +
-  # runtime/cgo link Apple's Security/CoreFoundation frameworks, which Zig does not
-  # bundle. The native apple clang (default CC here) does, so we build on a macOS
-  # runner. arm64 is native to the runner; amd64 is a clang cross-target (-arch).
-  macos:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout chartplotter
-        uses: actions/checkout@v7
-        with:
-          path: chartplotter
-          fetch-depth: 0
-      - name: Checkout tile57 (libtile57 engine)
-        uses: actions/checkout@v7
-        with:
-          repository: beetlebugorg/tile57
-          path: tile57
-          submodules: recursive
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
-          cache: true
-          cache-dependency-path: chartplotter/go.sum
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      # For each darwin arch: build libtile57.a for that arch with `zig build`
-      # (Zig builds the STATIC LIB fine — only the final Go link needs Apple's
-      # frameworks), normalizing the lib name exactly as scripts/xbuild-tile57.sh
-      # does, then link with CGO using the NATIVE apple clang (with the matching
-      # -arch so the cgo C objects agree with GOARCH; amd64 is a clang cross).
-      - name: Build darwin binaries (native clang link)
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          ENGINE_COMMIT="$(git -C tile57 rev-parse --short=9 HEAD)"
-          libdir="tile57/zig-out/lib"
-          mkdir -p chartplotter/dist
-          for arch in arm64 amd64; do
-            case "$arch" in
-              arm64) zt=aarch64-macos; clang_arch=arm64 ;;
-              amd64) zt=x86_64-macos;  clang_arch=x86_64 ;;
-            esac
-            echo "→ darwin/$arch (libtile57 via zig -Dtarget=$zt, link via clang -arch $clang_arch)"
-            # Rebuild the engine static lib for this arch; clear any stale lib first
-            # (mirrors build_lib() in scripts/xbuild-tile57.sh — same name normalize).
-            rm -f "$libdir/libtile57.a" "$libdir/tile57.lib"
-            ( cd tile57 && zig build -Dtarget="$zt" -Doptimize=ReleaseFast )
-            [ -f "$libdir/libtile57.a" ] || cp "$libdir/tile57.lib" "$libdir/libtile57.a"
-            ( cd chartplotter && \
-              CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
-              CC="clang -arch $clang_arch" CXX="clang++ -arch $clang_arch" \
-              go build -trimpath \
-                -ldflags "-s -w -X main.version=${TAG} -X main.engineCommit=${ENGINE_COMMIT}" \
-                -o "dist/chartplotter_darwin_${arch}" ./cmd/chartplotter )
-          done
-          ls -1 chartplotter/dist/chartplotter_darwin_*
-
-      - name: Upload darwin binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries-macos
-          path: chartplotter/dist/chartplotter_darwin_*
-          if-no-files-found: error
-
   # ---- package + publish: plain shell (no GoReleaser, no paid license) ---------
-  # The binaries are already built by the two jobs above; this just archives each
+  # The binaries are already built by the xbuild job above; this just archives each
   # (tar.gz for unix, zip for windows), writes checksums.txt, and creates the
   # GitHub release with all of it attached. (GoReleaser's prebuilt builder would do
   # the same packaging but is Pro-only; shell keeps the release path license-free.)
   release:
     runs-on: ubuntu-latest
-    needs: [xbuild, macos]
+    needs: [xbuild]
     steps:
       - name: Checkout chartplotter
         uses: actions/checkout@v7
@@ -155,13 +90,12 @@ jobs:
           path: chartplotter
           fetch-depth: 0
 
-      # Land all six prebuilt binaries into dist/ (naming: chartplotter_{os}_{arch}
-      # [.exe], from xbuild-tile57.sh + the macos job).
+      # Land all four prebuilt binaries into dist/ (naming: chartplotter_{os}_{arch}
+      # [.exe], from xbuild-tile57.sh — linux + windows, amd64/arm64).
       - name: Download prebuilt binaries
         uses: actions/download-artifact@v4
         with:
-          pattern: binaries-*
-          merge-multiple: true
+          name: binaries-xbuild
           path: chartplotter/dist
 
       # Archive each binary alongside README + LICENSE + THIRD-PARTY-NOTICES, then
@@ -201,9 +135,5 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --verify-tag \
             --generate-notes \
-            --notes "Per-platform binaries below. Each embeds the IHO S-101 catalogue (via the tile57 engine) — see THIRD-PARTY-NOTICES.md. Building from source per the README is the alternative." \
+            --notes "Linux + Windows binaries (amd64/arm64) below. Each embeds the IHO S-101 catalogue (via the tile57 engine) — see THIRD-PARTY-NOTICES.md. macOS is not shipped as a binary; build from source per the README." \
             release-assets/*
-
-# TODO(signing): binaries are unsigned/unnotarized (the old quill hook was removed
-# with the source-only pivot). macOS users hit Gatekeeper until notarization is
-# wired back in.

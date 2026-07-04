@@ -33,6 +33,15 @@ export function bandForScale(s) {
   return "overview";
 }
 
+// A NOAA cell's usage-band digit (the 3rd char of e.g. "US5MD1MC") → its band, a
+// fallback for the coverage overlay when the compilation scale isn't known yet (the
+// NOAA catalogue hasn't loaded). The digit is a coverage-PURPOSE hint — bandForScale
+// is authoritative — but good enough to colour/label a cell in the debug overlay.
+export function bandForCellName(name) {
+  const d = name && name.length >= 3 ? name.charCodeAt(2) - 48 : NaN;
+  return BANDS[d - 1] || "harbor";
+}
+
 // The finest band whose source paints at zoom z (Band.zoomRange mins in bake.zig:
 // overview 0, general 7, coastal 9, approach 11, harbor 13, berthing 16 — rounded
 // to the client's display thresholds here).

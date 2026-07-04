@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/beetlebugorg/chartplotter-go/actions/workflows/ci.yml"><img src="https://github.com/beetlebugorg/chartplotter-go/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://goreportcard.com/report/github.com/beetlebugorg/chartplotter-go"><img src="https://goreportcard.com/badge/github.com/beetlebugorg/chartplotter-go" alt="Go Report Card"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/beetlebugorg/chartplotter-go" alt="License"></a>
+  <a href="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml"><img src="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://goreportcard.com/report/github.com/beetlebugorg/chartplotter"><img src="https://goreportcard.com/badge/github.com/beetlebugorg/chartplotter" alt="Go Report Card"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/beetlebugorg/chartplotter" alt="License"></a>
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@ panning, zooming, switching palettes — and never touches the raw charts again.
 
 chartplotter is built from two repos that work as a pair:
 
-- **[`chartplotter`](https://github.com/beetlebugorg/chartplotter-go)** (this repo,
+- **[`chartplotter`](https://github.com/beetlebugorg/chartplotter)** (this repo,
   Go) — the application: the HTTP server and chart library, the `bake`/`serve`
   CLI, NMEA 0183 ingestion, and the `<chart-plotter>` web frontend.
 - **[`tile57`](https://github.com/beetlebugorg/tile57)** (Zig) — the chart
@@ -149,10 +149,13 @@ installs.
 ## 📦 Install & build
 
 **Download a binary.** Every tagged release publishes a self-contained
-`chartplotter` for **linux, macOS, and windows** (amd64 + arm64) on the
-[releases page](https://github.com/beetlebugorg/chartplotter-go/releases): unpack
+`chartplotter` for **linux and windows** (amd64 + arm64) on the
+[releases page](https://github.com/beetlebugorg/chartplotter/releases): unpack
 the archive for your platform and run it — the S-101 catalogue and web frontend
-are baked in, so you supply only the ENC cells.
+are baked in, so you supply only the ENC cells. **macOS** is not shipped as a
+prebuilt binary (the engine links Apple frameworks Zig can't cross-compile) — Mac
+users run the [Docker image](#-run-with-docker) via Docker Desktop, or build from
+source below.
 
 Those published binaries embed the **IHO S-101 Portrayal and Feature Catalogues**
 (compiled into libtile57 from the IHO's own GitHub repositories, which declare no
@@ -171,20 +174,17 @@ build locally.
 
 ### Recipe
 
-The two repos must sit **side by side**, with the engine directory named
-`tile57` — this repo's `go.mod` points at `../tile57/bindings/go`, and the
-Makefile builds `../tile57/zig-out/lib/libtile57.a` on demand. A symlink named
-`tile57` pointing at a checkout elsewhere also works.
+The engine is the [`tile57`](https://github.com/beetlebugorg/tile57) git submodule
+at `./tile57` — this repo's `go.mod` points at `./tile57/bindings/go`, and the
+Makefile builds `./tile57/zig-out/lib/libtile57.a` on demand. Clone with
+`--recurse-submodules` (or just run `make build`, which fetches the submodule and
+its nested IHO catalogues on first run).
 
 ```sh
-git clone https://github.com/beetlebugorg/tile57.git
-cd tile57
-git submodule update --init --recursive   # fetches the IHO S-101 catalogues
-cd ..
-
-git clone https://github.com/beetlebugorg/chartplotter-go.git
+git clone --recurse-submodules https://github.com/beetlebugorg/chartplotter.git
 cd chartplotter
-make build          # zig-builds libtile57, then a CGO go build → bin/chartplotter
+make build          # fetches the tile57 submodule if needed, zig-builds libtile57,
+                    # then a CGO go build → bin/chartplotter
 bin/chartplotter version
 ```
 
@@ -248,7 +248,7 @@ Run `chartplotter <command> --help` for the full flags.
 S-57 ENC cells (.000 + .001… updates)
    │
    ▼
-libtile57 — the native engine (Zig, ../tile57, linked via CGO)
+libtile57 — the native engine (Zig, ./tile57 submodule, linked via CGO)
    │  ISO 8211 decode → S-57 model → S-101 portrayal →
    │  web-Mercator tiling → MLT/MVT encode →
    │  MapLibre style + sprites/colors/line styles
@@ -296,16 +296,18 @@ bundle).
 
 ### Developing the engine
 
-The engine lives in the sibling `../tile57` checkout, and both halves of the build
-already point at it: `go.mod` replaces the Go binding at `../tile57/bindings/go`,
-and the Makefile defaults `TILE57 ?= ../tile57`. So day-to-day engine hacking needs
-no extra wiring — branch, edit, and commit inside `../tile57`, then `make build`
-picks the working tree up as usual.
+The engine is the `./tile57` git submodule, and both halves of the build point at
+it: `go.mod` replaces the Go binding at `./tile57/bindings/go`, and the Makefile
+defaults `TILE57 ?= tile57`. Day-to-day engine hacking works right inside the
+submodule — `cd tile57`, check out a branch (a fresh submodule lands detached, so
+`git checkout main` first), edit, commit, then `make build` picks the working tree
+up as usual. CI builds against the engine's latest `main`; the committed submodule
+pin is just last-known-good, bumped with a normal `git add tile57` when you want it.
 
 `go.work` is **optional** here: you only need it to build against a *different*
-engine checkout (not the `../tile57` sibling). To do that, redirect both halves —
-the Go binding via a gitignored `go.work`, and the Makefile's zig build via
-`TILE57=<path>`:
+engine checkout (not the `./tile57` submodule — e.g. a separate sibling clone you
+develop in). To do that, redirect both halves — the Go binding via a gitignored
+`go.work`, and the Makefile's zig build via `TILE57=<path>`:
 
 ```sh
 cat > go.work <<'EOF'
@@ -319,14 +321,7 @@ make TILE57=/path/to/other/tile57 build
 ```
 
 `go.work`/`go.work.sum` are gitignored, so the override never leaks into a commit;
-delete `go.work` to fall back to the `../tile57` sibling.
-
-CI runs `gofmt`, `go vet`, `go test`, and the CGO build on every push. Pushing a
-`v*` tag cross-builds the per-platform binaries (linux + windows via `zig cc`,
-macOS natively on a Mac runner), then archives + checksums them and publishes a
-GitHub release with generated notes — see
-[`.github/workflows/release.yml`](.github/workflows/release.yml). Binaries embed
-the IHO S-101 catalogue; see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+delete `go.work` to fall back to the `./tile57` submodule.
 
 ## 📚 Documentation
 

@@ -95,11 +95,11 @@ func (p *prefs) setDisabled(set string, off bool) {
 	}
 }
 
-// scanPacks walks the cache and returns every baked pack file keyed by set name →
-// path. The Go baker writes <PROVIDER>/<PACK>/<set>.pmtiles (set = filename); the
-// native tile57 bundle writes <PROVIDER>/<PACK>/tiles/chart.pmtiles, so its set name
-// is derived from the provider/pack dirs (mirroring setDir) — otherwise every bundle
-// collapses to "chart" and the chart library can't list them after a restart.
+// scanPacks walks the cache and returns every baked provider bundle keyed by set name
+// (= provider) → path. The tile57 bundle writes <cache>/<PROVIDER>/tiles/chart.pmtiles
+// (one archive per provider, provider-enc-root), so the set name is the provider dir —
+// otherwise every bundle collapses to "chart" and the chart library can't list them
+// after a restart.
 func scanPacks(cacheDir string) map[string]string {
 	out := map[string]string{}
 	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
@@ -110,14 +110,11 @@ func scanPacks(cacheDir string) map[string]string {
 			return nil
 		}
 		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		// tile57 bundle: <cache>/<PROVIDER>/<PACK>/tiles/chart.pmtiles → "provider-pack"
-		// (the reverse of setDir's "<PROVIDER>/<PACK>" layout for a "provider-pack" set).
+		// tile57 bundle: <cache>/<PROVIDER>/tiles/chart.pmtiles → the provider name.
 		if name == "chart" && filepath.Base(filepath.Dir(path)) == "tiles" {
-			setDir := filepath.Dir(filepath.Dir(path))
-			pack := filepath.Base(setDir)
-			provider := filepath.Base(filepath.Dir(setDir))
-			if provider != "" && provider != "." && pack != "" && pack != "." {
-				name = strings.ToLower(provider) + "-" + strings.ToLower(pack)
+			provider := filepath.Base(filepath.Dir(filepath.Dir(path)))
+			if provider != "" && provider != "." {
+				name = strings.ToLower(provider)
 			}
 		}
 		if isSetName(name) {

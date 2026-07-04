@@ -51,19 +51,20 @@ RUN set -eux; \
     ln -s /opt/zig/zig /usr/local/bin/zig; \
     zig version
 
-# The engine is the PUBLIC github.com/beetlebugorg/tile57, cloned as a SIBLING of
-# the source tree so go.mod's `replace … => ../tile57/bindings/go` and the
-# binding's cgo LDFLAGS resolve; its submodules carry the IHO S-101 catalogues.
-WORKDIR /src
-RUN set -eux; \
-    if [ -n "$TILE57_REF" ]; then br="--branch $TILE57_REF"; else br=""; fi; \
-    git clone --depth 1 $br --recurse-submodules --shallow-submodules \
-      https://github.com/beetlebugorg/tile57 /src/tile57; \
-    git -C /src/tile57 rev-parse --short=9 HEAD
-
-# chartplotter source beside the engine.
+# chartplotter source. The engine is the ./tile57 submodule, but the build context
+# doesn't carry submodule contents (.dockerignore excludes tile57/), so clone it
+# fresh IN-TREE below — a shallow, floating clone of the PUBLIC
+# github.com/beetlebugorg/tile57 (its own submodules carry the IHO S-101
+# catalogues). go.mod's `replace … => ./tile57/bindings/go` and the binding's cgo
+# LDFLAGS resolve against ./tile57.
 COPY . /src/chartplotter
 WORKDIR /src/chartplotter
+RUN set -eux; \
+    rm -rf tile57; \
+    if [ -n "$TILE57_REF" ]; then br="--branch $TILE57_REF"; else br=""; fi; \
+    git clone --depth 1 $br --recurse-submodules --shallow-submodules \
+      https://github.com/beetlebugorg/tile57 tile57; \
+    git -C tile57 rev-parse --short=9 HEAD
 
 # Cross-link the fully-static musl binary for TARGETARCH. LIBC=musl makes zig's
 # lld emit a static ELF (`ldd` → "not a dynamic executable"); SKIP_RESTORE=1 skips
@@ -76,8 +77,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       PLATFORMS="linux/${TARGETARCH}" \
       OUT=/out \
       VERSION="${VERSION}" \
-      TILE57=/src/tile57 \
-      ENGINE_COMMIT="$(git -C /src/tile57 rev-parse --short=9 HEAD)" \
+      TILE57=tile57 \
+      ENGINE_COMMIT="$(git -C tile57 rev-parse --short=9 HEAD)" \
       scripts/xbuild-tile57.sh; \
     cp "/out/chartplotter_linux_${TARGETARCH}_musl" /chartplotter; \
     # Smoke-test only on a native build — a cross-built (e.g. arm64-on-amd64)

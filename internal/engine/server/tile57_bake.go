@@ -13,68 +13,19 @@ import (
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
-// bakeBundleTile57 bakes an import's cells into a self-contained tile57 chart
-// bundle under the set's directory (tiles/chart.pmtiles + per-scheme SCAMIN-
-// bucketed style-*.json + assets + manifest.json) and registers chart.pmtiles as
-// the set. It mirrors the Go path's post-bake tail — aux.zip + per-pack metadata
-// sidecar + cell manifest — so a tile57-baked pack is as complete in the chart
-// library as a Go-baked one. Returns true once it has handled the bake (success OR
-// a recorded error); false only if there's nothing to do.
-func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, applyUpdates bool) bool {
-	if len(cells) == 0 {
-		return false
-	}
-	fail := func(err error) bool {
-		log.Printf("import %s (%s): tile57 bundle: %v", jobID, set, err)
-		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
-		return true
-	}
-
-	// Stage THIS import's cells to a temp ENC dir (the engine reads from disk; the
-	// shared <data>/ENC_ROOT holds every import, so we can't point it there).
-	encDir, err := os.MkdirTemp("", "cp-tile57-import-")
-	if err != nil {
-		return fail(err)
-	}
-	defer os.RemoveAll(encDir)
-	for name, cd := range cells { // name == "<stem>.000"
-		if err := os.WriteFile(filepath.Join(encDir, name), cd.Base, 0o644); err != nil {
-			return fail(err)
-		}
-		if applyUpdates {
-			for un, ub := range cd.Updates {
-				if err := os.WriteFile(filepath.Join(encDir, filepath.Base(un)), ub, 0o644); err != nil {
-					return fail(err)
-				}
-			}
-		}
-	}
-
-	outDir := s.setDir(set)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fail(err)
-	}
-	s.imports.update(jobID, func(j *importJob) {
-		j.Phase, j.Band, j.Unit, j.Note, j.Done, j.Total = "bake", "", "cells", "Preparing charts", 0, 0
-	})
-	// Per-band progress with the band name (like the Go baker). A calm per-band bar:
-	// it fills 0→100% per band and resets at each band — clamped monotonic WITHIN a
-	// band (the engine double-counts a band's tiles across its parallel-gen + serial-
-	// write phases, which would otherwise rewind). A smooth GLOBAL bar needs the
-	// engine to drive bands in bake order (BandIndex is navigational rank, not bake
-	// order, so a global mapping leaps around) — deferred; see ../tile57 spec host §3.
+// bakeProgress returns a per-band progress callback for a provider bake. BakeBundle
+// fires stage-0 (portraying a band's cells) then stage-1 (writing that band's tiles)
+// events per navigational-purpose band. A calm per-band bar: it fills 0→100% per band
+// and resets at each band — clamped monotonic WITHIN a band (the engine double-counts a
+// band's tiles across its parallel-gen + serial-write phases, which would otherwise
+// rewind). The multi-district DOWNLOAD phase sets pack "N of M" on the job separately.
+func (s *Server) bakeProgress(jobID string) func(tile57.BakeProgress) {
 	curBand, bandDoneMax := -1, 0
-	note := func(verb, noun, band string) string {
-		if band == "" {
-			return verb + " " + noun
-		}
-		return verb + " " + band + " " + noun
-	}
-	progress := func(p tile57.BakeProgress) {
+	return func(p tile57.BakeProgress) {
 		s.imports.update(jobID, func(j *importJob) {
 			j.Phase, j.Band = "bake", p.BandName
 			if p.Stage == 0 { // portraying this band's cells
-				j.Unit, j.Note, j.Done, j.Total = "cells", note("Preparing", "charts", p.BandName), p.Done, p.Total
+				j.Unit, j.Note, j.Done, j.Total = "cells", "Preparing charts", p.Done, p.Total
 				return
 			}
 			if p.BandIndex != curBand { // new band → reset the within-band floor
@@ -83,35 +34,23 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 			if p.Done > bandDoneMax {
 				bandDoneMax = p.Done
 			}
-			j.Unit, j.Note, j.Done, j.Total = "tiles", note("Generating", "tiles", p.BandName), bandDoneMax, p.Total
+			j.Unit, j.Note, j.Done, j.Total = "tiles", "Generating tiles", bandDoneMax, p.Total
 		})
 	}
-	created := time.Now().UTC().Format(time.RFC3339)
-	// MaxZoom 24 = the ABI's "no clamp" (each cell's full native band); MaxZoom 0 would
-	// clamp every band down to z0 — an EMPTY archive.
-	n, bbox, err := tile57.BakeBundle(encDir, outDir, tile57.BakeOpts{Created: created, MaxZoom: 24}, progress)
-	if err != nil {
-		return fail(err)
-	}
-	// An inverted/empty bbox (or zero cells) means nothing valid parsed — e.g. a
-	// corrupt cell libtile57 tolerates but that covers nothing. Treat it as a failed
-	// import (don't register an empty pack) and drop the stub bundle it wrote.
-	if n == 0 || bbox[2] <= bbox[0] || bbox[3] <= bbox[1] {
-		os.RemoveAll(outDir)
-		return fail(fmt.Errorf("import produced no coverage (%d cell(s), no valid S-57 data)", n))
-	}
+}
 
-	// Register the bundle's chart.pmtiles as the set (replacing any prior merged or
-	// per-band Go bake of the same district).
+// registerBakedSet registers a freshly-baked PROVIDER's chart.pmtiles as the live tile
+// set and writes its tail — bake stamps, cell manifest, companion aux.zip, metadata
+// sidecar — so a tile57 provider is as complete in the chart library as any pack.
+// Returns false (recording a job error) if the bundle can't be opened. `set` is the
+// provider name (one archive per provider).
+func (s *Server) registerBakedSet(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, created string) bool {
+	outDir := s.setDir(set)
 	chart := filepath.Join(outDir, "tiles", "chart.pmtiles")
 	src, err := tilesource.Open(chart)
 	if err != nil {
-		return fail(err)
-	}
-	s.removeMergedSet(set)
-	for _, band := range s.setsForDistrict(set) { // drop stale per-band Go sets
-		s.sets.remove(band)
-		s.packDel(band)
+		log.Printf("import %s (%s): open baked bundle: %v", jobID, set, err)
+		return false
 	}
 	s.sets.register(set, src)
 	s.packAdd(set, chart)
@@ -129,8 +68,8 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 		log.Printf("import %s: cell manifest %q: %v", jobID, set, err)
 	}
 
-	// Companion aux.zip (TXTDSC/PICREP) beside the set, so feature attachments still
-	// serve via /api/aux — same as the Go path's writeAndRegister.
+	// Companion aux.zip (TXTDSC/PICREP) beside the set, so feature attachments serve
+	// via /api/aux — one archive for the whole provider.
 	if len(aux) > 0 {
 		if f, e := os.Create(filepath.Join(outDir, set+".aux.zip")); e == nil {
 			if _, e := auxfiles.WriteZip(f, aux); e != nil {
@@ -142,9 +81,7 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 	}
 
 	// Per-pack metadata sidecar for the chart library (per-cell scale/edition/date/
-	// agency/coverage + catalogue titles) — same as the Go path, so pack details
-	// aren't poorer for a tile57 import.
-	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
+	// agency/coverage + catalogue titles).
 	cellMeta := baker.ExtractCellMeta(cells, func(name string, e error) {
 		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
 	})
@@ -153,8 +90,73 @@ func (s *Server) bakeBundleTile57(jobID, set string, cells map[string]baker.Cell
 	if err := s.writeSetMeta(set, meta); err != nil {
 		log.Printf("import %s: write meta %q: %v", jobID, set, err)
 	}
-
-	s.imports.update(jobID, func(j *importJob) { j.Cells = n; j.State = "done" })
-	log.Printf("import %s: baked tile57 bundle %q (%d cell(s)) → %s", jobID, set, n, outDir)
 	return true
+}
+
+// bakeProvider bakes a provider's WHOLE ENC_ROOT (all installed district subfolders)
+// into its ONE self-contained tile57 chart bundle under the provider's cache dir
+// (tiles/chart.pmtiles + per-scheme style-*.json + assets + manifest.json) and
+// registers it. The baker's within-archive best-available (finestCsclAt: finest
+// M_COVR-covering cell wins per point; coarser shows only in holes; per-cell oscl
+// overscale hatch) does all cross-cell / cross-district composition — there is no
+// cross-pack context, no peer folding. Any provider change (download/delete a
+// district) triggers a full re-bake: the archive is a pure function of the ENC_ROOT.
+// Returns true on success; on failure it records the job error and returns false. The
+// caller sets the terminal "done" state (a multi-provider batch bakes several first).
+func (s *Server) bakeProvider(jobID, provider string) bool {
+	fail := func(err error) bool {
+		log.Printf("import %s (%s): provider bake: %v", jobID, provider, err)
+		s.imports.update(jobID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
+		return false
+	}
+	// No districts left (e.g. the last was just deleted) → drop the provider set.
+	if len(s.providerDistricts(provider)) == 0 {
+		s.dropProviderSet(provider)
+		return true
+	}
+	encRoot := s.encRootDir(provider)
+	outDir := s.setDir(provider)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fail(err)
+	}
+	s.imports.update(jobID, func(j *importJob) {
+		j.Phase, j.Band, j.Unit, j.Note, j.Done, j.Total = "bake", "", "cells", "Preparing charts", 0, 0
+	})
+	created := time.Now().UTC().Format(time.RFC3339)
+	// MaxZoom 24 = the ABI's "no clamp" (each cell's full native band); MaxZoom 0 would
+	// clamp every band down to z0 — an EMPTY archive.
+	n, bbox, err := tile57.BakeBundle(encRoot, outDir, tile57.BakeOpts{Created: created, MaxZoom: 24}, s.bakeProgress(jobID))
+	if err != nil {
+		return fail(err)
+	}
+	// An inverted/empty bbox (or zero cells) means nothing valid parsed. Treat it as a
+	// failed import (don't register an empty pack) and drop the stub bundle it wrote.
+	if n == 0 || bbox[2] <= bbox[0] || bbox[3] <= bbox[1] {
+		os.RemoveAll(outDir)
+		return fail(fmt.Errorf("import produced no coverage (%d cell(s), no valid S-57 data)", n))
+	}
+
+	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
+	cells := s.providerCellData(provider)
+	aux := s.providerAux(provider)
+	cat := s.providerCatalog(provider)
+	if !s.registerBakedSet(jobID, provider, cells, aux, cat, created) {
+		return fail(fmt.Errorf("could not register baked bundle for %q", provider))
+	}
+	s.imports.update(jobID, func(j *importJob) { j.Cells = n })
+	log.Printf("import %s: baked provider %q (%d cell(s)) → %s", jobID, provider, n, outDir)
+	return true
+}
+
+// dropProviderSet unregisters a provider whose ENC_ROOT is now empty and removes its
+// (regenerable) baked bundle + its (now-empty) provider data tree. The cell index is
+// rebuilt so its cells stop counting as installed.
+func (s *Server) dropProviderSet(provider string) {
+	s.sets.remove(provider)
+	s.packDel(provider)
+	s.prefs.setDisabled(provider, false)
+	_ = os.RemoveAll(s.setDir(provider))          // baked bundle (cache)
+	_ = os.RemoveAll(s.providerDataDir(provider)) // ENC_ROOT source tree (now empty)
+	s.auxIdx.invalidate()
+	s.cellIdx.rebuild()
 }

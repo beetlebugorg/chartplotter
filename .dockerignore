@@ -11,6 +11,10 @@
 .vscode/
 .DS_Store
 
+# The tile57 engine submodule: cloned fresh in the builder (shallow + floating),
+# never copied from the context — so the local checkout doesn't leak in or pin it.
+tile57/
+
 # Build output / release staging
 bin/
 dist/

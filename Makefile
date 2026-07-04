@@ -63,27 +63,44 @@ NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
 
 
 # --- native libtile57 engine (the SOLE tile/portrayal/asset engine) -------------
-# TILE57 points at the engine repo, by default a sibling ../tile57 checkout (clone
-# github.com/beetlebugorg/tile57 there, with --recurse-submodules for its nested
-# IHO catalogues). go.mod's replace targets ../tile57/bindings/go to match. Override
-# to build against another checkout, e.g. `make TILE57=../tile57-experiment build`
-# (pair it with a gitignored go.work so the Go binding follows; see README.md
-# "Developing the engine"). Its static lib is built on demand with Zig 0.16.
-TILE57     ?= ../tile57
+# TILE57 points at the engine repo, by default the ./tile57 git submodule
+# (github.com/beetlebugorg/tile57, whose nested submodules carry the IHO
+# catalogues). A fresh clone materializes it automatically — `build` runs
+# `git submodule update --init --recursive` when the source is missing (or clone
+# with --recurse-submodules). go.mod's replace targets ./tile57/bindings/go to
+# match. Override to build against another checkout, e.g.
+# `make TILE57=../tile57-experiment build` (pair it with a gitignored go.work so the
+# Go binding follows; see README.md "Developing the engine"). Its static lib is
+# built on demand with Zig 0.16.
+TILE57     ?= tile57
 TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
 
 # Engine-commit stamp: the tile57 checkout's HEAD, linked into the binary beside
 # main.version so every bake can record WHICH engine produced its tiles (and the
-# client can flag a mixed-engine cache). Resolves for the default sibling ../tile57
-# AND a TILE57=… override; "unknown" when git can't answer (no sibling checkout,
-# tarball checkout). The `test -e .git` guard matters: git -C into a missing dir
-# would walk up and report THIS repo's HEAD instead of failing (a sibling clone's
-# .git is a real directory, so it resolves cleanly).
+# client can flag a mixed-engine cache). Resolves for the default ./tile57 submodule
+# AND a TILE57=… override; "unknown" when git can't answer (submodule not yet
+# initialized, tarball checkout). The `test -e .git` guard matters: git -C into a
+# missing dir would walk up and report THIS repo's HEAD instead of failing (for the
+# submodule .git is a gitdir FILE, for a plain clone a directory — test -e matches
+# both, so either resolves cleanly).
 ENGINE_COMMIT ?= $(shell test -e "$(TILE57)/.git" && git -C "$(TILE57)" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
 LDFLAGS += -X main.engineCommit=$(ENGINE_COMMIT)
 
+# Materialize the engine source if it isn't there yet. For the default ./tile57
+# submodule this fetches it (and its nested IHO catalogues) with one `git submodule
+# update --init --recursive`; for a TILE57=<path> override the checkout must already
+# exist (we don't guess where an external engine tree should come from).
+$(TILE57)/include/tile57.h:
+	@if [ "$(TILE57)" = "tile57" ] && [ -f .gitmodules ]; then \
+	  echo "fetching the tile57 engine submodule (git submodule update --init --recursive)…"; \
+	  git submodule update --init --recursive tile57; \
+	else \
+	  echo "missing $(TILE57)/include/tile57.h — TILE57=$(TILE57) is not the default submodule; point it at a github.com/beetlebugorg/tile57 checkout"; \
+	  exit 1; \
+	fi
+
 # Build the static library on demand (only when absent). Needs Zig 0.16 on PATH.
-$(TILE57_LIB):
+$(TILE57_LIB): $(TILE57)/include/tile57.h
 	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH and $(TILE57_LIB) missing — install Zig or prebuild the lib"; exit 1; }
 	@echo "building libtile57.a (zig build in $(TILE57))…"
 	cd "$(TILE57)" && zig build
@@ -94,10 +111,9 @@ tile57-lib: ## Force-rebuild $(TILE57)/zig-out/lib/libtile57.a (the native engin
 
 # Build bin/chartplotter. libtile57 is the sole engine, so this is a CGO build that
 # statically links the native lib; the S-101 catalogue lives inside libtile57, so
-# there is no separate sync/embed step (web/ is still embedded). Needs the sibling
-# ../tile57 checkout + Zig 0.16.
-build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; needs the sibling ../tile57 checkout + Zig 0.16)
-	@test -f "$(TILE57)/include/tile57.h" || { echo "missing $(TILE57)/include/tile57.h — clone github.com/beetlebugorg/tile57 as a sibling directory named tile57 (or set TILE57=<path>)"; exit 1; }
+# there is no separate sync/embed step (web/ is still embedded). Fetches the ./tile57
+# submodule on demand (see the $(TILE57)/include/tile57.h rule) + needs Zig 0.16.
+build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches the ./tile57 submodule on demand + needs Zig 0.16)
 	@# Force the link: go's build-cache action ID does NOT hash external static-lib
 	@# content, so with an existing up-to-date-looking $(BIN) `go build` silently
 	@# skips the relink and a fresh libtile57.a never reaches the output.
@@ -130,9 +146,9 @@ serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a
 # proven to cross-link from any host with Zig alone. darwin is built NATIVELY on a
 # macOS CI runner: with GOOS=darwin, Go's crypto/x509 links Apple frameworks
 # (Security/CoreFoundation) that Zig doesn't bundle. The S-101 catalogue lives in
-# libtile57, so there's no embed step. Needs the sibling ../tile57 checkout + Zig 0.16.
+# libtile57, so there's no embed step. Fetches the ./tile57 submodule on demand + Zig 0.16.
 # Outputs dist/chartplotter_<os>_<arch>[.exe].
-xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
+xbuild xbuild-tile57: $(TILE57)/include/tile57.h ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
 	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh
 
 # Fully-static musl binaries for the tiny FROM scratch Docker image (the "go-dims"
@@ -145,7 +161,7 @@ xbuild xbuild-tile57: ## Cross-compile CGO+libtile57 binaries with zig cc (linux
 # xbuild (no glibc floor), so it's the recommended linux artifact — the gnu xbuild
 # path is kept intact for anyone who needs a glibc-dynamic build.
 MUSL_PLATFORMS ?= linux/amd64 linux/arm64
-musl: ## Build fully-static musl binaries (linux amd64+arm64) into dist/ for the scratch Docker image
+musl: $(TILE57)/include/tile57.h ## Build fully-static musl binaries (linux amd64+arm64) into dist/ for the scratch Docker image
 	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" \
 	  LIBC=musl PLATFORMS="$(MUSL_PLATFORMS)" scripts/xbuild-tile57.sh
 
