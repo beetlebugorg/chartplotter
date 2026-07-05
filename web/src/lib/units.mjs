@@ -76,10 +76,12 @@ export function format(cat, value, prefs) {
     default: v = value;
   }
   if (unit === "Bft") return "Bft " + Math.round(v);
-  // Feet read as whole numbers on charts, so drop a decimal vs metric (a 12.3 ft
-  // depth shows "12 ft", not "12.3 ft"); sub-10 ft keeps one for shoal detail.
+  // Feet ALWAYS read as whole numbers on charts ("12 ft", never "12.3 ft");
+  // metric keeps at most one decimal — the tenths digit feet drops. Other units
+  // (nm/km/kn/…) keep the compact by-magnitude decimals.
   let dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
-  if (unit === "ft") dec = Math.max(0, dec - 1);
+  if (unit === "ft") dec = 0;
+  else if (unit === "m") dec = Math.min(1, dec);
   return `${trim(v.toFixed(dec))} ${unitSuffix(unit)}`;
 }
 

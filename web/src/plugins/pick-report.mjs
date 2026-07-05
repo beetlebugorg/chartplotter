@@ -27,10 +27,14 @@ const PICK_DEPTH_ATTRS = new Set(["VALSOU", "VALDCO", "DRVAL1", "DRVAL2"]);
 const PICK_DIST_ATTRS = new Set(["VALNMR"]);
 const PICK_SPEED_ATTRS = new Set(["CURVEL"]);
 
-// Format a converted number compactly + its unit suffix.
+// Format a converted number compactly + its unit suffix. Feet ALWAYS read as
+// whole numbers ("12 ft"); metric keeps at most one decimal (the tenths digit
+// feet drops). Other units keep the compact by-magnitude decimals.
 function fmtUnitNum(v, unit) {
   if (!isFinite(v)) return "";
-  const dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  let dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  if (unit === "ft") dec = 0;
+  else if (unit === "m") dec = Math.min(1, dec);
   let s = v.toFixed(dec);
   if (s.includes(".")) s = s.replace(/\.?0+$/, "");
   return s + " " + unitSuffix(unit);
