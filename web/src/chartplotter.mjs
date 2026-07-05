@@ -47,7 +47,7 @@ import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart
 import { OrientationControl } from "./plugins/orientation-control.mjs"; // compass: north-up / free orientation
 import { FpsMeter } from "./plugins/fps-meter.mjs"; // ?fps — live FPS/frame-time overlay
 import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
-import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale, bandForCellName } from "./lib/bands.mjs";
+import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, BAND_MAXZOOM, OVERSCALE_MARGIN, DEV_BANDS, bandForScale, bandForCellName } from "./lib/bands.mjs";
 import { loadJSON, maxZoomForScaleFloor, FLOOR_GIVE, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 import { STYLE, CHROME } from "./chartplotter.view.mjs"; // shell chrome (CSS + static markup)
@@ -1502,13 +1502,35 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // Cap the map's max zoom at the 1:MIN_DETAIL_SCALE scale for the current centre
-  // latitude — a consistent scale floor rather than a per-location data cap.
+  // latitude (a consistent scale floor), AND at the finest covering band's data
+  // depth: the bake carries each band OVERSCALE_MARGIN zooms past its native max
+  // (the composite's capped overscale fill-up, bake_enc.FILLUP_DZ) — past that
+  // there are NO vector tiles at all and MapLibre cannot stretch absent tiles,
+  // so the camera stops where the data stops instead of panning blank water.
   _applyScaleFloor() {
     if (!this._map) return;
     // FLOOR_GIVE headroom above the floor so WheelZoom can let a hard-in scroll
     // over-pull a hair past it and settle back (a stop with give, not a wall).
-    const mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
+    let mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
+    const c = this._map.getCenter();
+    const band = this._finestBandAt(c.lng, c.lat);
+    if (band) mz = Math.min(mz, BAND_MAXZOOM[band] + OVERSCALE_MARGIN + FLOOR_GIVE);
     if (Math.abs(this._map.getMaxZoom() - mz) > 1e-3) this._map.setMaxZoom(mz);
+  }
+
+  // The finest navigational band among the ACTIVE installed cells whose bbox
+  // covers (lng,lat) — the per-location data depth for the zoom cap. null when
+  // no active cell covers (open ocean / widget mode / nothing installed yet),
+  // which leaves the uniform scale floor alone.
+  _finestBandAt(lng, lat) {
+    let best = -1;
+    for (const cell of this._activeCells || []) {
+      const b = cell.bb;
+      if (!b || lng < b[0] || lng > b[2] || lat < b[1] || lat > b[3]) continue;
+      const r = BANDS.indexOf(bandForCellName(cell.n || ""));
+      if (r > best) best = r;
+    }
+    return best >= 0 ? BANDS[best] : null;
   }
 
   // Broker for WheelZoom: the geographic point wheel-zoom should keep fixed while
