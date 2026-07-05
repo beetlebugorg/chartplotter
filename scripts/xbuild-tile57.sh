@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Cross-compile chartplotter as a CGO binary linking the native libtile57 engine,
 # using Zig as the C toolchain (`zig cc`). This is how the tile57-only build keeps
-# single-command cross-compilation despite requiring CGO (see
-# specs/tile57-only-engine.md, phase 2/3).
+# single-command cross-compilation despite requiring CGO.
 #
 # Targets: linux + windows, amd64 & arm64 — all four proven to cross-link cleanly
 # from any host with Zig alone. darwin is deliberately EXCLUDED: with GOOS=darwin,

@@ -142,7 +142,7 @@ serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a
 # release binary. Outputs dist/chartplotter_<os>_<arch>[.exe] (cleaned by `clean`).
 # Cross-compile the CGO+libtile57 binary via the Zig C toolchain (`zig cc`) — how
 # the tile57-only build keeps single-command cross-compilation despite needing
-# CGO (specs/tile57-only-engine.md). Covers linux + windows (amd64/arm64), all
+# CGO. Covers linux + windows (amd64/arm64), all
 # proven to cross-link from any host with Zig alone. darwin is built NATIVELY on a
 # macOS CI runner: with GOOS=darwin, Go's crypto/x509 links Apple frameworks
 # (Security/CoreFoundation) that Zig doesn't bundle. The S-101 catalogue lives in
