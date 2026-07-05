@@ -1726,6 +1726,7 @@ export class ChartPlotter extends HTMLElement {
     if (!map || !map.getStyle) return null;
     let style;
     try { style = map.getStyle(); } catch { return null; }
+    if (!style) return null; // getStyle() RETURNS undefined (not throws) before the style loads
     const layers = (style.layers || [])
       .filter((l) => l.source && (l.source === "chart" || String(l.source).startsWith("chart-")))
       .map((l) => l.id)
