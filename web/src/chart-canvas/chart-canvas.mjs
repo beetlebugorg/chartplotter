@@ -152,6 +152,15 @@ export class ChartCanvas extends HTMLElement {
     this._engineStyle = null;  // cached full engine style for the last-applied mariner
     this._engineSet = null;    // set the engine style targets (live "tile57" or a baked pack)
     this._lastMariner = null;  // mariner query the engine style currently reflects (diff `from`)
+    // Server-LESS (widget/demo) engine mode: the same tile57 style engine, but run
+    // CLIENT-side from the vendored WASM (../../vendor/tile57-style-engine) instead of
+    // the server's /api/style.json — its chart layers fanned across the per-band
+    // PMTiles sources (mergeStyles-style). Distinct from server engine mode so the
+    // restyle path regenerates via WASM (no /api/style-diff) and _engineStyleMerged
+    // keeps the client's own per-band chart sources. See _initClientEngineStyle.
+    this._engineClient = false;
+    this._engineWasm = null;   // loaded StyleEngine (WASM), reused across restyles
+    this._engineLoad = null;   // in-flight load promise (load the engine once)
     // DEBUG (?ignoreScamin / ?noscamin): drop the per-SCAMIN display gate so every
     // feature shows in-band regardless of its 1:N min-display-scale. Deliberately a
     // per-page-load CONSTANT read from the URL — NOT a mariner toggle — so it's baked
@@ -1389,9 +1398,18 @@ export class ChartCanvas extends HTMLElement {
     const js = this._buildStyleJS(); // bg + basemap + no-data (+ JS chart layers we drop)
     const isChart = (s) => typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
     const chrome = js.layers.filter((l) => !isChart(l.source));
-    const chromeSources = {};
-    for (const [k, v] of Object.entries(js.sources)) if (!isChart(k)) chromeSources[k] = v;
-    const sources = { ...chromeSources, ...engine.sources };
+    let sources;
+    if (this._engineClient) {
+      // Server-LESS widget/demo: the chart tiles come from the JS builder's per-band
+      // PMTiles sources (chart-<slug>://, with their live maxzoom/encoding/cache-bust),
+      // so KEEP those and only swap in the engine's chart LAYERS. (Server mode instead
+      // takes the chart sources from the engine style — the else branch below.)
+      sources = { ...js.sources };
+    } else {
+      const chromeSources = {};
+      for (const [k, v] of Object.entries(js.sources)) if (!isChart(k)) chromeSources[k] = v;
+      sources = { ...chromeSources, ...engine.sources };
+    }
     this._applySourceBounds(sources); // per-pack bounds → skip non-covering packs' tile requests
     return {
       version: 8,
@@ -1457,7 +1475,12 @@ export class ChartCanvas extends HTMLElement {
     const sets = setNames || ((this._sources && this._sources.serverSets && this._sources.serverSets()) || []);
     this._engineSets = sets;
     this._engineSet = sets.join(","); // ?set CSV → tiles URLs + per-set scamin
-    if (sets.length === 0) return;
+    if (sets.length === 0) {
+      // No server sets → either a server-less widget/demo (drive the style from the
+      // vendored WASM engine, below) or a not-yet-populated install (nothing to do).
+      await this._initClientEngineStyle();
+      return;
+    }
     const style = await this._fetchEngineStyle();
     if (style && Array.isArray(style.layers)) {
       this._engineStyle = style;
@@ -1468,6 +1491,162 @@ export class ChartCanvas extends HTMLElement {
       // This ALSO collects each set's bounds (this._setBounds) from the same fetch,
       // applied to the chart sources in _engineStyleMerged (below).
       this._engineScaminValues = await this._fetchScaminValues();
+    }
+  }
+
+  // ---- server-LESS (widget/demo) engine mode: WASM style engine ----------
+  //
+  // The widget/demo has no server, so there is no /api/style.json to adopt — but the
+  // chart style should still come from the tile57 engine, not the JS builder (kills the
+  // JS-vs-engine drift, tile57-style-adoption). Run the SAME engine client-side from the
+  // vendored WASM: generateStyle(mariner) yields the engine's single-source chart style,
+  // which we fan across the client's per-band PMTiles sources exactly like the server's
+  // mergeStyles. On any failure (no vendored wasm / older deployment) we leave engine mode
+  // off and the JS builder (buildChartLayers) renders as before.
+  async _initClientEngineStyle() {
+    if (this._sources && this._sources.server) return; // server mode owns the engine style
+    try {
+      const eng = await this._loadClientEngine();
+      if (!eng) return;
+      this._engineWasm = eng;
+      this._engineStyle = this._composeClientEngineStyle(eng);
+      this._engineMode = true;
+      this._engineClient = true;
+      // The engine's *_scamin layers self-gate on the web-mercator zoom (a baked-in
+      // zoom expression), so the client SCAMIN filter-gate machinery stays OFF — the
+      // same "merged zoom-gate" the server serves by default. Force it on even under
+      // ?scaminexact: the exact per-value filter-gate needs the server's style, which
+      // a server-less widget can't produce.
+      this._scaminMerged = true;
+    } catch (e) {
+      console.warn("[engine-style] client engine unavailable, using JS builder:", e && e.message);
+      this._engineMode = false; this._engineClient = false; this._engineStyle = null; this._engineWasm = null;
+    }
+  }
+
+  // Load (once) the vendored tile57 WASM style engine. The binding module is resolved
+  // relative to THIS module (../../vendor/…); the .wasm bytes are fetched relative to
+  // `assets` (so a subpath-hosted widget finds them). Cached — reused across restyles.
+  _loadClientEngine() {
+    if (this._engineLoad) return this._engineLoad;
+    this._engineLoad = (async () => {
+      const [{ loadStyleEngine }, wasmResp] = await Promise.all([
+        import("../../vendor/tile57-style-engine/index.js"),
+        fetch(this._assets + "vendor/tile57-style-engine/style-engine.wasm"),
+      ]);
+      if (!wasmResp || !wasmResp.ok) throw new Error("style-engine.wasm HTTP " + (wasmResp && wasmResp.status));
+      const wasmBytes = new Uint8Array(await wasmResp.arrayBuffer());
+      return loadStyleEngine({ wasmBytes });
+    })().catch((e) => { this._engineLoad = null; throw e; });
+    return this._engineLoad;
+  }
+
+  // Build the cached client engine style for the current mariner: generate the engine's
+  // single-source chart style from the WASM, then fan its layers across the per-band
+  // PMTiles sources. Glyphs/sources are intentionally omitted — _engineStyleMerged (the
+  // client branch) supplies the client glyphs URL and the per-band chart sources.
+  _composeClientEngineStyle(eng) {
+    const base = eng.generateStyle(this._marinerToEngine());
+    return { layers: this._fanEngineLayers(base.layers || []) };
+  }
+
+  // Fan the engine's chart layers (which reference the single "chart" source) across the
+  // client's per-band chart-<slug> sources, mirroring the JS builder's pmtiles fan-out
+  // (chart-style.mjs). Group-outer / band-inner (coarse→fine) so the global draw order is
+  // by S-52 class then band — finer bands' fills over coarser ones, symbols/text above
+  // every band's fills. Grouping keeps each fill/line tier's plain + *_scamin variants
+  // together per band (else a coarse band's SCAMIN area stacks over a finer band's plain
+  // fill — "coastal docks over harbor water"). This is the server mergeStyles fan-out
+  // adapted to the widget's per-band (rather than per-provider) sources.
+  _fanEngineLayers(engineLayers) {
+    const chart = engineLayers.filter((l) => l.type !== "background"); // client chrome supplies the bg
+    // A layer joins the previous group when it shares the same BASE source-layer
+    // (its *_scamin sibling, or another dash/rot variant of the same tier).
+    const baseSrc = (l) => (l["source-layer"] || "").replace(/_scamin$/, "");
+    const groups = [];
+    for (const l of chart) {
+      const g = groups[groups.length - 1];
+      if (g && baseSrc(g[0]) === baseSrc(l)) g.push(l);
+      else groups.push([l]);
+    }
+    const out = [];
+    for (const group of groups) {
+      for (const band of CHART_BANDS) {
+        // Cap overview/general line, pattern-fill and point-symbol layers at their
+        // band max so their overzoomed copies don't duplicate a finer band's
+        // coast/contour/marks (mirrors buildChartLayers _capsAtBand).
+        const cap = (band.slug === "overview" || band.slug === "general") ? band.max : null;
+        for (const l of group) {
+          const v = { ...l, id: l.id + "--" + band.slug, source: "chart-" + band.slug };
+          if (cap != null && this._engineLayerCaps(l)) v.maxzoom = cap;
+          out.push(v);
+        }
+      }
+    }
+    return out;
+  }
+
+  // Which engine layers get the coarse-band maxzoom cap: LINES, pattern (hatch) FILLS,
+  // and POINT-SYMBOL layers — the marks that visibly duplicate a finer band's
+  // coast/contour/symbols when a coarse band overzooms past its compilation scale.
+  _engineLayerCaps(l) {
+    const sl = l["source-layer"] || "";
+    return l.type === "line"
+      || sl === "point_symbols" || sl === "point_symbols_scamin"
+      || (l.type === "fill" && l.paint && l.paint["fill-pattern"] !== undefined);
+  }
+
+  // Map the client mariner state (camelCase this._mariner + this._active scheme) to the
+  // WASM engine's MarinerSettings struct (snake_case; see the vendored index.d.ts). Only
+  // the fields the tile57/1 engine understands are sent — omitted fields take the engine
+  // default. sizeScale / viewingGroupsOff / overscale / scamin toggles are NOT in the
+  // tile57/1 mariner struct (a tile57/2 concern), so they're intentionally left out.
+  _marinerToEngine() {
+    const m = this._mariner || {};
+    const s = { scheme: this._active || "day" };
+    const num = (k, key) => { if (m[k] != null) s[key] = Number(m[k]); };
+    const bool = (k, key) => { if (m[k] != null) s[key] = !!m[k]; };
+    num("shallowContour", "shallow_contour");
+    num("safetyContour", "safety_contour");
+    num("deepContour", "deep_contour");
+    num("safetyDepth", "safety_depth");
+    bool("fourShadeWater", "four_shade_water");
+    if (m.depthUnit) s.depth_unit = m.depthUnit === "ft" ? "feet" : "meters";
+    bool("displayBase", "display_base");
+    bool("displayStandard", "display_standard");
+    bool("displayOther", "display_other");
+    bool("dataQuality", "data_quality");
+    bool("showInformCallouts", "show_inform_callouts");
+    bool("showMetaBounds", "show_meta_bounds");
+    bool("showIsolatedDangersShallow", "show_isolated_dangers_shallow");
+    if (m.boundaryStyle) s.boundary_style = m.boundaryStyle;
+    bool("simplifiedPoints", "simplified_points");
+    bool("showFullSectorLines", "show_full_sector_lines");
+    bool("textNames", "text_names");
+    bool("showLightDescriptions", "show_light_descriptions");
+    bool("textOther", "text_other");
+    bool("dateDependent", "date_dependent");
+    bool("highlightDateDependent", "highlight_date_dependent");
+    if (m.dateView) s.date_view = m.dateView;
+    return s;
+  }
+
+  // Client engine restyle: regenerate the engine style from the WASM for the current
+  // mariner/scheme and apply it with setStyle(diff:true) — the layer SET is stable
+  // across mariners (only filters/paint/colours change), so the diff is in-place with no
+  // tile reload or flicker. This is the server-less counterpart to _engineRestyleNow
+  // (which POSTs /api/style-diff); the widget has no server, so it regenerates locally.
+  async _engineClientRestyleNow() {
+    if (!this._engineClient || !this._map) return;
+    if (!this._map.isStyleLoaded()) { this._map.once("idle", () => this._engineRestyle()); return; }
+    try {
+      const eng = this._engineWasm || await this._loadClientEngine();
+      if (!eng) return;
+      this._engineWasm = eng;
+      this._engineStyle = this._composeClientEngineStyle(eng);
+      this._map.setStyle(this.buildStyle(), { diff: true });
+    } catch (e) {
+      console.warn("[engine-style] client restyle:", e && e.message);
     }
   }
 
@@ -1520,7 +1699,9 @@ export class ChartCanvas extends HTMLElement {
   _engineRestyle() {
     if (!this._engineMode || !this._map) return;
     clearTimeout(this._engineRestyleT);
-    this._engineRestyleT = setTimeout(() => this._engineRestyleNow(), 40);
+    // Server-less widget/demo regenerates from the WASM; server mode POSTs a style-diff.
+    this._engineRestyleT = setTimeout(
+      () => (this._engineClient ? this._engineClientRestyleNow() : this._engineRestyleNow()), 40);
   }
 
   async _engineRestyleNow() {
