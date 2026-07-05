@@ -1727,13 +1727,16 @@ export class ChartCanvas extends HTMLElement {
     return (this._scaminLayersCache = out);
   }
 
-  // Cached ids of every layer drawn from a chart source (point_symbols, soundings,
-  // lines, areas, text, complex_lines, area_patterns, sector_lines — across the
-  // live "chart" source and per-band "chart-<slug>" sources). Passing these to
-  // queryRenderedFeatures({layers}) lets MapLibre skip the basemap / OSM / no-data /
-  // overlay layers entirely, so the hot pick + inspect-hover paths query only what
-  // they'll keep instead of querying ALL layers and filtering by source afterward.
-  // Cache nulled on every style diff/rebuild (alongside _scaminLayersCache).
+  // Cached ids of every layer drawn from a chart source (the tile57/2 schema's 6
+  // merged source-layers: areas, area_patterns, lines, point_symbols, soundings,
+  // text — across the live "chart" source and per-band "chart-<slug>" sources).
+  // Selected dynamically by source prefix, so this tracks whatever layers the engine
+  // style ships (SCAMIN twins and complex/sector lines are folded into those 6).
+  // Passing these to queryRenderedFeatures({layers}) lets MapLibre skip the basemap /
+  // OSM / no-data / overlay layers entirely, so the hot pick + inspect-hover paths
+  // query only what they'll keep instead of querying ALL layers and filtering by
+  // source afterward. Cache nulled on every style diff/rebuild (alongside
+  // _scaminLayersCache).
   chartLayerIds() {
     if (this._chartLayerIdsCache) return this._chartLayerIdsCache;
     const style = this._map && this._map.getStyle();
