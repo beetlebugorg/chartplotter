@@ -161,6 +161,7 @@ export class ChartSources {
     this.rebuild = rebuild;   // () => map.setStyle(buildStyle(), {diff:false,validate:false})
     this.getPxPitch = getPxPitch || (() => undefined); // () => calibrated CSS-pixel pitch (mm); drives SCAMIN gating
     this._ver = 0;            // chart-tile cache-bust token (see refresh)
+    this._srcEncoding = {};   // source id ("chart-<slug>") → the tile encoding ("mvt"/"mlt") BAKED into the live style. MapLibre reads a vector source's `encoding` only at CREATION, so a decoder switch (an MLT archive loading after the initial mvt-default style) needs a full rebuild, not an in-place mutation (see _updateSourceZoom → rebuild).
     this._bands = {};         // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
     this._scaminValues = [];  // distinct SCAMIN denominators seen in tiles → per-SCAMIN bucket layers
     this._scaminLat = null;   // latitude the bucket minzooms were computed at (rebuild on big change)
@@ -483,8 +484,7 @@ export class ChartSources {
       if (!this._bands[b]) this._bands[b] = new MultiArchive();
       a = await this._bands[b].add(resolved);
     }
-    this._updateSourceZoom();
-    this.refresh();
+    if (this._updateSourceZoom()) this.rebuild(); else this.refresh();
     return a;
   }
 
@@ -512,8 +512,7 @@ export class ChartSources {
       this._bands[b] = new MultiArchive();
       a = await this._bands[b].add(resolved);
     }
-    this._updateSourceZoom();
-    this.refresh();
+    if (this._updateSourceZoom()) this.rebuild(); else this.refresh();
     return a;
   }
 
@@ -530,17 +529,25 @@ export class ChartSources {
       if (!this._bands[band]) this._bands[band] = new MultiArchive();
       return this._bands[band].add(this._resolveSrc(e.src)).catch((err) => { console.warn("[chartplotter] archive", e.src, err); return null; });
     }));
-    this._updateSourceZoom();
-    this.refresh();
+    if (this._updateSourceZoom()) this.rebuild(); else this.refresh();
     return arcs.filter(Boolean);
   }
 
   // NOAA-band sources have fixed zoom ranges (from CHART_BANDS), so only the
   // merged-upload `all` source needs its max synced to the loaded archive (an
   // upload may bake to <18; requesting above its max would read blank).
+  //
+  // Returns TRUE when a loaded archive needs a tile encoding the live style
+  // doesn't have — the caller must then rebuild() (recreate the sources) rather
+  // than refresh(), because MapLibre reads a vector source's `encoding` only at
+  // CREATION. Archives load AFTER the initial (mvt-default) style is built, so an
+  // MLT archive (the tile57 default bake format) has no way to switch a live
+  // source's decoder in place; a stale mvt decoder parses MLT bytes as MVT and
+  // MapLibre throws "Unable to parse the tile". zoom ranges, by contrast, ARE
+  // honoured in place, so they stay here.
   _updateSourceZoom() {
     const map = this.getMap();
-    if (!map) return;
+    if (!map) return false;
     // Hold every loaded band source's maxzoom at its archive's REAL deepest baked
     // zoom (PMTiles header), in place — so MapLibre overzooms the deepest tile it
     // has instead of requesting empty tiles past the bake (which read as a blank
@@ -548,19 +555,19 @@ export class ChartSources {
     // band-range change before a re-bake). No restyle. The merged "all" source has
     // no per-band overzoom so its minzoom tracks the archive too; the per-band
     // sources keep minzoom 0 for the sub-band SCAMIN features.
+    let encodingChanged = false;
     for (const slug of Object.keys(this._bands)) {
       const arc = this._bands[slug];
       const src = map.getSource("chart-" + slug);
       if (!src || !arc || src.maxzoom === undefined) continue;
       src.maxzoom = arc.maxZoom;
       if (slug === "all") src.minzoom = arc.minZoom;
-      // Tile-encoding hint, applied IN PLACE like the zooms: archives load after
-      // the initial style build, so an MLT archive (the tile57 default bake
-      // format) must switch the live source's decoder too — the worker reads
-      // source.encoding per tile load, and the refresh() that follows re-requests
-      // every tile. sourcesDict bakes the same hint into full style rebuilds.
-      src.encoding = arc.tileType === "mlt" ? "mlt" : "mvt";
+      // Does this archive's decoder match what the live style committed? If not,
+      // flag a rebuild — an in-place src.encoding mutation is silently ignored.
+      const want = arc.tileType === "mlt" ? "mlt" : "mvt";
+      if (this._srcEncoding["chart-" + slug] !== want) encodingChanged = true;
     }
+    return encodingChanged;
   }
 
   // Render a hosted `.pmtiles` by URL — read incrementally via HTTP Range (NOT
@@ -633,6 +640,8 @@ export class ChartSources {
     // for free). Falls back to band.bake until an archive is loaded.
     for (const band of CHART_BANDS) {
       const archive = this._bands[band.slug];
+      const enc = archive && archive.tileType === "mlt" ? "mlt" : "mvt";
+      this._srcEncoding["chart-" + band.slug] = enc; // record what THIS style commits (see _updateSourceZoom)
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
@@ -645,7 +654,7 @@ export class ChartSources {
         maxzoom: (archive && archive.maxZoom) || band.bake,
         // MLT archives (the tile57 default bake format) hint MapLibre's native MLT
         // decoder; MVT (the MapLibre default) adds nothing. Bytes serve verbatim.
-        ...(archive && archive.tileType === "mlt" ? { encoding: "mlt" } : {}),
+        ...(enc === "mlt" ? { encoding: "mlt" } : {}),
       };
     }
     if (this._server) {
@@ -656,12 +665,14 @@ export class ChartSources {
       // bake. With no packs we add no chart sources (a vector source with an empty
       // `tiles` array makes MapLibre crash); the no-data hatch shows through.
       for (const set of this._serverSets) {
+        const enc = set.encoding === "mlt" ? "mlt" : "mvt";
+        this._srcEncoding["chart-" + set.name] = enc;
         sources["chart-" + set.name] = {
           type: "vector",
           tiles: [set.tiles || this._serverTilesUrl(set.name)],
           minzoom: set.min,
           maxzoom: set.max,
-          ...(set.encoding === "mlt" ? { encoding: "mlt" } : {}),
+          ...(enc === "mlt" ? { encoding: "mlt" } : {}),
         };
       }
     }
