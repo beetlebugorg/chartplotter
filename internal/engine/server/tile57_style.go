@@ -284,28 +284,18 @@ func (s *Server) styleCtxForSet(r *http.Request, q url.Values, set string) tile5
 		tiles:  orDefault(q.Get("tiles"), fmt.Sprintf("%s/tiles/%s/{z}/{x}/{y}.mvt%s", base, set, genQuery(s.packGen(set)))),
 		sprite: orDefault(q.Get("sprite"), base+"/sprite"),
 		glyphs: orDefault(q.Get("glyphs"), base+"/glyphs/{fontstack}/{range}.pbf"),
-		scamin: parseBands(q.Get("scamin")),
 		bands:  parseBands(q.Get("bands")),
 	}
-	// ?scaminMerge collapses the per-value #sm bucket layers (and the filter-gate
-	// layers) into ONE zoom-gated layer per render-type by handing the engine an EMPTY
-	// SCAMIN manifest. With the filter-gate forced off (see marinerFromQuery), an empty
-	// manifest hits style.zig's zoom_gate branch, which self-gates on the live zoom via
-	// [">=",["zoom"],log2(DENOM_Z0/scamin)] — no per-value buckets, no client setFilter
-	// or source reload. So skip the meta.Scamin population and leave the manifest empty
-	// (a ?scamin override still wins — it's populated above from the query).
-	mergeScamin := queryBool(q, "scaminMerge")
+	// The style is band-independent — the merged zoom-gate by default (one self-gating
+	// zoom-expression layer per render-type), or the exact live filter-gate under
+	// ?scaminexact. The engine no longer turns a SCAMIN manifest into per-value #sm
+	// bucket layers, so ctx.scamin stays empty here. The manifest still rides the
+	// TileJSON (served by the tile route) as the filter-gate client's ladder crossings.
 	if src, ok := s.lookupSet(set); ok {
 		meta := src.Meta()
 		ctx.minZoom = uint32(meta.MinZoom) // the set's real tile floor — MapLibre requests nothing below the source minzoom
 		ctx.maxZoom = uint32(meta.MaxZoom) // live ENC = z18 (berthing); don't clamp to the engine's z16 default
 		ctx.encoding = tile57.EncodingFormat(meta.TileType)
-		if len(ctx.scamin) == 0 && !mergeScamin {
-			ctx.scamin = make([]int32, len(meta.Scamin))
-			for i, v := range meta.Scamin {
-				ctx.scamin[i] = int32(v)
-			}
-		}
 		ctx.lat = (meta.S + meta.N) / 2 // bounds-centre latitude for the scale→zoom map
 	}
 	if v := q.Get("lat"); v != "" {
@@ -330,13 +320,6 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
-}
-
-// queryBool reports whether a query param is set to a truthy value ("1"/"true"),
-// matching the client's bool serialization (marinerFromQuery's boolP).
-func queryBool(q url.Values, key string) bool {
-	v := q.Get(key)
-	return v == "1" || v == "true"
 }
 
 // requestOrigin reconstructs the scheme://host the client reached us on, for the
@@ -417,17 +400,12 @@ func marinerFromQuery(q url.Values) tile57.Mariner {
 		m.DateView = v
 	}
 	boolP("ignoreScamin", &m.IgnoreScamin)
-	// scamin-layers.md: one live-filtered layer per render-type instead of per-value
-	// #sm bucket layers (client rewrites curDenom via setFilter on boundary crossings).
+	// The merged zoom-gate is the DEFAULT (ScaminFilterGate off → the engine's
+	// self-gating zoom-expression, one layer per render-type). ?scaminexact opts INTO
+	// the exact live filter-gate (the client rewrites curDenom via setFilter on ladder
+	// crossings — scamin-layers.md). The legacy ?scaminMerge param is now a no-op: its
+	// behavior (empty manifest, filter-gate off) is exactly the default.
 	boolP("scaminFilterGate", &m.ScaminFilterGate)
-	// ?scaminMerge is the A/B collapse: an empty SCAMIN manifest (styleCtxForSet) plus
-	// the filter-gate OFF drives the engine's zoom_gate branch — one self-gating
-	// zoom-expression layer per render-type, no client setFilter/reload. Force the
-	// filter-gate off so the empty manifest can't be captured by the filter_gate branch
-	// (which precedes zoom_gate in style.zig), regardless of what the client sends.
-	if queryBool(q, "scaminMerge") {
-		m.ScaminFilterGate = false
-	}
 	floatP("sizeScale", &m.SizeScale)
 	m.ViewingGroupsOff = parseBands(q.Get("viewingGroupsOff")) // CSV of vg ids turned off
 	return m
