@@ -17,8 +17,8 @@ support is planned.
   missing, so a clone without `--recurse-submodules` still works. Needs git + Zig.
   (`make build-tile57` is a back-compat alias.)
 - `make test` / `make vet` / `make fmt` — run before you commit.
-- `make serve` — build and serve `web/` on `:8080`. `make serve-tile57 ENC_ROOT=<dir>`
-  also registers a live libtile57 set generated on demand from those cells.
+- `make serve` — build and serve `web/` on `:8080`. Baked tiles are the only
+  tile path: import/bake charts through the app (or `bake`), no live tile set.
 - `make xbuild` — cross-compile release binaries with `zig cc` (linux + windows,
   amd64/arm64). darwin is built natively on a macOS CI runner (Go's own
   `runtime/cgo`/`crypto/x509` link Apple frameworks Zig doesn't bundle).

@@ -113,7 +113,7 @@ func (s *Server) lookupSet(name string) (tilesource.TileSource, bool) {
 // engineForSet reports the tile57 engine commit behind a set's tiles. A baked
 // pack answers with BAKE-TIME truth — the commit stamped into its .enginever
 // sidecar when it was baked ("pre-stamp" for packs baked before stamping) —
-// while a live set (--tile57 / dynamic, no pack path) generates tiles on demand
+// while a dynamic set (plugin tiles, no pack path) generates tiles on demand
 // inside the RUNNING binary, so it answers with the build's own engine commit.
 func (s *Server) engineForSet(name string) string {
 	if p, ok := s.packPath(name); ok {

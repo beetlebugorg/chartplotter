@@ -27,7 +27,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 tile57-lib serve-tile57 xbuild xbuild-tile57 musl test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib xbuild xbuild-tile57 musl test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -123,18 +123,6 @@ build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches 
 
 # Back-compat alias — libtile57 is now the default engine, so this is just `build`.
 build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
-
-# Build the FULL app WITH libtile57 compiled in and serve it: the web frontend +
-# provisioning / chart-library API, defaulting chart imports to the native tile57
-# Build + serve the full app. Chart imports always bake native libtile57 bundles
-# (the sole engine); no --s101 needed — the catalogue lives in libtile57. Uses the
-# MAIN $(CACHE) (where the tile57 bundle baker writes its packs as
-# <PROVIDER>/<PACK>/tiles/chart.pmtiles). Set ENC_ROOT=<dir/.zip/.000> to ALSO
-# register a LIVE libtile57 set generated on demand (registered as 'tile57';
-# /tiles/tile57.json). Now just `serve` + a cache override — kept as a convenience.
-serve-tile57: build ## Build + serve the full app; ENC_ROOT=… also registers a live libtile57 set
-	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS) --cache $(CACHE) \
-	  $(if $(ENC_ROOT),--tile57 "$(ENC_ROOT)")
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps

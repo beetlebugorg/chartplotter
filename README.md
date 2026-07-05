@@ -237,7 +237,7 @@ chartplotter serve --assets web
 | `emit-assets DIR` | Write the S-101 client assets (color tables, sprites, line styles, patterns) to a directory. |
 | `catalog-json IN.xml OUT.json` | Distil NOAA `ENCProdCat.xml` into a compact `catalog.json`. |
 | `bake -o OUT IN…` | Bake S-57 cells, directories, or NOAA ENC zips into a chart bundle (or per-band PMTiles with `--bands`). |
-| `serve [--host] [--port] [--assets DIR] [--tile57 ENC]` | Serve the web frontend, the baking API, and the NOAA cell proxy; `--tile57` adds a live, bake-on-demand tile set from raw cells. |
+| `serve [--host] [--port] [--assets DIR]` | Serve the web frontend, the baking API, and the NOAA cell proxy (baked tiles only). |
 | `simulate` | Run an NMEA 0183 traffic generator over TCP (own-ship + AIS targets) for testing. |
 
 Run `chartplotter <command> --help` for the full flags.

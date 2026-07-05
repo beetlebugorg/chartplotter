@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { viewSnapshot, gatesSnapshot, featureSnapshot, featureDebugSnapshot } from "./debug-snapshot.mjs";
 
-// A minimal MapLibre-shaped stub: camera getters + a style with one SCAMIN/smax
-// gated layer, one smax-only layer and one ungated layer.
+// A minimal MapLibre-shaped stub: camera getters + a style with one SCAMIN-gated
+// layer, one overscale (oscl) layer and one ungated layer. (smax is retired:
+// cross-band occlusion is baked geometry, not a client gate.)
 function fakeMap() {
   return {
     getCenter: () => ({ lng: -76.4701234, lat: 38.9698765 }),
@@ -16,11 +17,9 @@ function fakeMap() {
         {
           id: "point_symbols",
           type: "symbol",
-          filter: ["all",
-            [">=", ["coalesce", ["get", "scamin"], 99999999], 21998.5],
-            ["<", ["coalesce", ["get", "smax"], 0], 21998.5]],
+          filter: [">=", ["coalesce", ["get", "scamin"], 99999999], 21998.5],
         },
-        { id: "soundings", type: "symbol", filter: ["<", ["get", "smax"], 12000] },
+        { id: "overscale", type: "fill", filter: [">", ["coalesce", ["get", "oscl"], 0], 11999.6] },
       ],
     }),
   };
@@ -32,11 +31,11 @@ test("viewSnapshot — compact camera; null without a map", () => {
   assert.equal(viewSnapshot(null), null);
 });
 
-test("gatesSnapshot — one entry per scamin/smax-gated layer, denoms rounded", () => {
+test("gatesSnapshot — one entry per scamin/oscl-gated layer, denoms rounded", () => {
   const g = gatesSnapshot(fakeMap());
-  assert.deepEqual(Object.keys(g).sort(), ["point_symbols", "soundings"]);
-  assert.deepEqual(g.point_symbols, { scamin: 21999, smax: 21999 });
-  assert.deepEqual(g.soundings, { scamin: null, smax: 12000 });
+  assert.deepEqual(Object.keys(g).sort(), ["overscale", "point_symbols"]);
+  assert.deepEqual(g.point_symbols, { scamin: 21999, oscl: null });
+  assert.deepEqual(g.overscale, { scamin: null, oscl: 12000 });
   assert.deepEqual(gatesSnapshot(null), {}); // no map → empty, not a throw
 });
 

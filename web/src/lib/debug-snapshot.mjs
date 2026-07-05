@@ -10,9 +10,10 @@ export function viewSnapshot(map) {
   return { center: [+c.lng.toFixed(6), +c.lat.toFixed(6)], zoom: +map.getZoom().toFixed(3), bearing: +map.getBearing().toFixed(1) };
 }
 
-// Live SCAMIN/smax gate denominators per gated layer — a feature "in the tile
+// Live SCAMIN/oscl gate denominators per gated layer — a feature "in the tile
 // but not rendered" is almost always a gate question, so snapshots should answer
-// it directly (frozen denoms diagnosed a phantom-cutoff bug).
+// it directly (frozen denoms diagnosed a phantom-cutoff bug). smax is retired:
+// cross-band occlusion is baked geometry now, not a client gate.
 export function gatesSnapshot(map) {
   const gates = {};
   if (!map || !map.getStyle) return gates;
@@ -20,15 +21,15 @@ export function gatesSnapshot(map) {
     for (const l of (map.getStyle().layers || [])) {
       if (!l.filter) continue;
       const s = JSON.stringify(l.filter);
-      if (!s.includes('"scamin"') && !s.includes('"smax"')) continue;
-      let sc = null, sm = null;
+      if (!s.includes('"scamin"') && !s.includes('"oscl"')) continue;
+      let sc = null, os = null;
       (function walk(n) {
         if (!Array.isArray(n)) return;
         if (n[0] === ">=" && JSON.stringify(n[1]).includes('"scamin"')) sc = n[2];
-        if (n[0] === "<" && JSON.stringify(n[1]).includes('"smax"')) sm = n[2];
+        if (n[0] === ">" && JSON.stringify(n[1]).includes('"oscl"')) os = n[2];
         n.forEach(walk);
       })(l.filter);
-      gates[l.id] = { scamin: typeof sc === "number" ? Math.round(sc) : sc, smax: typeof sm === "number" ? Math.round(sm) : sm };
+      gates[l.id] = { scamin: typeof sc === "number" ? Math.round(sc) : sc, oscl: typeof os === "number" ? Math.round(os) : os };
     }
   } catch (e) { gates.error = String(e); }
   return gates;

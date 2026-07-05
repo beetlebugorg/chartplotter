@@ -1725,7 +1725,7 @@ export class ChartCanvas extends HTMLElement {
       this._applyOpsToCached(ops);
       this._lastMariner = to;
       // The diff rewrote gated layers' filters back to their baked placeholders
-      // (scamin: show-all; smax: show-NOTHING) — re-inject the live cutoff,
+      // (scamin: show-all; oscl: hide-the-hatch) — re-inject the live cutoff,
       // retrying past the mid-load window the diff ops themselves create.
       this._scaminForceWhenReady();
     } catch (e) {
@@ -1735,11 +1735,10 @@ export class ChartCanvas extends HTMLElement {
   }
 
   // Force-apply the gate cutoff, retrying past mid-load windows. A style-diff
-  // (mariner/VG toggle) rewrites gated filters with their baked placeholders —
-  // the smax clause's placeholder (0) hides EVERYTHING until the live denom is
-  // injected, and the 35 setFilter ops the diff just applied leave the style
-  // mid-load, so a bare _scaminUpdate(true) silently no-ops and the chart
-  // stays blank until the next crossing (user: "map goes away until refresh").
+  // (mariner/VG toggle) rewrites gated filters with their baked placeholders,
+  // and the setFilter ops the diff just applied leave the style mid-load, so a
+  // bare _scaminUpdate(true) silently no-ops and stale gates linger until the
+  // next crossing — force it once the style settles.
   _scaminForceWhenReady() {
     // Merged mode's engine style self-gates on the live zoom (zoom-expression clause),
     // so there is no client cutoff to inject — every force path is a no-op.
@@ -2071,14 +2070,13 @@ export class ChartCanvas extends HTMLElement {
 
 // Custom element names must contain a hyphen (HTML spec) — `<chart-plotter>`.
 // Find the tile57 filter-gate SCAMIN clause `[">=", ["coalesce",["get","scamin"],1e12], N]`
-// — its band-handoff twin `["<", ["coalesce",["get","smax"],0], N]` (carry-down
-// features from the next-coarser band hide once the display is finer than their
-// handoff scale; ../tile57 band-handoff spec) — and the overscale third shape
-// `[">", ["coalesce",["get","oscl"],0], N]` (the S-52 §10.1.10 AP(OVERSC01) hatch +
-// the overscaled/at-scale fill split; the at-scale pass wraps it in ["!", …], which
-// this recursion reaches on its own; ../tile57 overscale spec) — anywhere in a
-// MapLibre filter and set each clause's literal N to `denom` (the current
-// display-scale denominator).
+// and the overscale shape `[">", ["coalesce",["get","oscl"],0], N]` (the S-52
+// §10.1.10 AP(OVERSC01) hatch + the overscaled/at-scale fill split; the at-scale
+// pass wraps it in ["!", …], which this recursion reaches on its own; ../tile57
+// overscale spec) — anywhere in a MapLibre filter and set each clause's literal N
+// to `denom` (the current display-scale denominator). (The band-handoff `smax`
+// twin is retired: the coverage-clipped composite owns cross-band occlusion
+// geometrically, and the engine style emits no smax clause.)
 // detectOnly=true just reports whether a gated clause is present (no mutation).
 // Returns true if a clause was found. Mutates `node` in place.
 function setScaminDenom(node, denom, detectOnly) {
@@ -2087,11 +2085,6 @@ function setScaminDenom(node, denom, detectOnly) {
       && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "scamin") {
     if (!detectOnly) node[2] = denom;
     return true;
-  }
-  if (node[0] === "<" && Array.isArray(node[1]) && node[1][0] === "coalesce"
-      && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "smax") {
-    if (!detectOnly) node[2] = denom;
-    return true; // smax-only layers (carried fills/lines in base layers) need injection too
   }
   if (node[0] === ">" && Array.isArray(node[1]) && node[1][0] === "coalesce"
       && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "oscl") {

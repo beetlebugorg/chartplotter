@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
@@ -183,4 +184,22 @@ func unionBBox(b bbox4, o [4]float64) bbox4 {
 
 func (b bbox4) slice() [4]float64 {
 	return [4]float64{b.minLon, b.minLat, b.maxLon, b.maxLat}
+}
+
+// orderedUpdates returns a cell's update bodies sorted by filename so libtile57
+// applies them in sequence (.001, .002, …).
+func orderedUpdates(m map[string][]byte) [][]byte {
+	if len(m) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([][]byte, len(names))
+	for i, n := range names {
+		out[i] = m[n]
+	}
+	return out
 }

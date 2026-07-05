@@ -22,7 +22,6 @@ type serveCmd struct {
 	ClearCache bool   `name:"clear-cache" help:"On startup, delete the cached baked archives for a clean slate (source ENC is kept)."`
 	S101       string `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Every chart baked by the server (chart library imports) uses this catalogue's symbology, and the matching client assets are served. Requires --s101-fc."`
 	S101FC     string `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
-	Tile57     string `name:"tile57" type:"path" help:"Serve a LIVE libtile57-backed tile set from this ENC_ROOT / .zip / .000, generating MVT on demand from the cells instead of prebaking. Registered as the 'tile57' set (point a client at /tiles/tile57.json)."`
 }
 
 func (c serveCmd) Run() error {
@@ -71,17 +70,8 @@ func (c serveCmd) Run() error {
 	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote)
 	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
-	srv.EngineCommit = engineCommit // stamped onto every bake + reported by live sets
+	srv.EngineCommit = engineCommit // stamped onto every bake
 	srv.ReportStaleCache()          // loud warning if any served pack predates this binary
-
-	// Optional libtile57 LIVE backend: generate MVT on demand from raw ENC cells
-	// (--tile57 <ENC_ROOT>) instead of serving a prebaked archive. Server chart
-	// imports always bake native libtile57 bundles regardless (it's the sole engine).
-	if c.Tile57 != "" {
-		if err := registerTile57Set(srv, "tile57", c.Tile57, c.S101); err != nil {
-			return err
-		}
-	}
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""

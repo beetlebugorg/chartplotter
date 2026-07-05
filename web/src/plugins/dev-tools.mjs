@@ -522,7 +522,7 @@ export class DevTools {
       count: feats.length,
       features: pick.map(featureSnapshot),
       render,
-      gates: gatesSnapshot(m), // live per-layer SCAMIN/smax denoms (see debug-snapshot.mjs)
+      gates: gatesSnapshot(m), // live per-layer SCAMIN/oscl denoms (see debug-snapshot.mjs)
     };
     const text = JSON.stringify(snap, null, 2);
     const ok = await copyText(text);

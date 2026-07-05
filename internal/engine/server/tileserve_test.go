@@ -193,7 +193,7 @@ func TestServeTileJSONAndList(t *testing.T) {
 // The TileJSON `engine` field distinguishes BAKE-TIME truth from the running
 // binary: a pack reports the engine commit stamped into its .enginever sidecar
 // when it was baked; a pack without the sidecar (baked before stamping) reports
-// "pre-stamp"; a LIVE set (no pack path — --tile57 / dynamic) generates tiles in
+// "pre-stamp"; a DYNAMIC set (no pack path — plugin tiles) generates tiles in
 // the running binary, so it reports the build's own EngineCommit.
 func TestServeTileJSONEngineStamp(t *testing.T) {
 	dir := t.TempDir()
@@ -207,7 +207,7 @@ func TestServeTileJSONEngineStamp(t *testing.T) {
 
 	srv := New(dir, dir, dir, false)
 	srv.EngineCommit = "fff999000" // the RUNNING binary's engine
-	// A live set: registered without a pack path (like --tile57 / dynamic).
+	// A dynamic set: registered without a pack path (plugin tiles).
 	live, err := tilesource.Open(filepath.Join(tilesDir(dir), "legacy.pmtiles"))
 	if err != nil {
 		t.Fatal(err)
