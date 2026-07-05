@@ -558,14 +558,18 @@ export class ChartSources {
     let encodingChanged = false;
     for (const slug of Object.keys(this._bands)) {
       const arc = this._bands[slug];
-      const src = map.getSource("chart-" + slug);
-      if (!src || !arc || src.maxzoom === undefined) continue;
-      src.maxzoom = arc.maxZoom;
-      if (slug === "all") src.minzoom = arc.minZoom;
-      // Does this archive's decoder match what the live style committed? If not,
-      // flag a rebuild — an in-place src.encoding mutation is silently ignored.
+      if (!arc) continue;
+      // Does this archive's decoder match what the live style committed? Checked
+      // BEFORE the live-source guard: the comparison is against our own
+      // bookkeeping (_srcEncoding), so a style that is still loading — or that
+      // hasn't materialized this source yet — must still flag the rebuild, or
+      // the stale decoder survives until some unrelated restyle.
       const want = arc.tileType === "mlt" ? "mlt" : "mvt";
       if (this._srcEncoding["chart-" + slug] !== want) encodingChanged = true;
+      const src = map.getSource("chart-" + slug);
+      if (!src || src.maxzoom === undefined) continue;
+      src.maxzoom = arc.maxZoom;
+      if (slug === "all") src.minzoom = arc.minZoom;
     }
     return encodingChanged;
   }
