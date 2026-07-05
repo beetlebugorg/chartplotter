@@ -38,16 +38,16 @@ func bakeFormat(format string) tile57.TileFormat {
 	return tile57.FormatDefault
 }
 
-// runTile57Bands bakes the ENC inputs into one gap-clipped PMTiles archive PER
-// navigational band (<out-stem>-<slug>.pmtiles) with the native libtile57 engine,
-// mirroring the Go baker's --bands output so the frontend loads each into its
-// chart-<slug> source. Cells are grouped into bands by compilation scale (the same
-// BandForScale mapping the Go baker uses); each band's cell subset is baked on its
-// own via tile57.BakePmtiles, so the archive is naturally clipped to that band's
-// coverage. Cross-band best-available (coarse fills finer gaps, none bleed) is then
-// composed CLIENT-side across the per-band sources, exactly as for the Go baker's
-// per-band archives. Honors --max-zoom and --overzoom; writes --manifest + aux.zip.
-func (c bakeCmd) runTile57Bands() error {
+// runTile57Archive bakes the ENC inputs into ONE flat merged archive at -o via
+// the native libtile57 engine. The coverage-clipped composite resolves
+// best-available inside the archive (the finest covering cell owns each patch;
+// each band also bakes FILLUP_DZ zooms past its window), so the per-band
+// --bands split is retired: one archive per district, one client source.
+// MinZoom 0 — the coarsest populated band extends down to the world view
+// (extend_min), which also covers the retired --overzoom (a standalone
+// large-scale set floats down automatically). Honors --max-zoom; writes
+// --manifest (one band-less entry) + aux.zip.
+func (c bakeCmd) runTile57Archive() error {
 	cells, aux, err := collectCells(c.In)
 	if err != nil {
 		return err
@@ -56,91 +56,52 @@ func (c bakeCmd) runTile57Bands() error {
 		return fmt.Errorf("no .000 base cells found in: %s", strings.Join(c.In, ", "))
 	}
 
-	// Per-cell compilation scale (cheap coverage-only parse) → band + coverage bbox.
+	// Per-cell coverage bbox (cheap coverage-only parse) for the manifest bounds.
 	metas := baker.ExtractCellMeta(cells, func(name string, err error) {
 		fmt.Fprintf(os.Stderr, "  skip %s: %v\n", name, err)
 	})
 
-	type bandAcc struct {
-		cells []tile57.Cell
-		bbox  bbox4
-	}
-	byBand := map[baker.Band]*bandAcc{}
+	all := make([]tile57.Cell, 0, len(cells))
+	overall := emptyBBox()
 	for name, cd := range cells { // name is "<stem>.000"
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
-		scale := 0
-		if m, ok := metas[stem]; ok {
-			scale = m.Scale
-		}
-		band := baker.BandForScale(uint32(scale))
-		acc := byBand[band]
-		if acc == nil {
-			acc = &bandAcc{bbox: emptyBBox()}
-			byBand[band] = acc
-		}
-		acc.cells = append(acc.cells, tile57.Cell{
+		all = append(all, tile57.Cell{
 			Base:    cd.Base,
 			Updates: orderedUpdates(cd.Updates),
 			Name:    stem,
 		})
 		if m, ok := metas[stem]; ok && m.HasBBox {
-			acc.bbox = unionBBox(acc.bbox, m.BBox)
+			overall = unionBBox(overall, m.BBox)
 		}
 	}
+
+	maxZ := uint8(0)
+	if c.MaxZoom > 0 {
+		maxZ = uint8(c.MaxZoom)
+	}
+	data, err := tile57.BakePmtiles(all, tile57.BakeOpts{MinZoom: 0, MaxZoom: maxZ, Format: bakeFormat(c.Format)}, nil)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.Out, data, 0o644); err != nil {
+		return err
+	}
+	st, _ := os.Stat(c.Out)
+	fmt.Printf("baked %d cell(s) → %s (%.1f MB) via libtile57\n", len(cells), c.Out, float64(st.Size())/(1<<20))
 
 	ext := filepath.Ext(c.Out)
 	stem := strings.TrimSuffix(c.Out, ext)
-	var entries []map[string]any
-	overall := emptyBBox()
-
-	// Bake each band coarse→fine (BakeBands order matches the Band enum), writing
-	// <stem>-<slug><ext>. minZ/maxZ clamp the archive to the band's native zoom span
-	// (--overzoom floats every band down to the world view; --max-zoom caps the top).
-	for i, bb := range baker.BakeBands() {
-		acc := byBand[baker.Band(i)]
-		if acc == nil || len(acc.cells) == 0 {
-			continue
-		}
-		minZ := uint8(bb.Min)
-		if c.Overzoom {
-			minZ = 0
-		}
-		maxZ := uint8(bb.Max)
-		if c.MaxZoom > 0 && uint32(c.MaxZoom) < bb.Max {
-			maxZ = uint8(c.MaxZoom)
-		}
-		data, err := tile57.BakePmtiles(acc.cells, tile57.BakeOpts{MinZoom: minZ, MaxZoom: maxZ, Format: bakeFormat(c.Format)}, nil)
-		if err != nil {
-			// A band whose cells cover nothing at its zooms produces no tiles; skip it
-			// (the same as the Go baker emitting no archive for an empty band).
-			fmt.Fprintf(os.Stderr, "  %-9s — no tiles (%v)\n", bb.Slug, err)
-			continue
-		}
-		out := stem + "-" + bb.Slug + ext
-		if err := os.WriteFile(out, data, 0o644); err != nil {
-			return err
-		}
-		st, _ := os.Stat(out)
-		fmt.Printf("  %-9s → %s (%d cell(s), %.1f MB)\n", bb.Slug, out, len(acc.cells), float64(st.Size())/(1<<20))
-		entries = append(entries, map[string]any{
-			"file":   filepath.Base(out),
-			"band":   bb.Slug,
-			"bounds": acc.bbox.slice(),
-		})
-		overall = unionBBox(overall, acc.bbox.slice())
-	}
-	if len(entries) == 0 {
-		return fmt.Errorf("no cells produced tiles in any band")
-	}
-	fmt.Printf("baked %d cell(s) → %d band archive(s) via libtile57\n", len(cells), len(entries))
-
 	auxFile, err := writeAuxZip(stem, aux)
 	if err != nil {
 		return err
 	}
 
 	if c.Manifest != "" {
-		man := map[string]any{"districts": entries}
+		entry := map[string]any{"file": filepath.Base(c.Out)}
+		if overall.set {
+			entry["bounds"] = overall.slice()
+		}
+		man := map[string]any{"districts": []map[string]any{entry}}
 		if auxFile != "" {
 			man["aux"] = auxFile
 		}

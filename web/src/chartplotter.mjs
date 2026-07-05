@@ -69,11 +69,13 @@ const DEFAULT_MARINER = {
   deepContour: 30,
   depthUnit: "ft", // US/NOAA preference (engine default DepthUnitFeet)
   // Display categories (S-52 §10.2). Base is the minimum safe-navigation set and
-  // can NEVER be deselected by the mariner — it is forced on at boot. Default
-  // display is Standard; Other is opt-in.
+  // can NEVER be deselected by the mariner — it is forced on at boot. We default
+  // to the full "Other" display (all charted detail) — friendlier for a
+  // recreational plotter than the ECDIS Standard default; the mariner can drop
+  // back to Standard/Base in Display settings (detailLevel).
   displayBase: true,
   displayStandard: true,
-  displayOther: false,
+  displayOther: true,
   boundaryStyle: "symbolized", // IMO/S-52 default (vs "plain")
   simplifiedPoints: false,     // paper-chart point symbols (engine SimplifiedPoints=false)
   fourShadeWater: true,        // four depth shades (engine TwoShades=false)
@@ -1507,14 +1509,23 @@ export class ChartPlotter extends HTMLElement {
   // (the composite's capped overscale fill-up, bake_enc.FILLUP_DZ) — past that
   // there are NO vector tiles at all and MapLibre cannot stretch absent tiles,
   // so the camera stops where the data stops instead of panning blank water.
-  _applyScaleFloor() {
+  async _applyScaleFloor() {
     if (!this._map) return;
     // FLOOR_GIVE headroom above the floor so WheelZoom can let a hard-in scroll
     // over-pull a hair past it and settle back (a stop with give, not a wall).
     let mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
     const c = this._map.getCenter();
     const band = this._finestBandAt(c.lng, c.lat);
-    if (band) mz = Math.min(mz, BAND_MAXZOOM[band] + OVERSCALE_MARGIN + FLOOR_GIVE);
+    if (band) {
+      mz = Math.min(mz, BAND_MAXZOOM[band] + OVERSCALE_MARGIN + FLOOR_GIVE);
+    } else if (this._plotter && this._plotter.dataMaxZoomAt) {
+      // Prebaked/widget: no active-cell index — probe the archives' own
+      // directory for the deepest tile at the centre. +1 for the one stretched
+      // level MapLibre's parent retention renders past the data (the pmtiles
+      // protocol errors absent-with-ancestor tiles to trigger it).
+      const dz = await this._plotter.dataMaxZoomAt(c.lng, c.lat);
+      if (dz != null) mz = Math.min(mz, dz + 1 + FLOOR_GIVE);
+    }
     if (Math.abs(this._map.getMaxZoom() - mz) > 1e-3) this._map.setMaxZoom(mz);
   }
 

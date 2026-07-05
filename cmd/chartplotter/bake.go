@@ -21,22 +21,22 @@ type bakeCmd struct {
 	Out      string   `short:"o" type:"path" default:"charts.pmtiles" help:"Output PMTiles archive."`
 	Manifest string   `help:"Also write a charts-index.json manifest (for the app's catalog=… option)."`
 	BaseURL  string   `name:"base-url" help:"URL/prefix for the archive in the manifest (default: the archive's basename)."`
-	Overzoom bool     `help:"Overzoom all bands DOWN to the world view, so a standalone large-scale set (e.g. an IENC bundle with no overview cells) stays visible when zoomed out."`
 	MaxZoom  int      `name:"max-zoom" help:"Cap the highest baked zoom (0 = each cell's native band max). Large-scale cells over a wide area (e.g. IENC at 1:5000) emit tens of millions of z17–18 tiles; cap the bake and let the client overzoom the vector tiles."`
-	Bands    bool     `help:"Write one gap-clipped archive PER navigational band (<out>-<slug>.pmtiles) instead of one merged archive, so the client reproduces the realtime best-available display: each band's source client-overzooms its own data, coarser bands fill finer gaps, none bleed."`
 	Format   string   `enum:"mlt,mvt," default:"" help:"Tile encoding: mlt (MapLibre Tile, the engine default) or mvt (Mapbox Vector Tile, for consumers without an MLT decoder). Empty = the engine default (mlt)."`
 	S101     string   `name:"s101" type:"existingdir" help:"Override the embedded catalogue with an external S-101 PortrayalCatalog directory (for iterating on rules). Requires --s101-fc."`
 	S101FC   string   `name:"s101-fc" type:"existingfile" help:"S-101 FeatureCatalogue.xml path (with --s101)."`
-	Tile57   bool     `name:"tile57" help:"Bake with the native libtile57 engine into a self-contained chart BUNDLE (tiles/chart.pmtiles + assets/style-*.json + manifest.json) under -o (treated as a directory). Honors --max-zoom; --bands/--manifest/--overzoom don't apply (the bundle is zoom-banded per cell and self-describing)."`
 }
 
 func (c bakeCmd) Run() error {
-	// libtile57 is the sole bake engine. --bands writes one gap-clipped PMTiles
-	// archive per navigational band (+ manifest) so the district/demo/widget
-	// workflows keep working; otherwise a self-contained bundle directory
-	// (tiles/chart.pmtiles + per-scheme style + assets + manifest.json). Both need
-	if c.Bands {
-		return c.runTile57Bands()
+	// libtile57 is the sole bake engine. A *.pmtiles/-mbtiles -o writes ONE flat
+	// merged archive (+ optional --manifest / aux.zip) — the coverage-clipped
+	// composite resolves best-available inside the single archive, so there are
+	// no per-band archives any more (the retired --bands). Any other -o is a
+	// self-contained bundle directory (tiles/chart.pmtiles + per-scheme style +
+	// assets + manifest.json).
+	switch strings.ToLower(filepath.Ext(c.Out)) {
+	case ".pmtiles", ".mbtiles":
+		return c.runTile57Archive()
 	}
 	return c.runTile57Bundle()
 }

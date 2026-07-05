@@ -54,12 +54,10 @@ NOAA_CACHE    ?= $(CACHE)/noaa
 NOAA_JOBS     ?= 5
 # ^ districts baked CONCURRENTLY (NOAA_JOBS=9 for all at once). Each bake is itself
 #   multi-threaded, so peak load ≈ NOAA_JOBS × cores and RAM scales with it too.
-# Each district bakes into one gap-clipped archive PER navigational band
-# (noaa-d<NN>-<slug>.pmtiles) so the frontend reproduces the realtime best-
-# available display (coarse bands fill finer gaps, none bleed). The bake writes
-# several files, so Make tracks each district by a stamp.
-NOAA_BANDS  := overview general coastal approach harbor berthing
-NOAA_STAMPS := $(foreach d,$(DISTRICTS),noaa-d$(d).stamp)
+# Each district bakes into ONE merged archive (noaa-d<NN>.pmtiles): the
+# coverage-clipped composite resolves best-available inside it, so the frontend
+# loads one source per district (the per-band archives are retired).
+NOAA_ARCHIVES := $(foreach d,$(DISTRICTS),noaa-d$(d).pmtiles)
 
 
 # --- native libtile57 engine (the SOLE tile/portrayal/asset engine) -------------
@@ -158,16 +156,16 @@ serve: build ## Serve the web frontend + provisioning API on :8080 (HOST/PORT/AS
 
 bake-ienc: build $(IENC_PMTILES) ## Bake every IENC cell in $(IENC_SRC) into $(IENC_PMTILES)
 
-# --overzoom: a standalone large-scale set with no overview cells, so it must
-# overzoom down to stay visible when zoomed out (mirrors the realtime upload path).
+# A standalone large-scale set with no overview cells floats down to the world
+# view automatically (the coarsest populated band extends to minzoom 0).
 $(IENC_PMTILES): $(BIN)
-	$(BIN) bake "$(IENC_SRC)" -o "$(IENC_PMTILES)" --overzoom --max-zoom $(IENC_MAXZOOM)
+	$(BIN) bake "$(IENC_SRC)" -o "$(IENC_PMTILES)" --max-zoom $(IENC_MAXZOOM)
 
 # Build the binary first (single-threaded), then bake the districts $(NOAA_JOBS)
 # at a time via a recursive parallel sub-make (the district .pmtiles targets are
 # independent, so -j fans them out; download + bake of each runs concurrently).
 bake-noaa: build ## Bake each USCG district ($(DISTRICTS)) into per-band noaa-d<NN>-<slug>.pmtiles, $(NOAA_JOBS) in parallel
-	$(MAKE) -j$(NOAA_JOBS) $(NOAA_STAMPS)
+	$(MAKE) -j$(NOAA_JOBS) $(NOAA_ARCHIVES)
 
 # Keep the downloaded district zips — without this Make treats them as
 # intermediate (made by one pattern rule, consumed by another) and deletes them
@@ -180,31 +178,29 @@ $(NOAA_CACHE)/%CGD_ENCs.zip:
 	@echo "downloading $*CGD_ENCs.zip from NOAA…"
 	curl -fSL --retry 3 -o "$@" "$(NOAA_URL_BASE)/$*CGD_ENCs.zip"
 
-# Bake a district bundle into per-band gap-clipped archives (--bands writes
-# noaa-d<NN>-<slug>.pmtiles for each band present). NO --overzoom: a district
-# bundle carries its own overview/general cells, so the zoomed-out skeleton is
-# already present. $(BIN) is an order-only prereq so rebuilding the binary doesn't
-# force a (very slow) re-bake. Stamped because the bake produces several files.
-noaa-d%.stamp: $(NOAA_CACHE)/%CGD_ENCs.zip | $(BIN)
-	$(BIN) bake "$<" -o "noaa-d$*.pmtiles" --bands
-	@touch "$@"
+# Bake a district bundle into ONE merged archive (the coverage-clipped composite
+# resolves best-available inside it; each band also bakes FILLUP_DZ zooms past
+# its window). $(BIN) is an order-only prereq so rebuilding the binary doesn't
+# force a (very slow) re-bake.
+noaa-d%.pmtiles: $(NOAA_CACHE)/%CGD_ENCs.zip | $(BIN)
+	$(BIN) bake "$<" -o "$@"
 
 # Serve the per-district NOAA archives + the baked IENC archive TOGETHER,
 # prebaked, in read-only widget mode on 0.0.0.0:8080. Every .pmtiles lives at the
 # project root; they're symlinked into web/ (the served asset dir) and listed in a
 # combined charts-index.json manifest the widget app loads via ?catalog=. Open the
 # printed URL.
-serve-widget: build bake-noaa ## Serve per-district per-band NOAA + IENC prebaked pmtiles together, read-only widget mode, on 0.0.0.0:8080
+serve-widget: build bake-noaa ## Serve per-district NOAA + IENC prebaked pmtiles together, read-only widget mode, on 0.0.0.0:8080
 	@ln -sf "$(abspath $(IENC_PMTILES))" web/ienc.pmtiles
-	@for d in $(DISTRICTS); do for s in $(NOAA_BANDS); do \
-	  f="noaa-d$$d-$$s.pmtiles"; [ -f "$$f" ] && ln -sf "$(abspath .)/$$f" "web/$$f" || true; \
-	done; done
+	@for d in $(DISTRICTS); do \
+	  f="noaa-d$$d.pmtiles"; [ -f "$$f" ] && ln -sf "$(abspath .)/$$f" "web/$$f" || true; \
+	done
 	@{ \
 	  printf '{\n  "districts": [\n'; \
-	  for d in $(DISTRICTS); do for s in $(NOAA_BANDS); do \
-	    f="noaa-d$$d-$$s.pmtiles"; [ -f "$$f" ] && printf '    { "file": "%s", "band": "%s" },\n' "$$f" "$$s"; \
-	  done; done; \
-	  printf '    { "file": "ienc.pmtiles", "band": "all" }\n  ]\n}\n'; \
+	  for d in $(DISTRICTS); do \
+	    f="noaa-d$$d.pmtiles"; [ -f "$$f" ] && printf '    { "file": "%s" },\n' "$$f"; \
+	  done; \
+	  printf '    { "file": "ienc.pmtiles" }\n  ]\n}\n'; \
 	} > web/charts-index.json
 	@echo
 	@echo "  Prebaked widget test server — open:"
@@ -220,7 +216,7 @@ serve-widget: build bake-noaa ## Serve per-district per-band NOAA + IENC prebake
 # DEMO_OUT, e.g. DEMO_OUT=docs/static/demo in CI): the per-band .pmtiles + manifest,
 # the generated S-101 client assets, and the committed static frontend (demo.html
 # as index.html). Serve it from ANY static host / CDN — no server logic required.
-DEMO_CELLS   ?= US2EC03M US3EC08M US4MD1DC US5MD1MC
+DEMO_CELLS   ?= US2EC03M US3EC08M US4MD1DC US4MD1EC US5MD1MC US5MD1MD US5MD1ME US5MD1LB US5MD1LC US5MD1NB US5MD1NC
 DEMO_CACHE   ?= $(CACHE)/demo
 DEMO_OUT     ?= dist/demo
 DEMO_MAXZOOM ?= 16
@@ -228,7 +224,7 @@ DEMO_MAXZOOM ?= 16
 demo: build ## Assemble the read-only Annapolis widget demo bundle into $(DEMO_OUT)
 	DEMO_CACHE="$(DEMO_CACHE)" DEMO_CELLS="$(DEMO_CELLS)" NOAA_URL_BASE="$(NOAA_URL_BASE)" scripts/fetch-demo-cells.sh
 	@mkdir -p "$(DEMO_OUT)"
-	$(BIN) bake "$(DEMO_CACHE)" -o "$(DEMO_OUT)/demo.pmtiles" --bands --max-zoom $(DEMO_MAXZOOM) --manifest "$(DEMO_OUT)/charts-index.json"
+	$(BIN) bake "$(DEMO_CACHE)" -o "$(DEMO_OUT)/demo.pmtiles" --max-zoom $(DEMO_MAXZOOM) --manifest "$(DEMO_OUT)/charts-index.json"
 	$(BIN) emit-assets "$(DEMO_OUT)" $(if $(wildcard $(S101_PC)),--s101 "$(S101_PC)")
 	@echo "assembling static frontend → $(DEMO_OUT)"
 	@cp web/demo.html "$(DEMO_OUT)/index.html"
@@ -251,7 +247,7 @@ CHART1_MAXZOOM   ?= 16
 demo-chart1: build ## Bake the S-52 ECDIS Chart 1 sheet to tiles for the docs (into $(DEMO_CHART1_OUT))
 	PRESLIB_CACHE="$(PRESLIB_CACHE)" scripts/fetch-preslib-cells.sh
 	@mkdir -p "$(DEMO_CHART1_OUT)"
-	$(BIN) bake "$(PRESLIB_CACHE)/cells" -o "$(DEMO_CHART1_OUT)/chart1.pmtiles" --bands --max-zoom $(CHART1_MAXZOOM) --manifest "$(DEMO_CHART1_OUT)/charts-index.json"
+	$(BIN) bake "$(PRESLIB_CACHE)/cells" -o "$(DEMO_CHART1_OUT)/chart1.pmtiles" --max-zoom $(CHART1_MAXZOOM) --manifest "$(DEMO_CHART1_OUT)/charts-index.json"
 	@echo "  chart1 tiles ready: $(DEMO_CHART1_OUT)/ — served beside the demo bundle as /chart1/"
 
 # LOCAL PREVIEW ONLY. The bundle is pure static files — deploy it to ANY

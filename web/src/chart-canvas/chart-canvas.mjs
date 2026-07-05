@@ -1074,6 +1074,11 @@ export class ChartCanvas extends HTMLElement {
   // Convenience: render a single server set (or none). See setServerSets.
   setServerSet(name) { return this._sources.setServerSet(name); }
 
+  // Deepest zoom the loaded prebaked archives hold a tile at over (lng,lat) —
+  // the widget's per-location data depth for the host's camera cap (null in
+  // server mode / before an archive loads). See ChartSources.dataMaxZoomAt.
+  dataMaxZoomAt(lng, lat) { return this._sources.dataMaxZoomAt(lng, lat); }
+
   // The active server tile-set names ([] when not in server mode).
   serverSets() { return this._sources.serverSets(); }
 

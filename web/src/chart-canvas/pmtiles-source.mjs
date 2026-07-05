@@ -187,6 +187,19 @@ export class PMTilesArchive {
     return entries;
   }
 
+  // Directory-only presence probe: does the archive hold a tile at (z,x,y)?
+  // Same root→leaf resolution as getTile without reading tile data — used by
+  // the protocol's sparse-pyramid fallback to decide whether an absent tile
+  // should ERROR (stretch an ancestor) or read as genuinely empty.
+  async hasTile(z, x, y) {
+    const key = z + "/" + x + "/" + y;
+    if (this._misses.has(key)) return false;
+    const id = zxyToTileId(z, x, y);
+    let e = floorEntry(this._root, id);
+    if (e && e.runLength === 0) e = floorEntry(await this._leaf(e.offset, e.length), id);
+    return !!(e && id < e.tileId + e.runLength && e.length !== 0);
+  }
+
   // Tile bytes (Uint8Array) for (z,x,y), or null when the archive has no such
   // tile (reads as blank — MapLibre overzooms from a present parent). Resolves
   // root → leaf (fetched on demand) → tile, so the whole directory is never held.
@@ -296,6 +309,14 @@ export class MultiArchive {
 
   get tileCount() { return this.archives.reduce((s, a) => s + a.tileCount, 0); }
 
+  async hasTile(z, x, y) {
+    for (const a of this.archives) {
+      if (!boundsCoverTile(a.bounds, z, x, y)) continue;
+      if (await a.hasTile(z, x, y)) return true;
+    }
+    return false;
+  }
+
   async getTile(z, x, y) {
     for (const a of this.archives) {
       if (!boundsCoverTile(a.bounds, z, x, y)) continue;
@@ -319,12 +340,25 @@ export function registerPmtilesProtocol(maplibregl, scheme, getArchive) {
     const m = params.url.match(/(\d+)\/(\d+)\/(\d+)$/);
     if (!m) return { data: new ArrayBuffer(0) };
     const [, z, x, y] = m;
+    let bytes = null;
     try {
-      const bytes = await archive.getTile(+z, +x, +y);
-      return { data: bytes ? bytes.buffer : new ArrayBuffer(0) };
+      bytes = await archive.getTile(+z, +x, +y);
     } catch (e) {
       console.warn("[pmtiles] tile", z, x, y, "failed:", e.message);
       return { data: new ArrayBuffer(0) };
     }
+    if (bytes) return { data: bytes.buffer };
+    // Sparse-pyramid fallback: the merged composite archive's depth varies by
+    // AREA (each band bakes to its native max + the overscale fill-up), so an
+    // absent tile INSIDE charted water must ERROR — MapLibre retains/loads an
+    // ancestor and renders it stretched (per-area overzoom) — while a
+    // delivered-empty tile would paint permanent blank. True no-data (no
+    // ancestor holds a tile either) stays a quiet empty tile.
+    if (archive.hasTile) {
+      for (let pz = +z - 1, px = +x >> 1, py = +y >> 1; pz >= 0; pz--, px >>= 1, py >>= 1) {
+        if (await archive.hasTile(pz, px, py)) throw new Error(`no tile at ${z}/${x}/${y}; ancestor z${pz} present (stretch)`);
+      }
+    }
+    return { data: new ArrayBuffer(0) };
   });
 }

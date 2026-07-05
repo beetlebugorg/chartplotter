@@ -435,6 +435,28 @@ export class ChartSources {
   // Convenience: render a single server set (or none). See setServerSets.
   setServerSet(name) { return this.setServerSets(name ? [name] : []); }
 
+  // Deepest zoom the loaded prebaked archives hold a tile at over (lng,lat) —
+  // the widget's per-location data depth. The merged composite archive is a
+  // SPARSE pyramid (each band bakes to its native max + the overscale fill-up),
+  // so a global source maxzoom can't say where tiles end; the camera cap probes
+  // the directory instead (root/leaf lookups, cached — no tile reads). null in
+  // server mode or before an archive loads.
+  async dataMaxZoomAt(lng, lat) {
+    if (this._server) return null;
+    const arc = this._bands.all;
+    if (!arc || !arc.hasTile || arc.maxZoom == null) return null;
+    const wx = (lng + 180) / 360;
+    const latRad = (lat * Math.PI) / 180;
+    const wy = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2;
+    for (let z = arc.maxZoom; z >= (arc.minZoom || 0); z--) {
+      const n = 2 ** z;
+      const x = Math.max(0, Math.min(n - 1, Math.floor(wx * n)));
+      const y = Math.max(0, Math.min(n - 1, Math.floor(wy * n)));
+      if (await arc.hasTile(z, x, y)) return z;
+    }
+    return null;
+  }
+
   // The active server tile-set names ([] when not in server mode).
   serverSets() { return this._server ? this._serverSets.map((s) => s.name) : []; }
 
@@ -599,10 +621,11 @@ export class ChartSources {
 
     // Open every archive CONCURRENTLY. Each open is two range round-trips (header
     // + root directory); doing ~50 districts serially was the slow initial load.
-    // Each unique file is opened ONCE — a bandless ("all") pack FANS across every
-    // per-band source (each overzooms its own [min,max]) so a coarse-only spot
-    // shows the coarser chart overscale instead of a high-zoom hole, but the
-    // underlying archive handle is shared, not re-fetched six times.
+    // A bandless entry (the merged composite archive — one per district) loads
+    // into the single "all" source ONLY: best-available is resolved inside the
+    // archive, and the pmtiles protocol errors absent tiles so MapLibre
+    // stretches an ancestor where the pyramid runs out (per-area overzoom).
+    // Legacy per-band entries still land in their chart-<slug> sources.
     const opened = new Map(); // url → Promise<PMTilesArchive>
     const openOnce = (u) => {
       let p = opened.get(u);
@@ -613,7 +636,7 @@ export class ChartSources {
     for (const d of districts) {
       if (!d.file) continue;
       const u = new URL(d.file, base).href;
-      for (const slug of this._fanBands(d.band || "all")) {
+      for (const slug of (d.band ? this._fanBands(d.band) : ["all"])) {
         if (!this._bands[slug]) this._bands[slug] = new MultiArchive();
         const band = this._bands[slug];
         tasks.push(openOnce(u)
