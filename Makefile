@@ -27,7 +27,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 tile57-lib xbuild xbuild-tile57 musl test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib vendor-style-engine xbuild xbuild-tile57 musl test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -221,7 +221,20 @@ DEMO_CACHE   ?= $(CACHE)/demo
 DEMO_OUT     ?= dist/demo
 DEMO_MAXZOOM ?= 16
 
-demo: build ## Assemble the read-only Annapolis widget demo bundle into $(DEMO_OUT)
+# The client-side WASM style engine (web/vendor/tile57-style-engine). The server-less
+# widget/demo runs the SAME tile57 chartstyle engine CLIENT-side (no /api/style.json),
+# so this .wasm must track the engine — a stale one silently drops the SCAMIN scale
+# gate and every feature shows at every zoom. Rebuilt from $(TILE57) and re-vendored so
+# a committed .wasm can never drift; `demo` depends on it so the shipped bundle always
+# carries the current engine's style.
+vendor-style-engine: ## Rebuild + re-vendor the WASM style engine (web/vendor/tile57-style-engine) from $(TILE57)
+	@echo "building the WASM style engine (zig build wasm in $(TILE57))…"
+	cd "$(TILE57)" && zig build wasm
+	@cp "$(TILE57)/zig-out/bin/style-engine.wasm" web/vendor/tile57-style-engine/style-engine.wasm
+	@cp "$(TILE57)/bindings/js/index.js" "$(TILE57)/bindings/js/index.d.ts" web/vendor/tile57-style-engine/
+	@echo "  vendored web/vendor/tile57-style-engine/style-engine.wasm ($$(wc -c < web/vendor/tile57-style-engine/style-engine.wasm) bytes)"
+
+demo: build vendor-style-engine ## Assemble the read-only Annapolis widget demo bundle into $(DEMO_OUT)
 	DEMO_CACHE="$(DEMO_CACHE)" DEMO_CELLS="$(DEMO_CELLS)" NOAA_URL_BASE="$(NOAA_URL_BASE)" scripts/fetch-demo-cells.sh
 	@mkdir -p "$(DEMO_OUT)"
 	$(BIN) bake "$(DEMO_CACHE)" -o "$(DEMO_OUT)/demo.pmtiles" --max-zoom $(DEMO_MAXZOOM) --manifest "$(DEMO_OUT)/charts-index.json"
