@@ -74,6 +74,25 @@ export class ChartService {
     return this.pollJob(job, opts);
   }
 
+  // POST /api/import/packs — download SEVERAL districts into their provider ENC_ROOTs
+  // and re-bake each touched provider (one archive per provider) in ONE job. packs is
+  // an array of { set:"<provider>-<district>", zipUrl|cells, names? }. Returns { job }.
+  async importPacks(packs) {
+    const res = await fetch(this._url("api/import/packs"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packs }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !j.job) throw new Error(j.error || `import HTTP ${res.status}`);
+    return j;
+  }
+
+  async importPacksAndWait(packs, opts) {
+    const { job } = await this.importPacks(packs);
+    return this.pollJob(job, opts);
+  }
+
   // POST /api/import?set=auto (multipart) — upload a whole ENC exchange-set zip;
   // the server parses its CATALOG.031, names the pack from its identity, bakes it,
   // and writes the metadata sidecar. Returns {job, set} (the server-derived name).
@@ -152,7 +171,10 @@ export class ChartService {
       detail = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
     }
     const frac = s.total ? s.done / s.total : (s.percent ? s.percent / 100 : null);
-    return { label: name || "", sub, detail, frac };
+    // pack/packNum/packTotal identify WHICH pack a multi-pack batch is on right now (the
+    // caller resolves pack — a set key — to a friendly name), so progress reads
+    // "Mid-Atlantic (2 of 4) · Generating coastal…" instead of looping on one line.
+    return { label: name || "", sub, detail, frac, pack: s.pack || "", packNum: s.packNum || 0, packTotal: s.packTotal || 0 };
   }
 
   // GET /api/packs — the installed-pack registry (single source of truth, incl.
@@ -194,9 +216,20 @@ export class ChartService {
     await fetch(this._url(`api/set/${on ? "enable" : "disable"}?set=${encodeURIComponent(set)}`), { method: "POST" });
   }
 
-  // DELETE /api/set — remove a pack's baked tiles/aux (source cells are kept).
+  // DELETE /api/set — uninstall a whole PROVIDER (baked bundle + its ENC_ROOT source).
   async deleteSet(set) {
     await fetch(this._url(`api/set?set=${encodeURIComponent(set)}`), { method: "DELETE" });
+  }
+
+  // DELETE /api/district — remove ONE district from a provider; the server re-bakes the
+  // provider (or drops it if that was the last district) as a background job. Returns
+  // {job} to poll (like a download), or {} when no re-bake job was started.
+  async deleteDistrict(provider, district) {
+    const res = await fetch(
+      this._url(`api/district?provider=${encodeURIComponent(provider)}&district=${encodeURIComponent(district)}`),
+      { method: "DELETE" },
+    );
+    return await res.json().catch(() => ({}));
   }
 
   // PUT /api/cell/<name> — upload raw cell bytes to the server's data store

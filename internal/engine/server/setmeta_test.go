@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
-	"github.com/beetlebugorg/chartplotter/pkg/s57"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 func TestCommonPrefixIdentity(t *testing.T) {
@@ -29,10 +29,10 @@ func TestBuildSetMeta_CatalogOverlay(t *testing.T) {
 		"US5MD1MC": {Name: "US5MD1MC", Title: "US5MD1MC", Scale: 12000, Agency: 550, IssueDate: "20251030", BBox: [4]float64{-76.5, 38.9, -76.4, 39.0}, HasBBox: true},
 		"US5MD2NW": {Name: "US5MD2NW", Title: "US5MD2NW", Scale: 20000, Agency: 550},
 	}
-	cat := &s57.Catalog{Entries: []s57.CatalogEntry{
-		{File: "US5MD1MC\\US5MD1MC.000", Impl: "BIN", LongName: "Annapolis Harbor", HasBBox: true, West: -76.5, South: 38.9, East: -76.4, North: 39.0},
-		{File: "US5MD2NW\\US5MD2NW.000", Impl: "BIN", LongName: "Chesapeake Bay", HasBBox: true, West: -76.6, South: 39.0, East: -76.4, North: 39.2},
-	}}
+	cat := []tile57.CatalogEntry{
+		{File: "US5MD1MC\\US5MD1MC.000", Impl: "BIN", LongName: "Annapolis Harbor", HasBBox: true, BBox: [4]float64{-76.5, 38.9, -76.4, 39.0}},
+		{File: "US5MD2NW\\US5MD2NW.000", Impl: "BIN", LongName: "Chesapeake Bay", HasBBox: true, BBox: [4]float64{-76.6, 39.0, -76.4, 39.2}},
+	}
 
 	m := buildSetMeta("user-us5md", cellMeta, cat)
 

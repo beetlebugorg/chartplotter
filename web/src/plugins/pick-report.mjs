@@ -11,9 +11,11 @@
 //   • emits "pick-feature" (the displayed feature, for the map highlight) and
 //     "pick-close" so the shell can sync the map.
 //
-// Public API: setCatalogue(cat) · setUnits(prefs) · show(feats, anchor{x,y}) · hide().
+// Public API: setCatalogue(cat) · setUnits(prefs) · setSnapshot(fn) ·
+// show(feats, anchor{x,y}) · hide().
 
 import { convertHeight, convertDistance, convertSpeed, unitSuffix, M_TO_FT } from "../lib/units.mjs";
+import { copyText, flashBtn } from "../lib/util.mjs";
 
 // Attributes whose numeric value carries a physical unit we let the mariner pick.
 // Each maps to a category whose canonical source unit matches the ENC encoding:
@@ -25,10 +27,14 @@ const PICK_DEPTH_ATTRS = new Set(["VALSOU", "VALDCO", "DRVAL1", "DRVAL2"]);
 const PICK_DIST_ATTRS = new Set(["VALNMR"]);
 const PICK_SPEED_ATTRS = new Set(["CURVEL"]);
 
-// Format a converted number compactly + its unit suffix.
+// Format a converted number compactly + its unit suffix. Feet ALWAYS read as
+// whole numbers ("12 ft"); metric keeps at most one decimal (the tenths digit
+// feet drops). Other units keep the compact by-magnitude decimals.
 function fmtUnitNum(v, unit) {
   if (!isFinite(v)) return "";
-  const dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  let dec = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
+  if (unit === "ft") dec = 0;
+  else if (unit === "m") dec = Math.min(1, dec);
   let s = v.toFixed(dec);
   if (s.includes(".")) s = s.replace(/\.?0+$/, "");
   return s + " " + unitSuffix(unit);
@@ -73,47 +79,76 @@ function sordatException(cls, attrs) {
 }
 
 const STYLE = `
-  :host { position:absolute; z-index:8; width:340px; max-width:calc(100% - 24px);
+  :host { position:absolute; z-index:8; width:440px; max-width:calc(100% - 24px);
+    /* Cap to the viewport (minus 12px margins + notch/bottom-bar) so the body
+       scrolls instead of the whole card running off-screen for long stacks. */
+    max-height:calc(100% - 24px - var(--sa-top,0px) - var(--botbar-h,0px));
     display:flex; flex-direction:column; background:var(--ui-surface,#fff); color:var(--ui-text,#2a2f35);
     border:1px solid var(--ui-border,#e2e2e2); border-radius:12px; box-shadow:0 8px 30px var(--ui-shadow,rgba(0,0,0,.22));
-    overflow:hidden; font:13px/1.45 system-ui,sans-serif; }
+    overflow:hidden; font:13px/1.4 system-ui,sans-serif; }
   :host([hidden]) { display:none; }
-  /* Consistent 16px horizontal gutter throughout; even vertical rhythm. */
-  .head { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--ui-border-2,#ededed);
+  /* Header, subtitle, meta and admin are fixed; only .kv (the attribute list)
+     takes the remaining height and scrolls. Consistent 14px horizontal gutter. */
+  .head, #name, #adminWrap { flex:none; }
+  /* Top-align so the grip and cycle/close buttons sit level with the class name (the
+     always-present top line); the source cell stacks beneath it without nudging them. */
+  .head { display:flex; align-items:flex-start; gap:10px; padding:12px 16px; border-bottom:1px solid var(--ui-border-2,#ededed);
     cursor:grab; touch-action:none; user-select:none; }
   .head.drag { cursor:grabbing; }
   .grip { flex:none; color:var(--ui-text-faint,#9aa0a8); font-size:14px; line-height:1; letter-spacing:-1px; }
-  .title { flex:1; min-width:0; font-weight:600; font-size:14.5px; line-height:1.3; }
+  /* Left header group: class name with the source cell STACKED beneath it, both
+     left-aligned to the group's edge — so the cell sits at a fixed left x regardless
+     of the class-name length (it doesn't trail/shift as you cycle). .htitle takes the
+     slack (flex:1) so the cycle buttons stay anchored right; the title ellipsises
+     rather than wrap. */
+  .htitle { flex:1; min-width:0; display:flex; flex-direction:column; align-items:stretch; gap:3px; overflow:hidden; }
+  .title { min-width:0; font-weight:600; font-size:14px; line-height:1.25;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .acr { font-size:10.5px; font-weight:600; color:var(--ui-text-faint,#9aa0a8); letter-spacing:.05em; }
   .title .acr { margin-left:8px; }
   .x { flex:none; border:none; background:none; color:var(--ui-text-dim,#7a828b); cursor:pointer; font-size:17px; line-height:1;
     padding:3px 5px; border-radius:7px; margin:-3px -5px -3px 0;
     touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .x:hover { background:var(--ui-hover,#f0f3f6); color:var(--ui-text,#2a2f35); }
-  .name { padding:13px 16px 0; font-size:13.5px; color:var(--ui-accent,#1565c0); font-weight:600; line-height:1.3; }
-  .meta { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:11px 16px; }
-  .cell { font-size:12px; color:var(--ui-text-dim,#7a828b); }
-  .cyc { display:inline-flex; align-items:center; gap:8px; margin-left:auto; }
+  /* The copy-feature button shares the close button's chrome, one step smaller;
+     zero the .x negative right margin so the head gap spaces the pair evenly. */
+  .copy { font-size:14px; margin-right:0; }
+  .name { padding:12px 16px 0; font-size:13.5px; color:var(--ui-accent,#1565c0); font-weight:600; line-height:1.3; }
+  .cell { flex:none; font-size:12px; color:var(--ui-text-dim,#7a828b); white-space:nowrap; }
+  /* Feature-cycle controls, pinned in the header (right of the title) so they hold
+     their place regardless of the subtitle/meta below. */
+  .cyc { flex:none; display:inline-flex; align-items:center; gap:6px; }
   .nav { border:1px solid var(--ui-border-strong,#cfcfcf); background:var(--ui-surface,#fff); color:var(--ui-text,#2a2f35);
     border-radius:7px; cursor:pointer; width:26px; height:24px; font-size:11px; padding:0; display:inline-flex; align-items:center; justify-content:center;
     touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .nav:hover { background:var(--ui-hover,#f0f3f6); }
   .count { font-size:12px; color:var(--ui-text-dim,#7a828b); min-width:46px; text-align:center; font-variant-numeric:tabular-nums; }
-  /* Stacked attribute rows: a dim label line (full name + acronym) over the value,
-     so long names and long values each get the full width and the rhythm stays even. */
-  .kv { overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:4px 0; display:flex; flex-direction:column; }
-  .row { padding:7px 16px; }
+  /* Attribute list is a two-column table: the KEY is right-aligned (so the colons
+     line up on a shared gutter) and the VALUE left-aligned. The key column is a
+     subgrid track that auto-sizes to the widest key. Genuinely block content (aux
+     text / pictures) spans both columns and stacks its label over the content.
+     min-height:0 lets .kv scroll as a flex child. */
+  .kv { flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+    display:grid; grid-template-columns:1fr 3fr; align-content:start; column-gap:18px; padding:4px 16px; }
+  .row { grid-column:1 / -1; display:grid; grid-template-columns:subgrid; align-items:baseline; padding:10px 0; }
   .row + .row { border-top:1px solid var(--ui-border-2,#ededed); }
-  .k { color:var(--ui-text-dim,#7a828b); font-size:11.5px; line-height:1.3; margin-bottom:3px; }
+  /* Readability: the VALUE is the data — dark and a touch larger so it reads at a
+     glance; the KEY stays a lighter secondary label. Both columns left-aligned into a
+     clean table with a generous row rhythm + gutter, not a cramped list. */
+  .k { text-align:left; color:var(--ui-text-dim,#6b7580); font-size:12.5px; line-height:1.4; }
+  .row:not(.block) .k::after { content:":"; }
   .k .acr { margin-left:7px; }
-  .v { font-size:13.5px; line-height:1.35; word-break:break-word; }
-  .empty { color:var(--ui-text-faint,#9aa0a8); font-size:12.5px; padding:8px 16px 12px; }
+  .v { text-align:left; min-width:0; color:var(--ui-text,#20252b); font-size:14.5px;
+    line-height:1.4; word-break:break-word; }
+  /* Block rows: one column spanning both tracks; label over content. */
+  .row.block { grid-template-columns:1fr; gap:5px; }
+  .empty { grid-column:1 / -1; color:var(--ui-text-faint,#9aa0a8); font-size:12.5px; padding:10px 0 14px; }
   /* Aux content (TXTDSC text / PICREP picture) resolved from the companion zip. */
   .aux-text { white-space:pre-wrap; font-size:12.5px; line-height:1.4; }
   .aux-img { display:block; max-width:100%; height:auto; margin-top:2px; border-radius:6px; border:1px solid var(--ui-border-2,#ededed); }
   .aux-pending { color:var(--ui-text-faint,#9aa0a8); }
-  .admin { margin:8px 16px 16px; align-self:flex-start; border:1px solid var(--ui-border-strong,#cfcfcf);
-    background:var(--ui-surface,#fff); color:var(--ui-text-dim,#7a828b); border-radius:8px; padding:7px 13px;
+  .admin { margin:10px 16px 14px; align-self:flex-start; border:1px solid var(--ui-border-strong,#cfcfcf);
+    background:var(--ui-surface,#fff); color:var(--ui-text-dim,#7a828b); border-radius:8px; padding:6px 12px;
     font:inherit; font-size:12px; cursor:pointer;
     touch-action:manipulation; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   .admin:hover { background:var(--ui-hover,#f0f3f6); color:var(--ui-text,#2a2f35); }
@@ -129,6 +164,7 @@ export class PickReport extends HTMLElement {
     this._admin = false;
     this._userPos = null; // {left,top} once the mariner drags it; cleared on close
     this._aux = null;     // AuxStore for TXTDSC/PICREP external files (optional)
+    this._snapshot = null; // shell-supplied debug-snapshot builder (copy button)
     this._renderSeq = 0;  // guards async aux fills against a newer render
     // NB: a custom-element constructor must not set attributes (incl. `hidden`) —
     // the spec forbids it ("result must not have attributes"). Hide in connectedCallback.
@@ -139,15 +175,21 @@ export class PickReport extends HTMLElement {
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <div class="head" part="head">
         <span class="grip" aria-hidden="true">⠿</span>
-        <div class="title" id="title"></div>
+        <div class="htitle">
+          <div class="title" id="title"></div>
+          <span class="cell" id="cell" title="Source ENC cell"></span>
+        </div>
+        <div class="cyc" id="cyc"></div>
+        <button class="x copy" id="copy" title="Copy feature data (JSON)" type="button" hidden>⧉</button>
         <button class="x" id="close" title="Close" type="button">✕</button>
       </div>
       <div id="name"></div>
-      <div id="meta" class="meta"></div>
       <div class="kv" id="kv"></div>
       <div id="adminWrap"></div>`;
     const $ = (id) => this.shadowRoot.getElementById(id);
     $("close").onclick = () => this.hide();
+    $("copy").onclick = (e) => this._copyFeature(e.currentTarget);
+    $("copy").hidden = !this._snapshot; // covers setSnapshot-before-connect ordering
     this._initDrag(this.shadowRoot.querySelector(".head"));
     // Delegate clicks for the dynamic nav / admin controls.
     this.shadowRoot.addEventListener("click", (e) => {
@@ -157,8 +199,20 @@ export class PickReport extends HTMLElement {
       else if (b.id === "next") this._step(1);
       else if (b.id === "admin") { this._admin = !this._admin; this._render(); }
     });
-    // Escape closes the report (captured so it pre-empts other shortcuts).
-    this._onKey = (e) => { if (e.key === "Escape" && !this.hidden) { e.stopPropagation(); this.hide(); } };
+    // Keyboard (captured so it pre-empts other shortcuts): Escape closes; ←/→ step
+    // through the picked stack, mirroring the header ◀ ▶ (and stealing the arrows from
+    // the map's pan only while a multi-feature pick is open). Ignored inside a text field.
+    this._onKey = (e) => {
+      if (this.hidden) return;
+      if (e.key === "Escape") { e.stopPropagation(); this.hide(); return; }
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      if (this._feats.length < 2) return;
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this._step(e.key === "ArrowLeft" ? -1 : 1);
+    };
     window.addEventListener("keydown", this._onKey, true);
   }
 
@@ -187,6 +241,30 @@ export class PickReport extends HTMLElement {
   // Optional: without it (or for a feature whose file isn't in the set) the report
   // falls back to showing the raw filename.
   setAux(aux) { this._aux = aux || null; if (!this.hidden) this._render(); }
+
+  // The shell's debug-snapshot builder for the copy-feature button: fn(feature) →
+  // the machine-readable object to copy (featureDebugSnapshot in
+  // debug-snapshot.mjs — { when, view, feature, gates }). This element has no map
+  // handle of its own, so the view/gates context is injected like the catalogue.
+  // The copy button only shows once a builder is supplied.
+  setSnapshot(fn) {
+    this._snapshot = typeof fn === "function" ? fn : null;
+    const b = this.shadowRoot && this.shadowRoot.getElementById("copy");
+    if (b) b.hidden = !this._snapshot;
+  }
+
+  // Copy the SELECTED feature's debug snapshot — the same self-diagnosing JSON the
+  // dev-tools Inspect copy produces, scoped to this one feature — with a ✓/✗ flash
+  // on the button for feedback.
+  async _copyFeature(btn) {
+    const f = this._feats[Math.min(this._idx, this._feats.length - 1)];
+    let ok = false;
+    try {
+      const snap = f && this._snapshot ? this._snapshot(f) : null;
+      if (snap) ok = await copyText(JSON.stringify(snap, null, 2));
+    } catch (e) { ok = false; }
+    flashBtn(btn, ok ? "✓" : "✗");
+  }
 
   // Show the report for a feature stack; `anchor` is the picked point {x,y} in
   // viewport pixels, used for out-of-the-way auto-placement.
@@ -232,8 +310,12 @@ export class PickReport extends HTMLElement {
     const cls = p.class || "";
     const $ = (id) => this.shadowRoot.getElementById(id);
 
-    const title = esc((cat.classes && cat.classes[cls]) || cls || "Feature");
-    $("title").innerHTML = `${title}${cls ? `<span class="acr">${esc(cls)}</span>` : ""}`;
+    // Title = the class's full name; the acronym follows as a dim tag, but only
+    // when it adds something. With no catalogue the name falls back TO the acronym,
+    // so showing the tag too would read "LNDMRK LNDMRK" — suppress that duplicate.
+    const clsName = (cat.classes && cat.classes[cls]) || cls || "Feature";
+    const clsTag = cls && clsName !== cls ? `<span class="acr">${esc(cls)}</span>` : "";
+    $("title").innerHTML = `${esc(clsName)}${clsTag}`;
 
     let attrs = {};
     if (p.s57) { try { attrs = JSON.parse(p.s57); } catch { attrs = {}; } }
@@ -253,15 +335,20 @@ export class PickReport extends HTMLElement {
     $("kv").innerHTML = rows.length ? rows.join("") : `<div class="empty">No attributes encoded.</div>`;
     this._fillAux(seq); // resolve any TXTDSC/PICREP rows from the aux zip
 
+    // Cycle controls live in the (always-present, fixed) header, so they don't jump
+    // vertically as you step across features whose subtitle/meta rows differ.
     const n = this._feats.length;
     const cyc = n > 1
-      ? `<span class="cyc"><button id="prev" class="nav" title="Previous" type="button">◀</button>`
+      ? `<button id="prev" class="nav" title="Previous" type="button">◀</button>`
         + `<span class="count">${this._idx + 1} / ${n}</span>`
-        + `<button id="next" class="nav" title="Next" type="button">▶</button></span>`
+        + `<button id="next" class="nav" title="Next" type="button">▶</button>`
       : "";
-    const cell = p.cell ? `<span class="cell" title="Source ENC cell">▦ ${esc(p.cell)}</span>` : "";
-    $("meta").innerHTML = cell + cyc;
-    $("meta").style.display = (cell || cyc) ? "" : "none";
+    $("cyc").innerHTML = cyc;
+    $("cyc").style.display = cyc ? "" : "none";
+    // Source cell rides in the header next to the class name — a fixed spot, so it
+    // doesn't jump as you cycle across features with different subtitles.
+    $("cell").textContent = p.cell ? `▦ ${p.cell}` : "";
+    $("cell").style.display = p.cell ? "" : "none";
 
     $("adminWrap").innerHTML = adminTotal
       ? `<button id="admin" class="admin" type="button">${this._admin ? "Hide" : "Show"} administrative${this._admin ? "" : ` (${adminHidden})`}</button>`
@@ -272,14 +359,19 @@ export class PickReport extends HTMLElement {
   // (rule 2), units (rule 4) and dates as DD-MMM-YYYY (rule 6). Numbers arrive
   // unpadded from the tile (rule 3). Unknown attributes still show, by acronym (§10.8.6).
   _row(acr, raw, meta) {
-    const name = esc((meta && meta.name) || acr);
+    // Label = the attribute's full name; the acronym follows as a dim tag, but only
+    // when it isn't already the name (no catalogue → name falls back to the acronym,
+    // and "CATLMK CATLMK" is just noise). See the title's matching guard.
+    const rawName = (meta && meta.name) || acr;
+    const k = `${esc(rawName)}${rawName !== acr ? `<span class="acr">${esc(acr)}</span>` : ""}`;
     // External-file attributes: render the filename now, tag the value cell so
     // _fillAux can swap in the actual text/picture once the aux zip resolves it.
     const isText = PICK_TEXT_ATTRS.has(acr), isPic = PICK_PIC_ATTRS.has(acr);
     if (isText || isPic) {
       const ref = String(raw).trim();
       const tag = this._aux && this._aux.has(ref) ? ` data-aux="${esc(ref)}" data-auxkind="${isPic ? "image" : "text"}"` : "";
-      return `<div class="row"><div class="k">${name}<span class="acr">${esc(acr)}</span></div><div class="v"${tag}>${esc(ref)}</div></div>`;
+      // Block row: the resolved text/picture wants its own full-width line under the label.
+      return `<div class="row block"><div class="k">${k}</div><div class="v"${tag}>${esc(ref)}</div></div>`;
     }
     let val;
     if (PICK_DATE_ATTRS.has(acr)) {
@@ -299,7 +391,7 @@ export class PickReport extends HTMLElement {
         if (meta && meta.unit) val += " " + meta.unit;
       }
     }
-    return `<div class="row"><div class="k">${name}<span class="acr">${esc(acr)}</span></div><div class="v">${esc(val)}</div></div>`;
+    return `<div class="row"><div class="k">${k}</div><div class="v">${esc(val)}</div></div>`;
   }
 
   // Swap external-file filenames for their resolved content. Async (the aux zip

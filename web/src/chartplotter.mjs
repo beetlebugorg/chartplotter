@@ -17,11 +17,14 @@
 // listCharts/setScheme/setMariner and its `map` handle) plus the server chart API.
 
 import "./chart-canvas/chart-canvas.mjs"; // defines <chart-canvas> (the renderer we wrap)
+import { engineStamp } from "./chart-canvas/chart-sources.mjs"; // engine-commit stamp for the attribution corner
 import "./plugins/pick-report.mjs"; // defines <pick-report> (the ECDIS cursor-pick panel)
+import { featureDebugSnapshot } from "./lib/debug-snapshot.mjs"; // pick report copy-feature JSON (shared with dev-tools Inspect)
 import "./plugins/chart-library.mjs"; // defines <chart-library> (the "Charts library" domain)
 import "./plugins/settings-dialog.mjs"; // defines <settings-dialog> (the settings panel host)
 import { SettingsRegistry } from "./core/settings-registry.mjs"; // contribution registry for the settings panel
-import { coreSettingsContributions } from "./core/core-settings.mjs"; // the app's own display settings as contributions
+import { coreSettingsContributions, vgGroupOn, vgSetGroupOn } from "./core/core-settings.mjs"; // the app's own display settings as contributions + the shared viewing-group toggle path
+import { VgRail } from "./plugins/vg-rail.mjs"; // mid-left viewing-group quick-toggle pill rail
 import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
@@ -42,8 +45,9 @@ import { HudController } from "./plugins/hud.mjs"; // status readout + overscale
 import { WheelZoom } from "./plugins/wheel-zoom.mjs"; // scroll-wheel zoom: band detent + elastic floor
 import { CoverageBoxes } from "./plugins/coverage-boxes.mjs"; // installed-chart coverage overlay
 import { OrientationControl } from "./plugins/orientation-control.mjs"; // compass: north-up / free orientation
+import { FpsMeter } from "./plugins/fps-meter.mjs"; // ?fps — live FPS/frame-time overlay
 import { SearchBox } from "./plugins/search-box.mjs"; // offline catalog + chart-feature search
-import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, DEV_BANDS, bandForScale } from "./lib/bands.mjs";
+import { BANDS, BAND_LABEL, BAND_COLOR, BAND_MINZOOM, BAND_MAXZOOM, OVERSCALE_MARGIN, DEV_BANDS, bandForScale, bandForCellName } from "./lib/bands.mjs";
 import { loadJSON, maxZoomForScaleFloor, FLOOR_GIVE, freshness, fmtIssue, fmtMB, isShareUrl, parseViewHash, copyText, flashBtn } from "./lib/util.mjs";
 import { archivePut, archiveGet } from "./data/archive-store.mjs";
 import { STYLE, CHROME } from "./chartplotter.view.mjs"; // shell chrome (CSS + static markup)
@@ -65,11 +69,13 @@ const DEFAULT_MARINER = {
   deepContour: 30,
   depthUnit: "ft", // US/NOAA preference (engine default DepthUnitFeet)
   // Display categories (S-52 §10.2). Base is the minimum safe-navigation set and
-  // can NEVER be deselected by the mariner — it is forced on at boot. Default
-  // display is Standard; Other is opt-in.
+  // can NEVER be deselected by the mariner — it is forced on at boot. We default
+  // to the full "Other" display (all charted detail) — friendlier for a
+  // recreational plotter than the ECDIS Standard default; the mariner can drop
+  // back to Standard/Base in Display settings (detailLevel).
   displayBase: true,
   displayStandard: true,
-  displayOther: false,
+  displayOther: true,
   boundaryStyle: "symbolized", // IMO/S-52 default (vs "plain")
   simplifiedPoints: false,     // paper-chart point symbols (engine SimplifiedPoints=false)
   fourShadeWater: true,        // four depth shades (engine TwoShades=false)
@@ -105,6 +111,14 @@ const DEFAULT_MARINER = {
   showContourLabels: false,
   dataQuality: false,
   showMetaBounds: false,
+  // S-52 §10.1.10 overscale indication (ON by default): the AP(OVERSC01)
+  // vertical-line hatch over regions whose best displayed data is enlarged past
+  // its compilation scale (engine `oscl` gate / per-band JS overscale layers).
+  showOverscale: true,
+  // Fine-grained viewing-group selection (S-52 §14.5): a DENY-LIST of raw viewing-
+  // group ids (the baked `vg` tag) the mariner has turned off. Empty = every group
+  // shown (default). Driven by the "Viewing groups" settings tab; see viewing-groups.mjs.
+  viewingGroupsOff: [],
   // Display units for non-depth quantities (distance/height/speed/wind/temp).
   // Depth has its own metric/imperial toggle (depthUnit, above). See units.mjs.
   ...UNIT_DEFAULTS,
@@ -171,15 +185,26 @@ const INSPECT_LAYER_LABEL = { point_symbols: "Symbol", soundings: "Sounding", li
 // Geometry-primitive rank for pick-report sorting (rule 9): points, then lines,
 // then areas; labels last. (Decode/render lives in <pick-report>.)
 function pickGeomRank(layer) {
-  return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[layer] ?? 9;
+  // Strip the SCAMIN-variant suffix so tile57's split source-layers (point_symbols_scamin,
+  // lines_scamin, areas_scamin, text_scamin, …) rank like their base layer — otherwise
+  // every SCAMIN feature falls to the unknown rank (9) and the point<line<area tiebreak breaks.
+  const base = String(layer || "").replace(/_scamin$/, "");
+  return { point_symbols: 0, soundings: 0, lines: 1, complex_lines: 1, areas: 2, area_patterns: 2, text: 3 }[base] ?? 9;
 }
 
-// Order two picked features per S-52 PresLib §10.8.4: higher drawing priority
-// first, then geometric primitive (point < line < area).
+// Order two picked features: geometric primitive first (point < line < area,
+// labels last), then higher drawing priority within the same primitive rank.
+// Priority-first buried point targets under any area with a higher S-52 drawing
+// priority — a LNDARE fill is priority 12, so every symbol on land ranked below
+// the land polygon and features on land were effectively unclickable. A click is
+// aimed at the discrete object under the cursor; the skin-of-the-earth polygon it
+// sits on is context, so the primitive rank wins and §10.8.4's priority ordering
+// applies within each rank.
 function pickCmp(a, b) {
+  const ga = pickGeomRank(a.sourceLayer), gb = pickGeomRank(b.sourceLayer);
+  if (ga !== gb) return ga - gb; // points, then lines, then areas, labels last
   const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
-  if (pa !== pb) return pb - pa; // higher drawing priority (more significant) first
-  return pickGeomRank(a.sourceLayer) - pickGeomRank(b.sourceLayer);
+  return pb - pa; // higher drawing priority (more significant) first
 }
 
 // S-57 cell names encode the usage band as the 3rd character (e.g. US[1-6]…):
@@ -513,10 +538,10 @@ export class ChartPlotter extends HTMLElement {
     // external files); load it so the pick report can show that content inline.
     this._aux = new AuxStore();
     const dl = this._dl.loadCatalog().then(async (r) => {
-      // Widget/hosted: a companion aux.zip named in the manifest (fetched whole once).
-      // Server: per-file on demand via GET api/aux — the raw zip is never exposed.
-      if (this._dl.auxUrl) await this._aux.load(this._dl.auxUrl);
-      else await this._aux.loadApi(this._assets);
+      // One aux path, online or off: a static index.json manifest whose files sit
+      // beside it, each fetched per-pick as a plain static GET (no zip, no /api).
+      // Hosted/widget: the manifest URL the charts index names. Server: /aux/index.json.
+      await this._aux.load(this._dl.auxUrl || `${this._assets}aux/index.json`);
       return r;
     });
     // Pick-report class/attribute name lookup. The old S-57 PresLib catalogue
@@ -624,6 +649,26 @@ export class ChartPlotter extends HTMLElement {
       plotter: this._plotter,
     });
 
+    // ?fps — opt-in live FPS/frame-time overlay for perf measurement.
+    if (new URLSearchParams(location.search).has("fps")) {
+      this._fps = new FpsMeter({ host: this.shadowRoot.getElementById("map") });
+    }
+
+    // Viewing-group quick toggles: the collapsible mid-left pill rail. Reads and
+    // writes through the SAME path as the Settings "Viewing groups" tab
+    // (vgGroupOn/vgSetGroupOn → applyMariner + server persist), so a pill tap
+    // restyles instantly and syncs to other screens; applyMariner calls
+    // _vgRail.refresh() on every viewingGroupsOff change (either writer). Shell
+    // chrome — not mounted in the hermetic widget viewer (it uses localStorage
+    // for its own fold state).
+    if (!this._widget) {
+      this._vgRail = new VgRail({
+        host: this.shadowRoot.getElementById("vg-rail"),
+        isOn: (id) => vgGroupOn(this, id),
+        setOn: (id, on) => vgSetGroupOn(this, id, on),
+      });
+    }
+
     // Developer tools (Advanced tab) — the first NON-core contributor to the
     // settings registry. A plain class (like the map controllers), built now that
     // the map exists; it registers itself as the Advanced-tab contribution and owns
@@ -692,6 +737,17 @@ export class ChartPlotter extends HTMLElement {
       this.saveView();
       this._assessCoverage();
       this._hud.updateZoomCap(); // clamp zoom-in to the finest band covering the new view
+      if (!this._widget && this._showCellBounds && this._coverage) this._refreshInstalledBounds();
+    });
+    // The rendered-cell coverage query needs tiles LOADED, so re-run once the map goes
+    // idle (tiles settled). Throttled — idle can fire often — and a no-op when the
+    // winning-cell set is unchanged (setFeatures de-dups).
+    map.on("idle", () => {
+      if (this._widget || !this._showCellBounds || !this._coverage) return;
+      const now = performance.now();
+      if (now - (this._covIdleAt || 0) < 250) return;
+      this._covIdleAt = now;
+      this._refreshInstalledBounds();
     });
 
     // Off-screen chart pointers: edge pointers to installed charts not in view
@@ -960,6 +1016,7 @@ export class ChartPlotter extends HTMLElement {
       this._setProgress(null);
       try { await this._renderInstalledSets(); } catch (e) { /* ignore */ }
       if (this._plotter && this._plotter.flushTiles) { try { await this._plotter.flushTiles(); } catch (e) { /* ignore */ } }
+      this._updateEngineStamp(); // flushTiles re-fetched the set metas (a re-bake can change the engine)
       if (this._chartLib) this._chartLib.refresh();
     });
   }
@@ -1195,13 +1252,8 @@ export class ChartPlotter extends HTMLElement {
         // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
         // it so a pick/coverage tap doesn't fire under an active inspect lock.
         if (this._devTools && this._devTools.inspecting) return;
-        // (The Charts cell-picker tap-to-preview-a-district branch was removed with
-        // the main-map cell picker; the <chart-library> panel is the chart surface.)
-        // Zoomed out over an installed-chart coverage marker → fly to that chart at
-        // its detail zoom (so you can find + open installed charts without knowing
-        // where/at what zoom they live). Otherwise the default ECDIS cursor pick.
-        if (this._coverage && this._coverage.tapFlyTo(e.point)) return;
-        // Default chart-view interaction: ECDIS cursor pick (S-52 PresLib §10.8).
+        // The coverage/cell-boundary overlay is a passive debug layer — a tap always
+        // runs the default ECDIS cursor pick (S-52 PresLib §10.8), never flies.
         this._pickReportAt(e.point, e.originalEvent);
       });
     }
@@ -1270,9 +1322,10 @@ export class ChartPlotter extends HTMLElement {
   // --- ECDIS cursor pick (S-52 PresLib §10.8) -------------------------------
   // Report on the chart feature(s) under a tapped point. Queries the rendered
   // tiles (so it returns only visible objects — rule 7), dedupes, and sorts by
-  // drawing priority then geometry primitive (rule 9), then hands the stack to
-  // the <pick-report> panel, which decodes + renders it. `ev` is the originating
-  // DOM event (its clientX/Y anchor the panel's out-of-the-way placement).
+  // geometry primitive then drawing priority (see pickCmp — the discrete point
+  // target under the cursor outranks the polygon it sits on), then hands the
+  // stack to the <pick-report> panel, which decodes + renders it. `ev` is the
+  // originating DOM event (its clientX/Y anchor the panel's placement).
   _pickReportAt(point, ev) {
     const map = this._map;
     if (!map) return;
@@ -1284,7 +1337,9 @@ export class ChartPlotter extends HTMLElement {
     // target than a mouse. The box is screen-space, so it's zoom-independent.
     const r = ev && ev.pointerType === "touch" ? 14 : 6;
     const area = [[point.x - r, point.y - r], [point.x + r, point.y + r]];
-    const feats = map.queryRenderedFeatures(area).filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
+    const only = this._plotter && this._plotter.chartLayerIds ? this._plotter.chartLayerIds() : null;
+    const feats = (only && only.length ? map.queryRenderedFeatures(area, { layers: only }) : map.queryRenderedFeatures(area))
+      .filter((f) => isChartSource(f.source) && !f.layer.id.startsWith("scaminprobe"));
     // Collapse the per-source-layer representations of one S-57 object — its area
     // fill, boundary line and centred symbol arrive as separate features that all
     // share class/cell/objnam/s57 — into a single pick entry, so stepping the
@@ -1309,7 +1364,7 @@ export class ChartPlotter extends HTMLElement {
       const key = (p.class || "") + "|" + (p.cell || "") + "|" + (p.s57 || "") + "|" + (p.objnam || "");
       const g = groups.get(key);
       if (!g) { groups.set(key, { feat: f, hi: f }); continue; }
-      if (pickCmp(f, g.feat) < 0) g.feat = f;        // higher drawing priority wins the report row
+      if (pickCmp(f, g.feat) < 0) g.feat = f;        // best pick rank wins the report row
       if (hiGeomRank(f) > hiGeomRank(g.hi)) g.hi = f; // richer primitive wins the highlight
     }
     const uniq = [];
@@ -1345,6 +1400,9 @@ export class ChartPlotter extends HTMLElement {
     const el = document.createElement("pick-report");
     if (typeof el.show !== "function") { console.warn("[pick] <pick-report> not loaded"); return null; }
     this.shadowRoot.appendChild(el);
+    // Copy-feature button: the dev Inspect debug-copy shape, scoped to the selected
+    // feature (includes the live layer gates, so a pasted report is self-diagnosing).
+    el.setSnapshot((f) => featureDebugSnapshot(this._map, f));
     el.addEventListener("pick-feature", (e) => {
       const f = e.detail && e.detail.feature;
       const geom = f ? (f._hiGeom || f.geometry) : null; // trace the object's extent, not the symbol anchor
@@ -1446,13 +1504,44 @@ export class ChartPlotter extends HTMLElement {
   }
 
   // Cap the map's max zoom at the 1:MIN_DETAIL_SCALE scale for the current centre
-  // latitude — a consistent scale floor rather than a per-location data cap.
-  _applyScaleFloor() {
+  // latitude (a consistent scale floor), AND at the finest covering band's data
+  // depth: the bake carries each band OVERSCALE_MARGIN zooms past its native max
+  // (the composite's capped overscale fill-up, bake_enc.FILLUP_DZ) — past that
+  // there are NO vector tiles at all and MapLibre cannot stretch absent tiles,
+  // so the camera stops where the data stops instead of panning blank water.
+  async _applyScaleFloor() {
     if (!this._map) return;
     // FLOOR_GIVE headroom above the floor so WheelZoom can let a hard-in scroll
     // over-pull a hair past it and settle back (a stop with give, not a wall).
-    const mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
+    let mz = maxZoomForScaleFloor(this._map.getCenter().lat) + FLOOR_GIVE;
+    const c = this._map.getCenter();
+    const band = this._finestBandAt(c.lng, c.lat);
+    if (band) {
+      mz = Math.min(mz, BAND_MAXZOOM[band] + OVERSCALE_MARGIN + FLOOR_GIVE);
+    } else if (this._plotter && this._plotter.dataMaxZoomAt) {
+      // Prebaked/widget: no active-cell index — probe the archives' own
+      // directory for the deepest tile at the centre. +1 for the one stretched
+      // level MapLibre's parent retention renders past the data (the pmtiles
+      // protocol errors absent-with-ancestor tiles to trigger it).
+      const dz = await this._plotter.dataMaxZoomAt(c.lng, c.lat);
+      if (dz != null) mz = Math.min(mz, dz + 1 + FLOOR_GIVE);
+    }
     if (Math.abs(this._map.getMaxZoom() - mz) > 1e-3) this._map.setMaxZoom(mz);
+  }
+
+  // The finest navigational band among the ACTIVE installed cells whose bbox
+  // covers (lng,lat) — the per-location data depth for the zoom cap. null when
+  // no active cell covers (open ocean / widget mode / nothing installed yet),
+  // which leaves the uniform scale floor alone.
+  _finestBandAt(lng, lat) {
+    let best = -1;
+    for (const cell of this._activeCells || []) {
+      const b = cell.bb;
+      if (!b || lng < b[0] || lng > b[2] || lat < b[1] || lat > b[3]) continue;
+      const r = BANDS.indexOf(bandForCellName(cell.n || ""));
+      if (r > best) best = r;
+    }
+    return best >= 0 ? BANDS[best] : null;
   }
 
   // Broker for WheelZoom: the geographic point wheel-zoom should keep fixed while
@@ -1546,27 +1635,49 @@ export class ChartPlotter extends HTMLElement {
     const packs = await this._api.packs();
     // Re-index aux content (server mode): a just-imported district's TXTDSC/PICREP
     // files become resolvable in the pick report without a page reload.
-    if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
+    if (this._aux && !this._dl.auxUrl) this._aux.load(`${this._assets}aux/index.json`).catch(() => {});
     const cells = await this._api.cells();
     if (cells) this._installed = cells; // null → keep current view
     // Active (enabled-pack) cells WITH bounds — the search catalog, so you can find
     // an installed chart by name and fly to it (esp. on a blank/no-basemap map).
     this._activeCells = await this._api.activeCells();
-    // Management keys on the DISTRICT name (noaa-d5); enable/disable/remove hit the
-    // district and the server fans to its band-sets.
+    // Provider-enc-root: /api/packs keys on the PROVIDER (noaa/ienc/user) — one baked
+    // archive per provider, districts are subfolders inside it. Enable/disable/remove
+    // operate at provider (+ per-district delete) level.
     this._installedSets = new Set(packs.map((p) => p.name));
     this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
-    this._packsMeta = packs; // {name,enabled,bands,bounds} — drives the coverage boxes (incl. disabled packs)
-    // Rendering needs each enabled district's PER-BAND tile sets (noaa-d5-general …),
-    // listed in `bands` ("all" for a bandless/merged pack → the bare set name).
+    this._packsMeta = packs; // {name,enabled,districts,bounds} — drives the coverage boxes (incl. disabled)
+    // Rendering: ONE vector source per enabled provider (chart-<provider>). Best-available
+    // across cells/districts is resolved inside the single archive by the baker, so there
+    // are no per-band or per-district sub-sources to composite. (`bands` is legacy — a
+    // provider pack has none, so this collapses to the bare provider name.)
     const active = packs.filter((p) => p.enabled).flatMap((p) =>
       (p.bands && p.bands.length ? p.bands : ["all"]).map((b) => (b === "all" ? p.name : `${p.name}-${b}`)));
     if (this._plotter) await this._plotter.setServerSets(active);
     this._hasArchive = active.length > 0;
     this.updateEmptyState();
     this._refreshInstalledBounds();
+    this._updateEngineStamp(); // fresh set metas → re-render the engine-commit stamp
     if (this._chartFinder) this._chartFinder.update(); // packs changed → recompute off-screen pointers
     return active;
+  }
+
+  // Engine-commit stamp beside the NOAA attribution: which tile57 engine commit
+  // baked the ACTIVE sets' visible tiles (each set's TileJSON `engine` — bake-time
+  // truth for packs, the running binary for live sets). One muted commit when every
+  // set agrees; a warn-tinted per-pack list with ✱ markers when they differ (a
+  // partially re-baked cache). Hidden when no set reports one (pmtiles mode, an
+  // older server) and in widget/spec modes (CSS).
+  _updateEngineStamp() {
+    const el = this.shadowRoot && this.shadowRoot.getElementById("engine-stamp");
+    if (!el) return;
+    const metas = (this._plotter && this._plotter.serverSetMetas) ? this._plotter.serverSetMetas() : [];
+    const stamp = engineStamp(metas);
+    el.hidden = !stamp;
+    if (!stamp) return;
+    el.textContent = stamp.text;
+    el.title = stamp.title;
+    el.classList.toggle("mixed", stamp.mixed);
   }
 
   // Wait for a server job (download/bake) to complete, surfacing progress through
@@ -1610,12 +1721,8 @@ export class ChartPlotter extends HTMLElement {
   _refreshInstalledBounds() {
     if (!this._coverage) return; // coverage overlay not set up yet
     const feats = [];
-    // Per-CELL footprints are the widget (pmtiles) path only. In SERVER mode we draw
-    // one box per ENABLED pack (below) instead — a full NOAA install has thousands
-    // of cells, and a box per cell (re-projected to its min on-screen size on every
-    // zoom frame) would freeze the map. Per-cell boxes also ignore the enabled flag,
-    // so they'd keep showing a disabled district's coverage. Per-pack boxes fix both.
     if (this._widget) {
+      // Widget (pmtiles) path: per-cell footprints from the local catalogue.
       for (const name of this._installed) {
         const bb = this._cellLocation(name); // catalog footprint
         if (!bb) continue;
@@ -1629,32 +1736,83 @@ export class ChartPlotter extends HTMLElement {
           geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
         });
       }
-    }
-    // Server mode has no per-cell footprints, so the list above is empty here.
-    // Add ONE coverage box per ENABLED pack from /api/packs
-    // (which carries each pack's union bounds + bands). Tag with the pack's COARSEST
-    // band (bands[0], coarse→fine from the server) for the click-to-fly zoom + the
-    // band-capped fill. DISABLED packs render nothing on the map, so they get no
-    // boundary either. An enabled full NOAA stack (overview/general band) hides its
-    // fill at coarse zoom (no stray box); a standalone set keeps its box until you
-    // zoom into its detail.
-    for (const p of this._packsMeta || []) {
-      if (!p.enabled) continue; // disabled packs aren't drawn → no coverage box
-      const bb = p.bounds;
-      if (!Array.isArray(bb) || bb.length !== 4) continue;
-      const coarsest = (p.bands && p.bands[0]) || "harbor";
-      const band = BANDS.includes(coarsest) ? coarsest : "harbor"; // "all"/unknown → large-scale
-      const [w, s, e, n] = bb;
-      feats.push({
-        type: "Feature",
-        properties: { name: p.name, band, status: "ready" },
-        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
-      });
+    } else {
+      // SERVER mode: only the cells currently rendering in view (best-available
+      // winners), each as a band-coloured, name-labelled footprint box — so you can see
+      // which chart owns a spot. Refreshed on moveend + idle (tiles must be loaded for
+      // the rendered-cell query to be accurate).
+      for (const f of this._serverCellFeatures()) feats.push(f);
     }
     // Hand the TRUE footprints to the coverage controller, which pushes them with a
     // per-zoom minimum on-screen size so a tiny cell never shrinks to an invisible
     // speck when zoomed out.
     if (this._coverage) this._coverage.setFeatures(feats);
+  }
+
+  // The cell names ACTUALLY RENDERING in the current view — the best-available
+  // WINNERS. Every baked feature carries a `cell` pick-attr, so the distinct `cell`
+  // values under the chart layers are exactly the cells whose data is on screen (a
+  // coarse cell fully covered by finer ones contributes nothing → not listed). Returns
+  // a Set, or null when the chart layers aren't queryable yet (style not ready).
+  _renderedCellNames() {
+    const map = this._map;
+    if (!map || !map.getStyle) return null;
+    let style;
+    try { style = map.getStyle(); } catch { return null; }
+    if (!style) return null; // getStyle() RETURNS undefined (not throws) before the style loads
+    const layers = (style.layers || [])
+      .filter((l) => l.source && (l.source === "chart" || String(l.source).startsWith("chart-")))
+      .map((l) => l.id)
+      .filter((id) => map.getLayer(id));
+    if (!layers.length) return null;
+    let feats;
+    try { feats = map.queryRenderedFeatures({ layers }); } catch { return null; }
+    const set = new Set();
+    for (const f of feats) { const c = f.properties && f.properties.cell; if (c) set.add(c); }
+    return set;
+  }
+
+  // Per-CELL coverage features for SERVER mode: ONLY the cells currently rendering
+  // (best-available winners in view), each as its full footprint box, band-coloured +
+  // name-labelled so you can see exactly which chart owns a spot (e.g. which cell won
+  // where a light drops out). Footprints come from the active-cell index; band from
+  // the cell's compilation scale (the baker's bandForScale) when known, else its
+  // usage-band name digit. Falls back to one coarse provider box only while the chart
+  // layers aren't queryable yet.
+  _serverCellFeatures() {
+    const rendered = this._renderedCellNames();
+    if (rendered === null) return this._providerBoxFeatures(); // style not ready → coarse box
+    const byName = new Map((this._activeCells || []).map((c) => [c.n, c.bb]));
+    const feats = [];
+    for (const name of rendered) {
+      const bb = byName.get(name);
+      if (!Array.isArray(bb) || bb.length !== 4) continue; // footprint not indexed yet
+      const cat = this._byName.get(name);
+      const scale = (cat && typeof cat.s === "number" && cat.s) || 0;
+      const band = scale ? bandForScale(scale) : bandForCellName(name);
+      const [w, s, e, n] = bb;
+      feats.push({
+        type: "Feature",
+        properties: { name, band },
+        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+      });
+    }
+    return feats;
+  }
+
+  // One coarse box per enabled provider (the fallback when per-cell isn't available).
+  _providerBoxFeatures() {
+    const feats = [];
+    for (const p of this._packsMeta || []) {
+      if (!p.enabled || !Array.isArray(p.bounds) || p.bounds.length !== 4) continue;
+      const [w, s, e, n] = p.bounds;
+      feats.push({
+        type: "Feature",
+        properties: { name: p.name, band: "general", status: "ready" },
+        geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+      });
+    }
+    return feats;
   }
 
   // Show/hide the installed-chart coverage overlay.
@@ -1866,6 +2024,12 @@ export class ChartPlotter extends HTMLElement {
     // Switching units relabels + reconverts the depth fields (still in metres
     // under the hood), so redraw the settings panel.
     if ("depthUnit" in patch) this._settingsDlg && this._settingsDlg.refresh();
+    // Viewing-group deny-list changed (the quick-toggle rail OR the Settings tab —
+    // both write through here): re-sync both surfaces so they never disagree.
+    if ("viewingGroupsOff" in patch) {
+      this._vgRail && this._vgRail.refresh();
+      this._settingsDlg && this._settingsDlg.refresh();
+    }
   }
 
   // -- chrome / panels -----------------------------------------------------

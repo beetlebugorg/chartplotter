@@ -50,7 +50,7 @@
 // Baking runs server-side; the client only renders tiles.
 import { PMTilesArchive, registerPmtilesProtocol } from "./pmtiles-source.mjs";
 import { convertDistance, unitSuffix } from "../lib/units.mjs";
-import { zoomForScale, DEFAULT_PX_PITCH_MM, clampPxPitch } from "../lib/util.mjs"; // shared scale↔zoom (512-tile MapLibre resolution)
+import { zoomForScale, scaleDenomPhysical, DEFAULT_PX_PITCH_MM, clampPxPitch } from "../lib/util.mjs"; // shared scale↔zoom (512-tile MapLibre resolution)
 import * as S52 from "./s52-style.mjs";
 import { SpriteBuilder } from "./sprite-builder.mjs";
 // Chart SOURCE / ARCHIVE management lives in its own stateful collaborator now (the
@@ -145,6 +145,22 @@ export class ChartCanvas extends HTMLElement {
     this._coastline = null; // offline GSHHG basemap GeoJSON fallback, if available
     this._coastlineArchive = null; // offline GSHHG coastline PMTiles (preferred vector basemap)
     this._mariner = {};      // current mariner settings (engine-side)
+    // tile57 engine-style mode (set at boot by _initEngineStyle when the server serves
+    // /api/style.json): render from the engine style + apply mariner toggles as engine-
+    // computed diffs. Off → the JS style builder (Go backend). See buildStyle.
+    this._engineMode = false;
+    this._engineStyle = null;  // cached full engine style for the last-applied mariner
+    this._engineSet = null;    // set the engine style targets (live "tile57" or a baked pack)
+    this._lastMariner = null;  // mariner query the engine style currently reflects (diff `from`)
+    // Server-LESS (widget/demo) engine mode: the same tile57 style engine, but run
+    // CLIENT-side from the vendored WASM (../../vendor/tile57-style-engine) instead of
+    // the server's /api/style.json — its chart layers fanned across the per-band
+    // PMTiles sources (mergeStyles-style). Distinct from server engine mode so the
+    // restyle path regenerates via WASM (no /api/style-diff) and _engineStyleMerged
+    // keeps the client's own per-band chart sources. See _initClientEngineStyle.
+    this._engineClient = false;
+    this._engineWasm = null;   // loaded StyleEngine (WASM), reused across restyles
+    this._engineLoad = null;   // in-flight load promise (load the engine once)
     // DEBUG (?ignoreScamin / ?noscamin): drop the per-SCAMIN display gate so every
     // feature shows in-band regardless of its 1:N min-display-scale. Deliberately a
     // per-page-load CONSTANT read from the URL — NOT a mariner toggle — so it's baked
@@ -155,6 +171,38 @@ export class ChartCanvas extends HTMLElement {
       try { const q = new URLSearchParams(location.search); return q.has("ignoreScamin") || q.has("noscamin"); }
       catch (e) { return false; }
     })();
+    // Engine mode uses the filter-gated SCAMIN style (one live-filtered layer per
+    // render-type instead of per-value #sm bucket layers — scamin-layers.md). This is
+    // what keeps the engine style at ~35 layers instead of ~1200, so a mariner-toggle
+    // diff is ~34 ops, not ~1200 setFilter calls. ?noScaminGate opts out (A/B). The
+    // client re-injects the current display-scale denominator (curDenom) into the gated
+    // layers on SCAMIN-ladder boundary crossings — see _scaminUpdate.
+    this._scaminGate = (() => {
+      try { return !new URLSearchParams(location.search).has("noScaminGate"); }
+      catch (e) { return true; }
+    })();
+    // SCAMIN merged mode is the DEFAULT: collapse the SCAMIN filter-gate/bucket
+    // layer explosion (~18 kinds × up to 33 SCAMIN values × N packs) down to ~1
+    // layer per kind by asking the engine for its MERGED zoom-expression gate
+    // (empty manifest → style.zig zoom_gate). That clause self-gates on the live
+    // zoom, so the entire client SCAMIN injection path (_scaminUpdate /
+    // _scaminApplySettled / _scaminForceWhenReady + the straggler sweep) is
+    // UNNECESSARY and disabled below — no setFilter, no source reload on zoom,
+    // which is what killed the "tiles crawl in a second after you stop scrolling"
+    // lag. Trade-off: integer-zoom snap (the clause steps at whole zoom levels, not
+    // the exact physical crossing) — imperceptible in practice since tiles are
+    // integer-zoom quantized anyway. Opt OUT to the exact per-value filter-gate
+    // (client-injected physical display denominator, no integer snap) with
+    // ?scaminexact — for side-by-side comparison or exact-declutter needs.
+    this._scaminMerged = (() => {
+      try { return !new URLSearchParams(location.search).has("scaminexact"); }
+      catch (e) { return true; }
+    })();
+    this._engineScaminValues = []; // SCAMIN ladder (from the set tilejson) — the crossing boundaries
+    this._scaminBandLast = -1;     // last-applied band index (count of ladder values below curDenom)
+    this._scaminApplyT = 0;        // settle timer for the deferred gate apply (see _scaminUpdate)
+    this._scaminLightApplied = false; // a mid-zoom LIGHT apply ran — the settle pass must do a real reload
+    this._scaminLayersCache = null; this._chartLayerIdsCache = null; // cached ids of the gated chart layers (filter carries the scamin clause)
     this._layerBase = {};    // chart layer id → intrinsic (pre-category) filter
     this._bandsHidden = new Set(); // usage bands turned off via setBandVisible (host-persisted)
     this._layerVis = {};     // chart layer id → intended (mariner) visibility, so band on/off restores it
@@ -313,6 +361,11 @@ export class ChartCanvas extends HTMLElement {
       registerPmtilesProtocol(maplibregl, "chart-" + slug, () => this._sources.bandArchive(slug));
     }
 
+    // tile57 engine-style probe: if the server serves /api/style.json (a -tags tile57
+    // backend), adopt the engine style as the render style (engine mode) BEFORE the first
+    // buildStyle. A 501/error leaves engine mode off → the JS builder (Go backend).
+    await this._initEngineStyle();
+
     // -- map ----------------------------------------------------------------
     const [lon, lat] = (this.getAttribute("center") || "-76.4875,38.975")
       .split(",").map(Number);
@@ -343,6 +396,12 @@ export class ChartCanvas extends HTMLElement {
       // Tile fade-in duration. The default 300ms makes pan feel laggy as new tiles
       // fade in slowly; 100ms is still smooth but noticeably snappier.
       fadeDuration: 100,
+      // Load tiles DURING a zoom gesture, not only after it settles. MapLibre's
+      // default (true) cancels/defers new-zoom tile requests while zooming and only
+      // fires them at moveend, so the finer tiles crawl in ~1s AFTER you stop
+      // scrolling ("everything appears a second after scrolling stops"). Off = the
+      // tiles stream in as you zoom, so they're ready (or nearly) when you stop.
+      cancelPendingTileRequestsWhileZooming: false,
     });
     this._map = map;
     this.map = map; // public handle
@@ -361,14 +420,22 @@ export class ChartCanvas extends HTMLElement {
     };
     window.__chartGL = () => this._logGLDiag();
 
-    // Touch gestures: keep pinch-zoom but DROP two-finger rotate (and drag-rotate)
-    // so a pinch can't tilt/spin the chart out from under the north-up/course-up/
-    // head-up follow modes (setCameraMode/updateFollow). MapLibre's default
-    // touchZoomRotate couples zoom+rotate on the same two-finger gesture, which on
-    // iOS/iPad constantly fought the orientation lock. If free rotation is wanted
-    // later, gate this on the camera mode instead of disabling outright.
+    // Touch/rotate/pitch gestures start OFF so a stray pinch can't spin or tilt the
+    // chart out from under the north-up/course-up/head-up follow modes (MapLibre's
+    // touchZoomRotate couples zoom+rotate on one two-finger gesture, which on
+    // iOS/iPad fought the orientation lock). setCameraMode gates the full set — 3D
+    // bearing + pitch — back ON in "free" mode via _setRotateGestures; boot is
+    // north-up, so they stay off (flat, north-up) here.
     if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
     if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
+    if (map.touchPitch && map.touchPitch.disable) map.touchPitch.disable();
+    // Desktop 3D: Shift + left-drag (free mode only) — horizontal rotates, vertical
+    // MapLibre's own dragRotate binds ctrl+left / right-button, but neither is
+    // reliable cross-platform: on macOS ctrl+click IS the OS secondary click (so
+    // ctrl+drag becomes a right-click/context-menu, never a rotate) and right-drag
+    // pops the menu; on Wayland ctrl/alt+drag is grabbed by the compositor for
+    // window moves. Shift is free everywhere, so bind our own explicit handler.
+    this._installFreeRotate(map);
 
     // Graphical bar scale, complementing the numeric 1:N readout in the app HUD.
     // Follows the mariner unit setting: metric (m/km) or imperial (ft/mi); MapLibre
@@ -385,7 +452,30 @@ export class ChartCanvas extends HTMLElement {
     // it lives in this element's shadow root, out of reach of the app's :host([spec]) CSS.
     if (document.querySelector("chart-plotter-app[spec], chart-plotter[spec]")) this._scaleEl.style.display = "none";
     map.addControl({ onAdd: () => this._scaleEl, onRemove: () => { this._scaleEl = null; } }, "bottom-left");
-    map.on("move", () => this._renderScalebar());
+    map.on("move", () => {
+      // `move` fires several times per frame; coalesce the scalebar redraw to one
+      // rAF (it rebuilds DOM, and _renderScalebar skips when the bar is unchanged
+      // — which it usually is, since the bar only steps at zoom boundaries).
+      if (!this._scalebarRaf) this._scalebarRaf = requestAnimationFrame(() => { this._scalebarRaf = 0; this._renderScalebar(); });
+      // While ZOOMING (only — pans wait for settle), a crossed ladder boundary
+      // applies at most every 500ms so a long continuous zoom doesn't render a
+      // stale cutoff all the way to moveend. _scaminUpdate early-returns when
+      // no boundary was crossed, so this is cheap per frame; the settle pass
+      // below still runs the final exact apply.
+      if (map.isZooming() && performance.now() - (this._scaminLastApply || 0) >= 500) this._scaminUpdate();
+    });
+    // SCAMIN filter-gate: apply ladder crossings only once the camera SETTLES.
+    // Each setFilter on a gated layer forces MapLibre to re-parse every loaded
+    // tile of that layer's source in the workers (bucket rebuild + symbol
+    // re-placement + GPU re-upload) — measured at ~68 setFilter calls and 4
+    // full source reloads per crossing on a multi-set install, ~110ms of
+    // main-thread time each, several times per zoom gesture. Firing that
+    // mid-gesture was the "jumpy zoom" + symbols-blink storm; at settle it is
+    // ONE coalesced apply, and MapLibre keeps the old buckets on screen while
+    // the reload happens. movestart cancels a pending apply so a resumed
+    // gesture never reloads underneath itself.
+    map.on("movestart", () => clearTimeout(this._scaminApplyT));
+    map.on("moveend", () => this._scaminApplySettled(120));
 
     // Surface MapLibre's own errors (style/source/tile/WebGL) to the console —
     // otherwise a failed texture upload is silent (renders black).
@@ -405,6 +495,7 @@ export class ChartCanvas extends HTMLElement {
     map.on("idle", () => this._sources._refreshScaminBuckets());
     map.on("load", async () => {
       this._renderScalebar(); // initial draw (the move hook only fires on movement)
+      this._scaminForceWhenReady(); // engine gate: initial SCAMIN cutoff
       // Images are registered LAZILY via the styleimagemissing handler above —
       // only the symbols/patterns actually referenced by visible tiles enter
       // MapLibre's icon atlas. Eagerly registering all ~750 (724 symbols + 26
@@ -513,7 +604,10 @@ export class ChartCanvas extends HTMLElement {
     const dark = this.token("SCLBR", "#e8820c"), light = this.token("CHGRD", "#dfe3e7");
     let bar = "";
     for (let i = 0; i < 4; i++) bar += `<span style="background:${i % 2 ? light : dark}"></span>`;
-    el.innerHTML = `<div class="s52sb-label">${dist} ${unitSuffix(unit)}</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
+    const html = `<div class="s52sb-label">${dist} ${unitSuffix(unit)}</div><div class="s52sb-bar" style="width:${totalPx}px">${bar}</div>`;
+    // The bar only changes at zoom-step boundaries (and on unit/scheme change), so
+    // most move frames produce identical HTML — skip the re-parse when unchanged.
+    if (html !== this._lastScalebarHtml) { el.innerHTML = html; this._lastScalebarHtml = html; }
   }
 
   // SAFCON01 (S-52 §13.2.13): the depth-contour value label. Drawn client-side
@@ -613,6 +707,10 @@ export class ChartCanvas extends HTMLElement {
     for (const id in this._layerBase) {
       if (map.getLayer(id)) map.setFilter(id, this.combineFilters(this._layerBase[id]), { validate: false });
     }
+    // The gated layers' base filter carries the SCAMIN clause at curDenom=0 (show-all);
+    // re-inject the live cutoff so a mariner toggle doesn't reveal everything until the
+    // next pan/zoom. Cheap (~1 setFilter per gated layer, ~16), only when the gate is on.
+    if (this._scaminGate) this._scaminForceWhenReady();
   }
 
   // Update a chart layer's base filter and re-apply it combined with the live
@@ -630,6 +728,8 @@ export class ChartCanvas extends HTMLElement {
   setScheme(name) {
     if (!this._colortables[name]) return;
     this._active = name;
+    // Engine mode: scheme is a mariner field → the diff emits the colour ops.
+    if (this._engineMode) { this._engineRestyle(); return; }
     const map = this._map;
     // A chart base id targets every band variant; basemap ids fall back to self.
     const setIf = (id, prop, val) => { for (const lid of this._variantIds(id)) if (map.getLayer(lid)) map.setPaintProperty(lid, prop, val); };
@@ -670,6 +770,8 @@ export class ChartCanvas extends HTMLElement {
     const v = (typeof mm === "number" && mm > 0) ? mm : undefined;
     if (v === this._pxPitch) return;
     this._pxPitch = v;
+    // Engine mode: sizeScale (from the pixel pitch) is a style input → engine diff.
+    if (this._engineMode) { this._engineRestyle(); return; }
     if (this._map && this._sources) {
       // Patterns bake the physical-size correction into their pixelRatio at
       // registration; a calibration change alters that ratio but registerPattern
@@ -782,9 +884,85 @@ export class ChartCanvas extends HTMLElement {
   //   "head-up"   — recentre on the target, chart rotated to the target's heading
   setCameraMode(mode) {
     this._cameraMode = mode || "free";
-    if (this._map && this._cameraMode === "north-up") this._map.easeTo({ bearing: 0, duration: 300 });
+    // 3D rotation (bearing + pitch) is allowed ONLY in free mode — Shift+drag on
+    // desktop, two-finger twist/tilt on touch. The follow modes are flat and their
+    // bearing is owned by the vessel fix, so the gestures stay off there (a stray
+    // drag would fight the orientation lock). "Gate on the camera mode", per the
+    // boot note.
+    this._setRotateGestures(this._cameraMode === "free");
+    // Leaving free returns to a flat chart; north-up also snaps bearing to 0
+    // (course-/head-up get their bearing from the fix via updateFollow). One
+    // combined easeTo — two separate ones cancel each other.
+    if (this._map && this._cameraMode !== "free") {
+      const cam = { pitch: 0, duration: 300 };
+      if (this._cameraMode === "north-up") cam.bearing = 0;
+      this._map.easeTo(cam);
+    }
     if (this._followFix) this.updateFollow(this._followFix);
     return this._cameraMode;
+  }
+
+  // Shift + left-drag 3D control (free mode only), installed once at map init:
+  // horizontal drag rotates (bearing), vertical drag tilts (pitch) — the same
+  // model as MapLibre's dragRotate, but on the Shift trigger (see the boot note on
+  // why ctrl/right aren't reliable). Drag up = more oblique. drag-pan is suspended
+  // for the drag so it doesn't also translate the map; touch 3D is handled
+  // separately by MapLibre (touchZoomRotate + touchPitch, enabled in free mode).
+  _installFreeRotate(map) {
+    if (!map || !map.getCanvasContainer) return;
+    const cvs = map.getCanvasContainer();
+    const DEG_PER_PX = 0.4;
+    let active = false, startX = 0, startY = 0, startBearing = 0, startPitch = 0, maxPitch = 60;
+    const onMove = (e) => {
+      if (!active) return;
+      map.setBearing(startBearing + (e.clientX - startX) * DEG_PER_PX);
+      const pitch = startPitch - (e.clientY - startY) * DEG_PER_PX; // drag up → more tilt
+      map.setPitch(Math.max(0, Math.min(maxPitch, pitch)));
+      e.preventDefault();
+    };
+    const onUp = () => {
+      if (!active) return;
+      active = false;
+      if (map.dragPan && map.dragPan.enable) map.dragPan.enable();
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+    };
+    cvs.addEventListener("mousedown", (e) => {
+      if (this._cameraMode !== "free" || e.button !== 0 || !e.shiftKey) return;
+      active = true;
+      startX = e.clientX; startY = e.clientY;
+      startBearing = map.getBearing();
+      startPitch = map.getPitch();
+      maxPitch = map.getMaxPitch ? map.getMaxPitch() : 60;
+      if (map.dragPan && map.dragPan.disable) map.dragPan.disable();
+      e.preventDefault();
+      e.stopPropagation();
+      window.addEventListener("mousemove", onMove, true);
+      window.addEventListener("mouseup", onUp, true);
+    });
+  }
+
+  // Enable/disable the full free-mode 3D gesture set (touch two-finger rotate +
+  // pitch, desktop drag-rotate) as one unit. Guarded: the handlers exist only
+  // after map init and some builds gate them, so every call is optional-chained.
+  _setRotateGestures(on) {
+    const map = this._map;
+    if (!map) return;
+    if (on) {
+      if (map.touchZoomRotate && map.touchZoomRotate.enableRotation) map.touchZoomRotate.enableRotation();
+      if (map.touchPitch && map.touchPitch.enable) map.touchPitch.enable();
+      if (map.dragRotate && map.dragRotate.enable) map.dragRotate.enable();
+      // Shift+drag is MapLibre's box-zoom by default — it would fire on the SAME
+      // gesture as our Shift+drag 3D control, so box-zoom yields to it in free mode
+      // (and comes back in the follow modes, where Shift+drag doesn't rotate).
+      if (map.boxZoom && map.boxZoom.disable) map.boxZoom.disable();
+    } else {
+      if (map.touchZoomRotate && map.touchZoomRotate.disableRotation) map.touchZoomRotate.disableRotation();
+      if (map.touchPitch && map.touchPitch.disable) map.touchPitch.disable();
+      if (map.dragRotate && map.dragRotate.disable) map.dragRotate.disable();
+      if (map.boxZoom && map.boxZoom.enable) map.boxZoom.enable();
+      // (the pitch/bearing reset is a single easeTo in setCameraMode)
+    }
   }
 
   // Push the latest target fix {lng, lat, courseDeg?, headingDeg?} from a tracking
@@ -873,10 +1051,33 @@ export class ChartCanvas extends HTMLElement {
   // /tiles/{set}/…), baked + registered by the Go server. Switches into server mode,
   // (re)builds the style, and re-requests tiles. Pass [] to clear. Returns the
   // active set names.
-  setServerSets(names) { return this._sources.setServerSets(names); }
+  async setServerSets(names) {
+    // Re-evaluate the engine style for the NEW active set(s) first (a tile57-baked pack
+    // renders from the engine style, not the JS builder), so buildStyle picks the right
+    // path when the source manager rebuilds. Reset engine state, re-probe for `names`.
+    this._engineMode = false; this._engineStyle = null; this._engineSet = null; this._scaminLayersCache = null; this._chartLayerIdsCache = null;
+    await this._initEngineStyle(Array.isArray(names) ? names : (names ? [names] : []));
+    const active = await this._sources.setServerSets(names);
+    // The source rebuild re-applies the engine style with the SCAMIN filter-gate at its
+    // baked curDenom=0 (show-all). Re-inject the live display-scale cutoff once that new
+    // style has settled — this is the one setStyle path that enters engine mode, and
+    // unlike _engineRestyle/_engineRebuild it had no post-apply _scaminUpdate. Without
+    // it a fresh boot (or set-switch) shows the fully-ungated, over-cluttered chart —
+    // every SCAMIN-gated sounding/symbol drawn regardless of scale — until the first
+    // `move` fires _scaminUpdate. See scamin-layers.md (client half of the filter-gate).
+    if (this._scaminGate && this._engineMode && this._map) {
+      this._map.once("idle", () => this._scaminForceWhenReady());
+    }
+    return active;
+  }
 
   // Convenience: render a single server set (or none). See setServerSets.
   setServerSet(name) { return this._sources.setServerSet(name); }
+
+  // Deepest zoom the loaded prebaked archives hold a tile at over (lng,lat) —
+  // the widget's per-location data depth for the host's camera cap (null in
+  // server mode / before an archive loads). See ChartSources.dataMaxZoomAt.
+  dataMaxZoomAt(lng, lat) { return this._sources.dataMaxZoomAt(lng, lat); }
 
   // The active server tile-set names ([] when not in server mode).
   serverSets() { return this._sources.serverSets(); }
@@ -918,6 +1119,15 @@ export class ChartCanvas extends HTMLElement {
   // once and immutable. Colour scheme is separate (setScheme).
   setMariner(settings) {
     this._mariner = { ...this._mariner, ...settings };
+    // The no-data hatch is CLIENT chrome (grafted under the engine chart
+    // layers), so its toggle must apply in BOTH modes — the engine style-diff
+    // below knows nothing about the nodata layer and silently dropped it.
+    if ("showNoData" in settings && this._map) {
+      this._eachLayer("nodata", (id) => this._setVis(id, this._mariner.showNoData === false ? "none" : "visible"));
+    }
+    // tile57 engine mode: the display state lives in the engine-generated style, so a
+    // toggle is an engine-computed diff applied in place (no JS in-place updaters).
+    if (this._engineMode) { this._engineRestyle(); return; }
     const keys = Object.keys(settings);
     const map = this._map;
     if (!map) return;
@@ -969,6 +1179,16 @@ export class ChartCanvas extends HTMLElement {
       if (keys.includes("showScaleBoundaries")) {
         this._eachLayer("scale-boundaries", (id) => this._setVis(id, this._mariner.showScaleBoundaries === false ? "none" : "visible"));
       }
+      // S-52 §10.1.10 overscale pattern: a visibility toggle on the per-band
+      // AP(OVERSC01) layers this (JS-builder) path emits ("overscale@<source>").
+      // Engine mode never reaches here — the toggle rides the style-diff instead.
+      if (keys.includes("showOverscale")) {
+        const vis = this._mariner.showOverscale === false ? "none" : "visible";
+        const style = map.getStyle && map.getStyle();
+        if (style && style.layers) for (const l of style.layers) {
+          if (l.id === "overscale" || l.id.startsWith("overscale@")) this._setVis(l.id, vis);
+        }
+      }
       // S-52 individually-selectable "Other" items, each a plain visibility
       // toggle on its own layer (all default on): spot soundings, light
       // descriptions (LIGHTS06 text), and geographic names / object labels.
@@ -989,7 +1209,7 @@ export class ChartCanvas extends HTMLElement {
       // Display category (multi-select) and boundary symbolization both filter
       // every chart layer by a baked per-feature tag (cat / bnd) — re-apply the
       // combined feature filter. Instant — no re-bake.
-      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds" || k === "dateDependent" || k === "dateView" || k === "highlightDateDependent" || k === "showInformCallouts")) {
+      if (keys.some((k) => k === "displayBase" || k === "displayStandard" || k === "displayOther" || k === "boundaryStyle" || k === "simplifiedPoints" || k === "showFullSectorLines" || k === "showIsolatedDangersShallow" || k === "dataQuality" || k === "showMetaBounds" || k === "dateDependent" || k === "dateView" || k === "highlightDateDependent" || k === "showInformCallouts" || k === "viewingGroupsOff")) {
         this.applyFeatureFilters();
       }
   }
@@ -1163,6 +1383,598 @@ export class ChartCanvas extends HTMLElement {
     return { ...(L.layout || {}), visibility: this._bandsHidden.has(band) ? "none" : vis };
   }
   buildStyle() {
+    // tile57 ENGINE-STYLE MODE: on the native tile57 backend the MapLibre style comes
+    // from the engine (/api/style.json), not the JS builder — ONE style source, no
+    // drift (see _engineStyleMerged + tile57-style-adoption). The client grafts only its
+    // own basemap + no-data + overlays onto the engine's chart layers. Otherwise (the Go
+    // backend) build the style in JS as before.
+    if (this._engineMode && this._engineStyle) return this._engineStyleMerged();
+    return this._buildStyleJS();
+  }
+
+  // ---- tile57 engine-style mode -----------------------------------------
+
+  // Merge the engine's /api/style.json (chart source + layers, sprite, glyphs) with the
+  // client's own basemap + no-data + overlay chrome: reuse the JS builder purely for
+  // that chrome (its chart layers/sources are dropped) and graft it UNDER the engine's
+  // chart layers. The engine's own background is dropped — the chrome supplies one.
+  _engineStyleMerged() {
+    const engine = this._engineStyle;
+    const js = this._buildStyleJS(); // bg + basemap + no-data (+ JS chart layers we drop)
+    const isChart = (s) => typeof s === "string" && (s === "chart" || s.startsWith("chart-"));
+    const chrome = js.layers.filter((l) => !isChart(l.source));
+    let sources;
+    if (this._engineClient) {
+      // Server-LESS widget/demo: the chart tiles come from the JS builder's per-band
+      // PMTiles sources (chart-<slug>://, with their live maxzoom/encoding/cache-bust),
+      // so KEEP those and only swap in the engine's chart LAYERS. (Server mode instead
+      // takes the chart sources from the engine style — the else branch below.)
+      sources = { ...js.sources };
+    } else {
+      const chromeSources = {};
+      for (const [k, v] of Object.entries(js.sources)) if (!isChart(k)) chromeSources[k] = v;
+      sources = { ...chromeSources, ...engine.sources };
+    }
+    this._applySourceBounds(sources); // per-pack bounds → skip non-covering packs' tile requests
+    return {
+      version: 8,
+      glyphs: engine.glyphs || js.glyphs,
+      // No `sprite`: the client renders chart symbols via its own SpriteBuilder
+      // (map.addImage from the tile57-custom sprite.json/png fetched separately),
+      // so a MapLibre sprite URL here only makes it fetch a standard @2x atlas that
+      // doesn't exist (404s). icon-image resolves against the addImage'd images.
+      sources,
+      // chrome (bg → basemap → no-data) UNDER the engine chart layers; drop the engine's
+      // own background so there is a single (client, scheme-aware) sea background.
+      layers: [...chrome, ...engine.layers.filter((l) => l.type !== "background")],
+    };
+  }
+
+  // Serialize the current mariner + scheme to the query /api/style.json & /api/style-diff
+  // read (server marinerFromQuery): bools as 1/0, contours as numbers, viewingGroupsOff
+  // as CSV, sizeScale from the calibrated physical scale.
+  _marinerQuery() {
+    const m = this._mariner, p = new URLSearchParams();
+    p.set("scheme", this._active || "day");
+    if (this._engineSet) p.set("set", this._engineSet); // target set (live "tile57" or a baked pack) → tiles URL + scamin
+
+    const numK = (k) => { if (m[k] != null) p.set(k, String(m[k])); };
+    const boolK = (k) => { if (m[k] != null) p.set(k, m[k] ? "1" : "0"); };
+    numK("shallowContour"); numK("safetyContour"); numK("deepContour"); numK("safetyDepth");
+    boolK("fourShadeWater");
+    if (m.depthUnit) p.set("depthUnit", m.depthUnit);
+    boolK("displayBase"); boolK("displayStandard"); boolK("displayOther");
+    boolK("dataQuality"); boolK("showInformCallouts"); boolK("showMetaBounds"); boolK("showIsolatedDangersShallow");
+    boolK("showOverscale");
+    if (m.boundaryStyle) p.set("boundaryStyle", m.boundaryStyle);
+    boolK("simplifiedPoints"); boolK("showFullSectorLines");
+    boolK("textNames"); boolK("showLightDescriptions"); boolK("textOther");
+    boolK("dateDependent"); boolK("highlightDateDependent");
+    if (m.dateView) p.set("dateView", m.dateView);
+    if (this._ignoreScamin) p.set("ignoreScamin", "1");
+    // Merged mode asks the engine for the zoom-expression gate (empty manifest,
+    // filter-gate off) instead of the per-value/filter-gate bucket layers.
+    if (this._scaminMerged) p.set("scaminMerge", "1");
+    else if (this._scaminGate) p.set("scaminFilterGate", "1");
+    p.set("sizeScale", String(this._featureSizeScale()));
+    if (m.viewingGroupsOff && m.viewingGroupsOff.length) p.set("viewingGroupsOff", m.viewingGroupsOff.join(","));
+    return p.toString();
+  }
+
+  // Fetch the full engine style for the current mariner (null on any failure).
+  async _fetchEngineStyle() {
+    try {
+      const r = await fetch(this._assets + "api/style.json?" + this._marinerQuery(), { cache: "no-store" });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  }
+
+  // Probe + adopt the engine style at boot: if /api/style.json serves one (a -tags tile57
+  // backend), cache it + record the mariner it reflects. 501/error → Go path (no-op).
+  async _initEngineStyle(setNames) {
+    // libtile57 is the sole engine, so render ALL active packs from the engine style —
+    // the server composes a multi-source style (one chart-<set> source per pack). The
+    // ?set query is a CSV of the active sets; the server 404s only when nothing is
+    // registered, in which case we leave engine mode off (the map stays chrome-only).
+    const sets = setNames || ((this._sources && this._sources.serverSets && this._sources.serverSets()) || []);
+    this._engineSets = sets;
+    this._engineSet = sets.join(","); // ?set CSV → tiles URLs + per-set scamin
+    if (sets.length === 0) {
+      // No server sets → either a server-less widget/demo (drive the style from the
+      // vendored WASM engine, below) or a not-yet-populated install (nothing to do).
+      await this._initClientEngineStyle();
+      return;
+    }
+    const style = await this._fetchEngineStyle();
+    if (style && Array.isArray(style.layers)) {
+      this._engineStyle = style;
+      this._engineMode = true;
+      this._lastMariner = this._marinerQuery();
+      // SCAMIN ladder (the boundary-crossing set) from the set's TileJSON, for the
+      // filter-gate controller (_scaminUpdate). Best-effort — empty → gate shows all.
+      // This ALSO collects each set's bounds (this._setBounds) from the same fetch,
+      // applied to the chart sources in _engineStyleMerged (below).
+      this._engineScaminValues = await this._fetchScaminValues();
+    }
+  }
+
+  // ---- server-LESS (widget/demo) engine mode: WASM style engine ----------
+  //
+  // The widget/demo has no server, so there is no /api/style.json to adopt — but the
+  // chart style should still come from the tile57 engine, not the JS builder (kills the
+  // JS-vs-engine drift, tile57-style-adoption). Run the SAME engine client-side from the
+  // vendored WASM: generateStyle(mariner) yields the engine's single-source chart style,
+  // which we fan across the client's per-band PMTiles sources exactly like the server's
+  // mergeStyles. On any failure (no vendored wasm / older deployment) we leave engine mode
+  // off and the JS builder (buildChartLayers) renders as before.
+  async _initClientEngineStyle() {
+    if (this._sources && this._sources.server) return; // server mode owns the engine style
+    try {
+      const eng = await this._loadClientEngine();
+      if (!eng) return;
+      this._engineWasm = eng;
+      this._engineStyle = this._composeClientEngineStyle(eng);
+      this._engineMode = true;
+      this._engineClient = true;
+      // The engine's *_scamin layers self-gate on the web-mercator zoom (a baked-in
+      // zoom expression), so the client SCAMIN filter-gate machinery stays OFF — the
+      // same "merged zoom-gate" the server serves by default. Force it on even under
+      // ?scaminexact: the exact per-value filter-gate needs the server's style, which
+      // a server-less widget can't produce.
+      this._scaminMerged = true;
+    } catch (e) {
+      console.warn("[engine-style] client engine unavailable, using JS builder:", e && e.message);
+      this._engineMode = false; this._engineClient = false; this._engineStyle = null; this._engineWasm = null;
+    }
+  }
+
+  // Load (once) the vendored tile57 WASM style engine. The binding module is resolved
+  // relative to THIS module (../../vendor/…); the .wasm bytes are fetched relative to
+  // `assets` (so a subpath-hosted widget finds them). Cached — reused across restyles.
+  _loadClientEngine() {
+    if (this._engineLoad) return this._engineLoad;
+    this._engineLoad = (async () => {
+      const [{ loadStyleEngine }, wasmResp] = await Promise.all([
+        import("../../vendor/tile57-style-engine/index.js"),
+        fetch(this._assets + "vendor/tile57-style-engine/style-engine.wasm"),
+      ]);
+      if (!wasmResp || !wasmResp.ok) throw new Error("style-engine.wasm HTTP " + (wasmResp && wasmResp.status));
+      const wasmBytes = new Uint8Array(await wasmResp.arrayBuffer());
+      return loadStyleEngine({ wasmBytes });
+    })().catch((e) => { this._engineLoad = null; throw e; });
+    return this._engineLoad;
+  }
+
+  // Build the cached client engine style for the current mariner: generate the engine's
+  // single-source chart style from the WASM, then fan its layers across the per-band
+  // PMTiles sources. Glyphs/sources are intentionally omitted — _engineStyleMerged (the
+  // client branch) supplies the client glyphs URL and the per-band chart sources.
+  _composeClientEngineStyle(eng) {
+    const base = eng.generateStyle(this._marinerToEngine());
+    return { layers: this._fanEngineLayers(base.layers || []) };
+  }
+
+  // Fan the engine's chart layers (which reference the single "chart" source) across the
+  // client's per-band chart-<slug> sources, mirroring the JS builder's pmtiles fan-out
+  // (chart-style.mjs). Group-outer / band-inner (coarse→fine) so the global draw order is
+  // by S-52 class then band — finer bands' fills over coarser ones, symbols/text above
+  // every band's fills. Grouping keeps each fill/line tier's plain + *_scamin variants
+  // together per band (else a coarse band's SCAMIN area stacks over a finer band's plain
+  // fill — "coastal docks over harbor water"). This is the server mergeStyles fan-out
+  // adapted to the widget's per-band (rather than per-provider) sources.
+  _fanEngineLayers(engineLayers) {
+    const chart = engineLayers.filter((l) => l.type !== "background"); // client chrome supplies the bg
+    // A layer joins the previous group when it shares the same BASE source-layer
+    // (its *_scamin sibling, or another dash/rot variant of the same tier).
+    const baseSrc = (l) => (l["source-layer"] || "").replace(/_scamin$/, "");
+    const groups = [];
+    for (const l of chart) {
+      const g = groups[groups.length - 1];
+      if (g && baseSrc(g[0]) === baseSrc(l)) g.push(l);
+      else groups.push([l]);
+    }
+    const out = [];
+    for (const group of groups) {
+      for (const band of CHART_BANDS) {
+        // Cap overview/general line, pattern-fill and point-symbol layers at their
+        // band max so their overzoomed copies don't duplicate a finer band's
+        // coast/contour/marks (mirrors buildChartLayers _capsAtBand).
+        const cap = (band.slug === "overview" || band.slug === "general") ? band.max : null;
+        for (const l of group) {
+          const v = { ...l, id: l.id + "--" + band.slug, source: "chart-" + band.slug };
+          if (cap != null && this._engineLayerCaps(l)) v.maxzoom = cap;
+          out.push(v);
+        }
+      }
+    }
+    return out;
+  }
+
+  // Which engine layers get the coarse-band maxzoom cap: LINES, pattern (hatch) FILLS,
+  // and POINT-SYMBOL layers — the marks that visibly duplicate a finer band's
+  // coast/contour/symbols when a coarse band overzooms past its compilation scale.
+  _engineLayerCaps(l) {
+    const sl = l["source-layer"] || "";
+    return l.type === "line"
+      || sl === "point_symbols" || sl === "point_symbols_scamin"
+      || (l.type === "fill" && l.paint && l.paint["fill-pattern"] !== undefined);
+  }
+
+  // Map the client mariner state (camelCase this._mariner + this._active scheme) to the
+  // WASM engine's MarinerSettings struct (snake_case; see the vendored index.d.ts). Only
+  // the fields the tile57/1 engine understands are sent — omitted fields take the engine
+  // default. sizeScale / viewingGroupsOff / overscale / scamin toggles are NOT in the
+  // tile57/1 mariner struct (a tile57/2 concern), so they're intentionally left out.
+  _marinerToEngine() {
+    const m = this._mariner || {};
+    const s = { scheme: this._active || "day" };
+    const num = (k, key) => { if (m[k] != null) s[key] = Number(m[k]); };
+    const bool = (k, key) => { if (m[k] != null) s[key] = !!m[k]; };
+    num("shallowContour", "shallow_contour");
+    num("safetyContour", "safety_contour");
+    num("deepContour", "deep_contour");
+    num("safetyDepth", "safety_depth");
+    bool("fourShadeWater", "four_shade_water");
+    if (m.depthUnit) s.depth_unit = m.depthUnit === "ft" ? "feet" : "meters";
+    bool("displayBase", "display_base");
+    bool("displayStandard", "display_standard");
+    bool("displayOther", "display_other");
+    bool("dataQuality", "data_quality");
+    bool("showInformCallouts", "show_inform_callouts");
+    bool("showMetaBounds", "show_meta_bounds");
+    bool("showIsolatedDangersShallow", "show_isolated_dangers_shallow");
+    if (m.boundaryStyle) s.boundary_style = m.boundaryStyle;
+    bool("simplifiedPoints", "simplified_points");
+    bool("showFullSectorLines", "show_full_sector_lines");
+    bool("textNames", "text_names");
+    bool("showLightDescriptions", "show_light_descriptions");
+    bool("textOther", "text_other");
+    bool("dateDependent", "date_dependent");
+    bool("highlightDateDependent", "highlight_date_dependent");
+    if (m.dateView) s.date_view = m.dateView;
+    return s;
+  }
+
+  // Client engine restyle: regenerate the engine style from the WASM for the current
+  // mariner/scheme and apply it with setStyle(diff:true) — the layer SET is stable
+  // across mariners (only filters/paint/colours change), so the diff is in-place with no
+  // tile reload or flicker. This is the server-less counterpart to _engineRestyleNow
+  // (which POSTs /api/style-diff); the widget has no server, so it regenerates locally.
+  async _engineClientRestyleNow() {
+    if (!this._engineClient || !this._map) return;
+    if (!this._map.isStyleLoaded()) { this._map.once("idle", () => this._engineRestyle()); return; }
+    try {
+      const eng = this._engineWasm || await this._loadClientEngine();
+      if (!eng) return;
+      this._engineWasm = eng;
+      this._engineStyle = this._composeClientEngineStyle(eng);
+      this._map.setStyle(this.buildStyle(), { diff: true });
+    } catch (e) {
+      console.warn("[engine-style] client restyle:", e && e.message);
+    }
+  }
+
+  // Inject each active set's geographic bounds onto its chart-<set> vector source,
+  // so MapLibre only requests tiles from packs whose coverage intersects the view.
+  // Without bounds, every viewport tile position is requested from ALL active packs
+  // — 8 of 9 return empty 204s but still saturate the browser's 6-connection pool,
+  // so tiles at a new zoom crawl in ("everything appears a second after you stop
+  // scrolling"). Applied in the merge so it survives a style rebuild.
+  _applySourceBounds(sources) {
+    if (!sources || !this._setBounds) return;
+    const sets = this._engineSets || [];
+    for (const set of sets) {
+      const b = this._setBounds[set];
+      if (!b) continue;
+      // Multi-pack sources are `chart-<slug>`; a single live set is just `chart`.
+      const src = sources["chart-" + set] || (sets.length === 1 ? sources["chart"] : null);
+      if (src && src.type === "vector") src.bounds = b;
+    }
+  }
+
+  // The distinct SCAMIN denominators the active packs carry, ascending — the ~19 ladder
+  // boundaries the display scale crosses (for the filter-gate). UNION across every active
+  // set's TileJSON `scamin` array, so a multi-pack install gates on all their boundaries.
+  async _fetchScaminValues() {
+    const sets = (this._engineSets && this._engineSets.length) ? this._engineSets : [this._engineSet].filter(Boolean);
+    const all = new Set();
+    this._setBounds = {};
+    for (const set of sets) {
+      try {
+        const r = await fetch(this._assets + "tiles/" + set + ".json", { cache: "no-store" });
+        if (!r.ok) continue;
+        const tj = await r.json();
+        if (Array.isArray(tj.scamin)) tj.scamin.forEach((v) => all.add(v));
+        if (Array.isArray(tj.bounds) && tj.bounds.length === 4) this._setBounds[set] = tj.bounds;
+      } catch (e) { /* offline / older server → skip */ }
+    }
+    return [...all].sort((a, b) => a - b);
+  }
+
+  // A mariner/scheme change in engine mode: fetch the engine-computed diff (last-applied
+  // → current mariner) and apply the ops IN PLACE — no setStyle, no tile reload, no
+  // overlay churn, no flicker. A `rebuild` op (layer set changed) falls back to a full
+  // re-fetch. Keeps _engineStyle current so a later full rebuild is correct.
+  // DEBOUNCED trigger. The shell pushes several settings at boot (scheme, mariner,
+  // pxPitch) and a user can flip toggles fast; without coalescing, EACH call would fetch
+  // + apply a full diff — on the old bucket style that was ~1200 setFilter ops per call,
+  // ×N calls = the "thousands of setFilter, page won't render" storm. Coalesce to ONE
+  // diff against the last-applied mariner.
+  _engineRestyle() {
+    if (!this._engineMode || !this._map) return;
+    clearTimeout(this._engineRestyleT);
+    // Server-less widget/demo regenerates from the WASM; server mode POSTs a style-diff.
+    this._engineRestyleT = setTimeout(
+      () => (this._engineClient ? this._engineClientRestyleNow() : this._engineRestyleNow()), 40);
+  }
+
+  async _engineRestyleNow() {
+    if (!this._engineMode || !this._map) return;
+    // Don't mutate the style mid-load (setFilter/setStyle re-enters MapLibre's run loop →
+    // "already running"). Defer once the map settles; the boot style already reflects the
+    // boot mariner, so nothing is lost by waiting.
+    if (!this._map.isStyleLoaded()) { this._map.once("idle", () => this._engineRestyle()); return; }
+    const to = this._marinerQuery();
+    const from = this._lastMariner != null ? this._lastMariner : to;
+    if (from === to) { this._lastMariner = to; return; }
+    try {
+      const r = await fetch(this._assets + "api/style-diff", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from, to }),
+      });
+      if (!r.ok) throw new Error("style-diff HTTP " + r.status);
+      const ops = await r.json();
+      if (ops.length === 1 && ops[0].op === "rebuild") { await this._engineRebuild(); return; }
+      for (const op of ops) this._applyStyleOp(op);
+      this._applyOpsToCached(ops);
+      this._lastMariner = to;
+      // The diff rewrote gated layers' filters back to their baked placeholders
+      // (scamin: show-all; oscl: hide-the-hatch) — re-inject the live cutoff,
+      // retrying past the mid-load window the diff ops themselves create.
+      this._scaminForceWhenReady();
+    } catch (e) {
+      console.warn("[engine-restyle] full rebuild:", e.message);
+      await this._engineRebuild();
+    }
+  }
+
+  // Force-apply the gate cutoff, retrying past mid-load windows. A style-diff
+  // (mariner/VG toggle) rewrites gated filters with their baked placeholders,
+  // and the setFilter ops the diff just applied leave the style mid-load, so a
+  // bare _scaminUpdate(true) silently no-ops and stale gates linger until the
+  // next crossing — force it once the style settles.
+  _scaminForceWhenReady() {
+    // Merged mode's engine style self-gates on the live zoom (zoom-expression clause),
+    // so there is no client cutoff to inject — every force path is a no-op.
+    if (this._scaminMerged) return;
+    const m = this._map;
+    if (!m) return;
+    if (!m.isStyleLoaded || !m.isStyleLoaded()) { m.once("idle", () => this._scaminForceWhenReady()); return; }
+    this._scaminLayersCache = null; this._chartLayerIdsCache = null;
+    this._scaminUpdate(true);
+  }
+
+  // Schedule the settle-deferred gate apply `delay` ms out. If the style is still
+  // mid-load when the timer fires (tiles streaming right after a zoom gesture),
+  // _scaminUpdate's isStyleLoaded guard would silently drop the crossing — so poll
+  // until the style is ready. movestart clears the timer (gesture resumed).
+  _scaminApplySettled(delay) {
+    clearTimeout(this._scaminApplyT);
+    if (this._scaminMerged) return; // merged mode self-gates on zoom — no settle apply
+    this._scaminApplyT = setTimeout(() => {
+      const m = this._map;
+      if (!this._scaminGate || !this._engineMode || !m) return;
+      if (!m.isStyleLoaded || !m.isStyleLoaded()) { this._scaminApplySettled(250); return; }
+      this._scaminUpdate();
+    }, delay);
+  }
+
+  // Re-inject the current display-scale denominator (curDenom) into every gated chart
+  // layer's SCAMIN clause, but ONLY when curDenom has crossed a SCAMIN-ladder boundary
+  // since the last apply (≤19 boundaries across a full zoom sweep). curDenom is the
+  // physical display-scale denominator (zoom + lat + calibrated pxPitch — the same scale
+  // the HUD readout shows). This is the client half of scamin-layers.md.
+  //
+  // COST: each setFilter here makes MapLibre reload the layer's whole SOURCE (worker
+  // re-parse of every loaded tile + symbol re-placement), so this must only run from
+  // the settle-deferred moveend hook or the force paths (boot/restyle/rebuild) — never
+  // per move frame. With N active sets there are ~17×N gated layers but still one
+  // reload per source; the setFilter loop itself is main-thread (validation skipped).
+  _scaminUpdate(force) {
+    // Merged mode: the engine's zoom-expression gate hides/shows features itself, so
+    // there is nothing to setFilter — early-return kills the whole injection loop
+    // (this also covers the mid-zoom `move` hook, which funnels through here).
+    if (this._scaminMerged) return;
+    // Only in engine mode, and only once the style is loaded (getStyle() is undefined
+    // and setFilter throws before that — the `move`/`load` hooks can fire mid-load).
+    if (!this._scaminGate || !this._engineMode || !this._map) return;
+    if (!this._map.isStyleLoaded || !this._map.isStyleLoaded()) return;
+    // Engine mode gets the ladder from the tile57 set TileJSON; the JS builder gets it
+    // from the chart-source manager (values discovered from the loaded tiles' manifest).
+    const values = this._engineMode ? this._engineScaminValues : ((this._sources && this._sources.scaminValues) || []);
+    const denom = scaleDenomPhysical(this._map.getZoom(), this._map.getCenter().lat, this._pxPitch);
+    let band = 0;
+    for (const v of values) if (v < denom) band++;
+    // Mid-gesture (the `move` hook) crossings get a LIGHT apply: sync the new cutoff
+    // to the worker layers so tiles PARSED FROM HERE ON use it, but skip the source
+    // reload — a full setFilter reloads the whole source (re-parse of every loaded
+    // tile + cache reset + symbol re-placement), and doing that up to ~10× inside one
+    // continuous zoom was ~80-90 wasted chart-tile re-parses per gesture whose
+    // results were stale on arrival anyway. Already-loaded tiles keep their old
+    // cutoff until the settle apply — which stays a real (reloading) apply, so the
+    // settled chart is always SCAMIN-exact.
+    const light = !force && this._map.isZooming();
+    // A light apply leaves loaded tiles stale, so a later settle pass must run even
+    // when the band hasn't moved since (the usual dedup would skip it).
+    if (!force && band === this._scaminBandLast && !(this._scaminLightApplied && !light)) return;
+    this._scaminBandLast = band;
+    this._scaminLastApply = performance.now(); // rate-limits the mid-zoom applies (move hook)
+    const map = this._map;
+    let anyLight = false;
+    for (const id of this._scaminGatedLayers()) {
+      // The gated-layer cache can go stale across style diffs/rebuilds, and
+      // MapLibre's getFilter THROWS on a missing id — unguarded, one stale
+      // entry killed this whole loop mid-iteration (silently, in a timer),
+      // freezing every later layer's cutoff at its last-applied denominator
+      // ("light with SCAMIN 499999 dips out at 255000").
+      let f = null;
+      try { f = map.getLayer(id) ? map.getFilter(id) : null; } catch { /* stale id */ }
+      if (!f) { this._scaminLayersCache = null; this._chartLayerIdsCache = null; continue; } // recollect next apply
+      const nf = JSON.parse(JSON.stringify(f));
+      if (setScaminDenom(nf, denom)) {
+        if (light && this._scaminLightSetFilter(id, nf)) { anyLight = true; continue; }
+        try { map.setFilter(id, nf, { validate: false }); } catch { /* ignore */ }
+      }
+    }
+    // A successful LIGHT apply did not reload anything, so there are no straggler
+    // parses to sweep — and arming the sweep mid-gesture would reintroduce the
+    // very reload churn the light path exists to avoid. The settle apply below
+    // (a real setFilter pass) arms it as usual.
+    if (anyLight) { this._scaminLightApplied = true; return; }
+    if (!light && this._scaminLightApplied) {
+      // Settle after light applies: the loop above went through the real setFilter,
+      // but MapLibre deep-equal-skips a filter identical to the light-applied one
+      // (same denom → no reload → tiles parsed before the light sync stay stale).
+      // Queue the gated sources for one explicit reload to guarantee exactness.
+      this._scaminLightApplied = false;
+      this._scaminQueueGatedReloads();
+    }
+    // Straggler sweep: a tile whose worker parse STARTED before the apply's layer
+    // broadcast but FINISHED after the reload keeps buckets built under the old
+    // filters — permanently (MapLibre re-parses only 'loaded' tiles). Symptom: a
+    // steady blank chart window that appears flakily at BOOT and never heals. That
+    // race is a ONE-TIME boot condition (once the layers are broadcast, later tiles
+    // parse correctly), so sweep the chart sources ONCE on the first idle after the
+    // first apply — NOT on every zoom settle. The old per-apply sweep re-reloaded
+    // (re-fetched + re-parsed) every tile of every source on every band crossing,
+    // which on a multi-pack install was a huge chunk of the "tiles crawl in after
+    // you stop scrolling" lag.
+    if (this._scaminSwept || this._scaminSweepArmed) return;
+    this._scaminSweepArmed = true;
+    map.once("idle", () => {
+      this._scaminSweepArmed = false;
+      this._scaminSwept = true;
+      try {
+        const tms = map.style.tileManagers || map.style.sourceCaches;
+        for (const sid of Object.keys(tms)) {
+          if (sid === "chart" || sid.startsWith("chart-")) map.style._reloadSource(sid);
+        }
+      } catch { /* internal API drifted — the next crossing still converges */ }
+    });
+  }
+
+  // The internals half of the light apply: set the layer's filter + mark it for the
+  // next worker-layer sync WITHOUT marking its source for reload (map.setFilter does
+  // both — see style._updateLayer). Uses the same style internals the chart-source
+  // manager already duck-types (style.tileManagers); returns false → the caller falls
+  // back to the full setFilter, so a MapLibre upgrade can only lose the optimisation.
+  _scaminLightSetFilter(id, nf) {
+    const st = this._map && this._map.style;
+    const ly = st && st._layers && st._layers[id];
+    if (!ly || typeof ly.setFilter !== "function" || !st._updatedLayers) return false;
+    try { ly.setFilter(nf); } catch { return false; }
+    st._updatedLayers[id] = true;
+    st._changed = true; // flushed by style.update() on the next render frame (we're zooming — frames are flowing)
+    return true;
+  }
+
+  // Force one reload of every source that carries gated layers — the settle-side
+  // counterpart of the light apply. Mirrors what style._updateLayer queues for a real
+  // setFilter (reload entry + paused manager, resumed by _reloadSource in the flush).
+  // Best-effort: if the internals moved, the next real crossing still reloads.
+  _scaminQueueGatedReloads() {
+    const m = this._map, st = m && m.style;
+    if (!st || !st._updatedSources || !st.tileManagers) return;
+    for (const id of this._scaminGatedLayers()) {
+      const ly = st._layers && st._layers[id];
+      const src = ly && ly.source;
+      if (!src || st._updatedSources[src] || !st.tileManagers[src]) continue;
+      st._updatedSources[src] = "reload";
+      st.tileManagers[src].pause();
+      st._changed = true;
+    }
+    // Make sure the flush actually runs — after moveend there may be no render queued.
+    if (typeof m._update === "function") m._update(true);
+    else if (typeof m.triggerRepaint === "function") m.triggerRepaint();
+  }
+
+  // Cached ids of the chart layers whose filter carries the SCAMIN clause (the gated
+  // layers). Recomputed after a diff/rebuild (cache nulled) — ~16 layers, cheap to scan.
+  _scaminGatedLayers() {
+    if (this._scaminLayersCache) return this._scaminLayersCache;
+    const style = this._map && this._map.getStyle();
+    if (!style || !style.layers) return []; // style not ready yet — don't cache the empty result
+    const out = [];
+    for (const l of style.layers) {
+      if (l.filter && setScaminDenom(JSON.parse(JSON.stringify(l.filter)), 0, true)) out.push(l.id);
+    }
+    return (this._scaminLayersCache = out);
+  }
+
+  // Cached ids of every layer drawn from a chart source (the tile57/2 schema's 6
+  // merged source-layers: areas, area_patterns, lines, point_symbols, soundings,
+  // text — across the live "chart" source and per-band "chart-<slug>" sources).
+  // Selected dynamically by source prefix, so this tracks whatever layers the engine
+  // style ships (SCAMIN twins and complex/sector lines are folded into those 6).
+  // Passing these to queryRenderedFeatures({layers}) lets MapLibre skip the basemap /
+  // OSM / no-data / overlay layers entirely, so the hot pick + inspect-hover paths
+  // query only what they'll keep instead of querying ALL layers and filtering by
+  // source afterward. Cache nulled on every style diff/rebuild (alongside
+  // _scaminLayersCache).
+  chartLayerIds() {
+    if (this._chartLayerIdsCache) return this._chartLayerIdsCache;
+    const style = this._map && this._map.getStyle();
+    if (!style || !style.layers) return []; // style not ready — don't cache the empty result
+    const out = [];
+    for (const l of style.layers) {
+      if (l.source && String(l.source).startsWith("chart") && !l.id.startsWith("scaminprobe")) out.push(l.id);
+    }
+    return (this._chartLayerIdsCache = out);
+  }
+
+  // Apply one engine diff op to the live map (ops only reference engine chart layers;
+  // a stray unknown layer just no-ops in the try/catch).
+  _applyStyleOp(op) {
+    const map = this._map; if (!map) return;
+    try {
+      if (op.op === "setFilter") map.setFilter(op.layer, op.value ?? null);
+      else if (op.op === "setPaintProperty") map.setPaintProperty(op.layer, op.property, op.value ?? null);
+      else if (op.op === "setLayoutProperty") map.setLayoutProperty(op.layer, op.property, op.value ?? null);
+    } catch { /* layer not in the live style — ignore */ }
+  }
+
+  // Keep the cached engine style consistent with applied ops, so a later FULL rebuild
+  // (basemap change, calibration) reflects the current mariner, not the boot one.
+  _applyOpsToCached(ops) {
+    const byId = {};
+    for (const l of this._engineStyle.layers) byId[l.id] = l;
+    for (const op of ops) {
+      const l = byId[op.layer]; if (!l) continue;
+      if (op.op === "setFilter") { if (op.value == null) delete l.filter; else l.filter = op.value; }
+      else if (op.op === "setPaintProperty") { l.paint = l.paint || {}; if (op.value == null) delete l.paint[op.property]; else l.paint[op.property] = op.value; }
+      else if (op.op === "setLayoutProperty") { l.layout = l.layout || {}; if (op.value == null) delete l.layout[op.property]; else l.layout[op.property] = op.value; }
+    }
+  }
+
+  // Full engine-style rebuild: re-fetch for the current mariner + setStyle(diff:true) so
+  // MapLibre applies the delta without flicker; overlays self-heal on style.load.
+  async _engineRebuild() {
+    const style = await this._fetchEngineStyle();
+    if (!style || !this._map) return;
+    this._engineStyle = style;
+    // Don't setStyle mid-load (re-entrancy → "already running"); defer to the next idle.
+    if (!this._map.isStyleLoaded()) { this._map.once("idle", () => { this._map.setStyle(this.buildStyle(), { diff: true }); this._lastMariner = this._marinerQuery(); this._scaminForceWhenReady(); }); return; }
+    this._map.setStyle(this.buildStyle(), { diff: true });
+    this._lastMariner = this._marinerQuery();
+    this._scaminForceWhenReady(); // re-inject the cutoff once the new style settles
+  }
+
+  // The JS S-52 style builder — the Go-backend render path. Assembles the chart layers
+  // (buildChartLayers, from baked per-feature tags) + basemap + no-data. On the tile57
+  // backend this is superseded by the engine style; _engineStyleMerged still calls it to
+  // reuse the client's own basemap/no-data chrome (grafting it onto the engine layers).
+  _buildStyleJS() {
     // The CHART band + server-set sources (per-band prebaked sources in BOTH modes,
     // plus one source per active server pack) are assembled by the chart-source
     // manager, keyed by its cache-bust token. The element then adds the basemap +
@@ -1195,7 +2007,11 @@ export class ChartCanvas extends HTMLElement {
 
     const basemap = this.getAttribute("basemap") || "none";
     if (basemap === "osm") {
-      sources.osm = { type: "raster", tileSize: 256, maxzoom: 19, tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "© OpenStreetMap contributors" };
+      // Fetch OSM raster tiles through the server proxy (same-origin): OSM's tile
+      // policy 403s direct browser requests that can't set an identifying
+      // User-Agent (a forbidden fetch header); the server sets a compliant one.
+      const osmUrl = new URL(this._assets + "osm/{z}/{x}/{y}.png", location.href).href;
+      sources.osm = { type: "raster", tileSize: 256, maxzoom: 19, tiles: [osmUrl], attribution: "© OpenStreetMap contributors" };
       layers.push({ id: "osm", type: "raster", source: "osm", paint: this._osmRasterPaint() });
     } else if (basemap === "osmvec" && this._osmvecArchive) {
       // Hosted OSM vector (Protomaps schema). Styled per source-layer (no kind
@@ -1258,4 +2074,31 @@ export class ChartCanvas extends HTMLElement {
 // and refilter that single id directly.
 
 // Custom element names must contain a hyphen (HTML spec) — `<chart-plotter>`.
+// Find the tile57 filter-gate SCAMIN clause `[">=", ["coalesce",["get","scamin"],1e12], N]`
+// and the overscale shape `[">", ["coalesce",["get","oscl"],0], N]` (the S-52
+// §10.1.10 AP(OVERSC01) hatch + the overscaled/at-scale fill split; the at-scale
+// pass wraps it in ["!", …], which this recursion reaches on its own; ../tile57
+// overscale spec) — anywhere in a MapLibre filter and set each clause's literal N
+// to `denom` (the current display-scale denominator). (The band-handoff `smax`
+// twin is retired: the coverage-clipped composite owns cross-band occlusion
+// geometrically, and the engine style emits no smax clause.)
+// detectOnly=true just reports whether a gated clause is present (no mutation).
+// Returns true if a clause was found. Mutates `node` in place.
+function setScaminDenom(node, denom, detectOnly) {
+  if (!Array.isArray(node)) return false;
+  if (node[0] === ">=" && Array.isArray(node[1]) && node[1][0] === "coalesce"
+      && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "scamin") {
+    if (!detectOnly) node[2] = denom;
+    return true;
+  }
+  if (node[0] === ">" && Array.isArray(node[1]) && node[1][0] === "coalesce"
+      && Array.isArray(node[1][1]) && node[1][1][0] === "get" && node[1][1][1] === "oscl") {
+    if (!detectOnly) node[2] = denom;
+    return true; // overscale gate: hatch + fill-areas#oscl / negated fill-areas split
+  }
+  let found = false;
+  for (const c of node) if (setScaminDenom(c, denom, detectOnly)) found = true;
+  return found;
+}
+
 customElements.define("chart-canvas", ChartCanvas);

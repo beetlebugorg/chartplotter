@@ -31,7 +31,7 @@ func TestCellIndexBuild(t *testing.T) {
 		t.Skipf("testdata cell absent: %v", err)
 	}
 	dir := t.TempDir()
-	cdir := filepath.Join(dir, "ENC_ROOT", cell)
+	cdir := filepath.Join(dir, "loose", "cells")
 	if err := os.MkdirAll(cdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestCellIndexFreshness(t *testing.T) {
 		t.Skipf("testdata cell absent: %v", err)
 	}
 	dir := t.TempDir()
-	cdir := filepath.Join(dir, "ENC_ROOT", cell)
+	cdir := filepath.Join(dir, "loose", "cells")
 	if err := os.MkdirAll(cdir, 0o755); err != nil {
 		t.Fatal(err)
 	}

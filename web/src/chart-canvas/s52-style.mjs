@@ -91,12 +91,39 @@ export function seabedTokenExpr(mariner) {
     "DEPIT"];
 }
 
+// A colour token may carry a ",<alpha>" suffix: S-101 ColorFill emits "TOKEN,alpha"
+// (e.g. "TRFCF,0.75" for traffic-separation zones; also "CHGRF,0.5", "NODTA,0.5"),
+// and the alpha rides in the same color_token property. Match the palette on the
+// BASE token (before the comma) — else "TRFCF,0.75" != "TRFCF" and the fill falls to
+// the opaque magenta FALLBACK — and fold the alpha into an rgba fill colour
+// (fill-opacity is not data-driven in MapLibre; fill-color is). A token with no comma
+// is matched whole, exactly as before (no regression for opaque fills).
+export function colorTokenFill(prop, palette) {
+  const t = palette || {};
+  const cases = [];
+  let n = 0;
+  for (const tok in t) { cases.push(tok, t[tok]); n++; }
+  if (!n) return FALLBACK;
+  // Both `case` branches must be the same type, and to-rgba needs a `color`; palette
+  // values are hex strings, so wrap the match in to-color.
+  return ["let", "ct", ["coalesce", ["get", prop], ""],
+    ["let", "ci", ["index-of", ",", ["var", "ct"]],
+      ["case",
+        ["<", ["var", "ci"], 0], ["to-color", ["match", ["var", "ct"], ...cases, FALLBACK]],
+        ["let", "c", ["to-color", ["match", ["slice", ["var", "ct"], 0, ["var", "ci"]], ...cases, FALLBACK]],
+          ["rgba",
+            ["at", 0, ["to-rgba", ["var", "c"]]],
+            ["at", 1, ["to-rgba", ["var", "c"]]],
+            ["at", 2, ["to-rgba", ["var", "c"]]],
+            ["to-number", ["slice", ["var", "ct"], ["+", ["var", "ci"], 1]]]]]]]];
+}
+
 // Fill colour for the `areas` layer: depth areas (carry drval1) shade live via
-// SEABED01; everything else uses its baked colour token.
+// SEABED01; everything else uses its baked colour token (which may carry a ",alpha").
 export function areasFillColor(palette, mariner) {
   return ["case",
     ["has", "drval1"], colorMatch(seabedTokenExpr(mariner), undefined, palette),
-    colorExpr("color_token", undefined, palette)];
+    colorTokenFill("color_token", palette)];
 }
 
 // SHALLOW_PATTERN filter: depth areas on the shallow side of the live safety
@@ -307,11 +334,26 @@ export function dateFilter(mariner) {
         true]]];
 }
 
+// Viewing-group selection (S-52 §14.5, fine-grained content control): each feature
+// is baked with its raw viewing-group number `vg` (the most-visible draw's VG, so
+// band(vg) === cat). The mariner DENY-LIST mariner.viewingGroupsOff lists the vg ids
+// turned off; a feature is hidden iff its vg is in that set. A feature with no `vg`
+// (unbanded, or a tile baked before vg existed) always shows. Empty deny-list = no
+// filter. Byte-identical to tile57's viewingGroupFilter (src/chartstyle/chartstyle.zig).
+export function viewingGroupFilter(mariner) {
+  const off = mariner.viewingGroupsOff;
+  if (!off || !off.length) return null;
+  return ["any", ["!", ["has", "vg"]], ["!", ["in", ["get", "vg"], ["literal", off]]]];
+}
+
 // Combine a layer's intrinsic (base) filter with the live category +
 // boundary-style filters (the two client-side portrayal axes baked as
 // per-feature `cat`/`bnd`).
 export function combineFilters(base, mariner) {
   const parts = ["all", categoryFilter(mariner), boundaryFilter(mariner), pointStyleFilter(mariner), sectorLegFilter(mariner)];
+  // Fine-grained viewing-group deny-list (S-52 §14.5) — null when nothing is off.
+  const vgf = viewingGroupFilter(mariner);
+  if (vgf) parts.push(vgf);
   // Date-dependent display (S-52 §10.4.1.1, mandatory + default-on): hide a
   // dated feature outside its validity period for the viewing date. The escape
   // valve mariner.dateDependent === false shows all dates (only dated features

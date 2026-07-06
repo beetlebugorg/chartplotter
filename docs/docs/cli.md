@@ -11,8 +11,8 @@ flags for a command at any time.
 
 ## version
 
-Print the version and whether the S-101 Portrayal Catalogue is built into the
-binary.
+Print the chartplotter version and the version of the linked libtile57 engine
+(which carries the embedded S-101 catalogue).
 
 ```sh
 chartplotter version
@@ -20,9 +20,10 @@ chartplotter version
 
 ## emit-assets
 
-Generate the S-101 client assets into a directory. These files tell the browser
-how to draw the chart: the color tables, the symbol sprites, the line styles, and
-the area patterns.
+Generate the S-101 client assets into a directory, using the same libtile57
+asset baker that renders the tiles. These files tell the browser how to draw
+the chart: the color tables, the symbol sprites, the line styles, and the area
+patterns.
 
 ```sh
 chartplotter emit-assets DIR
@@ -31,30 +32,41 @@ chartplotter emit-assets DIR
 | Argument / flag | Description |
 | --- | --- |
 | `DIR` | Output directory. The command writes the asset files here. |
-| `--s101 DIR` | Emit from an external S-101 PortrayalCatalog directory instead of the embedded catalogue. |
+| `--s101 DIR` | Emit from an external S-101 PortrayalCatalog directory instead of libtile57's embedded catalogue (for iterating on symbology rules). |
 | `--css FILE` | Palette stylesheet under `Symbols/` (default `daySvgStyle.css`). |
 
 ## bake
 
-Generate a PMTiles archive from S-57 ENC data. Inputs can be `.000` base cells,
-directories (scanned for `*.000` and `*.zip`), and NOAA ENC `.zip` bundles. The
-command groups each cell with its update files (`.001`, `.002`, …) and applies
-them.
+Bake S-57 ENC data into chart tiles with the libtile57 engine. Inputs can be
+`.000` base cells, directories (scanned for `*.000` and `*.zip`), and NOAA ENC
+`.zip` bundles. The command groups each cell with its update files (`.001`,
+`.002`, …) and the engine applies them.
+
+By default the output is a **self-contained chart bundle** directory:
+`tiles/chart.pmtiles`, a per-scheme MapLibre style
+(`assets/style-{day,dusk,night}.json`), the client assets, and a
+`manifest.json`. A `-o` value ending in `.pmtiles` names the bundle directory
+by its stem (`-o charts.pmtiles` → `charts/`).
 
 ```sh
-chartplotter bake -o OUT.pmtiles IN [IN ...]
+chartplotter bake -o charts IN [IN ...]
 ```
+
+With `--bands`, the output is instead one gap-clipped PMTiles archive **per
+navigational band** (`<out>-<slug>.pmtiles`), plus an optional manifest and a
+`<out>-aux.zip` of companion files — the format the static demo and widget
+workflows use.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-o, --out FILE` | `charts.pmtiles` | Output archive. |
-| `--bands` | off | Write one gap-clipped archive per navigational band (`<out>-<slug>.pmtiles`) so the client reproduces the best-available display. |
-| `--manifest FILE` | — | Also write a `charts-index.json` manifest for the app's `catalog=…` option. |
+| `-o, --out PATH` | `charts.pmtiles` | Output bundle directory (default mode) or archive stem (`--bands`). |
+| `--bands` | off | Write one gap-clipped archive per navigational band so the client reproduces the best-available display. |
+| `--format mlt\|mvt` | `mlt` | Tile encoding. MLT (MapLibre Tile) is the engine default and needs MapLibre GL JS 5.12+ to decode; use `mvt` for consumers without an MLT decoder. |
+| `--manifest FILE` | — | With `--bands`, also write a `charts-index.json` manifest for the app's `catalog=…` option. |
 | `--base-url URL` | archive basename | URL or prefix for the archive in the manifest. |
-| `--overzoom` | off | Overzoom every band down to the world view, so a standalone large-scale set stays visible when zoomed out. |
+| `--overzoom` | off | With `--bands`, overzoom every band down to the world view, so a standalone large-scale set stays visible when zoomed out. |
 | `--max-zoom N` | native | Cap the highest baked zoom (`0` = each cell's native band max), then let the client overzoom. |
-| `--s101 DIR` | embedded | Override the embedded catalogue with an external S-101 PortrayalCatalog (requires `--s101-fc`). |
-| `--s101-fc FILE` | — | S-101 `FeatureCatalogue.xml` path, used with `--s101`. |
+| `--tile57` | — | Accepted for backwards compatibility and ignored: libtile57 is the only engine, and the bundle output it selected is now the default. |
 
 ## catalog-json
 
@@ -74,7 +86,7 @@ chartplotter catalog-json IN.xml OUT.json
 
 Serve the web frontend together with the server-side baking and tile-serving API.
 The frontend is built into the binary, so the server needs no files on disk.
-Chart imports are parsed and baked into tiles in the backend; the browser only
+Chart imports are baked into tiles in the backend by libtile57; the browser only
 renders pre-baked tiles.
 
 ```sh
@@ -86,10 +98,11 @@ chartplotter serve [flags]
 | `--host` | `127.0.0.1` | Address to bind. |
 | `--port` | `8080` | Port to bind. |
 | `--assets DIR` | embedded | Serve static assets from this directory instead of the embedded bundle. Use this when you develop the frontend. |
-| `--cache DIR` | XDG cache | Directory for regenerable baked `.pmtiles` tile sets. Defaults to `~/.cache/chartplotter`. |
+| `--cache DIR` | XDG cache | Directory for regenerable baked tile sets. Defaults to `~/.cache/chartplotter`. |
 | `--data DIR` | XDG data | Directory for source ENC (district zips, raw cells). This is kept safe and never auto-deleted. |
 | `--clear-cache` | off | Delete the cached baked archives on startup for a clean slate (source ENC is kept). |
-| `--s101 DIR` | embedded | Override the embedded catalogue with an external S-101 PortrayalCatalog (requires `--s101-fc`). |
+| `--tile57 PATH` | — | Also register a **live** libtile57 tile set from this ENC root, `.zip`, or `.000`: tiles are generated on demand from the cells, with no prebake. The set is registered as `tile57` (TileJSON at `/tiles/tile57.json`). |
+| `--s101 DIR` | embedded | Generate the served S-101 client assets from an external PortrayalCatalog directory instead of libtile57's embedded catalogue (for iterating on symbology rules; requires `--s101-fc`). |
 | `--s101-fc FILE` | — | S-101 `FeatureCatalogue.xml` path, used with `--s101`. |
 
 When you bind to a loopback address (`127.0.0.1`, `localhost`, or `::1`), the
@@ -130,10 +143,14 @@ chartplotter simulate [flags]
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Bind host. |
 | `--port` | `10110` | Bind port (IANA NMEA-0183-over-IP). |
-| `--center LAT,LON` | `38.978,-76.478` | Own-ship start position. |
+| `--scenario NAME` | — | Named Annapolis preset that sets the start, route, and traffic. Use `--scenario list` to print the presets. |
+| `--center LAT,LON` | `38.978,-76.478` | Own-ship start position (ignored when `--scenario` is set). |
 | `--course` | `45` | Own-ship course, degrees true. |
 | `--speed` | `6` | Own-ship speed, knots. |
 | `--targets` | `6` | Number of AIS targets. |
 | `--collision` | on | Put one target on a collision course (`--no-collision` to disable). |
+| `--sailing` | off | Own-ship tacks (COG weaves) with varying leeway, so heading ≠ COG. |
+| `--drop-gps N` | `0` | Stop own-ship position fixes after N seconds, to test stale or lost GPS (`0` = never). |
 | `--seed` | `1` | RNG seed for reproducible scenarios. |
-| `--cell FILE` | — | S-57 cell to keep traffic in navigable water. |
+| `--cell FILE` | — | S-57 cell (`.000` or exchange `.zip`) to keep traffic in navigable water. |
+| `--min-depth M` | `2` | Minimum charted depth (DRVAL1, meters) that counts as navigable water when `--cell` is set. |

@@ -30,7 +30,7 @@ import { esc, fmtIssue, fmtScale } from "../lib/util.mjs";
 import { seaColor, landColor, coastColor } from "../chart-canvas/s52-style.mjs"; // our own basemap palette (consistent with the chart)
 import {
   STYLE, widgetBody, libraryBody, packSearch, providersCol, packsHeader,
-  packBadge, userPackRow, packRow, packsCol, emptyRow, downloadBtn,
+  packBadge, userPackRow, packRow, packsCol, emptyRow, selectBtn,
   detailEmpty, detailUnknownSet, detailPack, installedActions, previewMapHost,
   importDetail, dataFreshness, agreementModal, millerBack, packCellList,
 } from "./chart-library.view.mjs";
@@ -101,12 +101,13 @@ export class ChartLibrary extends HTMLElement {
     this._ienc = undefined;
     this._iencPromise = null;
 
-    // Download queue: one pack at a time; clicking Download on another while one
-    // runs enqueues it. `_activeDownloadKey` is the set being baked now; `_dlQueue`
-    // holds the waiting pack objects. Each detail button reflects its state.
-    this._activeDownloadKey = null;
-    this._dlQueue = [];
     this._uninstalling = false; // an uninstall job is in flight (busy gate)
+    // Multi-select: keys of the packs checked for the ONE "Download selected" batch (a
+    // single cross-pack bake for the whole selection — there are no per-pack download
+    // buttons). Cleared on provider switch + after a batch.
+    this._selected = new Set();
+    this._batchBusy = false;  // a "Download selected" batch job is in flight
+    this._batchStatus = null; // latest formatted progress → the in-dialog banner
 
     // The installed/disabled set state, kept in sync from the shell via show()/
     // refresh() reading the ChartService registry. Pure render input.
@@ -178,7 +179,7 @@ export class ChartLibrary extends HTMLElement {
 
   // True while a download / import / uninstall job is running (the shell's dev
   // panel + task gating read this).
-  get busy() { return !!this._activeDownloadKey || this._dlQueue.length > 0 || this._uninstalling; }
+  get busy() { return this._batchBusy || this._uninstalling; }
 
   // -- dependency proxies (mirror the shell's old getters) ------------------
   get _catalog() { return this._dl ? this._dl.catalog : []; }
@@ -204,14 +205,30 @@ export class ChartLibrary extends HTMLElement {
     if (!this._api) return;
     try {
       const packs = await this._api.packs();
-      this._installedSets = new Set(packs.map((p) => p.name));
-      this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name));
-      // Keep each pack's extracted metadata (title/agency/scale/cellCount/imported/
-      // bounds) for the User-Charts rows + detail — the per-upload info display.
+      // Provider-enc-root: /api/packs returns one entry per PROVIDER with an installed-
+      // districts list. The UI still selects/labels by a "<provider>-<district>" key, so
+      // expand each provider's districts into that key set; enabled state + metadata are
+      // provider-level (one archive per provider).
+      const keys = new Set();
+      for (const p of packs) for (const d of p.districts || []) keys.add(p.name + "-" + d);
+      this._installedSets = keys;                                     // "<provider>-<district>" keys
+      this._installedProviders = new Set(packs.map((p) => p.name));   // bare provider names
+      this._disabled = new Set(packs.filter((p) => !p.enabled).map((p) => p.name)); // provider-keyed
+      // Provider metadata (title/agency/scale/cellCount/imported/bounds), keyed by
+      // provider — used by the User-Charts rows + detail.
       this._packMeta = new Map(packs.map((p) => [p.name, p]));
     } catch (e) { /* keep last */ }
     try { const cells = await this._api.cells(); if (cells) this._installed = cells; } catch (e) { /* keep last */ }
   }
+
+  // Split a "<provider>-<district>" pack key into its provider / district halves,
+  // mirroring the server's providerOf/districtOf (the provider is the baked SET name,
+  // the district is the ENC_ROOT subfolder). A bare key with no "-" is a provider.
+  _providerKey(key) { const i = (key || "").indexOf("-"); return i > 0 ? key.slice(0, i) : (key || ""); }
+  _districtKey(key) { const i = (key || "").indexOf("-"); return i > 0 ? key.slice(i + 1) : ""; }
+
+  // Whether a pack key's PROVIDER is currently disabled (toggle is provider-level).
+  _isDisabled(key) { return this._disabled ? this._disabled.has(this._providerKey(key)) : false; }
 
   // -- chart packs (Coast Guard districts) ----------------------------------
   // Discovery helpers delegate to the downloader (this._dl).
@@ -508,7 +525,7 @@ export class ChartLibrary extends HTMLElement {
         if (hit === undefined) cls += " dim";
         else { cls += " match"; if (hit) sub = `matches “${esc(hit.l || hit.n)}”`; }
       }
-      return packRow({ key: pk.key, title: pk.title, cls, sub, cg: pk.cg, badge: this._packBadge(pk.key, pk.installed) });
+      return packRow({ key: pk.key, title: pk.title, cls, sub, cg: pk.cg, badge: this._packBadge(pk.key, pk.installed), selectable: !pk.installed, checked: this._selected.has(pk.key) });
     }).join("");
     return packsCol({ header: this._packsHeader(prov), rows });
   }
@@ -522,7 +539,7 @@ export class ChartLibrary extends HTMLElement {
   // can see at a glance which packs are downloading/queued); otherwise an installed
   // pack shows "Active"/"Disabled", and a plain not-installed pack shows nothing.
   _packBadge(key, installed) {
-    return packBadge({ installed, disabled: this._disabled.has(key), downloadState: this._packDownloadState(key) });
+    return packBadge({ installed, disabled: this._isDisabled(key), downloadState: null });
   }
 
   // Pane-2 header: the provider's name + a one-line description and when its source
@@ -532,7 +549,7 @@ export class ChartLibrary extends HTMLElement {
     if (prov === "noaa") line = `U.S. Coast Guard districts${this._catalogDate ? ` · catalogue ${fmtIssue(this._catalogDate)}` : ""} · ${this._catalog.length.toLocaleString()} charts`;
     else if (prov === "ienc") line = "USACE inland waterway ENC";
     else line = "Charts you've imported from a file";
-    return packsHeader({ providerName: this._providerName(prov), line });
+    return packsHeader({ providerName: this._providerName(prov), line, selectable: prov === "noaa" || prov === "ienc", selectedCount: this._selected.size, batch: this._batchBusy ? this._batchBanner() : null });
   }
 
   // Pane 3: the selected pack's detail — coverage map + download/remove.
@@ -549,11 +566,11 @@ export class ChartLibrary extends HTMLElement {
     if (!pk) {
       return detailUnknownSet({ label: this._setLabel(key), key, installed, busy });
     }
-    const disabled = this._disabled.has(key);
+    const disabled = this._isDisabled(key);
     const tick = installed ? (disabled ? ' <span class="m-badge off">Disabled</span>' : ' <span class="m-badge on">Active</span>') : "";
     const act = installed
       ? installedActions({ key, disabled, busy })
-      : this._downloadBtnHtml(key);
+      : selectBtn(key, this._selected.has(key));
     let title, sub, meta;
     if (pk.kind === "noaa") {
       const d = DISTRICTS.find((x) => x.cg === pk.cg);
@@ -672,6 +689,7 @@ export class ChartLibrary extends HTMLElement {
     this._selProvider = id;
     this._selPack = null;
     this._activeDistrict = null;
+    this._selected.clear(); // selections don't carry across providers
     const r = this.shadowRoot;
     r.querySelectorAll(".m-row[data-prov]").forEach((el) => el.classList.toggle("sel", el.dataset.prov === id));
     const cols = r.querySelectorAll(".miller > .mcol");
@@ -734,13 +752,81 @@ export class ChartLibrary extends HTMLElement {
     };
     r.querySelectorAll(".m-row[data-prov]").forEach((row) => onActivate(row, () => this._selectProvider(row.dataset.prov)));
     r.querySelectorAll(".m-row[data-pack]").forEach((row) => onActivate(row, () => this._selectPack(row.dataset.pack, row.dataset.cg ? +row.dataset.cg : null)));
+    // Multi-select checkboxes + the "Download selected" batch button (stopPropagation so
+    // ticking a box doesn't also select the row / advance the phone drill-down).
+    r.querySelectorAll(".pk-check[data-check]").forEach((cb) => {
+      cb.addEventListener("click", (e) => e.stopPropagation());
+      // Space/Enter must tick the box, NOT bubble to the row (which would drill into it).
+      cb.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") e.stopPropagation(); });
+      cb.addEventListener("change", (e) => { e.stopPropagation(); this._toggleSelected(cb.dataset.check, cb.checked); });
+    });
+    const dl = r.querySelector("[data-download-selected]");
+    if (dl) dl.addEventListener("click", (e) => { e.stopPropagation(); this._downloadSelectedPacks(); });
+  }
+
+  // Check/uncheck a pack for the batch; update the header button in place (no column
+  // re-render → the other checkboxes keep their state and the map doesn't flicker).
+  _toggleSelected(key, on) {
+    if (on) this._selected.add(key); else this._selected.delete(key);
+    const btn = this.shadowRoot.querySelector("[data-download-selected]");
+    if (!btn) return;
+    const n = this._selected.size;
+    btn.textContent = n ? `⬇ Download selected (${n})` : "⬇ Download selected";
+    btn.disabled = !n || this._batchBusy;
+    btn.classList.toggle("hidden", !n);
+  }
+
+  // Build one pack's /api/import/packs spec: a district zip (or per-cell on retry), or
+  // an IENC cell list. useCells forces the per-cell fallback (when the bundle zip fails).
+  _packSpec(pk, useCells) {
+    if (pk.kind === "ienc") return { set: pk.key, cells: (pk.cells || []).map((c) => ({ name: c.name, url: c.url })) };
+    const all = this._districtCellNames(pk.cg);
+    if (useCells) return { set: pk.key, cells: all.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" })) };
+    return { set: pk.key, zipUrl: this._districtZipUrl(pk.cg), names: all };
+  }
+
+  // "Download selected": download the whole checked selection of districts into their
+  // provider ENC_ROOTs and re-bake each touched provider (one archive per provider) in
+  // ONE job — best-available across cells/districts is resolved inside that single archive.
+  async _downloadSelectedPacks() {
+    if (this._batchBusy) return; // one batch at a time
+    const prov = this._selProvider || "noaa";
+    const packObjs = this._providerPacks(prov).filter((p) => this._selected.has(p.key) && !p.installed);
+    if (!packObjs.length) return;
+    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
+    this._batchBusy = true;
+    this._reflectDownloadState();
+    const name = packObjs.length === 1 ? (packObjs[0].title || packObjs[0].key) : `${packObjs.length} chart packs`;
+    const t = this._notify ? this._notify.task("download:batch", { label: name }) : null;
+    // Drive BOTH the notification task and the in-dialog banner (the toast renders UNDER
+    // the drawer, so the banner is what the user actually sees while the dialog is open).
+    const onStatus = (p) => {
+      if (t) { if (p.label) t.label(p.label); t.progress(p.frac, this._batchSub(p), p.detail); }
+      this._updateBatchProgress(p);
+    };
+    let ok = false;
+    try {
+      await this._api.importPacksAndWait(packObjs.map((p) => this._packSpec(p, false)), { name, onStatus });
+      ok = true;
+    } catch (e) {
+      console.warn("[packs] bundle path failed — per-cell:", e.message);
+      try { await this._api.importPacksAndWait(packObjs.map((p) => this._packSpec(p, true)), { name, onStatus }); ok = true; }
+      catch (e2) { console.error("[packs] batch download failed:", e2.message); if (t) t.fail(e2); }
+    }
+    if (t && ok) t.done();
+    this._selected.clear();
+    this._batchBusy = false;
+    this._batchStatus = null;
+    await this._syncRegistry();
+    this._changed();
+    if (this._active) this.render();
   }
 
   // Wire the detail-pane action buttons (re-run after the detail column is swapped).
   _wireDetailButtons() {
     const r = this.shadowRoot;
-    r.querySelectorAll(".pk-btn[data-getpack]").forEach((b) =>
-      b.addEventListener("click", (e) => { e.stopPropagation(); this._downloadSelected(b.dataset.getpack); }));
+    r.querySelectorAll(".pk-btn[data-select]").forEach((b) =>
+      b.addEventListener("click", (e) => { e.stopPropagation(); this._toggleSelectPack(b.dataset.select); }));
     r.querySelectorAll(".pk-btn[data-uninstall-set]").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); this._uninstallSet(b.dataset.uninstallSet); }));
     r.querySelectorAll(".pk-btn[data-disable]").forEach((b) =>
@@ -793,118 +879,49 @@ export class ChartLibrary extends HTMLElement {
 
   _emitHiddenCells() { this._emit("cells-hidden-changed", { hidden: [...this._hiddenCells] }); }
 
-  // Click Download on a pack: enqueue it (or start immediately if idle).
-  _downloadSelected(key) {
-    const pk = this._providerPacks(this._selProvider || "noaa").find((p) => p.key === key);
-    if (!pk) return;
-    if (this._activeDownloadKey === key) return;          // downloading now
-    if (this._dlQueue.some((j) => j.key === key)) return; // already queued
-    if (this._installedSets && this._installedSets.has(key)) return; // already have it
-    this._dlQueue.push(pk);
-    this._reflectDownloadState();
-    this._pumpDownloads();
+  // Re-render the packs column so its header reflects the current selection count and,
+  // during a batch, the in-dialog download banner (no map flicker — only pane 2 swaps).
+  _reflectDownloadState() { if (this._active) this._refreshPacksCol(); }
+
+  // Toggle a pack in the batch selection from the detail pane's Select button.
+  _toggleSelectPack(key) {
+    if (this._selected.has(key)) this._selected.delete(key); else this._selected.add(key);
+    this._reflectDownloadState(); // header button count + list checkboxes
+    this._updateDetail();         // the detail Select button label
   }
 
-  // Run the next queued download, one at a time. Re-entrant-safe.
-  async _pumpDownloads() {
-    if (this._activeDownloadKey || !this._dlQueue.length) return;
-    const pk = this._dlQueue.shift();
-    this._activeDownloadKey = pk.key;
-    this._reflectDownloadState();
-    try {
-      if (pk.kind === "ienc") await this._runDownloadIenc(pk);
-      else if (pk.kind === "noaa") await this._runDownloadPack(pk.cg);
-    } catch (e) { console.error("[download]", pk.key, e); }
-    this._activeDownloadKey = null;
-    this._reflectDownloadState();
-    this._pumpDownloads(); // next in line
+  // Friendly name for a set key, for the progress banner: a NOAA district's region, an
+  // IENC/user pack's label, else the key.
+  _packName(key) {
+    const m = /^noaa-d(\d+)$/.exec(key || "");
+    if (m) { const d = DISTRICTS.find((x) => x.cg === +m[1]); if (d) return d.region; }
+    return this._setLabel ? this._setLabel(key) : (key || "");
   }
 
-  // Reflect queue state on the visible pack buttons (no full re-render → no map
-  // flicker): update each Download button in place, and refresh the pack list.
-  _reflectDownloadState() {
-    if (!this._active) return;
-    this._refreshDownloadButtons();
-    this._refreshPacksCol();
+  // "Mid-Atlantic (2 of 4) · Generating coastal…" — which pack, its place in the batch,
+  // and the current step, so a multi-pack download never looks like it's stuck on one line.
+  _batchSub(p) {
+    const pack = p && p.pack ? this._packName(p.pack) : "";
+    const count = p && p.packTotal > 1 ? ` (${p.packNum || 1} of ${p.packTotal})` : "";
+    return (pack ? `${pack}${count} · ` : "") + ((p && p.sub) || "Downloading…");
   }
 
-  _refreshDownloadButtons() {
-    this.shadowRoot.querySelectorAll(".pk-btn[data-getpack]").forEach((b) => {
-      b.outerHTML = this._downloadBtnHtml(b.dataset.getpack);
-    });
-    this._wireDetailButtons(); // re-bind the swapped button(s)
+  // The in-dialog banner descriptor for the packs header (bar + text).
+  _batchBanner() {
+    const p = this._batchStatus;
+    return { busy: true, sub: this._batchSub(p), detail: (p && p.detail) || "", frac: (p && p.frac) || 0 };
   }
 
-  // The Download button's HTML for a pack key, by queue state.
-  _downloadBtnHtml(key) {
-    return downloadBtn(key, {
-      downloading: this._activeDownloadKey === key,
-      queued: this._dlQueue.some((j) => j.key === key),
-    });
-  }
-
-  // Whether a pack key is downloading now / waiting in the queue (for list badges).
-  _packDownloadState(key) {
-    if (this._activeDownloadKey === key) return "downloading";
-    if (this._dlQueue.some((j) => j.key === key)) return "queued";
-    return null;
-  }
-
-  // Download an IENC river pack: the server fetches each cell's s57 zip from
-  // ienccloud.us and bakes them into the pack's set (ienc-<river>). Progress flows
-  // through a NotificationCenter task; on success we dispatch charts-changed.
-  async _runDownloadIenc(pk) {
-    const name = `Inland ENC · ${pk.title || pk.name || "river"}`;
-    const t = this._notify ? this._notify.task("download:" + pk.key, { label: `Preparing ${name}…` }) : null;
-    if (this._active) this.render();
-    try {
-      const cells = pk.cells.map((c) => ({ name: c.name, url: c.url }));
-      await this._api.importAndWait({ set: pk.key, cells }, { name, onStatus: this._jobStatus(t) });
-      if (t) t.done();
-    } catch (e) {
-      console.error(`[ienc] ${pk.key} download:`, e.message);
-      if (t) t.fail(e);
-    }
-    await this._syncRegistry();
-    this._changed();
-    if (this._active) this.render();
-  }
-
-  // Download a whole district pack: the SERVER fetches NOAA's per-district bundle
-  // into its data store and bakes it into its OWN tile set (noaa-d<cg>). Falls back
-  // to per-cell server fetches if the district bundle can't be opened.
-  async _runDownloadPack(cg) {
-    const d = DISTRICTS.find((x) => x.cg === cg);
-    const label = d ? `${d.region} pack` : `District ${cg}`;
-    const all = this._districtCellNames(cg);
-    if (!all.length) return;
-    if (all.every((n) => this._installed.has(n)) && this._installedSets.has("noaa-d" + cg)) return; // already installed
-    if (!await this._ensureAgreed()) return; // NOAA ENC User Agreement gate
-
-    this._activeDistrict = cg;
-    const set = "noaa-d" + cg;
-    const name = d ? `NOAA · ${d.region}` : "NOAA";
-    const t = this._notify ? this._notify.task("download:" + set, { label: name }) : null;
-    const onStatus = this._jobStatus(t);
-    if (this._active) this.render();
-    let ok = false;
-    try {
-      // The district bundle holds the whole district; bake the FULL district into the
-      // pack so it's a complete set (names=all, not just the not-yet-installed ones).
-      await this._api.importAndWait({ set, zipUrl: this._districtZipUrl(cg), names: all }, { name, onStatus });
-      ok = true;
-    } catch (e) {
-      console.warn(`[pack] ${label} server bundle failed — per-cell:`, e.message);
-      const cells = all.map((n) => ({ name: n, url: (this._byName.get(n) || {}).z || "" }));
-      try { await this._api.importAndWait({ set, cells }, { name, onStatus }); ok = true; }
-      catch (e2) { console.error(`[pack] ${label} server download failed:`, e2.message); if (t) t.fail(e2); }
-    }
-    if (t && ok) t.done();
-    await this._syncRegistry();
-    this._changed();
-    // Deliberately DON'T frame the map to the new pack — yanking the camera when a
-    // background download finishes is distracting.
-    if (this._active) this.render();
+  // Update the banner in place from a formatted status (no re-render → the bar animates).
+  _updateBatchProgress(p) {
+    this._batchStatus = p;
+    const r = this.shadowRoot;
+    const bar = r.querySelector(".dl-bar > span");
+    if (bar) bar.style.width = `${Math.max(0, Math.min(100, Math.round((p.frac || 0) * 100)))}%`;
+    const sub = r.querySelector(".dl-banner .dl-sub");
+    if (sub) sub.textContent = this._batchSub(p);
+    const detail = r.querySelector(".dl-banner .dl-detail");
+    if (detail) detail.textContent = p.detail || "";
   }
 
   // Find-a-chart search box.
@@ -960,28 +977,38 @@ export class ChartLibrary extends HTMLElement {
     return dataFreshness({ catalogDate: this._catalogDate, total: this._catalog.length.toLocaleString() });
   }
 
-  // Uninstall any pack by set name: DELETE /api/set removes the baked pmtiles/aux
-  // from the cache (source cells in the data store are kept), then re-render.
+  // Uninstall a pack (a "<provider>-<district>" key): DELETE /api/district removes that
+  // one district's ENC_ROOT subfolder and re-bakes the provider (dropping the provider
+  // set if it was the last district). The re-bake is a background job we follow to
+  // completion before re-syncing, so the map reflects the new archive. Delete reclaims
+  // disk; re-download to restore.
   async _uninstallSet(set) {
     if (this._uninstalling) return;
     if (!(this._installedSets && this._installedSets.has(set))) return;
     this._uninstalling = true;
+    const provider = this._providerKey(set), district = this._districtKey(set);
     const t = this._notify ? this._notify.task("uninstall:" + set, { label: `Removing ${this._setLabel(set)}…` }) : null;
     if (t) t.progress(null);
     if (this._active) this.render();
-    try { await this._api.deleteSet(set); if (t) t.done(); }
-    catch (e) { console.warn("[pack] remove", set, e); if (t) t.fail(e); }
+    try {
+      const { job } = district ? await this._api.deleteDistrict(provider, district) : (await this._api.deleteSet(provider), {});
+      if (job) await this._api.pollJob(job, { name: this._setLabel(set), onStatus: this._jobStatus(t) }); // wait for the re-bake
+      if (t) t.done();
+    } catch (e) { console.warn("[pack] remove", set, e); if (t) t.fail(e); }
     await this._syncRegistry();
     this._uninstalling = false;
     this._changed();
     if (this._active) this.render();
   }
 
-  // Show/hide an installed pack on the map. The state is SERVER-side (the data is
-  // kept; this only toggles rendering); call the API, re-sync, dispatch changed.
+  // Show/hide an installed provider on the map (the toggle is PROVIDER-level under
+  // provider-enc-root — one archive per provider can't hide a sub-region without a
+  // re-bake, so toggling any district toggles its whole provider). The state is
+  // SERVER-side (data is kept; this only toggles rendering).
   async _setPackDisabled(key, off) {
-    try { await this._api.setEnabled(key, !off); }
-    catch (e) { console.warn("[pack] toggle", key, e); }
+    const provider = this._providerKey(key);
+    try { await this._api.setEnabled(provider, !off); }
+    catch (e) { console.warn("[pack] toggle", provider, e); }
     await this._syncRegistry();
     this._changed();
     if (this._active) { this._updateDetail(); this._refreshPacksCol(); }

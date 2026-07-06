@@ -197,12 +197,13 @@ func TestImportFetchValidation(t *testing.T) {
 	}
 }
 
-// TestImportFetchDownloadOnly places a cell in the cache, then a per-cell
-// download-only fetch with an empty URL finds it cached (no NOAA) and finishes
-// "done" without baking — verifying the server-side download path + cache.
+// TestImportFetchDownloadOnly places a cell in the provider's ENC_ROOT, then a
+// per-cell download-only fetch with an empty URL finds it cached (no NOAA) and
+// finishes "done" without baking — verifying the server-side download path + cache.
+// A bare-provider set ("user") lands in a district named for the provider.
 func TestImportFetchDownloadOnly(t *testing.T) {
 	dir := t.TempDir()
-	cp := filepath.Join(dir, "ENC_ROOT", "US5MD1MC", "US5MD1MC.000")
+	cp := filepath.Join(dir, "USER", "ENC_ROOT", "user", "US5MD1MC.000")
 	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +256,7 @@ func TestImportFetchDownloadOnly(t *testing.T) {
 func TestServeCells(t *testing.T) {
 	dir := t.TempDir()
 	for _, n := range []string{"US5MD1MC", "U37AG001"} {
-		p := filepath.Join(dir, "ENC_ROOT", n, n+".000")
+		p := filepath.Join(dir, "loose", "cells", n+".000")
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}

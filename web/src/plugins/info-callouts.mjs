@@ -67,9 +67,11 @@ export class InfoCallouts {
   _refresh() {
     const m = this._map;
     const layers = this._pointSymbolLayers();
+    if (!layers.length) return; // no point-symbol layers yet → nothing to place, and
+    // NEVER fall back to querying ALL layers (that walks basemap/overlay/no-data too).
     let feats = [];
     try {
-      feats = (layers.length ? m.queryRenderedFeatures({ layers }) : m.queryRenderedFeatures())
+      feats = m.queryRenderedFeatures({ layers })
         .filter((f) => f.properties && CALLOUTS[f.properties.symbol_name] && f.geometry && f.geometry.type === "Point");
     } catch {
       return;

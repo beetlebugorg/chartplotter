@@ -39,7 +39,13 @@ export class HudController {
     this.getPxPitch = opts.getPxPitch || (() => undefined);
     this.coverScale = 0; // finest covering chart's CSCL — the overscale ×n reference
     this.detentZoom = null; // finest covering band's overscale cap — the wheel-zoom detent (not a hard maxZoom)
-    this._onMove = () => this.updateHud();
+    // `move` fires several times per animation frame during a pan/zoom; coalesce
+    // to at most one updateHud per frame (updateHud rebuilds the readout, so an
+    // unthrottled per-event rebuild was a per-frame HTML parse + reflow).
+    this._onMove = () => {
+      if (this._hudRaf) return;
+      this._hudRaf = requestAnimationFrame(() => { this._hudRaf = 0; this.updateHud(); });
+    };
     this.map.on("move", this._onMove);
     this.updateHud();
     this.updateZoomCap();
@@ -48,6 +54,7 @@ export class HudController {
 
   destroy() {
     if (this.map) this.map.off("move", this._onMove);
+    if (this._hudRaf) { cancelAnimationFrame(this._hudRaf); this._hudRaf = 0; }
     if (this._onDocClick) document.removeEventListener("pointerdown", this._onDocClick, true);
   }
 
@@ -103,12 +110,28 @@ export class HudController {
     const band = bandForZoom(z);
     // The READOUT shows the PHYSICAL scale (matches a ruler / other ENCs).
     const dispDenom = scaleDenomPhysical(z, c.lat, this.getPxPitch());
-    el.innerHTML =
-      `<span class="hud-main"><span class="hud-dot" style="background:${BAND_COLOR[band]}"></span>` +
-      `<span class="hud-band">${BAND_LABEL[band]}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-scale">1:${fmtScale(dispDenom)}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-z">z${z.toFixed(1)}</span><span class="hud-sep">·</span>` +
-      `<span class="hud-coord">${fmtLatLon(c.lat, c.lng)}</span></span>`;
+    // Build the span structure ONCE, then update text nodes in place. During a pan
+    // the coordinate changes every frame, so a per-frame `innerHTML =` would re-PARSE
+    // the whole readout each time; writing textContent on stable spans skips the
+    // parse and (coord uses tabular fixed-width figures) avoids reflow.
+    let s = this._hudSpans;
+    if (!s || !el.firstChild) {
+      el.innerHTML =
+        `<span class="hud-main"><span class="hud-dot"></span>` +
+        `<span class="hud-band"></span><span class="hud-sep">·</span>` +
+        `<span class="hud-scale"></span><span class="hud-sep">·</span>` +
+        `<span class="hud-z"></span><span class="hud-sep">·</span>` +
+        `<span class="hud-coord"></span></span>`;
+      s = this._hudSpans = {
+        dot: el.querySelector(".hud-dot"), band: el.querySelector(".hud-band"),
+        scale: el.querySelector(".hud-scale"), z: el.querySelector(".hud-z"), coord: el.querySelector(".hud-coord"),
+      };
+      this._lastBand = null;
+    }
+    if (this._lastBand !== band) { s.dot.style.background = BAND_COLOR[band]; s.band.textContent = BAND_LABEL[band]; this._lastBand = band; }
+    const scaleTxt = "1:" + fmtScale(dispDenom); if (s.scale.textContent !== scaleTxt) s.scale.textContent = scaleTxt;
+    const zTxt = "z" + z.toFixed(1); if (s.z.textContent !== zTxt) s.z.textContent = zTxt;
+    const coordTxt = fmtLatLon(c.lat, c.lng); if (s.coord.textContent !== coordTxt) s.coord.textContent = coordTxt;
     // Overscale (S-52 §10.1.10.1): display scale larger than the chart's compilation
     // scale → data magnified beyond survey scale; show the ×n factor as a full-width
     // amber band. "No charts enabled" outranks it (nothing is drawing at all).

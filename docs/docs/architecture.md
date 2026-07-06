@@ -7,95 +7,112 @@ sidebar_position: 5
 # Architecture
 
 This page explains how chartplotter turns an S-57 chart cell into vector tiles,
-and how the pieces of the codebase fit together.
+and how the pieces fit together.
+
+## Two repositories, one program
+
+chartplotter is built from two repos:
+
+- **`chartplotter`** (this repo, Go) — the application: the HTTP server and
+  chart library, the CLI, NMEA 0183 ingestion, and the web frontend.
+- **[`tile57`](https://github.com/beetlebugorg/tile57)** (Zig) — the chart
+  engine. It builds **libtile57**, a native static library that is linked into
+  the Go binary via CGO and does *all* of the chart work: S-57 decoding, S-101
+  portrayal, tiling, tile encoding, and generating the MapLibre style and
+  client assets.
+
+The Go code is the hub around the engine; the browser only renders what the
+engine baked.
 
 ## The pipeline
 
 A chart cell flows through these stages:
 
 ```
-S-57 ENC cell (.000)
-   │  decode the binary file        pkg/iso8211
+S-57 ENC cells (.000 + .001… updates)
+   │
    ▼
-S-57 feature + geometry model       pkg/s57
-   │  apply S-101 portrayal          pkg/s100, internal/engine/s101
+libtile57 — the native engine (linked via CGO)
+   │  ISO 8211 decode → S-57 feature model → S-101 portrayal →
+   │  web-mercator tiling → MLT/MVT encode →
+   │  MapLibre style + sprites, color tables, line styles
    ▼
-Primitive drawing list (lat/lon)    internal/engine/portrayal
-   │  project to web mercator + clip internal/engine/tile
+Chart bundle: tiles/chart.pmtiles + style-{day,dusk,night}.json + assets
+   │
    ▼
-Mapbox Vector Tiles                 internal/engine/mvt
-   │  dedup + stream to one file     internal/engine/pmtiles
+Go server — the hub (internal/engine/server)
+   │  chart library + background bakes, /tiles + /api,
+   │  settings, NMEA 0183 / AIS, aux attachments
    ▼
-charts.pmtiles  ───────────────▶  the web viewer (MapLibre GL JS)
+<chart-plotter> web component (web/) — MapLibre GL JS
 ```
 
 Here is what each stage does:
 
-1. **Decode (ISO 8211).** S-57 cells use the ISO 8211 binary container format.
-   The decoder reads the raw records and fields.
-2. **Build the S-57 model.** The features (depth areas, buoys, coastlines, and so
-   on), their attributes, and their geometry become a queryable in-memory model.
-3. **Apply S-101 portrayal.** The S-101 Portrayal Catalogue decides how to draw
-   each feature: which symbol, which color, which line style. This includes
-   conditional symbology, where the right symbol depends on a feature's
-   attributes.
-4. **Build primitives.** The portrayal output is a list of simple drawing
-   primitives in latitude/longitude: filled polygons, stroked lines, symbols,
-   patterns, text, and sector lights.
-5. **Project and clip.** Each primitive is projected to web-mercator tile
-   coordinates and clipped to tile boundaries.
-6. **Encode to MVT.** The clipped geometry becomes Mapbox Vector Tile bytes.
-7. **Write PMTiles.** Identical tiles are stored once (deduplicated), and all
-   tiles stream into a single PMTiles archive.
+1. **Decode and model (libtile57).** S-57 cells use the ISO 8211 binary
+   container format. The engine decodes the records, applies the sequential
+   update files (`.001`, `.002`, …), and builds the feature and geometry model.
+2. **Apply S-101 portrayal (libtile57).** The S-101 Portrayal Catalogue —
+   compiled into the engine — decides how to draw each feature: which symbol,
+   which color, which line style, including conditional symbology.
+3. **Tile and encode (libtile57).** Features are projected to web-mercator,
+   clipped, and encoded as **MLT** (MapLibre Tile, the default) or **MVT**
+   tiles, deduplicated and written into a **PMTiles** archive.
+4. **Style and assets (libtile57).** The engine also generates the matching
+   MapLibre style (per color scheme) and the client assets: the symbol sprite
+   atlas, color tables, line styles, and area patterns.
+5. **Serve (Go).** The server hosts the frontend and the tiles, runs background
+   bake jobs for chart imports, proxies NOAA cell downloads, persists display
+   settings, and ingests NMEA 0183 for own-ship and AIS.
+6. **Render (browser).** MapLibre GL JS draws the pre-baked tiles with the
+   engine's style. The browser does no portrayal of its own.
 
 ## Design decisions
 
 A few choices shape the whole project:
 
-- **All tile generation runs in the backend.** The CLI or server does the baking.
-  The browser only renders pre-baked tiles. There is no heavy in-browser pipeline
-  to ship.
+- **One engine.** libtile57 is the *sole* tile, portrayal, style, and asset
+  engine. The Go side never draws a chart; it orchestrates the engine and
+  serves its output. This means CGO is required — `CGO_ENABLED=0` does not
+  build — and cross-compilation uses Zig as the C toolchain.
+- **All tile generation runs in the backend.** The CLI or server does the
+  baking. The browser only renders pre-baked tiles.
 - **Colors are names, not RGB.** Tiles store S-101 color *tokens*. The browser
   resolves Day, Dusk, or Night from `colortables.json`. Switching the lighting
   mode is an instant restyle, with no re-baking.
 - **Generate once, adjust live.** Mariner settings — depth shading, soundings,
   contours, and danger highlighting — come from attributes baked into the tiles.
   The viewer applies them live.
-- **One archive is the source of truth.** A baked region is a single `.pmtiles`
-  file. Long downloads and bakes run as background jobs that the viewer watches
-  through `/api/import/status` and `/api/import/events`.
-- **The binary is self-contained.** The web frontend, the S-101 catalogue and
-  client assets, the basemap, and the NOAA catalog are embedded in the program,
-  so `chartplotter serve` runs from a single file. Everything baked from a user
+- **The binary is self-contained.** The web frontend is embedded in the Go
+  binary and the S-101 catalogue is compiled into libtile57, so
+  `chartplotter serve` runs from a single file. Everything baked from a user
   action is written to the cache directory, never into the embedded assets.
 
 ## Code layout
 
 | Path | What lives there |
 | --- | --- |
-| `pkg/geo` | Shared `LatLon`, `Point`, and `BoundingBox` types. |
-| `pkg/iso8211` | The ISO 8211 binary decoder. |
-| `pkg/s57` | The S-57 cell model and spatial/class queries. |
-| `pkg/s100` | The S-101 Portrayal Catalogue: feature catalogue, drawing instructions, symbols, and colors. |
-| `internal/engine/s101` | The S-101 rule engine: applies the portrayal catalogue to S-57 features. |
-| `internal/engine/portrayal` | Turns portrayal output into the primitive drawing list. |
-| `internal/engine/tile` | Web-mercator projection and clipping. |
-| `internal/engine/mvt` | The Mapbox Vector Tile encoder. |
-| `internal/engine/pmtiles` | The streaming, deduplicating PMTiles writer. |
-| `internal/engine/bake`, `internal/engine/baker` | The baker: cells in, tiles out, plus the high-level helpers the CLI and server use. |
+| `../tile57` | The native engine (separate repo, Zig): S-57 decode, S-101 portrayal, tiling, MLT/MVT encode, style + asset generation. Linked as `libtile57.a`. |
+| `pkg/iso8211` | A pure-Go ISO 8211 reader, kept for cell *metadata* (headers, coverage) — not for portrayal. |
+| `pkg/s57` | The Go S-57 cell model, slimmed to metadata and simulator needs (e.g. depth areas for the traffic simulator). |
+| `internal/engine/baker` | Cell metadata + parse helpers: base + update grouping, header/coverage extraction, and the compilation-scale → navigational-band mapping. It does not bake tiles. |
+| `internal/engine/server` | The HTTP server: chart library, background bake jobs, tile serving, settings, aux files, NMEA APIs. |
+| `internal/engine/tilesource` | The tile-source abstraction the server serves from: libtile57 live sets, PMTiles, MBTiles. |
+| `internal/engine/pmtiles` | A minimal PMTiles v3 reader/writer used by the serving path. |
 | `internal/engine/catalog` | Distils the NOAA product catalog into `catalog.json`. |
-| `internal/engine/assets` | Generates client assets: color tables, line styles, and sprite atlases. |
-| `internal/engine/nmea` | NMEA 0183 ingestion for own-ship and AIS overlays. |
-| `internal/engine/server` | The HTTP server, baking API, and tile serving. |
-| `cmd/chartplotter` | The command-line interface and dev server. |
+| `internal/engine/nmea` | NMEA 0183 ingestion (own-ship, AIS) and the traffic simulator. |
+| `internal/engine/auxfiles` | ENC companion files (TXTDSC text notes, PICREP pictures) served via `/api/aux`. |
+| `cmd/chartplotter` | The command-line interface: `bake`, `serve`, `simulate`, `emit-assets`, … |
 | `web` | The MapLibre frontend that renders pre-baked tiles. |
 
 ## The web viewer
 
 The frontend is a `<chart-plotter>` web component built on
-[MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/). It reads the
-`.pmtiles` archive and the client assets the server hosts, draws the chart, and
-handles the Day/Dusk/Night restyle. It does no tile generation of its own.
+[MapLibre GL JS](https://maplibre.org/maplibre-gl-js/docs/) (5.12+ is required
+to decode the default MLT tiles; the vendored copy is newer). It loads the
+engine-generated style and assets, reads the tiles the server hosts, draws the
+chart, and handles the Day/Dusk/Night restyle. It does no tile generation of
+its own.
 
 ## Learn more
 

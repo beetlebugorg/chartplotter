@@ -33,42 +33,46 @@ func activeCells(t *testing.T, base string) map[string]bool {
 	return set
 }
 
-// TestActiveCellsDropOnDelete: a manifest-tracked pack's cells appear under
-// ?active=1, and DELETEing the pack drops them AND removes the lingering
-// <set>.cells.json manifest. This is the "search shows uninstalled cells" / "stale
-// after remove" regression: the active set is driven by the live pack list + its
-// manifest, so removing the pack (packDel) and its manifest clears the cells, while
-// the source stays in ENC_ROOT for a future re-bake.
+// TestActiveCellsDropOnDelete: a provider's manifest-tracked cells appear under
+// ?active=1, and DELETEing the provider drops them AND removes the lingering
+// <provider>.cells.json manifest + the ENC_ROOT source tree. This is the "search shows
+// uninstalled cells" / "stale after remove" regression: the active set is driven by the
+// live pack list + its manifest, so dropping the provider set clears the cells, and
+// delete also reclaims the provider's source ENC_ROOT.
 func TestActiveCellsDropOnDelete(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir, dir, dir, false)
 
 	const cell = "US5MD11M"
-	// The cell's source dir must exist in ENC_ROOT (serveCells lists it from there).
-	if err := os.MkdirAll(filepath.Join(dir, "ENC_ROOT", cell), 0o755); err != nil {
+	// The cell's source .000 must exist in the provider ENC_ROOT (serveCells lists
+	// installed cells from the ENC_ROOT trees; delete reclaims them).
+	scell := filepath.Join(s.districtDir("noaa", "d5"), cell+".000")
+	if err := os.MkdirAll(filepath.Dir(scell), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Register a band-set with an exact cell manifest, and add it as an enabled pack.
-	const set = "noaa-d5-harbor"
-	if err := s.writeSetCells(set, map[string]baker.CellData{cell + ".000": {}}); err != nil {
+	if err := os.WriteFile(scell, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	manifest := filepath.Join(s.setDir(set), set+".cells.json")
+	// Register the provider set with an exact cell manifest, and add it as an enabled pack.
+	const provider = "noaa"
+	if err := s.writeSetCells(provider, map[string]baker.CellData{cell + ".000": {}}); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(s.setDir(provider), provider+".cells.json")
 	if _, err := os.Stat(manifest); err != nil {
 		t.Fatalf("manifest not written: %v", err)
 	}
-	s.packAdd(set, filepath.Join(s.setDir(set), set+".pmtiles"))
+	s.packAdd(provider, filepath.Join(s.setDir(provider), "tiles", "chart.pmtiles"))
 
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
 	if !activeCells(t, ts.URL)[cell] {
-		t.Fatalf("cell %s should be active while its pack is installed", cell)
+		t.Fatalf("cell %s should be active while its provider is installed", cell)
 	}
 
-	// DELETE the district → its band-sets are unregistered and their baked files +
-	// manifests removed.
-	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/set?set=noaa-d5", nil)
+	// DELETE the provider → unregistered, baked bundle + manifest + ENC_ROOT removed.
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/set?set=noaa", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -80,13 +84,14 @@ func TestActiveCellsDropOnDelete(t *testing.T) {
 	}
 
 	if activeCells(t, ts.URL)[cell] {
-		t.Errorf("cell %s still active after its pack was deleted (stale search)", cell)
+		t.Errorf("cell %s still active after its provider was deleted (stale search)", cell)
 	}
 	if _, err := os.Stat(manifest); !os.IsNotExist(err) {
 		t.Errorf("manifest %s not removed on delete (err=%v)", manifest, err)
 	}
-	// The source cell is intentionally kept for a future re-bake.
-	if _, err := os.Stat(filepath.Join(dir, "ENC_ROOT", cell)); err != nil {
-		t.Errorf("source cell should be kept in ENC_ROOT: %v", err)
+	// Delete reclaims disk: the provider's source ENC_ROOT is removed too (re-download to
+	// restore); disable, by contrast, keeps the cells + bundle and only hides the set.
+	if _, err := os.Stat(scell); !os.IsNotExist(err) {
+		t.Errorf("source cell should be removed on delete (err=%v)", err)
 	}
 }

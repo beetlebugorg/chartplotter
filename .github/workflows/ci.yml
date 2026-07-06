@@ -4,31 +4,71 @@ on:
   push:
   pull_request:
 
+# libtile57 is the sole engine: the build is CGO and statically links the native
+# lib from the public beetlebugorg/tile57 repo, built with Zig 0.16. That repo is
+# the ./tile57 git submodule (go.mod's replace points at ./tile57/bindings/go, and
+# the binding's cgo LDFLAGS at its zig-out/lib); its own submodules fetch the IHO
+# S-101 catalogues. `submodules: recursive` checks it out at the committed pin, then
+# we float it to the engine's latest main (the pin is just last-known-good).
+# NOTE: correct-by-construction but unvalidated until pushed to GitHub.
 jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter (+ tile57 engine submodule)
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+          submodules: recursive
+      # Keep building against the engine's latest main (floating); the committed
+      # submodule pin is just last-known-good. Move tile57 to origin/main, then
+      # re-sync its nested IHO catalogues to that commit's pins.
+      - name: Float tile57 submodule to latest main
+        run: |
+          git -C chartplotter submodule update --remote tile57
+          git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: make -C chartplotter tile57-lib
       - name: Format check
-        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+        run: make -C chartplotter fmt-check
       - name: Vet
-        run: go vet ./...
+        run: make -C chartplotter vet
       - name: Test
-        run: go test ./...
+        run: make -C chartplotter test
       - name: Build
-        run: go build ./...
+        run: make -C chartplotter build
 
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter (+ tile57 engine submodule)
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+          submodules: recursive
+      - name: Float tile57 submodule to latest main
+        run: |
+          git -C chartplotter submodule update --remote tile57
+          git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build libtile57
+        run: make -C chartplotter tile57-lib
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: cd chartplotter && go run golang.org/x/vuln/cmd/govulncheck@latest ./...

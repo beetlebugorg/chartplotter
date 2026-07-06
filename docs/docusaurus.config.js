@@ -4,7 +4,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'chartplotter',
-  tagline: '⚓ An S-52 marine chart plotter, in Go.',
+  tagline: '⚓ An S-101 marine chart plotter.',
 
   url: 'https://beetlebugorg.github.io',
   baseUrl: '/chartplotter/',

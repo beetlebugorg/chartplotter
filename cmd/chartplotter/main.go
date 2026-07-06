@@ -9,23 +9,28 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 
 	"github.com/alecthomas/kong"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/assets"
-	"github.com/beetlebugorg/chartplotter/internal/engine/s101catalog"
+	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
+
+// engineCommit is the tile57 (libtile57) checkout's commit this binary was built
+// against, stamped via -ldflags "-X main.engineCommit=..." (Makefile
+// ENGINE_COMMIT; resolves the default sibling ../tile57 or a TILE57=… override).
+// Every bake records it beside the pack so the client can show which engine
+// commit produced the visible tiles. "unknown" for a bare `go build`.
+var engineCommit = "unknown"
 
 type cli struct {
 	Version     versionCmd     `cmd:"" help:"Print version and embedded-asset info."`
 	EmitAssets  emitAssetsCmd  `cmd:"" name:"emit-assets" help:"Generate S-101 client assets (colortables.json, ...) into a directory."`
 	CatalogJSON catalogJSONCmd `cmd:"" name:"catalog-json" help:"Distil NOAA ENCProdCat.xml into a compact catalog.json."`
 	Bake        bakeCmd        `cmd:"" name:"bake" help:"Bake S-57 ENC cells (.zip/.000/dir) into a PMTiles archive for a prebaked deployment."`
-	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static + wasm) + the NOAA cell proxy."`
+	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static) + the NOAA cell proxy."`
 	Simulate    simulateCmd    `cmd:"" name:"simulate" help:"Run a NMEA0183 traffic generator over TCP (own-ship + AIS targets) for testing."`
 }
 
@@ -36,21 +41,9 @@ type emitAssetsCmd struct {
 }
 
 func (c emitAssetsCmd) Run() error {
-	var (
-		files []string
-		err   error
-	)
-	switch {
-	case c.S101 != "":
-		files, err = assets.EmitS101(c.S101, c.CSS, c.Dir)
-	case s101catalog.Available():
-		var fsys fs.FS
-		if fsys, err = s101catalog.PortrayalFS(); err == nil {
-			files, err = assets.EmitS101FS(fsys, c.CSS, c.Dir)
-		}
-	default:
-		return fmt.Errorf("no S-101 catalogue (build with `make` or pass --s101)")
-	}
+	// Emit the client assets via the native libtile57 asset baker: c.S101 "" uses
+	// libtile57's embedded S-101 catalogue, else an on-disk PortrayalCatalog dir.
+	files, err := emitS101Assets(c.S101, c.Dir)
 	if err != nil {
 		return err
 	}
@@ -64,7 +57,7 @@ type versionCmd struct{}
 
 func (versionCmd) Run() error {
 	fmt.Printf("chartplotter %s\n", version)
-	fmt.Printf("embedded S-101 catalogue: %v\n", s101catalog.Available())
+	fmt.Printf("libtile57 %s (engine commit %s, S-101 catalogue embedded)\n", tile57.Version(), engineCommit)
 	return nil
 }
 

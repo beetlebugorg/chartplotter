@@ -1,7 +1,7 @@
 // core-settings.mjs — the app's own display settings, expressed as <settings-dialog>
-// contributions. These reproduce the panes the shell used to render inline in
-// renderSettings(): General, Text, Units, Depths, Advanced. Everything here is a
-// plain contribution (same path a plugin would take) — there is no privileged
+// contributions. Tabs: General (app chrome), Display (the S-52 display category +
+// viewing-group toggles, grouped), Text, Units, Depths, Advanced. Everything here
+// is a plain contribution (same path a plugin would take) — there is no privileged
 // built-in settings code in the dialog.
 //
 //   const reg = new SettingsRegistry();
@@ -14,7 +14,27 @@
 // SettingsStore here — that's for future plugins.
 
 import { UNIT_CATEGORIES, M_TO_FT } from "../lib/units.mjs";
-import { DEFAULT_PX_PITCH_MM } from "../lib/util.mjs";
+import { VIEWING_GROUP_SECTIONS, VG_BY_GROUP_ID } from "./viewing-groups.mjs";
+
+// Shared viewing-group read/write — the ONE toggle path, used by both the
+// Settings "Viewing groups" tab (below) and the on-map quick-toggle rail
+// (plugins/vg-rail.mjs). A group reads ON (shown) iff NONE of its vg ids are in
+// the mariner's deny-list; writing routes through app.applyMariner, which
+// restyles instantly and persists (localStorage + /api/settings → other screens).
+export function vgGroupOn(app, groupId) {
+  const vgs = VG_BY_GROUP_ID[groupId] || [];
+  const off = app._mariner.viewingGroupsOff || [];
+  return !vgs.some((v) => off.includes(v));
+}
+
+// Turning a group OFF adds its vg ids to the deny-list; ON removes them. Stored
+// sorted for a stable persisted value.
+export function vgSetGroupOn(app, groupId, on) {
+  const vgs = VG_BY_GROUP_ID[groupId] || [];
+  const off = new Set(app._mariner.viewingGroupsOff || []);
+  for (const v of vgs) on ? off.delete(v) : off.add(v);
+  return app.applyMariner({ viewingGroupsOff: [...off].sort((a, b) => a - b) });
+}
 
 // One shared read path for every core contribution. App-level flags live on the
 // shell; everything else is a mariner setting (pre-merged with DEFAULT_MARINER,
@@ -25,7 +45,12 @@ function coreGet(app, key, def) {
   if (key === "scheme") return app._scheme;
   if (key === "showCellBounds") return app._showCellBounds;
   if (key === "showChartRadar") return app._showChartRadar;
-  if (key === "pxPitch") return app._pxPitch;
+  // Synthetic S-52 display-category level (§10.2). Base → Standard → All are
+  // CUMULATIVE, so the three mariner booleans collapse to one of three levels.
+  if (key === "detailLevel") return app._mariner.displayOther ? "other" : (app._mariner.displayStandard ? "standard" : "base");
+  // Synthetic viewing-group toggle (S-52 §14.5): "vg:<groupId>" reads ON (shown)
+  // iff NONE of the group's vg ids are in the mariner's deny-list. See vgGroupOn.
+  if (key.startsWith("vg:")) return vgGroupOn(app, key.slice(3));
   const v = app._mariner[key];
   return v === undefined ? def : v;
 }
@@ -37,7 +62,13 @@ function coreSet(app, key, val) {
   if (key === "scheme") return app.applyScheme(val);
   if (key === "showCellBounds") return app._setCellBoundsVisible(val);
   if (key === "showChartRadar") return app._setChartRadarVisible(val);
-  if (key === "pxPitch") return app.setPxPitch(val);
+  // Cumulative display category (S-52 §10.2): each level implies the ones below
+  // it. Base is permanent (displayBase always true); Standard adds the standard
+  // set; All adds the "other" category on top. This can never produce the
+  // non-conformant Standard-off / Other-on state the old multi-select allowed.
+  if (key === "detailLevel") return app.applyMariner({ displayBase: true, displayStandard: val !== "base", displayOther: val === "other" });
+  // Viewing-group toggle (S-52 §14.5): the shared deny-list write. See vgSetGroupOn.
+  if (key.startsWith("vg:")) return vgSetGroupOn(app, key.slice(3), val);
   return app.applyMariner({ [key]: val });
 }
 
@@ -46,7 +77,10 @@ export function coreSettingsContributions(app) {
   const get = (k, d) => coreGet(app, k, d);
   const set = (k, v) => coreSet(app, k, v);
 
-  // GENERAL — basemap, detail level, area/point style, and the display toggles.
+  // GENERAL — app chrome only: the basemap drawn under the chart and the
+  // off-screen chart pointers. Everything S-52 (the display category + the
+  // viewing-group toggles) now lives on the dedicated DISPLAY tab below; screen
+  // calibration has its own "Calibration" tab (plugins/calibration.mjs).
   const general = {
     id: "core-general",
     tab: { id: "general", label: "General" },
@@ -60,11 +94,60 @@ export function coreSettingsContributions(app) {
         options: [["none", "Disabled"], ["coastline", "Offline"], ["osm", "OSM"], ...(app._osmVecUrl ? [["osmvec", "Vector"]] : [])],
       },
       {
-        key: "detail", type: "multi", label: "Detail level",
-        desc: "How much chart detail to show — Base is always on",
-        locked: [["Base"]],
-        options: [["displayStandard", "Standard"], ["displayOther", "Other"]],
+        key: "showChartRadar", type: "toggle", label: "Off-screen chart pointers",
+        desc: "Edge arrows to installed charts you can't currently see — tap one to fly there",
       },
+    ],
+  };
+
+  // DISPLAY — the S-52 portrayal controls, split into five sub-groups that mirror
+  // the spec's mental model: pick a detail level (display category, §10.2), then
+  // add or remove the individual viewing groups within it. Each contribution
+  // renders as one sub-heading on the shared Display tab.
+
+  // Detail level (display category, S-52 §10.2 / §10.3.4). CUMULATIVE: Base is the
+  // permanent safe-navigation minimum, Standard adds the normal chart content, All
+  // adds every other feature. Backed by displayBase/Standard/Other via the
+  // synthetic "detailLevel" key (coreGet/coreSet), so the control can never reach
+  // the non-conformant Standard-off / Other-on state the old multi-select allowed.
+  const displayDetail = {
+    id: "core-display-detail",
+    tab: { id: "display", label: "Display" },
+    order: 0.6,
+    group: "Detail level",
+    get, set,
+    items: [
+      {
+        key: "detailLevel", type: "segmented", label: "Detail level",
+        desc: "Display Base is always shown — Standard adds normal chart content, Other adds every remaining feature",
+        options: [["base", "Base"], ["standard", "Standard"], ["other", "Other"]],
+      },
+    ],
+  };
+
+  // Water, depth areas & soundings.
+  const displayWater = {
+    id: "core-display-water",
+    tab: "display",
+    order: 0.7,
+    group: "Water & soundings",
+    get, set,
+    items: [
+      { key: "fourShadeWater", type: "toggle", label: "Four-shade water", desc: "Use four depth shades instead of two", default: true },
+      { key: "shallowPattern", type: "toggle", label: "Shallow pattern", desc: "Diagonal fill in shallow water" },
+      { key: "showSoundings", type: "toggle", label: "Spot soundings", desc: "Individual depth soundings", default: true },
+      { key: "showNoData", type: "toggle", label: "No-data hatch", desc: "Hatch areas that have no chart data", default: true },
+    ],
+  };
+
+  // Point symbols & line styling.
+  const displaySymbols = {
+    id: "core-display-symbols",
+    tab: "display",
+    order: 0.8,
+    group: "Symbols & lines",
+    get, set,
+    items: [
       {
         key: "boundaryStyle", type: "segmented", label: "Area boundaries", desc: "Line style for area edges",
         default: "symbolized",
@@ -75,23 +158,54 @@ export function coreSettingsContributions(app) {
         options: [["paper", "Paper-chart"], ["simplified", "Simplified"]],
         transform: { toView: (b) => (b ? "simplified" : "paper"), fromView: (s) => s === "simplified" },
       },
-      { key: "fourShadeWater", type: "toggle", label: "Four-shade water", desc: "Use four depth shades instead of two", default: true },
-      { key: "showNoData", type: "toggle", label: "No-data hatch", desc: "Hatch areas that have no chart data", default: true },
-      { key: "shallowPattern", type: "toggle", label: "Shallow pattern", desc: "Diagonal fill in shallow water" },
-      { key: "showSoundings", type: "toggle", label: "Spot soundings", desc: "Individual depth soundings", default: true },
       { key: "showFullSectorLines", type: "toggle", label: "Full sector lines", desc: "Draw light sectors to full range, not short stubs" },
-      { key: "showIsolatedDangersShallow", type: "toggle", label: "Isolated dangers (shallow)", desc: "Only flag isolated dangers in shallow water" },
-      { key: "dataQuality", type: "toggle", label: "Data quality", desc: "Survey zones-of-confidence overlay" },
-      { key: "showInformCallouts", type: "toggle", label: "Information callouts", desc: "“Additional information available” (i) markers on features that carry notes" },
-      { key: "highlightDateDependent", type: "toggle", label: "Highlight date-dependent", desc: "Mark features that carry date conditions with the “d” symbol" },
-      { key: "showMetaBounds", type: "toggle", label: "Metadata boundaries", desc: "Chart coverage & region indicator lines" },
-      { key: "showScaleBoundaries", type: "toggle", label: "Scale boundaries", desc: "Outline where more detailed charts exist", default: true },
-      {
-        key: "showChartRadar", type: "toggle", label: "Off-screen chart pointers",
-        desc: "Edge arrows to installed charts you can't currently see — tap one to fly there",
-      },
     ],
   };
+
+  // Dangers & data quality.
+  const displayDangers = {
+    id: "core-display-dangers",
+    tab: "display",
+    order: 0.9,
+    group: "Dangers & quality",
+    get, set,
+    items: [
+      { key: "showIsolatedDangersShallow", type: "toggle", label: "Isolated dangers (shallow)", desc: "Only flag isolated dangers in shallow water" },
+      { key: "dataQuality", type: "toggle", label: "Data quality", desc: "Survey zones-of-confidence overlay" },
+    ],
+  };
+
+  // Chart boundaries & informational callouts.
+  const displayBounds = {
+    id: "core-display-bounds",
+    tab: "display",
+    order: 0.95,
+    group: "Boundaries & callouts",
+    get, set,
+    items: [
+      { key: "showScaleBoundaries", type: "toggle", label: "Scale boundaries", desc: "Outline where more detailed charts exist" },
+      { key: "showOverscale", type: "toggle", label: "Overscale pattern", desc: "Hatch areas displayed beyond their chart's compilation scale" },
+      { key: "showMetaBounds", type: "toggle", label: "Metadata boundaries", desc: "Chart coverage & region indicator lines" },
+      { key: "showInformCallouts", type: "toggle", label: "Information callouts", desc: "“Additional information available” (i) markers on features that carry notes" },
+      { key: "highlightDateDependent", type: "toggle", label: "Highlight date-dependent", desc: "Mark features that carry date conditions with the “d” symbol" },
+    ],
+  };
+
+  // VIEWING GROUPS — S-52 §14.5 fine-grained content selection. One contribution
+  // per taxonomy section (→ one sub-heading); each item is a toggle keyed
+  // "vg:<groupId>" that adds/removes the group's raw vg ids from the deny-list
+  // (mariner.viewingGroupsOff; see coreGet/coreSet + viewing-groups.mjs). All
+  // default ON. Only Standard/Other groups are listed — Display Base is the
+  // mandatory minimum and never selectable (S-52 §10.2). The first section declares
+  // the tab; the rest slot into it. Ordered (0.96+) so the tab sits after Display.
+  const viewingGroups = VIEWING_GROUP_SECTIONS.map((s, i) => ({
+    id: `core-vg-${s.id}`,
+    tab: i === 0 ? { id: "viewing-groups", label: "Viewing groups" } : "viewing-groups",
+    order: 0.96 + i * 0.001,
+    group: s.label,
+    get, set,
+    items: s.groups.map((g) => ({ key: `vg:${g.id}`, type: "toggle", label: g.label, desc: g.desc, default: true })),
+  }));
 
   // TEXT — the S-52 text-group toggles.
   const text = {
@@ -153,7 +267,7 @@ export function coreSettingsContributions(app) {
     tab: { id: "advanced", label: "Advanced" },
     order: 4,
     get, set,
-    items: [
+    items: () => [
       {
         key: "showCellBounds", type: "toggle", label: "Cell boundaries",
         desc: "Outline installed charts when zoomed out — tap one to jump to it",
@@ -162,7 +276,7 @@ export function coreSettingsContributions(app) {
       // mandatory current-date filter (default on); turning it off shows
       // seasonal/expired features regardless of their validity dates. The viewing
       // date evaluates that filter (and the "Highlight date-dependent" markers,
-      // toggled under General) against a chosen date for passage planning.
+      // toggled under Display) against a chosen date for passage planning.
       {
         key: "dateDependent", type: "toggle", label: "Hide out-of-date features",
         desc: "Hide seasonal or expired features outside their validity dates", default: true,
@@ -174,60 +288,9 @@ export function coreSettingsContributions(app) {
     ],
   };
 
-  // SCREEN CALIBRATION — make the on-screen scale (the 1:N readout, overscale, and
-  // "go to scale") match a real ruler / other ENCs. We can't know the monitor's
-  // physical pixel size, so the user enters their display's diagonal and we derive
-  // the CSS-pixel pitch from window.screen. Stored as pxPitch (mm per CSS pixel);
-  // the engine scale (bands/SCAMIN/overscale-vs-CSCL) is unaffected.
-  const cssDiagPx = () => {
-    const s = window.screen || {};
-    return Math.hypot(s.width || 1280, s.height || 800) || 1509; // CSS-pixel screen diagonal
-  };
-  const pitchToInches = (mm) => (cssDiagPx() * mm) / 25.4;        // pitch → implied diagonal (in)
-  const inchesToPitch = (inch) => (inch * 25.4) / cssDiagPx();    // diagonal → pitch (mm/CSS px)
-  const calibration = {
-    id: "core-calibration",
-    tab: { id: "general", label: "General" },
-    order: 0.5,
-    group: "Screen calibration",
-    get, set,
-    render(host) {
-      const pitch = get("pxPitch") || DEFAULT_PX_PITCH_MM;
-      host.innerHTML = `
-        <style>
-          .cal { padding:2px 0 4px; }
-          .cal-desc { font-size:12.5px; color:var(--ui-text-dim); line-height:1.45; margin-bottom:11px; }
-          .cal-field { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ui-text); flex-wrap:wrap; }
-          .cal-field input { width:74px; text-align:right; border:1px solid var(--ui-border-strong); border-radius:6px;
-            padding:5px 7px; font:inherit; font-size:16px; background:var(--ui-surface); color:var(--ui-text); }
-          .cal-readout { font-size:12px; color:var(--ui-text-faint); margin-top:9px; display:flex; align-items:center; gap:10px; }
-          .cal-readout b { color:var(--ui-text-dim); font-variant-numeric:tabular-nums; }
-          .cal-reset { border:1px solid var(--ui-border-strong); background:var(--ui-surface); color:var(--ui-text);
-            border-radius:6px; padding:4px 9px; font:inherit; font-size:12px; cursor:pointer; margin-left:auto; }
-        </style>
-        <div class="cal">
-          <div class="cal-desc">Enter your display's diagonal so the scale readout matches a real ruler (and other ENCs). Affects only the on-screen scale numbers — not the charts.</div>
-          <label class="cal-field">Screen diagonal <input class="cal-diag" type="number" inputmode="decimal" step="0.1" min="3" max="120" value="${pitchToInches(pitch).toFixed(1)}"> inches</label>
-          <div class="cal-readout">Pixel pitch: <b class="cal-pitch">${pitch.toFixed(4)}</b> mm<button class="cal-reset" type="button">Reset</button></div>
-        </div>`;
-      const diag = host.querySelector(".cal-diag");
-      const out = host.querySelector(".cal-pitch");
-      const apply = () => {
-        const inch = +diag.value;
-        if (!(inch >= 3 && inch <= 120)) return;
-        const mm = inchesToPitch(inch);
-        set("pxPitch", mm);
-        out.textContent = mm.toFixed(4);
-      };
-      diag.addEventListener("change", apply);
-      diag.addEventListener("input", apply);
-      host.querySelector(".cal-reset").addEventListener("click", () => {
-        set("pxPitch", undefined);
-        diag.value = pitchToInches(DEFAULT_PX_PITCH_MM).toFixed(1);
-        out.textContent = DEFAULT_PX_PITCH_MM.toFixed(4);
-      });
-    },
-  };
+  // (Screen calibration lives in its own "Calibration" tab — plugins/calibration.mjs,
+  // the S-52 CHKSYM 5 mm ruler-measure method. The old screen-diagonal duplicate that
+  // used to sit here under General was removed.)
 
-  return [general, calibration, text, units, depths, advanced];
+  return [general, displayDetail, displayWater, displaySymbols, displayDangers, displayBounds, ...viewingGroups, text, units, depths, advanced];
 }

@@ -144,6 +144,10 @@ export class PMTilesArchive {
     if (!okComp(ic) || !okComp(tc)) throw new Error("unsupported PMTiles compression (only none/gzip)");
     this._internalGz = ic === 2;
     this._tileGz = tc === 2;
+    // Stored tile encoding (header byte 99): 1=MVT, 6=MLT (tile57's MLT-default
+    // bake). Drives the vector source's `encoding` hint so maplibre-gl (>=5.12)
+    // decodes MLT natively — tiles always serve bytes-verbatim.
+    this.tileType = head.getUint8(99) === 6 ? "mlt" : "mvt";
     this.minZoom = head.getUint8(100);
     this.maxZoom = head.getUint8(101);
     // Data extent straight from the header (the writer stores it), so we never
@@ -181,6 +185,19 @@ export class PMTilesArchive {
     if (this._leafCache.size >= 64) this._leafCache.delete(this._leafCache.keys().next().value);
     this._leafCache.set(offset, entries);
     return entries;
+  }
+
+  // Directory-only presence probe: does the archive hold a tile at (z,x,y)?
+  // Same root→leaf resolution as getTile without reading tile data — used by
+  // the protocol's sparse-pyramid fallback to decide whether an absent tile
+  // should ERROR (stretch an ancestor) or read as genuinely empty.
+  async hasTile(z, x, y) {
+    const key = z + "/" + x + "/" + y;
+    if (this._misses.has(key)) return false;
+    const id = zxyToTileId(z, x, y);
+    let e = floorEntry(this._root, id);
+    if (e && e.runLength === 0) e = floorEntry(await this._leaf(e.offset, e.length), id);
+    return !!(e && id < e.tileId + e.runLength && e.length !== 0);
   }
 
   // Tile bytes (Uint8Array) for (z,x,y), or null when the archive has no such
@@ -245,6 +262,7 @@ export class MultiArchive {
     this.maxZoom = 16;
     this.bounds = null;
     this.scamin = []; // union of the packs' published SCAMIN manifests
+    this.tileType = "mvt"; // "mlt" when every loaded archive stores MLT tiles
   }
 
   // Add (open) an archive from a Blob/File or a URL string. Returns the opened
@@ -279,9 +297,25 @@ export class MultiArchive {
     this.maxZoom = this.archives.length ? mx : 16;
     this.bounds = b;
     this.scamin = [...sc].sort((x, y) => x - y);
+    // The source `encoding` hint is per-SOURCE, so it can only be "mlt" when
+    // every archive in this band agrees (archives of one bake always do). A
+    // mixed band keeps "mvt" and the MLT archives in it would not decode —
+    // re-bake to one format rather than mixing.
+    this.tileType = this.archives.length && this.archives.every((a) => a.tileType === "mlt") ? "mlt" : "mvt";
+    if (this.archives.some((a) => a.tileType === "mlt") && this.tileType !== "mlt") {
+      console.warn("[chartplotter] mixed MVT/MLT archives in one band source; MLT archives will not render — re-bake to a single format");
+    }
   }
 
   get tileCount() { return this.archives.reduce((s, a) => s + a.tileCount, 0); }
+
+  async hasTile(z, x, y) {
+    for (const a of this.archives) {
+      if (!boundsCoverTile(a.bounds, z, x, y)) continue;
+      if (await a.hasTile(z, x, y)) return true;
+    }
+    return false;
+  }
 
   async getTile(z, x, y) {
     for (const a of this.archives) {
@@ -306,12 +340,25 @@ export function registerPmtilesProtocol(maplibregl, scheme, getArchive) {
     const m = params.url.match(/(\d+)\/(\d+)\/(\d+)$/);
     if (!m) return { data: new ArrayBuffer(0) };
     const [, z, x, y] = m;
+    let bytes = null;
     try {
-      const bytes = await archive.getTile(+z, +x, +y);
-      return { data: bytes ? bytes.buffer : new ArrayBuffer(0) };
+      bytes = await archive.getTile(+z, +x, +y);
     } catch (e) {
       console.warn("[pmtiles] tile", z, x, y, "failed:", e.message);
       return { data: new ArrayBuffer(0) };
     }
+    if (bytes) return { data: bytes.buffer };
+    // Sparse-pyramid fallback: the merged composite archive's depth varies by
+    // AREA (each band bakes to its native max + the overscale fill-up), so an
+    // absent tile INSIDE charted water must ERROR — MapLibre retains/loads an
+    // ancestor and renders it stretched (per-area overzoom) — while a
+    // delivered-empty tile would paint permanent blank. True no-data (no
+    // ancestor holds a tile either) stays a quiet empty tile.
+    if (archive.hasTile) {
+      for (let pz = +z - 1, px = +x >> 1, py = +y >> 1; pz >= 0; pz--, px >>= 1, py >>= 1) {
+        if (await archive.hasTile(pz, px, py)) throw new Error(`no tile at ${z}/${x}/${y}; ancestor z${pz} present (stretch)`);
+      }
+    }
+    return { data: new ArrayBuffer(0) };
   });
 }

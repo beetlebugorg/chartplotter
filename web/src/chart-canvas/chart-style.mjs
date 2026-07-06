@@ -172,7 +172,12 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
     { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}),
       layout: { "fill-sort-key": ["-", ["*", ["coalesce", ["get", "draw_prio"], 0], 1000], ["coalesce", ["get", "drval1"], 0]] },
       paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
-    { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
+    // Exclude OVERSC01: tile57 now bakes the S-52 §10.1.10 overscale hatch (each
+    // cell's M_COVR coverage, tagged `oscl`) into area_patterns. The engine style
+    // gates it on a dedicated `overscale` layer; this generic pattern layer must
+    // not paint it ungated over everything. On this (JS-builder) path the per-band
+    // _pushOverscale layers keep providing the hatch.
+    { id: "area_patterns", type: "fill", source: "chart", "source-layer": "area_patterns", filter: ["!=", ["get", "pattern_name"], "OVERSC01"], paint: { "fill-pattern": ["concat", PAT_PREFIX, ["coalesce", ["get", "pattern_name"], ""]] } },
     // SHALLOW_PATTERN (SEABED01, client-side): DIAMOND1 over depth areas on
     // the shallow side of the live safety contour, shown only when the
     // mariner toggle is on. Filter/visibility update on safetyContour /
@@ -200,6 +205,20 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
     // navigational purpose changes, baked into the scale_boundaries layer.
     // Standard display, on by default; toggled via mariner.showScaleBoundaries.
     { id: "scale-boundaries", type: "line", source: "chart", "source-layer": "scale_boundaries", layout: { visibility: mariner.showScaleBoundaries === false ? "none" : "visible" }, paint: { "line-color": S52.colorExpr("color_token", undefined, palette), "line-width": ["coalesce", ["get", "width_px"], 1.5] } },
+    // Chart-coverage outline when ZOOMED OUT (to ~z3.5): the meta-object region
+    // boundary, so a pack still shows WHERE it covers once SCAMIN has suppressed
+    // every in-cell feature. Today the engine emits only M_NSYS (nav-system /
+    // IALA A↔B) among the meta classes; the canonical M_COVR data-coverage edge
+    // is requested in ../tile57 specs/host-canonical-backend.md ("Still needed
+    // from the engine" §6 — coverage edge baked to z0 for every pack). _rawFilter
+    // makes it bypass combineFilters AND the SCAMIN bucketing, so it draws
+    // regardless of the showMetaBounds gate. Capped at z8 → a pure zoom-out
+    // indicator that yields to the full chart at detail zooms, and hidden when
+    // showMetaBounds is on (the lines layers draw these classes then — no double).
+    { id: "meta-boundary", type: "line", source: "chart", "source-layer": "lines", _rawFilter: true, maxzoom: 8,
+      filter: ["==", ["coalesce", ["get", "class"], ""], "M_NSYS"],
+      layout: { visibility: mariner.showMetaBounds ? "none" : "visible" },
+      paint: { "line-color": S52.colorExpr("color_token", S52.token("CHMGD", "#bf30bf", palette), palette), "line-width": 1.4, "line-dasharray": [4, 2], "line-opacity": 0.85 } },
   ];
   const top = [
     // Point symbols split by ROTATION REFERENCE FRAME (S-52 6.1.1 §3.1.6 / PresLib
@@ -279,7 +298,14 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
   // also hits the clone, so SCAMIN features restyle/toggle identically. (e.g.
   // contour-labels for DEPCNT, which now live in lines_scamin; safety-contour /
   // shallow-pattern reading areas_scamin; danger-boundary reading lines_scamin.)
-  const SCAMIN_SRC = new Set(["areas", "area_patterns", "lines", "complex_lines"]);
+  // Source-layers whose SCAMIN-bearing primitives live in a SEPARATE "<sl>_scamin"
+  // source-layer (vs. an in-layer `scamin` property). The Go baker splits the four
+  // area/line layers; the native tile57 engine ALSO splits point_symbols + text
+  // (its SCAMIN buoys/beacons/lights/labels ride point_symbols_scamin / text_scamin),
+  // so they must be cloned + bucketed too or every SCAMIN'd symbol/label is invisible
+  // under tile57. The clones read source-layers that simply don't exist in a Go-baked
+  // pack, so they render nothing there — safe for both bakers.
+  const SCAMIN_SRC = new Set(["areas", "area_patterns", "lines", "complex_lines", "point_symbols", "text"]);
   const withScamin = [];
   for (const L of tmpl) {
     withScamin.push(L);
@@ -445,12 +471,12 @@ export function buildChartLayers({
         // native minzoom, and mirrors the coarse-band maxzoom cap.
         const mk = (suffix, baseFilter, minzoom) => {
           const id = L.id + "@" + set.name + suffix;
-          layerBase[id] = baseFilter;
+          if (!L._rawFilter) layerBase[id] = baseFilter; // raw layers keep their verbatim filter — exclude from the live re-combine
           // Register under the ORIGINAL base id for a *_scamin clone (L._baseId),
           // so every restyle/toggle keyed on the original id reaches the clone too.
           (variants[L._baseId || L.id] ||= []).push(id);
-          const { _baseId, ...tmplL } = L; // _baseId is internal — keep it out of the MapLibre layer
-          const v = { ...tmplL, id, source: "chart-" + set.name, filter: S52.combineFilters(baseFilter, mariner), layout: _variantLayout(L, set.band, id, bandsHidden, layerVis) };
+          const { _baseId, _rawFilter, ...tmplL } = L; // internal — keep out of the MapLibre layer
+          const v = { ...tmplL, id, source: "chart-" + set.name, filter: _rawFilter ? baseFilter : S52.combineFilters(baseFilter, mariner), layout: _variantLayout(L, set.band, id, bandsHidden, layerVis) };
           if (minzoom != null) v.minzoom = minzoom; // band appears at its scale, not the baked floor
           if (capped) v.maxzoom = CHART_BANDS.find((b) => b.slug === set.band).max;
           out.push(v);
@@ -465,7 +491,7 @@ export function buildChartLayers({
         // natively (zero JS/frame). The per-band archive is FLOOR-GATED at bake, so
         // tile CONTENT controls appearance: client layers need no band minzoom.
         const scaminVals = set.scamin || [];
-        if (!ignoreScamin && SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
+        if (!ignoreScamin && !L._rawFilter && SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminVals.length) {
           // Only materialize a per-value bucket where the SCAMIN cutoff zoom is
           // ABOVE this set's source floor (set.min). The set's tiles don't load
           // below set.min, so any SCAMIN whose cutoff is ≤ set.min shows from the
@@ -495,7 +521,7 @@ export function buildChartLayers({
         // interleaved per band, so a finer band's opaque fill covers it where finer
         // data exists — the hatch is left only on the coarse-only (overscale) patches
         // such as open water shown enlarged. S-52 §10.1.10.2.
-        if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, undefined, bandsHidden, finerBandPresent(set.band));
+        if (L.id === "areas") _pushOverscale(out, "chart-" + set.name, set.band, layerVis, mariner.showOverscale, bandsHidden, finerBandPresent(set.band));
         }
       }
     }
@@ -523,12 +549,12 @@ export function buildChartLayers({
       // is mirrored from the unbucketed path.
       const mk = (suffix, baseFilter, minzoom) => {
         const id = L.id + "@" + band.slug + suffix;
-        layerBase[id] = baseFilter;
+        if (!L._rawFilter) layerBase[id] = baseFilter; // raw layers keep their verbatim filter — exclude from the live re-combine
         // Register under the ORIGINAL base id for a *_scamin clone (L._baseId),
         // so every restyle/toggle keyed on the original id reaches the clone too.
         (variants[L._baseId || L.id] ||= []).push(id);
-        const { _baseId, ...tmplL } = L; // _baseId is internal — keep it out of the MapLibre layer
-        const v = { ...tmplL, id, source: "chart-" + band.slug, filter: S52.combineFilters(baseFilter, mariner), layout: _variantLayout(L, band.slug, id, bandsHidden, layerVis) };
+        const { _baseId, _rawFilter, ...tmplL } = L; // internal — keep out of the MapLibre layer
+        const v = { ...tmplL, id, source: "chart-" + band.slug, filter: _rawFilter ? baseFilter : S52.combineFilters(baseFilter, mariner), layout: _variantLayout(L, band.slug, id, bandsHidden, layerVis) };
         if (minzoom != null) v.minzoom = minzoom;
         if (capped) v.maxzoom = band.max;
         out.push(v);
@@ -541,7 +567,7 @@ export function buildChartLayers({
       // SCAMIN value (collected from the tiles). Out-of-zoom buckets are skipped by
       // MapLibre for free, so the extra layers cost nothing at runtime. Features
       // WITHOUT SCAMIN take the band-gated `#no` variant. Other layers: one variant.
-      if (!ignoreScamin && SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminValues && scaminValues.length) {
+      if (!ignoreScamin && !L._rawFilter && SCAMIN_BUCKET_LAYERS.has(L["source-layer"]) && scaminValues && scaminValues.length) {
         // Only bucket SCAMIN values whose cutoff is ABOVE this band's display floor
         // (dmin) — values at/below dmin show from the floor anyway (the band isn't
         // displayed below it), so fold them into the dmin-floored `#no` bucket. Cuts
@@ -559,7 +585,7 @@ export function buildChartLayers({
       } else {
         mk("", base, dmin || undefined);
       }
-      if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, undefined, bandsHidden, finerBandPresent(band.slug));
+      if (L.id === "areas") _pushOverscale(out, "chart-" + band.slug, band.slug, layerVis, mariner.showOverscale, bandsHidden, finerBandPresent(band.slug));
     }
     }
   }

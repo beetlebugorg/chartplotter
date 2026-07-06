@@ -64,7 +64,11 @@ export const BAND_DISPLAY_MIN = { overview: 0, general: 0, coastal: 9, approach:
 // no-SCAMIN counterparts stay in the original (areas/area_patterns/lines/
 // complex_lines) layers — single, always-in-band, NOT bucketed.
 export const SCAMIN_BUCKET_LAYERS = new Set(["point_symbols", "soundings", "text", "sector_lines",
-  "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin"]);
+  "areas_scamin", "area_patterns_scamin", "lines_scamin", "complex_lines_scamin",
+  // The native tile57 engine splits SCAMIN point symbols + text into their own
+  // source-layers (vs. the Go baker's in-layer `scamin` property), so bucket those
+  // too — without them, tile57's SCAMIN buoys/beacons/lights/labels never show.
+  "point_symbols_scamin", "text_scamin"]);
 
 // Centre-latitude drift (degrees) that triggers a SCAMIN bucket-minzoom rebuild.
 // The cutoff zoom shifts with cos(lat); 2° keeps the error under ~0.05 zoom at
@@ -109,6 +113,47 @@ export function bandOfSet(name) {
   return "all";
 }
 
+// engineStamp — the compact ENGINE-COMMIT stamp for the attribution corner: which
+// tile57 engine commit baked the ACTIVE sets' visible tiles. Each set's TileJSON
+// carries `engine` (bake-time truth for packs, stamped when they were baked;
+// "pre-stamp" for packs baked before stamping; the RUNNING binary's commit for
+// live --tile57/dynamic sets). Returns null when no active set reports one
+// (pmtiles mode / an older server) — the stamp hides.
+//   • all sets agree → { text: "<commit>", mixed:false } — one muted commit.
+//   • they DIFFER (a partially re-baked cache — the case the stamp exists for) →
+//     { text: "d5:abc123 d7:def456✱", mixed:true }: one "label:commit" group per
+//     distinct engine, majority first, every minority group marked ✱; the caller
+//     also warn-tints the whole stamp via `mixed`.
+// `title` always carries the full per-set detail for the tooltip.
+export function engineStamp(metas) {
+  const seen = [];
+  for (const m of metas || []) {
+    if (!m || typeof m.engine !== "string" || !m.engine) continue;
+    // Pack label: the set minus its band suffix ("noaa-d5-coastal" → "noaa-d5"),
+    // minus the noaa- provider prefix ("d5") — short enough for the corner.
+    const name = m.name || "";
+    const band = bandOfSet(name);
+    let pack = name;
+    if (band !== "all" && pack.endsWith("-" + band)) pack = pack.slice(0, -(band.length + 1));
+    seen.push({ set: name, label: pack.replace(/^noaa-/, "") || pack, engine: m.engine });
+  }
+  if (!seen.length) return null;
+  const title = "Engine commit that baked each active set:\n" + seen.map((e) => `${e.set}: ${e.engine}`).join("\n");
+  const groups = new Map(); // engine → { engine, labels:[…], count }
+  for (const e of seen) {
+    let g = groups.get(e.engine);
+    if (!g) groups.set(e.engine, (g = { engine: e.engine, labels: [], count: 0 }));
+    if (!g.labels.includes(e.label)) g.labels.push(e.label);
+    g.count++;
+  }
+  if (groups.size === 1) return { text: seen[0].engine, mixed: false, title };
+  // Mixed bake: majority group first (ties broken by commit for stability); every
+  // group after the majority carries the ✱ disagreement marker.
+  const ordered = [...groups.values()].sort((a, b) => b.count - a.count || (a.engine < b.engine ? -1 : 1));
+  const text = ordered.map((g, i) => `${g.labels.join(",")}:${g.engine}${i ? "✱" : ""}`).join(" ");
+  return { text, mixed: true, title: title + "\n✱ differs from the majority engine — a partial re-bake" };
+}
+
 export class ChartSources {
   constructor({ assets, getMap, rebuild, getPxPitch }) {
     this.assets = assets;     // resolved assets base URL (trailing "/")
@@ -116,6 +161,7 @@ export class ChartSources {
     this.rebuild = rebuild;   // () => map.setStyle(buildStyle(), {diff:false,validate:false})
     this.getPxPitch = getPxPitch || (() => undefined); // () => calibrated CSS-pixel pitch (mm); drives SCAMIN gating
     this._ver = 0;            // chart-tile cache-bust token (see refresh)
+    this._srcEncoding = {};   // source id ("chart-<slug>") → the tile encoding ("mvt"/"mlt") BAKED into the live style. MapLibre reads a vector source's `encoding` only at CREATION, so a decoder switch (an MLT archive loading after the initial mvt-default style) needs a full rebuild, not an in-place mutation (see _updateSourceZoom → rebuild).
     this._bands = {};         // band slug → MultiArchive of that band's loaded packs (chart-<slug> source)
     this._scaminValues = [];  // distinct SCAMIN denominators seen in tiles → per-SCAMIN bucket layers
     this._scaminLat = null;   // latitude the bucket minzooms were computed at (rebuild on big change)
@@ -175,7 +221,7 @@ export class ChartSources {
     // GENERATION (?g=<mtime>) — re-fetching this JSON (it's no-cache) after a re-bake
     // yields a new URL, so pointing the source at it bypasses every tile cache by
     // content. Falls back to the plain URL if the server omits it.
-    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name) };
+    const meta = { name, band: bandOfSet(name), min: 0, max: 18, bounds: null, scamin: [], tiles: this._serverTilesUrl(name), encoding: "mvt", engine: "" };
     try {
       const base = new URL(this.assets, location.href).href;
       const tj = await fetch(`${base}tiles/${name}.json`).then((r) => (r.ok ? r.json() : null));
@@ -185,6 +231,12 @@ export class ChartSources {
         if (Array.isArray(tj.bounds) && tj.bounds.length === 4) meta.bounds = tj.bounds; // [w,s,e,n] — host zoom-cap
         if (Array.isArray(tj.scamin)) meta.scamin = tj.scamin; // SCAMIN manifest → per-set bucket layers (no runtime collect)
         if (Array.isArray(tj.tiles) && tj.tiles[0]) meta.tiles = tj.tiles[0];
+        if (tj.encoding === "mlt") meta.encoding = "mlt"; // MLT set → source `encoding` hint (native MLT decode)
+        // The tile57 engine commit behind this set's tiles: bake-time for packs
+        // ("pre-stamp" for pre-stamping bakes), the running binary for live sets.
+        // Drives the attribution engine stamp (engineStamp below); "" = an older
+        // server that doesn't report it (the stamp hides).
+        if (typeof tj.engine === "string") meta.engine = tj.engine;
       }
     } catch (e) { /* keep defaults */ }
     return meta;
@@ -383,6 +435,28 @@ export class ChartSources {
   // Convenience: render a single server set (or none). See setServerSets.
   setServerSet(name) { return this.setServerSets(name ? [name] : []); }
 
+  // Deepest zoom the loaded prebaked archives hold a tile at over (lng,lat) —
+  // the widget's per-location data depth. The merged composite archive is a
+  // SPARSE pyramid (each band bakes to its native max + the overscale fill-up),
+  // so a global source maxzoom can't say where tiles end; the camera cap probes
+  // the directory instead (root/leaf lookups, cached — no tile reads). null in
+  // server mode or before an archive loads.
+  async dataMaxZoomAt(lng, lat) {
+    if (this._server) return null;
+    const arc = this._bands.all;
+    if (!arc || !arc.hasTile || arc.maxZoom == null) return null;
+    const wx = (lng + 180) / 360;
+    const latRad = (lat * Math.PI) / 180;
+    const wy = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2;
+    for (let z = arc.maxZoom; z >= (arc.minZoom || 0); z--) {
+      const n = 2 ** z;
+      const x = Math.max(0, Math.min(n - 1, Math.floor(wx * n)));
+      const y = Math.max(0, Math.min(n - 1, Math.floor(wy * n)));
+      if (await arc.hasTile(z, x, y)) return z;
+    }
+    return null;
+  }
+
   // The active server tile-set names ([] when not in server mode).
   serverSets() { return this._server ? this._serverSets.map((s) => s.name) : []; }
 
@@ -432,8 +506,7 @@ export class ChartSources {
       if (!this._bands[b]) this._bands[b] = new MultiArchive();
       a = await this._bands[b].add(resolved);
     }
-    this._updateSourceZoom();
-    this.refresh();
+    if (this._updateSourceZoom()) this.rebuild(); else this.refresh();
     return a;
   }
 
@@ -461,8 +534,7 @@ export class ChartSources {
       this._bands[b] = new MultiArchive();
       a = await this._bands[b].add(resolved);
     }
-    this._updateSourceZoom();
-    this.refresh();
+    if (this._updateSourceZoom()) this.rebuild(); else this.refresh();
     return a;
   }
 
@@ -479,17 +551,25 @@ export class ChartSources {
       if (!this._bands[band]) this._bands[band] = new MultiArchive();
       return this._bands[band].add(this._resolveSrc(e.src)).catch((err) => { console.warn("[chartplotter] archive", e.src, err); return null; });
     }));
-    this._updateSourceZoom();
-    this.refresh();
+    if (this._updateSourceZoom()) this.rebuild(); else this.refresh();
     return arcs.filter(Boolean);
   }
 
   // NOAA-band sources have fixed zoom ranges (from CHART_BANDS), so only the
   // merged-upload `all` source needs its max synced to the loaded archive (an
   // upload may bake to <18; requesting above its max would read blank).
+  //
+  // Returns TRUE when a loaded archive needs a tile encoding the live style
+  // doesn't have — the caller must then rebuild() (recreate the sources) rather
+  // than refresh(), because MapLibre reads a vector source's `encoding` only at
+  // CREATION. Archives load AFTER the initial (mvt-default) style is built, so an
+  // MLT archive (the tile57 default bake format) has no way to switch a live
+  // source's decoder in place; a stale mvt decoder parses MLT bytes as MVT and
+  // MapLibre throws "Unable to parse the tile". zoom ranges, by contrast, ARE
+  // honoured in place, so they stay here.
   _updateSourceZoom() {
     const map = this.getMap();
-    if (!map) return;
+    if (!map) return false;
     // Hold every loaded band source's maxzoom at its archive's REAL deepest baked
     // zoom (PMTiles header), in place — so MapLibre overzooms the deepest tile it
     // has instead of requesting empty tiles past the bake (which read as a blank
@@ -497,13 +577,23 @@ export class ChartSources {
     // band-range change before a re-bake). No restyle. The merged "all" source has
     // no per-band overzoom so its minzoom tracks the archive too; the per-band
     // sources keep minzoom 0 for the sub-band SCAMIN features.
+    let encodingChanged = false;
     for (const slug of Object.keys(this._bands)) {
       const arc = this._bands[slug];
+      if (!arc) continue;
+      // Does this archive's decoder match what the live style committed? Checked
+      // BEFORE the live-source guard: the comparison is against our own
+      // bookkeeping (_srcEncoding), so a style that is still loading — or that
+      // hasn't materialized this source yet — must still flag the rebuild, or
+      // the stale decoder survives until some unrelated restyle.
+      const want = arc.tileType === "mlt" ? "mlt" : "mvt";
+      if (this._srcEncoding["chart-" + slug] !== want) encodingChanged = true;
       const src = map.getSource("chart-" + slug);
-      if (!src || !arc || src.maxzoom === undefined) continue;
+      if (!src || src.maxzoom === undefined) continue;
       src.maxzoom = arc.maxZoom;
       if (slug === "all") src.minzoom = arc.minZoom;
     }
+    return encodingChanged;
   }
 
   // Render a hosted `.pmtiles` by URL — read incrementally via HTTP Range (NOT
@@ -531,10 +621,11 @@ export class ChartSources {
 
     // Open every archive CONCURRENTLY. Each open is two range round-trips (header
     // + root directory); doing ~50 districts serially was the slow initial load.
-    // Each unique file is opened ONCE — a bandless ("all") pack FANS across every
-    // per-band source (each overzooms its own [min,max]) so a coarse-only spot
-    // shows the coarser chart overscale instead of a high-zoom hole, but the
-    // underlying archive handle is shared, not re-fetched six times.
+    // A bandless entry (the merged composite archive — one per district) loads
+    // into the single "all" source ONLY: best-available is resolved inside the
+    // archive, and the pmtiles protocol errors absent tiles so MapLibre
+    // stretches an ancestor where the pyramid runs out (per-area overzoom).
+    // Legacy per-band entries still land in their chart-<slug> sources.
     const opened = new Map(); // url → Promise<PMTilesArchive>
     const openOnce = (u) => {
       let p = opened.get(u);
@@ -545,7 +636,7 @@ export class ChartSources {
     for (const d of districts) {
       if (!d.file) continue;
       const u = new URL(d.file, base).href;
-      for (const slug of this._fanBands(d.band || "all")) {
+      for (const slug of (d.band ? this._fanBands(d.band) : ["all"])) {
         if (!this._bands[slug]) this._bands[slug] = new MultiArchive();
         const band = this._bands[slug];
         tasks.push(openOnce(u)
@@ -576,6 +667,8 @@ export class ChartSources {
     // for free). Falls back to band.bake until an archive is loaded.
     for (const band of CHART_BANDS) {
       const archive = this._bands[band.slug];
+      const enc = archive && archive.tileType === "mlt" ? "mlt" : "mvt";
+      this._srcEncoding["chart-" + band.slug] = enc; // record what THIS style commits (see _updateSourceZoom)
       sources["chart-" + band.slug] = {
         type: "vector",
         tiles: [`chart-${band.slug}://${v}/{z}/{x}/{y}`],
@@ -586,16 +679,28 @@ export class ChartSources {
         // tiles), so it's cheap. Per-SCAMIN bucket layers gate the exact display scale.
         minzoom: 0,
         maxzoom: (archive && archive.maxZoom) || band.bake,
+        // MLT archives (the tile57 default bake format) hint MapLibre's native MLT
+        // decoder; MVT (the MapLibre default) adds nothing. Bytes serve verbatim.
+        ...(enc === "mlt" ? { encoding: "mlt" } : {}),
       };
     }
     if (this._server) {
-      // One source per active pack, MVT pulled live from /tiles/{set}. minzoom/
-      // maxzoom are the set's REAL range (from its TileJSON) so MapLibre overzooms
-      // the deepest baked tile instead of requesting empty tiles past the bake. With
-      // no packs we add no chart sources (a vector source with an empty `tiles` array
-      // makes MapLibre crash); the no-data hatch shows through.
+      // One source per active pack, tiles pulled live from /tiles/{set} in the
+      // set's stored encoding (the TileJSON `encoding` hint selects the decoder).
+      // minzoom/maxzoom are the set's REAL range (from its TileJSON) so MapLibre
+      // overzooms the deepest baked tile instead of requesting empty tiles past the
+      // bake. With no packs we add no chart sources (a vector source with an empty
+      // `tiles` array makes MapLibre crash); the no-data hatch shows through.
       for (const set of this._serverSets) {
-        sources["chart-" + set.name] = { type: "vector", tiles: [set.tiles || this._serverTilesUrl(set.name)], minzoom: set.min, maxzoom: set.max };
+        const enc = set.encoding === "mlt" ? "mlt" : "mvt";
+        this._srcEncoding["chart-" + set.name] = enc;
+        sources["chart-" + set.name] = {
+          type: "vector",
+          tiles: [set.tiles || this._serverTilesUrl(set.name)],
+          minzoom: set.min,
+          maxzoom: set.max,
+          ...(enc === "mlt" ? { encoding: "mlt" } : {}),
+        };
       }
     }
     return sources;

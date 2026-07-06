@@ -14,10 +14,16 @@
 //   cov.setFeatures(rawFeats);    // [{properties:{name,band}, geometry:Polygon}]
 //   if (cov.tapFlyTo(point)) …    // in the map click handler, before the pick report
 
-import { BAND_COLOR, BAND_MINZOOM } from "../lib/bands.mjs";
+import { BAND_COLOR } from "../lib/bands.mjs";
 
-const BANDS = ["general", "coastal", "approach", "harbor", "berthing"];
+// Band → outline/label colour (a feature's `band` property; "" / unknown → blue).
+const BAND_TINT = ["match", ["get", "band"],
+  "overview", BAND_COLOR.overview, "general", BAND_COLOR.general, "coastal", BAND_COLOR.coastal,
+  "approach", BAND_COLOR.approach, "harbor", BAND_COLOR.harbor, "berthing", BAND_COLOR.berthing,
+  "#3a9bdc"];
+
 const MIN_BOX_PX = 26; // a box never renders smaller than this on screen
+const REGROW_MS = 200; // during a continuous zoom, re-grow the boxes at most 5×/s
 
 export class CoverageBoxes {
   constructor({ map, visible }) {
@@ -25,9 +31,25 @@ export class CoverageBoxes {
     this._visible = visible !== false;
     this._raw = [];
     this._raf = 0;
+    this._regrowT = 0;   // trailing re-grow timer (covers the end of a gesture)
+    this._lastApply = 0; // performance.now() of the last actual setData
+    this._lastSig = null; // signature of the last-pushed features (skip no-op setData)
     // The boxes have a per-zoom minimum on-screen size, so re-grow them as the zoom
-    // changes. Hooked once (the map persists across style rebuilds); rAF-throttled.
-    this._onZoom = () => { if (this._raf) return; this._raf = requestAnimationFrame(() => { this._raf = 0; this._apply(); }); };
+    // changes. Hooked once (the map persists across style rebuilds). Throttled to
+    // REGROW_MS with a trailing apply: the old per-frame (rAF) cadence made every
+    // animation frame of a zoom gesture setData() this source, and each setData
+    // re-tiles the geojson in a worker AND reloads every inst-bounds tile across
+    // its 11 layers (5 of them symbol layers → re-placement). Measured on a
+    // continuous z8→16 easeTo, that was ~70-85% of ALL tile churn in the gesture
+    // (~230-410 tile reloads vs ~120 real chart loads) — the map got choppier the
+    // faster it rendered. _apply() also skips identical output, so the common
+    // zoomed-in case (every footprint ≥ MIN_BOX_PX) does no work at all.
+    this._onZoom = () => {
+      if (!this._visible || this._raf || this._regrowT) return;
+      const wait = this._lastApply + REGROW_MS - performance.now();
+      if (wait > 0) { this._regrowT = setTimeout(() => { this._regrowT = 0; this._apply(); }, wait); return; }
+      this._raf = requestAnimationFrame(() => { this._raf = 0; this._apply(); });
+    };
     map.on("zoom", this._onZoom);
   }
 
@@ -36,104 +58,78 @@ export class CoverageBoxes {
   addLayers() {
     const map = this.map;
     if (!map.getSource("inst-bounds")) map.addSource("inst-bounds", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    this._lastSig = null; // a rebuilt style starts from an empty source — must re-push
     const vis = this._visible ? "visible" : "none";
-    // Per-band fill/line, auto-hidden at the band's native min zoom (maxzoom) where
-    // the real chart takes over.
-    for (const band of BANDS) {
-      const mz = BAND_MINZOOM[band];
-      const f = ["==", ["get", "band"], band];
-      if (!map.getLayer(`inst-fill-${band}`)) map.addLayer({ id: `inst-fill-${band}`, type: "fill", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: vis }, paint: { "fill-color": BAND_COLOR[band], "fill-opacity": 0.06 } });
-      if (!map.getLayer(`inst-line-${band}`)) map.addLayer({ id: `inst-line-${band}`, type: "line", source: "inst-bounds", maxzoom: mz, filter: f, layout: { visibility: vis }, paint: { "line-color": BAND_COLOR[band], "line-width": 1.1, "line-opacity": 0.85 } });
-      // Cell-name label at the footprint centroid, so on a blank (no-basemap) map you
-      // can SEE which chart is where (and tap it). Capped at the band's render zoom
-      // (same as the fill/line) so it vanishes once the chart itself draws — not
-      // obtrusive when you're already there. Decluttered (drops on overlap).
-      if (!map.getLayer(`inst-label-${band}`)) map.addLayer({ id: `inst-label-${band}`, type: "symbol", source: "inst-bounds", maxzoom: mz, filter: f, layout: {
-        visibility: vis,
-        "symbol-placement": "point",
-        "text-field": ["coalesce", ["get", "name"], ""],
-        "text-font": ["Noto Sans Regular"],
-        "text-size": 12,
-        "text-allow-overlap": false,
-        "text-optional": true,
-      }, paint: {
-        "text-color": BAND_COLOR[band],
-        "text-halo-color": "#ffffff",
-        "text-halo-width": 1.8,
-      } });
-    }
-    // Always-on footprint outline (NOT maxzoom-capped): when SCAMIN suppresses every
-    // feature in a cell the tiles render blank, so keep a thin dashed outline at ALL
-    // zooms — BOLD when scaled far out (the box is a tiny shape then), subtle once
-    // zoomed in so it doesn't fight the chart symbology.
+    // A band-coloured dashed outline per cell footprint, at ALL zooms (no fill/tint), so
+    // you can see which chart owns where even while zoomed into the detail. Subtle when
+    // zoomed in so it doesn't fight the chart symbology; bolder scaled far out.
     if (!map.getLayer("inst-outline")) map.addLayer({ id: "inst-outline", type: "line", source: "inst-bounds", layout: { visibility: vis }, paint: {
-      "line-color": "#3a9bdc",
+      "line-color": BAND_TINT,
       "line-dasharray": [4, 3],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 2, 2.2, 8, 1.6, 13, 1, 16, 0.8],
-      "line-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.95, 8, 0.8, 13, 0.55, 16, 0.4],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 3, 2.2, 8, 1.4, 13, 1, 16, 0.8],
+      "line-opacity": ["interpolate", ["linear"], ["zoom"], 3, 0.95, 8, 0.85, 13, 0.7, 16, 0.55],
+    } });
+    // Cell-name label at each footprint centroid, band-coloured, kept at ALL zooms so you
+    // can read WHICH chart covers a point even at the detail zoom — the "which cells are
+    // which" debug view. Decluttered (drops on overlap) so a dense view stays legible.
+    if (!map.getLayer("inst-name")) map.addLayer({ id: "inst-name", type: "symbol", source: "inst-bounds", layout: {
+      visibility: vis,
+      "symbol-placement": "point",
+      "text-field": ["coalesce", ["get", "name"], ""],
+      "text-font": ["Noto Sans Regular"],
+      "text-size": 11,
+      "text-allow-overlap": false,
+      "text-optional": true,
+    }, paint: {
+      "text-color": BAND_TINT,
+      "text-halo-color": "#ffffff",
+      "text-halo-width": 1.8,
     } });
     this._apply(); // restore data after a style rebuild
   }
 
-  // Replace the coverage features. Raw (true) footprints are kept; _apply() pushes
-  // them with the per-zoom minimum size.
-  setFeatures(raw) { this._raw = raw || []; this._apply(); }
+  // Replace the coverage features. De-dups on the cell name/band signature (moveend +
+  // idle both refresh, and idle can fire repeatedly with the same winning cells); the
+  // per-zoom min-box growth is handled by the zoom hook + _apply, so a name/band
+  // signature is enough to skip a redundant re-tile.
+  setFeatures(raw) {
+    raw = raw || [];
+    const sig = raw.length + "#" + raw.map((f) => `${(f.properties && f.properties.name) || ""}:${(f.properties && f.properties.band) || ""}`).join(",");
+    if (sig === this._featSig) return;
+    this._featSig = sig;
+    this._raw = raw;
+    this._lastSig = null;
+    this._apply();
+  }
 
   _apply() {
     const src = this.map.getSource("inst-bounds");
     if (!src) return;
-    src.setData({ type: "FeatureCollection", features: this._raw.map((f) => minSizeBox(this.map, f, MIN_BOX_PX)) });
+    const features = this._raw.map((f) => minSizeBox(this.map, f, MIN_BOX_PX));
+    // Skip the setData when the grown output is unchanged. minSizeBox returns the
+    // RAW feature object itself whenever the footprint is already big enough on
+    // screen, so the signature only stringifies the (few, usually zero) boxed
+    // geometries — zoomed in past the point where every footprint ≥ MIN_BOX_PX,
+    // a whole zoom gesture is a no-op here.
+    let sig = "";
+    for (let i = 0; i < features.length; i++) if (features[i] !== this._raw[i]) sig += i + ":" + JSON.stringify(features[i].geometry.coordinates) + ";";
+    if (this._lastSig !== null && sig === this._lastSig) return;
+    this._lastSig = sig;
+    this._lastApply = performance.now();
+    src.setData({ type: "FeatureCollection", features });
   }
 
   setVisible(on) {
     this._visible = !!on;
     const map = this.map, vis = on ? "visible" : "none";
-    for (const band of BANDS) for (const pre of ["inst-fill-", "inst-line-", "inst-label-"]) if (map.getLayer(pre + band)) map.setLayoutProperty(pre + band, "visibility", vis);
-    if (map.getLayer("inst-outline")) map.setLayoutProperty("inst-outline", "visibility", vis);
-  }
-
-  // A coverage box under `point` that we're zoomed OUT of (its chart detail hasn't
-  // kicked in) — so a tap should fly there rather than open a pick report. null when
-  // hidden, nothing under the point, or already at the chart's detail zoom.
-  boxAt(point) {
-    const map = this.map;
-    if (!this._visible) return null;
-    const ids = ["inst-outline", ...BANDS.map((b) => `inst-fill-${b}`)].filter((id) => map.getLayer(id));
-    const hit = map.queryRenderedFeatures(point, { layers: ids })[0];
-    if (!hit) return null;
-    const band = hit.properties && hit.properties.band;
-    if (map.getZoom() >= (BAND_MINZOOM[band] || 12)) return null; // already at detail → let the pick run
-    return hit;
-  }
-
-  // Fly to a box's chart at the zoom where its detail renders. The box may be the
-  // min-size marker, so frame the TRUE footprint (from _raw) and ensure we cross the
-  // band's render zoom (a tiny cell fitted to the viewport would stop short).
-  flyTo(f) {
-    const map = this.map;
-    const name = f.properties && f.properties.name;
-    const real = this._raw.find((r) => r.properties && r.properties.name === name) || f;
-    const ring = real.geometry.coordinates[0];
-    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
-    for (const [x, y] of ring) { w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y); }
-    const need = (BAND_MINZOOM[(f.properties && f.properties.band)] || 12) + 1;
-    const cam = map.cameraForBounds([[w, s], [e, n]], { padding: 80 });
-    const zoom = Math.min(18, Math.max(cam ? cam.zoom : need, need));
-    if (map.getMaxZoom() < zoom) map.setMaxZoom(zoom); // don't let the departure cap clamp the fly short
-    map.flyTo({ center: cam ? cam.center : [(w + e) / 2, (s + n) / 2], zoom, duration: 1200 });
-  }
-
-  // Hit-test + fly in one call; returns true if it handled the tap.
-  tapFlyTo(point) {
-    const f = this.boxAt(point);
-    if (!f) return false;
-    this.flyTo(f);
-    return true;
+    for (const id of ["inst-outline", "inst-name"]) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
+    if (on) this._apply(); // re-grow: the zoom hook is idle while hidden
   }
 
   destroy() {
     this.map.off("zoom", this._onZoom);
     if (this._raf) cancelAnimationFrame(this._raf);
+    if (this._regrowT) clearTimeout(this._regrowT);
   }
 }
 

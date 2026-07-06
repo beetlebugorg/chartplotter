@@ -17,7 +17,7 @@ export const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11,
 // native max + OVERSCALE_MARGIN over open water just enlarges blank water, so
 // _updateZoomCap clamps to the finest band that actually covers the view.
 export const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
-export const OVERSCALE_MARGIN = 2; // zoom-in levels allowed past the finest covering band
+export const OVERSCALE_MARGIN = 1; // zoom-in levels allowed past the finest covering band (matches the bake default TILE57_FILLUP_DZ=1)
 // Usage bands in coarse→fine order, for the dev band-filter rows.
 export const DEV_BANDS = BANDS;
 
@@ -31,6 +31,15 @@ export function bandForScale(s) {
   if (n <= 500000) return "coastal";
   if (n <= 2300000) return "general";
   return "overview";
+}
+
+// A NOAA cell's usage-band digit (the 3rd char of e.g. "US5MD1MC") → its band, a
+// fallback for the coverage overlay when the compilation scale isn't known yet (the
+// NOAA catalogue hasn't loaded). The digit is a coverage-PURPOSE hint — bandForScale
+// is authoritative — but good enough to colour/label a cell in the debug overlay.
+export function bandForCellName(name) {
+  const d = name && name.length >= 3 ? name.charCodeAt(2) - 48 : NaN;
+  return BANDS[d - 1] || "harbor";
 }
 
 // The finest band whose source paints at zoom z (Band.zoomRange mins in bake.zig:

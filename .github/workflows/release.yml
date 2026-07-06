@@ -1,5 +1,31 @@
 name: Release
 
+# chartplotter publishes per-platform binaries on every v* tag. The binary is a
+# CGO build that statically links the native libtile57 engine and can't be
+# cross-compiled by an off-the-shelf builder, so the binaries are cross-built HERE,
+# then a plain shell step archives + checksums + releases them:
+#
+#   xbuild (ubuntu)  → linux + windows, amd64/arm64  via `make xbuild` (zig cc)
+#   release (ubuntu) → downloads the artifact set, archives + checksums + release
+#
+# macOS is intentionally NOT built: with GOOS=darwin, Go's crypto/x509 + runtime/cgo
+# link Apple's Security/CoreFoundation frameworks, which Zig doesn't bundle, so darwin
+# can't be cross-built with zig cc and would need a paid macOS runner. Mac users build
+# from source per the README.
+#
+# The engine is the public github.com/beetlebugorg/tile57 (its submodules hold the
+# IHO S-101 catalogues); it is the ./tile57 git submodule so go.mod's
+# ./tile57/bindings/go replace and the binding's cgo LDFLAGS resolve — the same
+# layout as ci.yml. `submodules: recursive` checks it out at the committed pin, then
+# it's floated to the engine's latest main. main.version + main.engineCommit are
+# stamped into every binary via ldflags (preserved across both jobs).
+#
+# Packaging is plain shell (tar/zip + checksums + gh release) — no GoReleaser, no
+# paid license — so nothing here depends on a GoReleaser Pro key.
+#
+# NOTE: correct-by-construction but UNVALIDATED until a real v* tag is pushed —
+# nothing runs on push/PR, and packaging needs the CI-built binaries.
+
 on:
   push:
     tags:
@@ -9,49 +35,105 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  # ---- linux + windows (amd64/arm64): CGO cross-compile with zig cc -------------
+  xbuild:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout chartplotter (+ tile57 engine submodule)
+        uses: actions/checkout@v7
         with:
+          path: chartplotter
           fetch-depth: 0
-
+          # ./tile57 submodule (go.mod replaces the binding at ./tile57/bindings/go);
+          # its own submodules carry the IHO catalogues.
+          submodules: recursive
+      - name: Float tile57 submodule to latest main
+        run: |
+          git -C chartplotter submodule update --remote tile57
+          git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
           cache: true
-
-      # The S-101 Portrayal + Feature Catalogues are IHO material kept out of this
-      # repo. Clone them (public, no auth) into a temp dir and sync into the
-      # gitignored embed dir so GoReleaser builds self-contained (-tags embed_s101)
-      # binaries. The IHO repos declare no license; see THIRD-PARTY-NOTICES.md.
-      - name: Fetch IHO S-101 catalogues
-        run: |
-          git clone --depth 1 https://github.com/iho-ohi/S-101_Portrayal-Catalogue.git "$RUNNER_TEMP/s101-pc"
-          git clone --depth 1 https://github.com/iho-ohi/S-101-Documentation-and-FC.git "$RUNNER_TEMP/s101-fc"
-          make sync-s101 \
-            S101_PC="$RUNNER_TEMP/s101-pc/PortrayalCatalog" \
-            S101_FC="$RUNNER_TEMP/s101-fc/S-101FC/FeatureCatalogue.xml"
-
-      # quill signs + notarizes the macOS binaries from this Linux runner (no Mac
-      # needed). The GoReleaser build hook (scripts/quill-sign.sh) invokes it.
-      - name: Install quill
-        run: |
-          go install github.com/anchore/quill/cmd/quill@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
         with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+          version: 0.16.0
+
+      # xbuild-tile57.sh builds libtile57 per target with zig, then links each
+      # binary with `zig cc`, emitting dist/chartplotter_${goos}_${goarch}${ext}
+      # (ext=.exe for windows) for linux+windows amd64/arm64, stamping VERSION +
+      # ENGINE_COMMIT (the Makefile derives ENGINE_COMMIT from the tile57 submodule HEAD).
+      - name: Cross-build linux + windows binaries
+        run: make -C chartplotter xbuild TILE57=tile57 VERSION="${{ github.ref_name }}"
+
+      - name: Upload linux + windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-xbuild
+          path: chartplotter/dist/chartplotter_*
+          if-no-files-found: error
+
+  # ---- package + publish: plain shell (no GoReleaser, no paid license) ---------
+  # The binaries are already built by the xbuild job above; this just archives each
+  # (tar.gz for unix, zip for windows), writes checksums.txt, and creates the
+  # GitHub release with all of it attached. (GoReleaser's prebuilt builder would do
+  # the same packaging but is Pro-only; shell keeps the release path license-free.)
+  release:
+    runs-on: ubuntu-latest
+    needs: [xbuild]
+    steps:
+      - name: Checkout chartplotter
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+          fetch-depth: 0
+
+      # Land all four prebuilt binaries into dist/ (naming: chartplotter_{os}_{arch}
+      # [.exe], from xbuild-tile57.sh — linux + windows, amd64/arm64).
+      - name: Download prebuilt binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-xbuild
+          path: chartplotter/dist
+
+      # Archive each binary alongside README + LICENSE + THIRD-PARTY-NOTICES, then
+      # one checksums.txt over the archives. tar.gz for unix, zip for windows.
+      # upload-artifact drops the exec bit, so it's restored before archiving.
+      - name: Package archives + checksums
+        working-directory: chartplotter
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          out=release-assets
+          mkdir -p "$out"
+          for bin in dist/chartplotter_*; do
+            base="$(basename "$bin")"          # chartplotter_linux_amd64[.exe]
+            platform="${base#chartplotter_}"   # linux_amd64[.exe]
+            stage="$(mktemp -d)"
+            cp README.md LICENSE THIRD-PARTY-NOTICES.md "$stage/"
+            if [ "${base##*.}" = "exe" ]; then
+              platform="${platform%.exe}"
+              cp "$bin" "$stage/chartplotter.exe"
+              ( cd "$stage" && zip -q -r - . ) > "$out/chartplotter_${tag}_${platform}.zip"
+            else
+              cp "$bin" "$stage/chartplotter"
+              chmod +x "$stage/chartplotter"
+              tar -czf "$out/chartplotter_${tag}_${platform}.tar.gz" -C "$stage" .
+            fi
+            rm -rf "$stage"
+          done
+          ( cd "$out" && sha256sum chartplotter_* > checksums.txt )
+          ls -1 "$out"
+
+      - name: Create GitHub release
+        working-directory: chartplotter
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing/notarization (quill). Set these as repo secrets; if they
-          # are absent the hook skips signing and the release still builds.
-          QUILL_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
-          QUILL_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
-          QUILL_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-          QUILL_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          QUILL_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --verify-tag \
+            --generate-notes \
+            --notes "Linux + Windows binaries (amd64/arm64) below. Each embeds the IHO S-101 catalogue (via the tile57 engine) — see THIRD-PARTY-NOTICES.md. macOS is not shipped as a binary; build from source per the README." \
+            release-assets/*
