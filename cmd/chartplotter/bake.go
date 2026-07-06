@@ -74,8 +74,15 @@ func (c bakeCmd) runTile57Bundle() error {
 func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
 	noop := func() {}
 	if len(c.In) == 1 {
-		if fi, e := os.Stat(c.In[0]); e == nil && (fi.IsDir() || encExt(c.In[0]) == ".000") {
-			return c.In[0], noop, nil
+		if fi, e := os.Stat(c.In[0]); e == nil {
+			// A lone .000, or a directory that ALREADY holds extracted .000 cells
+			// (a real ENC_ROOT), is handed to the engine as-is. A directory of only
+			// exchange-set .zip bundles (the demo cache, an IENC download) has no
+			// .000 for the engine to read — it must be unpacked via collectCells
+			// below, else the bake covers nothing.
+			if encExt(c.In[0]) == ".000" || (fi.IsDir() && dirHasBaseCell(c.In[0])) {
+				return c.In[0], noop, nil
+			}
 		}
 	}
 	cells, aux, err := collectCells(c.In)
@@ -138,6 +145,25 @@ func bundleOutDir(out string) string {
 	default:
 		return out
 	}
+}
+
+// dirHasBaseCell reports whether dir already contains at least one extracted .000
+// base cell — i.e. it is a bakeable ENC_ROOT the engine can read directly, not a
+// directory of .zip exchange-set bundles (which must be unpacked via collectCells
+// first). Stops at the first hit.
+func dirHasBaseCell(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if encExt(path) == ".000" {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // encExt reports the 3-digit S-57 cell extension (".000" base, ".001"+ updates)
