@@ -148,6 +148,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAPI(lw, r)
 	case strings.HasPrefix(r.URL.Path, "/tiles/"):
 		s.serveTileSet(lw, r)
+	case r.URL.Path == "/aux/index.json" || strings.HasPrefix(r.URL.Path, "/aux/"):
+		// Feature attachments (TXTDSC/PICREP) as loose static files: GET /aux/index.json
+		// (the manifest) + GET /aux/<stored> (one file). The SAME path the offline bundle
+		// serves, so the client loads aux identically online or off — no zip, no /api.
+		s.serveAux(lw, r)
 	case strings.HasPrefix(r.URL.Path, "/osm/"):
 		// Proxy the OSM raster basemap through the server: a browser can't set the
 		// User-Agent that OSM's tile policy requires (it's a forbidden request
@@ -302,8 +307,6 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveConnectionsStream(w, r) // SSE: live connection-status badges
 	case strings.HasPrefix(r.URL.Path, "/api/connections/"):
 		s.serveConnection(w, r) // GET/PUT/DELETE /<id>, or SSE /<id>/raw (sniffer)
-	case r.URL.Path == "/api/aux" || strings.HasPrefix(r.URL.Path, "/api/aux/"):
-		s.serveAux(w, r) // GET aux manifest, or one TXTDSC/PICREP file on demand (not the raw zip)
 	case strings.HasPrefix(r.URL.Path, "/api/import"):
 		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
 	case r.URL.Path == "/api/packs":

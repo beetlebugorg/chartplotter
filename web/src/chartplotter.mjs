@@ -538,10 +538,10 @@ export class ChartPlotter extends HTMLElement {
     // external files); load it so the pick report can show that content inline.
     this._aux = new AuxStore();
     const dl = this._dl.loadCatalog().then(async (r) => {
-      // Widget/hosted: a companion aux.zip named in the manifest (fetched whole once).
-      // Server: per-file on demand via GET api/aux — the raw zip is never exposed.
-      if (this._dl.auxUrl) await this._aux.load(this._dl.auxUrl);
-      else await this._aux.loadApi(this._assets);
+      // One aux path, online or off: a static index.json manifest whose files sit
+      // beside it, each fetched per-pick as a plain static GET (no zip, no /api).
+      // Hosted/widget: the manifest URL the charts index names. Server: /aux/index.json.
+      await this._aux.load(this._dl.auxUrl || `${this._assets}aux/index.json`);
       return r;
     });
     // Pick-report class/attribute name lookup. The old S-57 PresLib catalogue
@@ -1635,7 +1635,7 @@ export class ChartPlotter extends HTMLElement {
     const packs = await this._api.packs();
     // Re-index aux content (server mode): a just-imported district's TXTDSC/PICREP
     // files become resolvable in the pick report without a page reload.
-    if (this._aux && !this._dl.auxUrl) this._aux.loadApi(this._assets).catch(() => {});
+    if (this._aux && !this._dl.auxUrl) this._aux.load(`${this._assets}aux/index.json`).catch(() => {});
     const cells = await this._api.cells();
     if (cells) this._installed = cells; // null → keep current view
     // Active (enabled-pack) cells WITH bounds — the search catalog, so you can find

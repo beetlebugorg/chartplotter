@@ -68,15 +68,14 @@ func (s *Server) registerBakedSet(jobID, set string, cells map[string]baker.Cell
 		log.Printf("import %s: cell manifest %q: %v", jobID, set, err)
 	}
 
-	// Companion aux.zip (TXTDSC/PICREP) beside the set, so feature attachments serve
-	// via /api/aux — one archive for the whole provider.
+	// Companion aux/ dir (TXTDSC/PICREP) beside the set: loose static files + an
+	// index.json, so feature attachments serve via /aux AND resolve offline as
+	// plain files (no zip to unpack, no server needed) — one aux dir per provider.
 	if len(aux) > 0 {
-		if f, e := os.Create(filepath.Join(outDir, set+".aux.zip")); e == nil {
-			if _, e := auxfiles.WriteZip(f, aux); e != nil {
-				log.Printf("import %s: aux %q: %v", jobID, set, e)
-			}
-			f.Close()
+		if _, e := auxfiles.WriteDir(filepath.Join(outDir, "aux"), aux); e != nil {
+			log.Printf("import %s: aux %q: %v", jobID, set, e)
 		}
+		_ = os.Remove(filepath.Join(outDir, set+".aux.zip")) // drop a stale legacy zip from a pre-loose bake
 		s.auxIdx.invalidate()
 	}
 

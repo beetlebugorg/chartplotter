@@ -152,7 +152,7 @@ func (s *Server) handleDeleteDistrict(w http.ResponseWriter, r *http.Request) {
 			s.imports.update(job.ID, func(j *importJob) { j.State = "error"; j.Err = err.Error() })
 			return
 		}
-		s.auxIdx.invalidate() // the district's aux content is gone — re-index /api/aux
+		s.auxIdx.invalidate() // the district's aux content is gone — re-index /aux
 		if s.bakeProvider(job.ID, provider) {
 			s.imports.update(job.ID, func(j *importJob) { j.State = "done" })
 		}

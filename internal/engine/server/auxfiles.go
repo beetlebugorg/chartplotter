@@ -11,37 +11,44 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/beetlebugorg/chartplotter/internal/engine/auxfiles"
 )
 
 // aux.go serves an ENC's auxiliary content — the external resources a feature
 // points at by filename: TXTDSC/NTXTDS textual descriptions (.TXT) and PICREP
-// pictures (PNG-transcoded). The baker bundles them per district into a companion
-// "<set>.aux.zip" beside the pmtiles. Rather than expose that raw archive to the
-// client (which would force a whole-zip download just to render one pick), the
-// server indexes every companion zip and serves a SINGLE file per request on
-// demand. The pick report fetches GET /api/aux/<name> only when a picked feature
-// actually references it.
+// pictures (PNG-transcoded). The baker writes them per provider into a companion
+// "aux/" dir beside the pmtiles: loose static files + an index.json. The server
+// indexes every aux dir and serves a SINGLE file per request on demand (GET
+// /aux/<stored>), so a pick never downloads more than the one file it shows —
+// and, because the files are loose, the same dir resolves OFFLINE as plain static
+// files with no server at all. Legacy "<set>.aux.zip" companions (baked before the
+// loose layout) are still indexed so their attachments keep resolving until re-bake.
 
-// auxLoc points at one aux file: the companion zip that holds it, the entry name
-// inside that zip (TIFF pictures are stored transcoded to .png), and the MIME type
-// to serve it with.
+// auxLoc points at one aux file: EITHER the loose aux dir that holds it (dir) or the
+// legacy companion zip (zip); the stored filename (TIFF pictures are stored transcoded
+// to .png); and the MIME type to serve it with.
 type auxLoc struct {
-	zip    string
+	dir    string // loose aux dir holding the file (preferred); "" if it's in a zip
+	zip    string // legacy companion aux.zip holding the file; "" if it's loose
 	stored string
 	typ    string
 }
 
-// auxIndex aggregates every set's companion "<set>.aux.zip" into one lookup keyed
-// by the upper-cased referenced filename (the form S-57 stores TXTDSC/PICREP values
-// in). Built lazily from the cache and invalidated whenever a set is (re)baked or
-// removed, so a freshly imported district's attachments resolve without a restart.
+// auxIndex aggregates every provider's aux content into one lookup keyed by the
+// upper-cased referenced filename (the form S-57 stores TXTDSC/PICREP values in).
+// Built lazily from the cache and invalidated whenever a set is (re)baked or removed,
+// so a freshly imported district's attachments resolve without a restart.
 type auxIndex struct {
-	mu      sync.RWMutex
-	loaded  bool
-	entries map[string]auxLoc
+	mu       sync.RWMutex
+	loaded   bool
+	entries  map[string]auxLoc // referenced name (UPPER) → loc — drives the manifest
+	byStored map[string]auxLoc // stored filename (UPPER) → loc — resolves GET /aux/<stored>
 }
 
-func newAuxIndex() *auxIndex { return &auxIndex{entries: map[string]auxLoc{}} }
+func newAuxIndex() *auxIndex {
+	return &auxIndex{entries: map[string]auxLoc{}, byStored: map[string]auxLoc{}}
+}
 
 // invalidate marks the index stale; the next lookup rebuilds it.
 func (a *auxIndex) invalidate() {
@@ -50,10 +57,10 @@ func (a *auxIndex) invalidate() {
 	a.mu.Unlock()
 }
 
-// ensure (re)builds the index from cacheDir if it is stale. It walks for every
-// "*.aux.zip" companion and reads each one's index.json. Best-effort: a broken or
-// missing zip is skipped, leaving those files unresolvable (the pick report then
-// shows the bare filename).
+// ensure (re)builds the index from cacheDir if it is stale. It walks for every loose
+// "aux/index.json" (the current layout) and every legacy "*.aux.zip" companion,
+// reading each manifest. Best-effort: a broken or missing manifest is skipped,
+// leaving those files unresolvable (the pick report then shows the bare filename).
 func (a *auxIndex) ensure(cacheDir string) {
 	a.mu.RLock()
 	loaded := a.loaded
@@ -63,27 +70,48 @@ func (a *auxIndex) ensure(cacheDir string) {
 	}
 	entries := map[string]auxLoc{}
 	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".aux.zip") {
+		if err != nil || d.IsDir() {
 			return nil
 		}
-		readAuxZipIndex(path, entries)
+		switch {
+		case filepath.Base(path) == auxfiles.IndexName && filepath.Base(filepath.Dir(path)) == "aux":
+			readAuxDirIndex(path, entries) // loose aux/ dir (current layout)
+		case strings.HasSuffix(path, ".aux.zip"):
+			readAuxZipIndex(path, entries) // legacy companion zip
+		}
 		return nil
 	})
+	byStored := make(map[string]auxLoc, len(entries))
+	for _, loc := range entries {
+		byStored[strings.ToUpper(loc.stored)] = loc
+	}
 	a.mu.Lock()
 	a.entries = entries
+	a.byStored = byStored
 	a.loaded = true
 	a.mu.Unlock()
 }
 
-// auxIndexEntry mirrors one record of a companion zip's index.json (auxfiles.entry).
-type auxIndexEntry struct {
-	Stored string `json:"stored"`
-	Type   string `json:"type"`
+// readAuxDirIndex decodes a loose aux dir's index.json and records each referenced
+// filename as a loose-file location under that dir. Later manifests win on a (rare)
+// name clash — aux names are basenames and effectively provider-unique.
+func readAuxDirIndex(indexPath string, out map[string]auxLoc) {
+	b, err := os.ReadFile(indexPath)
+	if err != nil {
+		return
+	}
+	var man auxfiles.Manifest
+	if json.Unmarshal(b, &man) != nil {
+		return
+	}
+	dir := filepath.Dir(indexPath)
+	for name, e := range man.Files {
+		out[strings.ToUpper(name)] = auxLoc{dir: dir, stored: e.Stored, typ: e.Type}
+	}
 }
 
-// readAuxZipIndex opens one companion aux.zip, decodes its index.json, and adds each
-// referenced filename to out. Later zips win on a (rare) name clash — aux names are
-// basenames and effectively district-unique.
+// readAuxZipIndex opens one legacy companion aux.zip, decodes its index.json, and
+// adds each referenced filename to out.
 func readAuxZipIndex(path string, out map[string]auxLoc) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
@@ -91,69 +119,75 @@ func readAuxZipIndex(path string, out map[string]auxLoc) {
 	}
 	defer zr.Close()
 	for _, f := range zr.File {
-		if f.Name != "index.json" {
+		if f.Name != auxfiles.IndexName {
 			continue
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return
 		}
-		var meta struct {
-			Files map[string]auxIndexEntry `json:"files"`
-		}
-		err = json.NewDecoder(rc).Decode(&meta)
+		var man auxfiles.Manifest
+		err = json.NewDecoder(rc).Decode(&man)
 		rc.Close()
 		if err != nil {
 			return
 		}
-		for name, e := range meta.Files {
+		for name, e := range man.Files {
 			out[strings.ToUpper(name)] = auxLoc{zip: path, stored: e.Stored, typ: e.Type}
 		}
 		return
 	}
 }
 
-// lookup resolves a referenced aux filename to its location, rebuilding first if stale.
-func (a *auxIndex) lookup(cacheDir, name string) (auxLoc, bool) {
+// lookupStored resolves a STORED aux filename (the name the manifest points the
+// client at, and the client requests) to its location, rebuilding first if stale.
+func (a *auxIndex) lookupStored(cacheDir, stored string) (auxLoc, bool) {
 	a.ensure(cacheDir)
 	a.mu.RLock()
-	loc, ok := a.entries[strings.ToUpper(name)]
+	loc, ok := a.byStored[strings.ToUpper(stored)]
 	a.mu.RUnlock()
 	return loc, ok
 }
 
-// manifest returns NAME→MIME for every available aux file, rebuilding if stale. The
-// client loads this once so the pick report knows which TXTDSC/PICREP refs resolve.
-func (a *auxIndex) manifest(cacheDir string) map[string]string {
+// manifest returns referencedName→{stored,type} for every available aux file,
+// rebuilding if stale — the same index.json shape the offline aux dir carries, so
+// the client loads it identically online or off.
+func (a *auxIndex) manifest(cacheDir string) map[string]auxfiles.Entry {
 	a.ensure(cacheDir)
 	a.mu.RLock()
-	out := make(map[string]string, len(a.entries))
+	out := make(map[string]auxfiles.Entry, len(a.entries))
 	for name, loc := range a.entries {
-		out[name] = loc.typ
+		out[name] = auxfiles.Entry{Stored: loc.stored, Type: loc.typ}
 	}
 	a.mu.RUnlock()
 	return out
 }
 
-// serveAux serves ENC auxiliary content the pick report references by filename.
-// GET /api/aux       → JSON {"files":{NAME:MIME,…}} of everything resolvable.
-// GET /api/aux/<name> → that one file's bytes, extracted on demand from the cached
-// companion aux.zip. The raw archive itself is never exposed.
+// serveAux serves ENC feature attachments (TXTDSC/PICREP) as loose static files — the
+// SAME layout the offline bundle carries, so the client loads aux identically whether
+// a server is running or not:
+//
+//	GET /aux/index.json  → {"version":1,"files":{REF:{stored,type},…}} of everything resolvable
+//	GET /aux/<stored>    → that one file's bytes
+//
+// CORS-open so a static-hosted client can fetch from a different origin.
 func (s *Server) serveAux(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Method != http.MethodGet {
 		apiErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	name := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/aux"), "/")
-	if name == "" { // the manifest
+	name := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/aux"), "/")
+	if name == "" || name == "index.json" { // the manifest
 		w.Header().Set("Content-Type", jsonCT)
-		_ = json.NewEncoder(w).Encode(map[string]any{"files": s.auxIdx.manifest(s.cacheDir)})
+		w.Header().Set("Cache-Control", "no-cache")
+		_ = json.NewEncoder(w).Encode(auxfiles.Manifest{Version: 1, Files: s.auxIdx.manifest(s.cacheDir)})
 		return
 	}
 	if dec, err := url.PathUnescape(name); err == nil {
 		name = dec
 	}
-	loc, ok := s.auxIdx.lookup(s.cacheDir, name)
+	loc, ok := s.auxIdx.lookupStored(s.cacheDir, name)
 	if !ok {
 		apiErr(w, http.StatusNotFound, "no such aux file")
 		return
@@ -163,9 +197,20 @@ func (s *Server) serveAux(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// writeAuxEntry streams one stored entry out of its companion zip to w with the
-// indexed MIME type.
+// writeAuxEntry streams one stored aux file to w with the indexed MIME type — a loose
+// file read straight off disk (current layout), or, for a legacy companion, the entry
+// extracted from its zip.
 func writeAuxEntry(w http.ResponseWriter, loc auxLoc) error {
+	if loc.dir != "" {
+		b, err := os.ReadFile(filepath.Join(loc.dir, loc.stored))
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Content-Type", loc.typ)
+		w.Header().Set("Cache-Control", "max-age=86400")
+		_, err = w.Write(b)
+		return err
+	}
 	zr, err := zip.OpenReader(loc.zip)
 	if err != nil {
 		return err

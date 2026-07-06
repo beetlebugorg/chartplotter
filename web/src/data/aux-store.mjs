@@ -1,48 +1,57 @@
-// AuxStore — loads the companion "<stem>-aux.zip" the baker ships next to the
-// hosted .pmtiles. It holds the external resources an ENC feature points at by
-// *filename* rather than carrying inline: TXTDSC/NTXTDS textual descriptions and
-// PICREP pictures. The baked tiles carry only the filename (in the s57 blob), so
-// the pick report resolves it here, by the (upper-cased) referenced name.
+// AuxStore — resolves the external resources an ENC feature points at by *filename*
+// rather than carrying inline: TXTDSC/NTXTDS textual descriptions and PICREP
+// pictures. The baked tiles carry only the filename (in the s57 blob); the pick
+// report resolves it here, by the (upper-cased) referenced name.
 //
-// The zip is fetched whole once (it's small — the texts plus PNG-transcoded
-// pictures) and parsed with the same dependency-free reader the .zip import uses.
-// No server: it's a static file beside the charts, so it updates with them.
+// Two source layouts, ONE load path, resolving one file at a time (never a whole-set
+// download just to render one pick):
+//   • load(manifestUrl) — a static index.json manifest whose files sit beside it as
+//     loose static files, each a plain static GET. IDENTICAL online (the server's
+//     /aux/index.json) or off (a bundle's aux/index.json on any static host / file://).
+//   • load(zipUrl) — LEGACY: a single companion .aux.zip fetched whole and unzipped
+//     client-side (pre-loose bundles); auto-detected by extension so old archives resolve.
 
 import { readCentralDirectory, extractEntry } from "./zip-import.mjs";
 
 export class AuxStore {
   constructor() {
     this._index = null;      // referencedName(UPPER) → { stored, type, from } | { type }
-    this._entries = null;    // stored entry name → central-directory entry (zip mode)
-    this._blob = null;       // the fetched aux zip (zip mode)
-    this._apiBase = null;    // assets/API base when resolving per-file via the server
+    this._entries = null;    // stored entry name → central-directory entry (legacy zip mode)
+    this._blob = null;       // the fetched aux zip (legacy zip mode)
+    this._staticBase = null; // dir holding the loose files when resolving static
     this._cache = new Map(); // key → resolved { type, text|url }
   }
 
-  // Server mode: index the aux files the server exposes (GET <base>api/aux returns
-  // { files: { NAME: mimeType } }) so has()/resolve() work WITHOUT downloading the
-  // whole zip — each TXTDSC/PICREP file is fetched on demand from GET api/aux/<name>.
-  // The raw aux.zip is never exposed. Best-effort: failure leaves the store empty.
-  async loadApi(base) {
+  // Load the aux content: a static index.json manifest (loose files beside it) — the
+  // one path used both online (server /aux/index.json) and offline (a bundle's
+  // aux/index.json). A legacy ".aux.zip" is fetched whole and unzipped instead,
+  // auto-detected by extension. Best-effort: failure leaves the store empty.
+  async load(url) {
+    if (/\.zip(\?|#|$)/i.test(url)) return this._loadZip(url);
+    return this.loadStatic(url);
+  }
+
+  // Loose/offline layout: fetch the static index.json manifest and remember the dir it
+  // sits in; resolve() then fetches each file as a plain static GET. No zip, no server.
+  async loadStatic(manifestUrl) {
     try {
-      const r = await fetch(`${base}api/aux`);
+      const r = await fetch(manifestUrl);
       if (!r.ok) throw new Error("HTTP " + r.status);
       const j = await r.json();
       const files = (j && j.files) || {};
       const idx = {};
-      for (const [name, type] of Object.entries(files)) idx[String(name).toUpperCase()] = { type };
+      for (const [name, e] of Object.entries(files)) idx[String(name).toUpperCase()] = e;
       this._index = idx;
-      this._apiBase = base;
+      this._staticBase = manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
       return true;
     } catch (e) {
-      console.warn("[aux] api index load failed:", e.message);
+      console.warn("[aux] static manifest load failed:", e.message);
       return false;
     }
   }
 
-  // Fetch + parse the aux zip. Best-effort: any failure leaves the store empty
-  // and the pick report degrades to showing the raw filename. Returns true on load.
-  async load(url) {
+  // LEGACY: fetch + parse a whole companion aux.zip. Best-effort.
+  async _loadZip(url) {
     try {
       const r = await fetch(url);
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -72,12 +81,13 @@ export class AuxStore {
     const key = String(ref).toUpperCase();
     const meta = this._index[key];
     if (!meta) return null;
-    // Server mode: fetch the single file on demand; the response Content-Type tells
-    // image vs text (falling back to the indexed type). Object URLs/text are cached.
-    if (this._apiBase) {
+    // Static layout: fetch the single file on demand from beside the manifest; the
+    // response Content-Type tells image vs text (falling back to the indexed type).
+    if (this._staticBase) {
       if (this._cache.has(key)) return this._cache.get(key);
+      const fileURL = `${this._staticBase}${encodeURIComponent(meta.stored || ref)}`;
       try {
-        const r = await fetch(`${this._apiBase}api/aux/${encodeURIComponent(ref)}`);
+        const r = await fetch(fileURL);
         if (!r.ok) throw new Error("HTTP " + r.status);
         const type = (r.headers.get("content-type") || meta.type || "").split(";")[0].trim();
         let out;
@@ -93,6 +103,7 @@ export class AuxStore {
         return null;
       }
     }
+    // Legacy zip mode: extract the stored entry from the fetched archive.
     if (this._cache.has(meta.stored)) return this._cache.get(meta.stored);
     const entry = this._entries.get(meta.stored);
     if (!entry) return null;

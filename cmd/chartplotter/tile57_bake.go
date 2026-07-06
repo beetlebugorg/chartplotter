@@ -80,7 +80,7 @@ func (c bakeCmd) runTile57Archive() error {
 	}
 	ext := filepath.Ext(c.Out)
 	stem := strings.TrimSuffix(c.Out, ext)
-	auxFile, err := writeAuxZip(stem, collectAuxDir(auxRoot))
+	auxManifest, err := writeAuxDir(stem, collectAuxDir(auxRoot))
 	if err != nil {
 		return err
 	}
@@ -88,8 +88,8 @@ func (c bakeCmd) runTile57Archive() error {
 	if c.Manifest != "" {
 		entry := map[string]any{"file": filepath.Base(c.Out), "bounds": bbox[:]}
 		man := map[string]any{"districts": []map[string]any{entry}}
-		if auxFile != "" {
-			man["aux"] = auxFile
+		if auxManifest != "" {
+			man["aux"] = auxManifest
 		}
 		if err := writeManifestJSON(c.Manifest, man); err != nil {
 			return err
