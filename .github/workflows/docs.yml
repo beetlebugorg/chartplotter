@@ -65,7 +65,7 @@ jobs:
       # keyed on the cell list / fetch script so a change re-downloads. Lets the
       # bake reuse the same cells across runs.
       - name: Cache demo ENC cells
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/demo-cells
           key: demo-cells-${{ hashFiles('chartplotter/scripts/fetch-demo-cells.sh', 'chartplotter/Makefile') }}
@@ -73,7 +73,7 @@ jobs:
       # Cache the S-52 PresLib "ECDIS Chart 1" source cells (the IHO draft zip is
       # fetched once and extracted), keyed on the fetch script so a change re-pulls.
       - name: Cache PresLib Chart 1 cells
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/preslib-cells
           key: preslib-cells-${{ hashFiles('chartplotter/scripts/fetch-preslib-cells.sh') }}
@@ -111,7 +111,7 @@ jobs:
         working-directory: chartplotter/docs
         run: npm run build
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: chartplotter/docs/build
 
