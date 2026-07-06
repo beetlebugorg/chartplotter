@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # push only on main; PR branches are covered by pull_request. Scoping push this
+  # way avoids the double run (a push to a branch with an open PR otherwise fires
+  # both events — now doubly wasteful with the ~7-min xbuild job below).
   push:
+    branches: [main]
   pull_request:
 
 # libtile57 is the sole engine: the build is CGO and statically links the native
@@ -72,3 +76,34 @@ jobs:
         run: make -C chartplotter tile57-lib
       - name: Vulnerability scan
         run: cd chartplotter && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # Cross-compile the CGO binary for every release target (linux + windows,
+  # amd64/arm64) with `zig cc`, the same path release.yml runs on a v* tag. Kept
+  # here on push/PR so a cross-compile break (e.g. an engine change that only
+  # fails to build for windows) is caught before tagging, not during the release.
+  xbuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout chartplotter (+ tile57 engine submodule)
+        uses: actions/checkout@v7
+        with:
+          path: chartplotter
+          submodules: recursive
+      - name: Float tile57 submodule to latest main
+        run: |
+          git -C chartplotter submodule update --remote tile57
+          git -C chartplotter submodule update --init --recursive tile57
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+          cache-dependency-path: chartplotter/go.sum
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # Builds libtile57 per target with zig, then links each binary with `zig cc`,
+      # emitting dist/chartplotter_${goos}_${goarch}${ext} for linux+windows
+      # amd64/arm64. No artifact upload — this is a build-health gate, not a release.
+      - name: Cross-build linux + windows binaries
+        run: make -C chartplotter xbuild TILE57=tile57 VERSION="ci"
