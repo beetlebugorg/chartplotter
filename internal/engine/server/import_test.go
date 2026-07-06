@@ -211,6 +211,10 @@ func TestImportFetchDownloadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(dir, dir, dir, false)
+	// The seeded USER/ENC_ROOT makes New() kick off a self-heal bake of "user" in the
+	// background; drain it (srv.Close → bakeWG.Wait) before t.TempDir's RemoveAll, else
+	// that bake's USER/assets write races cleanup ("directory not empty" on CI).
+	defer srv.Close()
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 

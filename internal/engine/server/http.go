@@ -43,6 +43,7 @@ type Server struct {
 	sets    *tileSets         // registry of ENABLED tile sets served at /tiles/{set}/…
 	imports *importJobs       // background server-side bake jobs (POST /api/import)
 	bakeMu  sync.Mutex        // serializes bakes: two imports must not interleave cross-pack peer rewrites / shared context
+	bakeWG  sync.WaitGroup    // tracks the New-triggered self-heal bake goroutine so Close can drain it (its asset writes must not race a test/temp-dir teardown)
 	packsMu sync.Mutex        // guards packs
 	packs   map[string]string // ALL baked packs on disk: set name → pmtiles path
 	prefs   *prefs            // persisted enable/disable state (<data>/prefs.json)
@@ -110,7 +111,9 @@ func (s *Server) rebakeMissingProviders() {
 	if len(missing) == 0 {
 		return
 	}
+	s.bakeWG.Add(1)
 	go func() {
+		defer s.bakeWG.Done()
 		for _, prov := range missing {
 			job := s.imports.create(prov)
 			s.bakeMu.Lock()
@@ -125,6 +128,7 @@ func (s *Server) rebakeMissingProviders() {
 // Close releases server-held resources (open tile-set archives). Safe to call once
 // at shutdown.
 func (s *Server) Close() error {
+	s.bakeWG.Wait() // drain the New-triggered self-heal bake so its asset writes finish before teardown
 	if s.nmeaMgr != nil {
 		s.nmeaMgr.Close()
 	}
