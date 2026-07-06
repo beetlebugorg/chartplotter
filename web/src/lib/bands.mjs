@@ -17,7 +17,7 @@ export const BAND_MINZOOM = { overview: 0, general: 0, coastal: 9, approach: 11,
 // native max + OVERSCALE_MARGIN over open water just enlarges blank water, so
 // _updateZoomCap clamps to the finest band that actually covers the view.
 export const BAND_MAXZOOM = { overview: 7, general: 9, coastal: 11, approach: 13, harbor: 16, berthing: 18 };
-export const OVERSCALE_MARGIN = 2; // zoom-in levels allowed past the finest covering band
+export const OVERSCALE_MARGIN = 1; // zoom-in levels allowed past the finest covering band (matches the bake default TILE57_FILLUP_DZ=1)
 // Usage bands in coarse→fine order, for the dev band-filter rows.
 export const DEV_BANDS = BANDS;
 
