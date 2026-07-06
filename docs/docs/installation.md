@@ -12,9 +12,8 @@ self-contained `chartplotter` for **linux and windows** (amd64 + arm64) on the
 the archive for your platform and run it — the web frontend and the S-101
 catalogue are compiled in, so you supply only the ENC cells. **macOS** is not
 shipped as a prebuilt binary (the engine links Apple frameworks Zig can't
-cross-compile); Mac users run the [Docker image](#run-with-docker-recommended)
-or [build from source](#build-from-source). To build it yourself on any platform,
-follow [Build from source](#build-from-source) below. `go install …@latest` does
+cross-compile). To build it yourself on any platform — including macOS — follow
+[Build from source](#build-from-source) below. `go install …@latest` does
 **not** work — the build statically links a native library and uses a local
 `replace` directive.
 
@@ -28,43 +27,6 @@ locally and what the project publishes on the releases page — embed that IHO
 material. The project distributes those binaries as an accepted position; see
 [THIRD-PARTY-NOTICES.md](https://github.com/beetlebugorg/chartplotter/blob/main/THIRD-PARTY-NOTICES.md).
 
-:::
-
-## Run with Docker (recommended)
-
-The simplest way to run chartplotter — and the primary path for the
-**server-hub-on-a-boat** deployment (a Raspberry Pi, laptop, or mini PC that
-holds all chart state while every screen just points a browser at it) — is the
-published container image:
-
-```sh
-docker run -p 8080:8080 -v chartplotter-data:/data \
-  ghcr.io/beetlebugorg/chartplotter
-# open http://localhost:8080
-```
-
-Or with Docker Compose, using the [`compose.yaml`](https://github.com/beetlebugorg/chartplotter/blob/main/compose.yaml)
-in the repo:
-
-```sh
-docker compose up -d
-```
-
-The image is **multi-arch** (`linux/amd64` + `linux/arm64`), so the same command
-runs on a Raspberry Pi (arm64) and on an amd64 box. It is built `FROM scratch`
-around a **fully-static musl binary**, so it is tiny — essentially just the
-~26 MB binary plus a CA-certificate bundle. The named `/data` volume holds the
-downloaded ENC source, the baked tiles, and your settings, and survives image
-upgrades (`docker compose pull && docker compose up -d`).
-
-The container binds `0.0.0.0:8080` inside, so map it with `-p 8080:8080` (or any
-host port). It writes source ENC to `/data` and regenerable baked tiles to
-`/data/cache`.
-
-:::tip macOS and Windows
-Run the same image via **Docker Desktop** — no native Mac or Windows binary is
-needed. The native binaries below remain available as a secondary option for
-bare-metal installs.
 :::
 
 ## Requirements
@@ -131,7 +93,6 @@ targets you'll use most:
 | `make fmt` | `gofmt -w .`. |
 | `make serve` | Build, then serve the web frontend on `:8080` (`HOST`/`PORT`/`ASSETS` overridable). |
 | `make xbuild` | Cross-compile release binaries with `zig cc` (linux + windows, amd64/arm64). |
-| `make musl` | Fully-static musl binaries (linux amd64 + arm64) for the `FROM scratch` Docker image. |
 
 Run `make fmt vet test` before you commit. `make xbuild` deliberately skips
 macOS — Go's `crypto/x509` links Apple frameworks Zig can't cross-compile, so a

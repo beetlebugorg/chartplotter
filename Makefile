@@ -27,7 +27,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 tile57-lib vendor-style-engine xbuild xbuild-tile57 musl test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 tile57-lib vendor-style-engine xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -136,20 +136,6 @@ build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
 # Outputs dist/chartplotter_<os>_<arch>[.exe].
 xbuild xbuild-tile57: $(TILE57)/include/tile57.h ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
 	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh
-
-# Fully-static musl binaries for the tiny FROM scratch Docker image (the "go-dims"
-# pattern): CGO+libtile57 linked against musl STATICALLY via zig cc, so `ldd` reports
-# "not a dynamic executable" and the binary drops straight into `FROM scratch`. Builds
-# linux/amd64 + linux/arm64 into dist/chartplotter_linux_<arch>_musl (same zig-cc
-# cross-build as xbuild — no QEMU; one host cross-links both arches by target swap).
-# The Dockerfile calls scripts/xbuild-tile57.sh with LIBC=musl directly; this target
-# is the local/CI equivalent. musl-static is strictly more portable than the gnu
-# xbuild (no glibc floor), so it's the recommended linux artifact — the gnu xbuild
-# path is kept intact for anyone who needs a glibc-dynamic build.
-MUSL_PLATFORMS ?= linux/amd64 linux/arm64
-musl: $(TILE57)/include/tile57.h ## Build fully-static musl binaries (linux amd64+arm64) into dist/ for the scratch Docker image
-	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" \
-	  LIBC=musl PLATFORMS="$(MUSL_PLATFORMS)" scripts/xbuild-tile57.sh
 
 serve: build ## Serve the web frontend + provisioning API on :8080 (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)
