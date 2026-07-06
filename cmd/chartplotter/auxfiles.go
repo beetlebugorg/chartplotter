@@ -148,3 +148,23 @@ func tiffToPNG(data []byte) ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
+
+// collectAuxDir walks a directory tree for referenced aux content (TXTDSC /
+// PICREP text + pictures) and returns it keyed like collectCells' aux map
+// (auxKey — UPPER basename, first occurrence wins). Lets the streaming
+// flat-archive bake ship aux.zip without reading any cell into memory.
+func collectAuxDir(dir string) map[string][]byte {
+	aux := map[string][]byte{}
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !isAuxContent(p) {
+			return nil
+		}
+		if k := auxKey(p); aux[k] == nil {
+			if b, e := os.ReadFile(p); e == nil {
+				aux[k] = b
+			}
+		}
+		return nil
+	})
+	return aux
+}

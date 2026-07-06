@@ -78,7 +78,7 @@ func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
 			return c.In[0], noop, nil
 		}
 	}
-	cells, _, err := collectCells(c.In)
+	cells, aux, err := collectCells(c.In)
 	if err != nil {
 		return "", noop, err
 	}
@@ -99,6 +99,15 @@ func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
 				os.RemoveAll(dir)
 				return "", noop, err
 			}
+		}
+	}
+	// Aux content (TXTDSC/PICREP text + pictures) rides beside the cells, exactly
+	// like a real ENC_ROOT — so the flat-archive path's aux.zip walk finds it for
+	// zip inputs too.
+	for name, data := range aux {
+		if err := os.WriteFile(filepath.Join(dir, filepath.Base(name)), data, 0o644); err != nil {
+			os.RemoveAll(dir)
+			return "", noop, err
 		}
 	}
 	return dir, func() { os.RemoveAll(dir) }, nil
