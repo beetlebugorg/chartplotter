@@ -93,7 +93,7 @@ jobs:
       # Land all four prebuilt binaries into dist/ (naming: chartplotter_{os}_{arch}
       # [.exe], from xbuild-tile57.sh — linux + windows, amd64/arm64).
       - name: Download prebuilt binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: binaries-xbuild
           path: chartplotter/dist
