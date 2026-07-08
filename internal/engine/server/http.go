@@ -325,6 +325,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleDeleteDistrict(w, r) // DELETE: remove one district + re-bake the provider
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
+	case strings.HasPrefix(r.URL.Path, "/api/debug/partition"):
+		s.handleDebugPartition(w, r) // POST: bake ownership-partition overlays; GET: their status
 	default:
 		apiErr(w, http.StatusNotFound, "unknown endpoint")
 	}
