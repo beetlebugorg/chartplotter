@@ -2,11 +2,9 @@ package server
 
 import (
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/auxfiles"
@@ -172,87 +170,21 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 // then discarded), so the whole cell set is never resident. Returns the count of cells that
 // contributed to the composite, or 0 if none produced coverage.
 func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
-	cells, err := listCells(encRoot)
-	if err != nil {
-		return 0, err
-	}
-	if len(cells) == 0 {
-		return 0, nil
-	}
-
-	// Per-cell PMTiles cache (temp; discarded after the compose reads them).
-	cellsDir, err := os.MkdirTemp("", "tile57-cells-*")
-	if err != nil {
-		return 0, err
-	}
-	defer os.RemoveAll(cellsDir)
-
-	// 1. Bake each cell to its own PMTiles (one cell resident at a time — the bytes are freed
-	//    as soon as they are written). Serial for now; a warmup + worker pool is the next lever.
-	perCell := make([]string, 0, len(cells))
-	for i, cp := range cells {
-		s.imports.update(jobID, func(j *importJob) {
-			j.Phase, j.Band, j.Unit, j.Note = "bake", "", "cells", "Baking charts"
-			j.Done, j.Total = i, len(cells)
+	tilesPath := filepath.Join(outDir, "tiles", "chart.pmtiles")
+	return baker.ComposeENCRoot(encRoot, tilesPath,
+		func(done, total int) {
+			note := "Baking charts"
+			if done >= total { // bakes finished → the partition compose runs
+				note = "Composing tiles"
+			}
+			s.imports.update(jobID, func(j *importJob) {
+				j.Phase, j.Band, j.Unit, j.Note = "bake", "", "cells", note
+				j.Done, j.Total = done, total
+			})
+		},
+		func(cell string, err error) {
+			log.Printf("import %s: bake cell %s: %v (skipping)", jobID, cell, err)
 		})
-		b, err := tile57.BakeCell(cp)
-		if err != nil {
-			log.Printf("import %s: bake cell %s: %v (skipping)", jobID, filepath.Base(cp), err)
-			continue
-		}
-		if len(b) == 0 {
-			continue
-		}
-		pc := filepath.Join(cellsDir, filepath.Base(cp)+".pmtiles")
-		if err := os.WriteFile(pc, b, 0o644); err != nil {
-			log.Printf("import %s: write per-cell %s: %v (skipping)", jobID, filepath.Base(cp), err)
-			continue
-		}
-		perCell = append(perCell, pc)
-	}
-	if len(perCell) == 0 {
-		// Cells were present but none baked (e.g. all unparseable) → a bake ERROR, not empty
-		// coverage. Returning an error (like BakeBundle) lets the caller fail WITHOUT dropping
-		// the provider's stub/source; returning 0,nil would trip the "no coverage" RemoveAll.
-		if len(cells) > 0 {
-			return 0, fmt.Errorf("bake failed for all %d cell(s)", len(cells))
-		}
-		return 0, nil
-	}
-
-	// 2. Stream-compose the per-cell archives into tiles/chart.pmtiles via the partition.
-	s.imports.update(jobID, func(j *importJob) {
-		j.Phase, j.Band, j.Unit, j.Note, j.Done, j.Total = "bake", "", "cells", "Composing tiles", len(cells), len(cells)
-	})
-	tilesDir := filepath.Join(outDir, "tiles")
-	if err := os.MkdirAll(tilesDir, 0o755); err != nil {
-		return 0, err
-	}
-	n, err := tile57.ComposeFiles(perCell, filepath.Join(tilesDir, "chart.pmtiles"))
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
-// listCells returns every base cell (.000) path under encRoot, deduped by stem (a boundary
-// cell shared by two districts bakes once).
-func listCells(encRoot string) ([]string, error) {
-	var out []string
-	seen := map[string]bool{}
-	err := filepath.WalkDir(encRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".000") {
-			return nil
-		}
-		stem := strings.TrimSuffix(filepath.Base(path), ".000")
-		if seen[stem] {
-			return nil
-		}
-		seen[stem] = true
-		out = append(out, path)
-		return nil
-	})
-	return out, err
 }
 
 // dropProviderSet unregisters a provider whose ENC_ROOT is now empty and removes its

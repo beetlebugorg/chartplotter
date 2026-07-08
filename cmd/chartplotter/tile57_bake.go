@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
@@ -57,21 +58,55 @@ func (c bakeCmd) runTile57Archive() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(outAbs), ".bake-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
 
-	n, bbox, err := bakeTile57Bundle(input, tmp, c.MaxZoom, c.Format, nil)
-	if err != nil {
-		return err
+	var n int
+	var bbox [4]float64
+	if os.Getenv("TILE57_LEGACY_BAKE") != "" {
+		// Legacy in-bake combiner: BakeBundle into a temp dir beside -o, then rename the
+		// finished tiles/chart.pmtiles onto -o and discard the bundle scaffolding.
+		tmp, terr := os.MkdirTemp(filepath.Dir(outAbs), ".bake-*")
+		if terr != nil {
+			return terr
+		}
+		defer os.RemoveAll(tmp)
+		n, bbox, err = bakeTile57Bundle(input, tmp, c.MaxZoom, c.Format, nil)
+		if err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(tmp, "tiles", "chart.pmtiles"), outAbs); err != nil {
+			return err
+		}
+		st, _ := os.Stat(outAbs)
+		fmt.Printf("baked %d cell(s) → %s (%.1f MB) via libtile57 (streamed)\n", n, c.Out, float64(st.Size())/(1<<20))
+	} else {
+		// Per-cell COMPOSITE (default): bake each cell at its native scale, then combine them
+		// via the engine's ownership partition straight into -o. --max-zoom/--format do not
+		// apply — each cell bakes at its native band and the compositor expands zoom.
+		n, err = baker.ComposeENCRoot(input, outAbs,
+			func(done, total int) {
+				if done < total {
+					fmt.Printf("\rbaking cells %d/%d…      ", done, total)
+				} else {
+					fmt.Printf("\rcomposing %d cells…      ", total)
+				}
+			},
+			func(cell string, e error) { fmt.Fprintf(os.Stderr, "\nwarning: bake %s: %v (skipping)\n", cell, e) })
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("no coverage: no valid S-57 cells under %s", input)
+		}
+		st, _ := os.Stat(outAbs)
+		fmt.Printf("composed %d cell(s) → %s (%.1f MB) via the per-cell ownership partition\n", n, c.Out, float64(st.Size())/(1<<20))
+		// bbox for the manifest, read back from the composed archive.
+		if src, e := tile57.OpenPMTiles(outAbs); e == nil {
+			info := src.Info()
+			bbox = [4]float64{info.West, info.South, info.East, info.North}
+			src.Close()
+		}
 	}
-	if err := os.Rename(filepath.Join(tmp, "tiles", "chart.pmtiles"), outAbs); err != nil {
-		return err
-	}
-	st, _ := os.Stat(outAbs)
-	fmt.Printf("baked %d cell(s) → %s (%.1f MB) via libtile57 (streamed)\n", n, c.Out, float64(st.Size())/(1<<20))
 
 	// Aux content walks the INPUT tree (for a lone .000, its directory).
 	auxRoot := input
