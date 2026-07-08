@@ -91,10 +91,36 @@ export function inspectorSection(inspecting, selectingArea) {
   </section>`;
 }
 
-// The whole dev-tools panel skeleton: rebake + inspector sections + the
+// The ownership-partition debug section: a "Generate" button (the server bakes one
+// partition PMTiles per provider) + a per-provider "Show/Hide overlay" toggle. `part`
+// = { list, on, gen }: list = [{provider, ready, tiles}] (null while loading), on = the
+// Set of providers whose overlay is shown, gen = a generate run is in flight.
+export function partitionSection(part, busy) {
+  const list = part && part.list;
+  const on = (part && part.on) || new Set();
+  const gen = part && part.gen;
+  let rows;
+  if (list == null) rows = `<p class="dev-note">Loading…</p>`;
+  else if (!list.length) rows = `<p class="dev-note">No providers installed.</p>`;
+  else rows = list.map((p) => {
+    const shown = on.has(p.provider);
+    const ctrl = p.ready
+      ? `<button class="btn sm${shown ? " on" : ""}" data-part-toggle="${esc(p.provider)}">${shown ? "Hide" : "Show"} overlay</button>`
+      : `<span class="dev-note">generating…</span>`;
+    return `<div class="dev-row"><span>${esc(p.provider)}</span>${ctrl}</div>`;
+  }).join("");
+  return `<section class="dev-sec">
+    <div class="dev-h">Ownership partition (debug)</div>
+    <button id="dev-part-gen" class="btn wide"${busy || gen ? " disabled" : ""}>${gen ? "● Generating…" : "▦ Generate partition overlays"}</button>
+    ${rows}
+    <p class="dev-note">A PMTiles per provider showing which cell owns each region per band (finer cells win; coarser fill the gaps). Enable a provider's overlay to see the composite quilt on the chart — each face is coloured and labelled with its cell.</p>
+  </section>`;
+}
+
+// The whole dev-tools panel skeleton: rebake + partition + inspector sections + the
 // inspect-result container (filled separately by the logic on hover/click).
-export function devToolsPanel(busy, inspecting, selectingArea) {
-  return `<div class="dev-tools">${rebakeSection(busy)}${inspectorSection(inspecting, selectingArea)}<div id="inspect-body" class="ins-body"></div></div>`;
+export function devToolsPanel(busy, inspecting, selectingArea, part) {
+  return `<div class="dev-tools">${rebakeSection(busy)}${partitionSection(part, busy)}${inspectorSection(inspecting, selectingArea)}<div id="inspect-body" class="ins-body"></div></div>`;
 }
 
 // One inspected feature card. `label`/`acr`/`named` come from the logic's injected
