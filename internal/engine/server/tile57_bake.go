@@ -211,6 +211,12 @@ func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
 		perCell = append(perCell, pc)
 	}
 	if len(perCell) == 0 {
+		// Cells were present but none baked (e.g. all unparseable) → a bake ERROR, not empty
+		// coverage. Returning an error (like BakeBundle) lets the caller fail WITHOUT dropping
+		// the provider's stub/source; returning 0,nil would trip the "no coverage" RemoveAll.
+		if len(cells) > 0 {
+			return 0, fmt.Errorf("bake failed for all %d cell(s)", len(cells))
+		}
 		return 0, nil
 	}
 
