@@ -738,7 +738,10 @@ export class ChartLibrary extends HTMLElement {
     if (name === "import") return "Imported charts";
     const ie = /^ienc-(.+)$/.exec(name);
     if (ie) return `IENC · ${ie[1]}`;
-    return name;
+    // A bare provider set (the live-composite model registers ONE set per provider,
+    // e.g. "noaa") → its branded display name ("NOAA"), not the lowercase routing key.
+    const prov = this._providers().find((p) => p.id === this._providerKey(name));
+    return prov ? prov.name : name;
   }
 
   _wirePacks() { this._wireMillerRows(); this._wireDetailButtons(); }
