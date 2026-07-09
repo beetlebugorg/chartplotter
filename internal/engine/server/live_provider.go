@@ -106,12 +106,37 @@ func (s *Server) openLiveComposer(provider string) (*tilesource.Composer, error)
 	if err != nil {
 		return nil, err
 	}
-	if load == "" { // freshly built the partition — persist it so the next open is a fast load
-		if err := c.SavePartition(sidecar); err != nil {
-			log.Printf("live %s: save partition sidecar: %v", provider, err)
-		}
+	// Persist the (possibly rebuilt) partition so the on-disk sidecar always matches the current
+	// cell set: a progressive re-key or an added/removed district changes the inputs, the
+	// compositor rebuilds from a stale sidecar, and saving keeps the sidecar current for a fast
+	// boot. (When the sidecar was loaded intact this re-writes identical bytes.)
+	if err := c.SavePartition(sidecar); err != nil {
+		log.Printf("live %s: save partition sidecar: %v", provider, err)
 	}
 	return c, nil
+}
+
+// liveReKeyBatch is how many freshly-baked cells trigger a progressive re-key during an import.
+// Small enough that coverage appears promptly on the map; large enough that the per-re-key
+// partition rebuild is a negligible fraction of the (per-cell, seconds-each) bake.
+const liveReKeyBatch = 48
+
+// progressiveReKey re-opens the live compositor over the cells baked SO FAR, registers it as the
+// provider's (enabled) set, and advances the content token — so a long import fills in on the map
+// batch by batch instead of appearing only when the whole provider finishes. Called synchronously
+// from the bake loop (which is paused, so it never races the writer). Best-effort: a transient
+// open failure just skips this batch; the next one (or the final register) catches up.
+func (s *Server) progressiveReKey(provider string) {
+	c, err := s.openLiveComposer(provider)
+	if err != nil || c == nil {
+		if err != nil {
+			log.Printf("live %s: progressive re-key: %v", provider, err)
+		}
+		return
+	}
+	s.sets.register(provider, c)
+	s.prefs.setDisabled(provider, false)
+	s.bumpLiveGen(provider)
 }
 
 // prepareLiveProvider bakes the provider's cells to its kept live-cells dir (incremental) and opens
@@ -140,6 +165,12 @@ func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tile
 				}
 				j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", note, done, total, eta
 			})
+			// Progressive: every liveReKeyBatch freshly-baked cells, re-open + re-key the set so
+			// the map fills in live during a long import. The final register (registerProviderSet)
+			// handles done == total, so skip it here.
+			if done > 0 && done < total && done%liveReKeyBatch == 0 {
+				s.progressiveReKey(provider)
+			}
 		},
 		func(cell string, err error) { log.Printf("live %s: bake cell %s: %v (skipping)", provider, cell, err) })
 	if err != nil {

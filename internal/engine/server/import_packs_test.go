@@ -138,4 +138,16 @@ func TestImportPacks(t *testing.T) {
 	if _, live := s.sets.get("noaa"); !live {
 		t.Error("re-enabled live provider not re-registered from kept archives")
 	}
+
+	// progressiveReKey re-opens + re-registers the set over the cells baked so far — the
+	// mechanism that fills the map in batch-by-batch during a long import — and stamps the
+	// content token so the client re-fetches.
+	s.sets.remove("noaa")
+	s.progressiveReKey("noaa")
+	if _, live := s.sets.get("noaa"); !live {
+		t.Error("progressiveReKey did not register the live set")
+	}
+	if s.packGen("noaa") <= 0 {
+		t.Error("progressiveReKey did not persist the content token")
+	}
 }
