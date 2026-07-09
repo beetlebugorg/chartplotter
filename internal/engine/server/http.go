@@ -92,6 +92,7 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if len(s.packs) > 0 {
 		log.Printf("tilesets: %d pack(s) on disk, %d enabled (from %s)", len(s.packs), n, cacheDir)
 	}
+	s.registerLiveCompose()    // dev/test: on-demand runtime compositor from TILE57_LIVE_COMPOSE (no-op if unset)
 	s.rebakeMissingProviders() // self-heal: bake any provider with an ENC_ROOT but no bundle (post-migration)
 	return s
 }
