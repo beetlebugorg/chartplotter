@@ -22,6 +22,23 @@ func (s *Server) livePartitionPath(provider string) string {
 	return filepath.Join(s.setDir(provider), "partition.tpart")
 }
 
+// liveGenPath is <setDir>/live.gen — its mtime is the provider's tile GENERATION token (packGen
+// reads it), bumped on each completed import so the client's tile URLs change and it re-fetches,
+// invalidating tiles it cached against a previous, less-complete cell set. Its existence also marks
+// "an import completed" — registerLiveProviders only re-serves a provider that has one, so a set
+// left partial by an interrupted bake is completed by rebakeMissingProviders instead of served.
+func (s *Server) liveGenPath(provider string) string {
+	return filepath.Join(s.setDir(provider), "live.gen")
+}
+
+// bumpLiveGen advances the live provider's generation token (writes live.gen; the MTIME is the
+// token). Called when an import registration completes.
+func (s *Server) bumpLiveGen(provider string) {
+	p := s.liveGenPath(provider)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.WriteFile(p, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o644)
+}
+
 // liveCellArchives lists a provider's kept per-cell PMTiles paths (sorted).
 func (s *Server) liveCellArchives(provider string) []string {
 	dir := s.liveCellsDir(provider)
@@ -134,6 +151,12 @@ func (s *Server) invalidateLiveOnEngineChange(cellsDir string) {
 func (s *Server) registerLiveProviders() {
 	for _, prov := range s.installedProviders() {
 		if s.prefs.isDisabled(prov) || len(s.liveCellArchives(prov)) == 0 {
+			continue
+		}
+		// Only re-serve a provider whose import COMPLETED (live.gen written at registration). A set
+		// left partial by an interrupted bake has cells-pm but no live.gen → skip it here, and
+		// rebakeMissingProviders finishes it (incremental) instead of serving a partial map.
+		if _, err := os.Stat(s.liveGenPath(prov)); err != nil {
 			continue
 		}
 		c, err := s.openLiveComposer(prov)

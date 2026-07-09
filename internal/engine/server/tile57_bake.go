@@ -75,6 +75,10 @@ func (s *Server) registerProviderSet(jobID, set string, src tilesource.TileSourc
 		if s.EngineCommit != "" {
 			_ = os.WriteFile(packPath+engineVerExt, []byte(s.EngineCommit), 0o644)
 		}
+	} else {
+		// Live compositor: advance the generation token so the client re-fetches with a fresh ?g,
+		// invalidating any tiles (incl. blank 204s) it cached against a previous, less-complete set.
+		s.bumpLiveGen(set)
 	}
 	if err := s.writeSetCells(set, cells); err != nil {
 		log.Printf("import %s: cell manifest %q: %v", jobID, set, err)

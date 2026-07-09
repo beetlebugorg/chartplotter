@@ -121,6 +121,20 @@ func (j *importJobs) running() (importJob, bool) {
 	return *best, true
 }
 
+// runningFor reports whether a bake/import is in flight for `set` — its own job, or the pack being
+// processed in a multi-pack batch. The tile server keeps caching OFF for a set while its content is
+// in flux (a blank tile now may fill in when a cell finishes baking).
+func (j *importJobs) runningFor(set string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for _, job := range j.m {
+		if job.State == "running" && (job.Set == set || job.Pack == set) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleImport routes the import endpoints (already past the /api host check).
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/import/status" {

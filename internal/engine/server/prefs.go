@@ -165,6 +165,11 @@ func (s *Server) packGen(set string) int64 {
 			return fi.ModTime().UnixNano()
 		}
 	}
+	// Live runtime-compositor provider (no disk pack): the live.gen file's mtime, bumped on each
+	// completed import — so its tiles are content-addressed by ?g exactly like a baked pack's.
+	if fi, err := os.Stat(s.liveGenPath(set)); err == nil {
+		return fi.ModTime().UnixNano()
+	}
 	return 0
 }
 

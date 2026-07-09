@@ -39,8 +39,23 @@ func NewComposer(paths []string, partitionPath string) (*Composer, error) {
 	}, nil
 }
 
+// OwnershipTiler is a TileSource that also reports tile OWNERSHIP: whether its data model says a
+// cell SHOULD render at (z,x,y). A blank (nil body) from an OWNED tile is transient (a cell's bake
+// is still running) or an error (bake done) — the HTTP layer must not cache it, so it re-fetches
+// once content lands; a blank from an UNOWNED tile is true empty ocean (safe to cache). The runtime
+// Composer implements this; prebaked archives do not (their blanks are always true empty).
+type OwnershipTiler interface {
+	TileOwned(z uint8, x, y uint32) (body []byte, owned bool, err error)
+}
+
 // Tile composes (z,x,y) on demand, returning decompressed MLT, or (nil, nil) for a blank tile.
 func (c *Composer) Tile(z uint8, x, y uint32) ([]byte, error) {
+	body, _, err := c.src.Serve(z, x, y)
+	return body, err
+}
+
+// TileOwned is Tile plus the ownership flag (implements OwnershipTiler).
+func (c *Composer) TileOwned(z uint8, x, y uint32) (body []byte, owned bool, err error) {
 	return c.src.Serve(z, x, y)
 }
 
