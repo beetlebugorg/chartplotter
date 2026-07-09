@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,28 +66,44 @@ func (s *Server) liveGenToken(provider string) int64 {
 }
 
 // bumpLiveGen recomputes and persists the live provider's content token (writes live.gen).
-// Called when an import registration completes, and per batch during a progressive bake.
+// Called when an import registration completes.
 func (s *Server) bumpLiveGen(provider string) {
 	p := s.liveGenPath(provider)
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	_ = os.WriteFile(p, []byte(strconv.FormatInt(s.liveGenToken(provider), 10)), 0o644)
 }
 
-// liveCellArchives lists a provider's kept per-cell PMTiles paths (sorted).
+// liveCellArchives lists a provider's kept per-cell PMTiles paths (sorted). The bake mirrors the
+// ENC tree, so the archives live in subdirs (<tiles>/d1/US4CT1AA.pmtiles, …) — walk, don't ReadDir.
 func (s *Server) liveCellArchives(provider string) []string {
-	dir := s.liveCellsDir(provider)
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
+	root := s.liveCellsDir(provider)
 	var paths []string
-	for _, e := range ents {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pmtiles") {
-			paths = append(paths, filepath.Join(dir, e.Name()))
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-	}
+		if !d.IsDir() && strings.HasSuffix(p, ".pmtiles") {
+			paths = append(paths, p)
+		}
+		return nil
+	})
 	sort.Strings(paths)
 	return paths
+}
+
+// liveBakeWorkers is how many cells bake in parallel — a MEMORY bound (each concurrent bake holds a
+// whole cell's parse+portray+raster working set), so the CPU count capped modestly, overridable via
+// CHARTPLOTTER_BAKE_WORKERS.
+func liveBakeWorkers() int {
+	if v := os.Getenv("CHARTPLOTTER_BAKE_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	if n := runtime.NumCPU(); n < 8 {
+		return n
+	}
+	return 8
 }
 
 // openLiveComposer opens a runtime compositor over a provider's kept per-cell archives, loading the
@@ -116,11 +133,6 @@ func (s *Server) openLiveComposer(provider string) (*tilesource.Composer, error)
 	return c, nil
 }
 
-// liveReKeyBatch is how many freshly-baked cells trigger a progressive re-key during an import.
-// Small enough that coverage appears promptly on the map; large enough that the per-re-key
-// partition rebuild is a negligible fraction of the (per-cell, seconds-each) bake.
-const liveReKeyBatch = 48
-
 // progressiveReKey re-opens the live compositor over the cells baked SO FAR, registers it as the
 // provider's (enabled) set, and advances the content token — so a long import fills in on the map
 // batch by batch instead of appearing only when the whole provider finishes. Called synchronously
@@ -146,36 +158,21 @@ func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tile
 	cellsDir := s.liveCellsDir(provider)
 	s.invalidateLiveOnEngineChange(cellsDir)
 	start := time.Now()
-	paths, err := baker.PrepareLive(encRoot, cellsDir,
-		func(done, total int, cell string) {
-			s.imports.update(jobID, func(j *importJob) {
-				j.Phase, j.Band, j.Zoom = "bake", "", 0
-				if done >= total {
-					j.Unit, j.Note, j.Done, j.Total, j.ETA = "", "Preparing live tiles", 0, 0, 0
-					return
-				}
-				note := "Baking charts"
-				if cell != "" {
-					note = "Baking " + cell
-				}
-				eta := 0
-				if done > 0 {
-					per := time.Since(start) / time.Duration(done)
-					eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
-				}
-				j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", note, done, total, eta
-			})
-			// Progressive: every liveReKeyBatch freshly-baked cells, re-open + re-key the set so
-			// the map fills in live during a long import. The final register (registerProviderSet)
-			// handles done == total, so skip it here.
-			if done > 0 && done < total && done%liveReKeyBatch == 0 {
-				s.progressiveReKey(provider)
+	if _, err := baker.PrepareLive(encRoot, cellsDir, liveBakeWorkers(), func(done, total int) {
+		s.imports.update(jobID, func(j *importJob) {
+			j.Phase, j.Band, j.Zoom = "bake", "", 0
+			eta := 0
+			if done > 0 && total > done {
+				per := time.Since(start) / time.Duration(done)
+				eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
 			}
-		},
-		func(cell string, err error) { log.Printf("live %s: bake cell %s: %v (skipping)", provider, cell, err) })
-	if err != nil {
+			j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", "Baking charts", done, total, eta
+		})
+	}); err != nil {
 		return 0, nil, err
 	}
+	// The mirrored tree holds every kept per-cell archive (baked + reused).
+	paths := s.liveCellArchives(provider)
 	if len(paths) == 0 {
 		return 0, nil, nil
 	}

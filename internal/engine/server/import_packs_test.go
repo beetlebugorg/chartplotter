@@ -85,9 +85,19 @@ func TestImportPacks(t *testing.T) {
 	if _, ok := s.sets.get("noaa"); !ok {
 		t.Errorf("provider set %q not registered", "noaa")
 	}
-	cellArc := filepath.Join(s.setDir("noaa"), "tiles", "US5MD1MC.pmtiles")
-	if fi, err := os.Stat(cellArc); err != nil || fi.Size() == 0 {
-		t.Errorf("provider %q: no baked per-cell tiles (%v)", "noaa", err)
+	// The bake mirrors the ENC tree, so the cell's archive lives under its district subdir
+	// (tiles/d5/US5MD1MC.pmtiles) — walk for it.
+	var found bool
+	for _, p := range s.liveCellArchives("noaa") {
+		if strings.HasSuffix(p, "US5MD1MC.pmtiles") {
+			found = true
+			if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+				t.Errorf("provider %q: empty archive %s (%v)", "noaa", p, err)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("provider %q: no baked US5MD1MC archive in the mirrored tree", "noaa")
 	}
 	if _, err := os.Stat(filepath.Join(s.setDir("noaa"), "partition.tpart")); err != nil {
 		t.Errorf("provider %q: no partition sidecar (%v)", "noaa", err)
