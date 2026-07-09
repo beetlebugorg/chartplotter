@@ -101,4 +101,41 @@ func TestImportPacks(t *testing.T) {
 	if stems, ok := s.setCells("noaa"); !ok || len(stems) != 1 || stems[0] != "US5MD1MC" {
 		t.Errorf("provider cell manifest = %v (ok=%t), want [US5MD1MC]", stems, ok)
 	}
+
+	// A live provider is a FIRST-CLASS set, surfaced provider-centrically (no disk pack):
+	// /api/packs reports its coverage bounds from the registry.
+	pr, _ := http.Get(ts.URL + "/api/packs")
+	pb, _ := io.ReadAll(pr.Body)
+	pr.Body.Close()
+	var packs struct {
+		Packs []struct {
+			Name   string    `json:"name"`
+			Bounds []float64 `json:"bounds"`
+		} `json:"packs"`
+	}
+	json.Unmarshal(pb, &packs)
+	var noaaBounds []float64
+	for _, p := range packs.Packs {
+		if p.Name == "noaa" {
+			noaaBounds = p.Bounds
+		}
+	}
+	if len(noaaBounds) != 4 {
+		t.Errorf("/api/packs: live provider noaa has no bounds: %v", noaaBounds)
+	}
+
+	// disable → enable round-trips through the registry (re-opening the runtime
+	// compositor from kept per-cell archives), not just disk packs.
+	if resp, err := http.Post(ts.URL+"/api/set/disable?set=noaa", "", nil); err == nil {
+		resp.Body.Close()
+	}
+	if _, live := s.sets.get("noaa"); live {
+		t.Error("disabled live provider still registered")
+	}
+	if resp, err := http.Post(ts.URL+"/api/set/enable?set=noaa", "", nil); err == nil {
+		resp.Body.Close()
+	}
+	if _, live := s.sets.get("noaa"); !live {
+		t.Error("re-enabled live provider not re-registered from kept archives")
+	}
 }
