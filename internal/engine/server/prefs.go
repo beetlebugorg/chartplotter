@@ -107,10 +107,16 @@ func scanPacks(cacheDir string) map[string]string {
 			return nil
 		}
 		if d.IsDir() {
-			// The live compositor's per-cell PMTiles are INPUTS, not packs — skip them, else every
-			// cell would surface as its own provider (and the client would probe /tiles/<cell>.json).
-			if d.Name() == "cells-pm" {
-				return filepath.SkipDir
+			// A live runtime-compositor provider keeps its per-cell PMTiles under
+			// <provider>/tiles next to a partition.tpart sidecar. Those archives are INPUTS,
+			// not packs — skip the whole dir, else every cell would surface as its own
+			// provider (and the client would probe /tiles/<cell>.json). Detect the live
+			// provider by the sidecar, so a legacy batch bundle's tiles/chart.pmtiles still
+			// registers below.
+			if d.Name() == "tiles" {
+				if _, err := os.Stat(filepath.Join(filepath.Dir(path), "partition.tpart")); err == nil {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}

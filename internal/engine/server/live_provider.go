@@ -12,9 +12,11 @@ import (
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
 
-// liveCellsDir is <setDir>/cells-pm — the KEPT per-cell PMTiles the runtime compositor mmaps.
+// liveCellsDir is <setDir>/tiles — the KEPT per-cell PMTiles the runtime compositor mmaps.
+// This is the same layout `tile57 bake -o <dir>` writes (<dir>/tiles/<STEM>.pmtiles next to
+// <dir>/partition.tpart), so a CLI-baked structure drops straight into a provider's set dir.
 func (s *Server) liveCellsDir(provider string) string {
-	return filepath.Join(s.setDir(provider), "cells-pm")
+	return filepath.Join(s.setDir(provider), "tiles")
 }
 
 // livePartitionPath is <setDir>/partition.tpart — the saved ownership-partition sidecar.
@@ -154,7 +156,7 @@ func (s *Server) registerLiveProviders() {
 			continue
 		}
 		// Only re-serve a provider whose import COMPLETED (live.gen written at registration). A set
-		// left partial by an interrupted bake has cells-pm but no live.gen → skip it here, and
+		// left partial by an interrupted bake has tiles/ but no live.gen → skip it here, and
 		// rebakeMissingProviders finishes it (incremental) instead of serving a partial map.
 		if _, err := os.Stat(s.liveGenPath(prov)); err != nil {
 			continue

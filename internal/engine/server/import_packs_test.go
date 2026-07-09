@@ -79,14 +79,18 @@ func TestImportPacks(t *testing.T) {
 		t.Fatalf("job state=%q error=%q", st.State, st.Error)
 	}
 
-	// ONE provider set ("noaa") registered, with a baked chart.pmtiles under the cache
-	// dir, and both districts' source cells kept under the data dir.
+	// ONE provider set ("noaa") registered, serving from the live-composite structure
+	// under the cache dir (per-cell tiles/<STEM>.pmtiles + partition.tpart), and both
+	// districts' source cells kept under the data dir.
 	if _, ok := s.sets.get("noaa"); !ok {
 		t.Errorf("provider set %q not registered", "noaa")
 	}
-	chart := filepath.Join(s.setDir("noaa"), "tiles", "chart.pmtiles")
-	if fi, err := os.Stat(chart); err != nil || fi.Size() == 0 {
-		t.Errorf("provider %q: no baked pmtiles (%v)", "noaa", err)
+	cellArc := filepath.Join(s.setDir("noaa"), "tiles", "US5MD1MC.pmtiles")
+	if fi, err := os.Stat(cellArc); err != nil || fi.Size() == 0 {
+		t.Errorf("provider %q: no baked per-cell tiles (%v)", "noaa", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.setDir("noaa"), "partition.tpart")); err != nil {
+		t.Errorf("provider %q: no partition sidecar (%v)", "noaa", err)
 	}
 	for _, dist := range []string{"d5", "d7"} {
 		if _, err := os.Stat(filepath.Join(s.districtDir("noaa", dist), "US5MD1MC.000")); err != nil {
