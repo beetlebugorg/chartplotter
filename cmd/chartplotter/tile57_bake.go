@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
@@ -82,12 +83,16 @@ func (c bakeCmd) runTile57Archive() error {
 		// Per-cell COMPOSITE (default): bake each cell at its native scale, then combine them
 		// via the engine's ownership partition straight into -o. --max-zoom/--format do not
 		// apply — each cell bakes at its native band and the compositor expands zoom.
+		start := time.Now()
 		n, err = baker.ComposeENCRoot(input, outAbs,
 			func(done, total int) {
-				if done < total {
-					fmt.Printf("\rbaking cells %d/%d…      ", done, total)
+				if done >= total {
+					fmt.Printf("\rcomposing %d cells…                 ", total)
+				} else if done > 0 {
+					per := time.Since(start) / time.Duration(done)
+					fmt.Printf("\rbaking cells %d/%d · ~%s left      ", done, total, (per * time.Duration(total-done)).Round(time.Second))
 				} else {
-					fmt.Printf("\rcomposing %d cells…      ", total)
+					fmt.Printf("\rbaking cells %d/%d…      ", done, total)
 				}
 			},
 			func(cell string, e error) { fmt.Fprintf(os.Stderr, "\nwarning: bake %s: %v (skipping)\n", cell, e) })

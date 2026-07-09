@@ -171,15 +171,20 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 // contributed to the composite, or 0 if none produced coverage.
 func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
 	tilesPath := filepath.Join(outDir, "tiles", "chart.pmtiles")
+	start := time.Now()
 	return baker.ComposeENCRoot(encRoot, tilesPath,
 		func(done, total int) {
 			note := "Baking charts"
+			eta := 0
 			if done >= total { // bakes finished → the partition compose runs
 				note = "Composing tiles"
+			} else if done > 0 { // seconds remaining from the mean per-cell rate so far
+				per := time.Since(start) / time.Duration(done)
+				eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
 			}
 			s.imports.update(jobID, func(j *importJob) {
 				j.Phase, j.Band, j.Unit, j.Note = "bake", "", "cells", note
-				j.Done, j.Total = done, total
+				j.Done, j.Total, j.ETA = done, total, eta
 			})
 		},
 		func(cell string, err error) {

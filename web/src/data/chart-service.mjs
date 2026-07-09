@@ -36,6 +36,14 @@ function fmtBytes(n) {
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 }
 
+// Seconds remaining → compact "~2m 30s" / "~45s" / "~1h" for a progress ETA.
+function fmtEta(sec) {
+  if (!sec || sec < 0) return "";
+  if (sec >= 3600) return `~${Math.round(sec / 3600)}h`;
+  if (sec >= 60) { const m = Math.floor(sec / 60), r = sec % 60; return r ? `~${m}m ${r}s` : `~${m}m`; }
+  return `~${sec}s`;
+}
+
 export class ChartService {
   constructor({ assets = "" } = {}) {
     this._assets = assets;
@@ -170,6 +178,9 @@ export class ChartService {
       const u = s.unit === "cells" ? "charts" : (s.unit || "");
       detail = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
     }
+    // Time remaining, when the server reports one (the composite bake): "1,234 / 4,567 charts · ~2m left".
+    const eta = fmtEta(s.eta);
+    if (eta) detail = detail ? `${detail} · ${eta} left` : `${eta} left`;
     const frac = s.total ? s.done / s.total : (s.percent ? s.percent / 100 : null);
     // pack/packNum/packTotal identify WHICH pack a multi-pack batch is on right now (the
     // caller resolves pack — a set key — to a friendly name), so progress reads

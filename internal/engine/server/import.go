@@ -42,6 +42,7 @@ type importJob struct {
 	Note      string `json:"note"`      // human-readable current step (e.g. "downloading US5MD1MC")
 	Done      int    `json:"done"`      // phase units done (bytes/cells downloaded, then tiles emitted)
 	Total     int    `json:"total"`     // phase total (0 until known)
+	ETA       int    `json:"eta,omitempty"` // seconds remaining in this phase (0 = unknown/none)
 	Unit      string `json:"unit"`      // what done/total count: "bytes" | "cells" | "tiles"
 	Cells     int    `json:"cells"`     // cells successfully parsed
 	Err       string `json:"error,omitempty"`
