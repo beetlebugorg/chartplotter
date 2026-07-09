@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,25 +48,33 @@ func (c bakeCmd) Run() error {
 		return err
 	}
 
-	// Bake each cell to <outDir>/tiles/*.pmtiles (incremental — reruns re-bake only changed cells).
+	// Bake each cell IN PARALLEL to <outDir>/tiles/<rel>.pmtiles, mirroring the input tree
+	// (incremental — reruns re-bake only changed cells). The engine writes + frees each archive.
 	start := time.Now()
-	paths, err := baker.PrepareLive(input, tilesDir,
-		func(done, total int, cell string) {
-			switch {
-			case done >= total:
-				fmt.Printf("\rbuilding partition over %d cell(s)…              ", total)
-			case done > 0:
-				per := time.Since(start) / time.Duration(done)
-				fmt.Printf("\rbaking %s (%d/%d) · ~%s left      ", cell, done, total, (per * time.Duration(total-done)).Round(time.Second))
-			default:
-				fmt.Printf("\rbaking %s (%d/%d)…      ", cell, done, total)
-			}
-		},
-		func(cell string, e error) { fmt.Fprintf(os.Stderr, "\nwarning: bake %s: %v (skipping)\n", cell, e) })
-	fmt.Println()
-	if err != nil {
+	if _, err := baker.PrepareLive(input, tilesDir, runtime.NumCPU(), func(done, total int) {
+		if done >= total {
+			fmt.Printf("\rbaked %d cell(s), building partition…              ", total)
+		} else if done > 0 {
+			per := time.Since(start) / time.Duration(done)
+			fmt.Printf("\rbaking %d/%d · ~%s left      ", done, total, (per * time.Duration(total-done)).Round(time.Second))
+		} else {
+			fmt.Printf("\rbaking %d/%d…      ", done, total)
+		}
+	}); err != nil {
+		fmt.Println()
 		return err
 	}
+	fmt.Println()
+
+	// Collect the mirrored per-cell archives (baked + reused) for the compositor.
+	var paths []string
+	_ = filepath.WalkDir(tilesDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".pmtiles") {
+			paths = append(paths, p)
+		}
+		return nil
+	})
+	sort.Strings(paths)
 	if len(paths) == 0 {
 		return fmt.Errorf("no coverage: no valid S-57 cells under %s", input)
 	}
