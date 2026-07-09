@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -159,10 +160,13 @@ func (s *Server) packGen(set string) int64 {
 			return fi.ModTime().UnixNano()
 		}
 	}
-	// Live runtime-compositor provider (no disk pack): the live.gen file's mtime, bumped on each
-	// completed import — so its tiles are content-addressed by ?g exactly like a baked pack's.
-	if fi, err := os.Stat(s.liveGenPath(set)); err == nil {
-		return fi.ModTime().UnixNano()
+	// Live runtime-compositor provider (no disk pack): the CONTENT token stored in live.gen (a
+	// sha-of-shas over its per-cell archives), so its tiles are content-addressed by ?g — a no-op
+	// re-bake keeps the token, and each progressive re-key advances it as cells fill in.
+	if b, err := os.ReadFile(s.liveGenPath(set)); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			return n
+		}
 	}
 	return 0
 }

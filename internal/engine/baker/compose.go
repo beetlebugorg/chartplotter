@@ -1,6 +1,8 @@
 package baker
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -62,6 +64,11 @@ func PrepareLive(input, cellsDir string, onProgress func(done, total int, cell s
 			}
 			continue
 		}
+		// Content sha of the archive, written beside it (<archive>.sha), for the provider's
+		// content-addressed cache-bust token (a sha-of-shas). A reused cell keeps its sidecar,
+		// so a re-key reads N tiny sidecars instead of re-hashing the whole archive set.
+		sum := sha256.Sum256(b)
+		_ = os.WriteFile(pc+".sha", []byte(hex.EncodeToString(sum[:])), 0o644)
 		perCell = append(perCell, pc)
 	}
 	if len(perCell) == 0 {

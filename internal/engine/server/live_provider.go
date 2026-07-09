@@ -1,10 +1,14 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,21 +28,48 @@ func (s *Server) livePartitionPath(provider string) string {
 	return filepath.Join(s.setDir(provider), "partition.tpart")
 }
 
-// liveGenPath is <setDir>/live.gen — its mtime is the provider's tile GENERATION token (packGen
-// reads it), bumped on each completed import so the client's tile URLs change and it re-fetches,
-// invalidating tiles it cached against a previous, less-complete cell set. Its existence also marks
-// "an import completed" — registerLiveProviders only re-serves a provider that has one, so a set
+// liveGenPath is <setDir>/live.gen — it holds the provider's CONTENT cache-bust token (a
+// decimal of the sha-of-shas over its per-cell archives; see liveGenToken), which packGen reads
+// and stamps into tile URLs as ?g. It changes exactly when the cell set or any cell's content
+// changes, so a no-op re-bake keeps the client's cached tiles. Its existence also marks "an
+// import registered" — registerLiveProviders only re-serves a provider that has one, so a set
 // left partial by an interrupted bake is completed by rebakeMissingProviders instead of served.
 func (s *Server) liveGenPath(provider string) string {
 	return filepath.Join(s.setDir(provider), "live.gen")
 }
 
-// bumpLiveGen advances the live provider's generation token (writes live.gen; the MTIME is the
-// token). Called when an import registration completes.
+// liveGenToken is the provider's CONTENT cache-bust token: a sha-of-shas over its per-cell
+// archives (each archive's content sha, from the .sha sidecar written at bake). The lines are
+// sorted so the token is order-independent, and the low 63 bits become the positive ?g int. It
+// changes exactly when the set of cells or any cell's content changes.
+func (s *Server) liveGenToken(provider string) int64 {
+	paths := s.liveCellArchives(provider)
+	if len(paths) == 0 {
+		return 0
+	}
+	lines := make([]string, 0, len(paths))
+	for _, p := range paths {
+		stem := strings.TrimSuffix(filepath.Base(p), ".pmtiles")
+		sha, err := os.ReadFile(p + ".sha")
+		if err != nil { // no sidecar (shouldn't happen post-bake) — hash the archive itself
+			if b, e := os.ReadFile(p); e == nil {
+				sum := sha256.Sum256(b)
+				sha = []byte(hex.EncodeToString(sum[:]))
+			}
+		}
+		lines = append(lines, stem+":"+strings.TrimSpace(string(sha)))
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return int64(binary.BigEndian.Uint64(sum[:8]) & 0x7fffffffffffffff) // 63 bits → non-negative
+}
+
+// bumpLiveGen recomputes and persists the live provider's content token (writes live.gen).
+// Called when an import registration completes, and per batch during a progressive bake.
 func (s *Server) bumpLiveGen(provider string) {
 	p := s.liveGenPath(provider)
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	_ = os.WriteFile(p, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o644)
+	_ = os.WriteFile(p, []byte(strconv.FormatInt(s.liveGenToken(provider), 10)), 0o644)
 }
 
 // liveCellArchives lists a provider's kept per-cell PMTiles paths (sorted).
