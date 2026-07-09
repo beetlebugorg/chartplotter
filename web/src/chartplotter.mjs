@@ -1010,7 +1010,7 @@ export class ChartPlotter extends HTMLElement {
     if (!j || j.state !== "running" || !j.id) return;
     this._task = { kind: "download", status: "running" };
     const name = this._reattachName(j.set);
-    this._setProgress({ label: "Working", pill: `Working on ${name}`, sub: "", frac: j.percent ? j.percent / 100 : null });
+    this._setProgress({ label: "Working", pill: `Working on ${name}`, sub: j.action ? `${j.action}…` : "", frac: (j.frac === null || j.frac === undefined) ? null : j.frac });
     this._pollImport(j.id, (p) => this._setProgress(p), name).catch(() => {}).then(async () => {
       this._task = null;
       this._setProgress(null);

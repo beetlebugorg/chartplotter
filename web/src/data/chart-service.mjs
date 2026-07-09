@@ -16,34 +16,6 @@
 // filenames. Methods throw on hard failure; pollJob resolves with the final
 // status object or rejects on error/timeout.
 
-// Job phase → [verb, noun] for the progress label, e.g. bake → "Generating … tiles".
-// The noun is what's being acted on at that phase (source charts while fetching /
-// reading; tiles while baking; nothing while finishing).
-const PHASE = {
-  download: ["Downloading", "charts"], fetch: ["Downloading", "charts"], dl: ["Downloading", "charts"],
-  upload: ["Uploading", "charts"],
-  extract: ["Extracting", "charts"], unzip: ["Extracting", "charts"], expand: ["Extracting", "charts"],
-  parse: ["Reading", "charts"], read: ["Reading", "charts"], import: ["Reading", "charts"],
-  bake: ["Generating", "tiles"], tiles: ["Generating", "tiles"], render: ["Generating", "tiles"],
-  register: ["Finishing", "up"], finalize: ["Finishing", "up"], index: ["Finishing", "up"],
-};
-
-// Bytes → compact "12 MB" / "1.4 KB" (local copy so this module is self-contained).
-function fmtBytes(n) {
-  if (!n) return "0 B";
-  const u = ["B", "KB", "MB", "GB"]; let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
-}
-
-// Seconds remaining → compact "~2m 30s" / "~45s" / "~1h" for a progress ETA.
-function fmtEta(sec) {
-  if (!sec || sec < 0) return "";
-  if (sec >= 3600) return `~${Math.round(sec / 3600)}h`;
-  if (sec >= 60) { const m = Math.floor(sec / 60), r = sec % 60; return r ? `~${m}m ${r}s` : `~${m}m`; }
-  return `~${sec}s`;
-}
-
 export class ChartService {
   constructor({ assets = "" } = {}) {
     this._assets = assets;
@@ -164,28 +136,20 @@ export class ChartService {
   // tiles", "12 MB / 45 MB"). The action carries the band but not the noun, so the
   // unit isn't repeated — "Generating coastal…" + "1,234 / 4,567 tiles".
   _formatStatus(s, name) {
-    const m = s.phase ? PHASE[s.phase] : null;
-    let verb = m ? m[0] : (s.phase ? s.phase[0].toUpperCase() + s.phase.slice(1) : "Working");
-    // The bake phase has two visible stages the server distinguishes by unit:
-    // "cells" while a band's charts are parsed + portrayed (the long gap before
-    // any tile emits), then "tiles" while that band's tiles are generated.
-    if (m && m[1] === "tiles" && s.unit === "cells") verb = "Preparing";
-    const sub = [verb, s.band].filter(Boolean).join(" ") + "…"; // "Preparing coastal…"
-    // Count, with the unit named in every stage so a bare number is never ambiguous.
-    let detail = "";
-    if (s.unit === "bytes") detail = s.total ? `${fmtBytes(s.done)} / ${fmtBytes(s.total)}` : fmtBytes(s.done);
-    else if (s.total) {
-      const u = s.unit === "cells" ? "charts" : (s.unit || "");
-      detail = `${s.done.toLocaleString()} / ${s.total.toLocaleString()} ${u}`.trim();
-    }
-    // Time remaining, when the server reports one (the composite bake): "1,234 / 4,567 charts · ~2m left".
-    const eta = fmtEta(s.eta);
-    if (eta) detail = detail ? `${detail} · ${eta} left` : `${eta} left`;
-    const frac = s.total ? s.done / s.total : (s.percent ? s.percent / 100 : null);
-    // pack/packNum/packTotal identify WHICH pack a multi-pack batch is on right now (the
-    // caller resolves pack — a set key — to a friendly name), so progress reads
-    // "Mid-Atlantic (2 of 4) · Generating coastal…" instead of looping on one line.
-    return { label: name || "", sub, detail, frac, pack: s.pack || "", packNum: s.packNum || 0, packTotal: s.packTotal || 0 };
+    // The SERVER owns the wording: `action` is the live step and `detail` the count/ETA beside
+    // it, both display-ready — the client renders them verbatim rather than re-deriving the
+    // status from the raw phase/unit/note fields. `frac` is the bar fill (0..1, or null → the
+    // shell sweeps an indeterminate bar). The client only supplies the region title (label) and
+    // the pack context (pack/packNum/packTotal, resolved to a friendly name by the caller), so
+    // progress reads "Mid-Atlantic (2 of 4) · Composing tiles…".
+    const frac = (s.frac === null || s.frac === undefined) ? null : s.frac;
+    return {
+      label: name || "",
+      sub: s.action ? `${s.action}…` : "",
+      detail: s.detail || "",
+      frac,
+      pack: s.pack || "", packNum: s.packNum || 0, packTotal: s.packTotal || 0,
+    };
   }
 
   // GET /api/packs — the installed-pack registry (single source of truth, incl.

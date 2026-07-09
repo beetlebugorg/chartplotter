@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,8 +44,13 @@ type importJob struct {
 	Done      int    `json:"done"`      // phase units done (bytes/cells downloaded, then tiles emitted)
 	Total     int    `json:"total"`     // phase total (0 until known)
 	ETA       int    `json:"eta,omitempty"` // seconds remaining in this phase (0 = unknown/none)
-	Unit      string `json:"unit"`      // what done/total count: "bytes" | "cells" | "tiles"
+	Unit      string `json:"unit"`      // what done/total count: "bytes" | "cells" | "tiles" | "" (opaque)
 	Cells     int    `json:"cells"`     // cells successfully parsed
+	// Compose-step zoom progress: the ownership-partition compose walks the zoom ladder, so it
+	// reports "zoom N of M" instead of a chart count. Zoom == 0 means "not composing".
+	Zoom      int    `json:"-"`
+	ZoomMin   int    `json:"-"`
+	ZoomMax   int    `json:"-"`
 	Err       string `json:"error,omitempty"`
 	Started   string `json:"started"`
 }
@@ -586,16 +592,153 @@ func (s *Server) setCells(set string) ([]string, bool) {
 	return stems, true
 }
 
-// statusJSON renders a job snapshot as the status JSON line (shared by the polling
-// endpoint and the SSE stream).
+// statusJSON renders a job snapshot as the status JSON line (shared by the polling endpoint and
+// the SSE stream). The server owns the human wording: `action` (the live step) and `detail` (the
+// count/ETA beside it) are display-ready strings the client renders verbatim, and `frac` is the
+// bar fill (0..1, or null for an indeterminate/opaque-step bar). The raw fields ride along for the
+// client's own use (pack context, region title), but it must not re-derive the status from them.
 func (j importJob) statusJSON() string {
-	pct := 0
-	if j.Total > 0 {
-		pct = j.Done * 100 / j.Total
-	}
+	action, detail, frac := j.statusDisplay()
 	return fmt.Sprintf(
-		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"band":%q,"pack":%q,"packNum":%d,"packTotal":%d,"note":%q,"done":%d,"total":%d,"unit":%q,"percent":%d,"cells":%d,"error":%q}`,
-		j.ID, j.Set, j.State, j.Phase, j.Band, j.Pack, j.PackNum, j.PackTotal, j.Note, j.Done, j.Total, j.Unit, pct, j.Cells, j.Err)
+		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"band":%q,"pack":%q,"packNum":%d,"packTotal":%d,"note":%q,"done":%d,"total":%d,"unit":%q,"eta":%d,"cells":%d,"action":%q,"detail":%q,"frac":%s,"error":%q}`,
+		j.ID, j.Set, j.State, j.Phase, j.Band, j.Pack, j.PackNum, j.PackTotal, j.Note, j.Done, j.Total, j.Unit, j.ETA, j.Cells, action, detail, fracJSON(frac), j.Err)
+}
+
+// statusDisplay composes the display-ready progress strings the client renders verbatim:
+//
+//	action — the live step ("Baking charts", "Composing tiles", "Downloading charts")
+//	detail — the count beside it ("1,234 / 4,567 charts · ~2m left", "zoom 12 / 16 · ~1m left")
+//	frac   — bar fill 0..1, or a negative value for an indeterminate (opaque-step) bar.
+func (j importJob) statusDisplay() (action, detail string, frac float64) {
+	action = j.actionText()
+
+	switch {
+	case j.Zoom > 0: // the compose step reports its zoom position, not a chart count
+		detail = fmt.Sprintf("zoom %d / %d", j.Zoom-j.ZoomMin+1, j.ZoomMax-j.ZoomMin+1)
+	case j.Unit == "bytes":
+		if j.Total > 0 {
+			detail = fmtBytes(j.Done) + " / " + fmtBytes(j.Total)
+		} else {
+			detail = fmtBytes(j.Done)
+		}
+	case j.Total > 0:
+		unit := j.Unit
+		if unit == "cells" {
+			unit = "charts" // "charts" reads friendlier than the internal "cells"
+		}
+		detail = commaInt(j.Done) + " / " + commaInt(j.Total) + " " + unit
+	}
+	if eta := fmtEtaSecs(j.ETA); eta != "" {
+		if detail != "" {
+			detail += " · " + eta + " left"
+		} else {
+			detail = eta + " left"
+		}
+	}
+
+	// A known total → a determinate bar (the compose weights or the chart count both work). An
+	// opaque step with no total (initial "Preparing", the compose warm-up) sweeps.
+	if j.Total > 0 {
+		frac = float64(j.Done) / float64(j.Total)
+	} else {
+		frac = -1
+	}
+	return
+}
+
+// actionText is the live step verb. The bake/meta phases carry a clean, self-contained note that
+// names the step ("Baking charts", "Composing tiles", "Reading chart metadata"); use it verbatim.
+// The download/extract notes echo a source filename ("Downloading US5MD1MC"), so those get a
+// friendly generic verb instead.
+func (j importJob) actionText() string {
+	switch j.Phase {
+	case "bake", "meta":
+		if j.Note != "" {
+			if j.Band != "" {
+				return j.Note + " " + j.Band // legacy per-band bake: "Generating tiles coastal"
+			}
+			return j.Note
+		}
+	case "download":
+		return "Downloading charts"
+	case "extract":
+		return "Extracting charts"
+	}
+	if j.Note != "" {
+		return j.Note
+	}
+	if j.Phase != "" {
+		return strings.ToUpper(j.Phase[:1]) + j.Phase[1:]
+	}
+	return "Working"
+}
+
+// fracJSON renders a bar fill as a JSON number, or null for an indeterminate bar.
+func fracJSON(frac float64) string {
+	if frac < 0 {
+		return "null"
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	return strconv.FormatFloat(frac, 'f', 4, 64)
+}
+
+// fmtBytes renders a byte count as a compact "12 MB" / "1.4 KB".
+func fmtBytes(n int) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB"}
+	f, i := float64(n), 0
+	for f >= 1024 && i < len(units)-1 {
+		f /= 1024
+		i++
+	}
+	if f < 10 && i > 0 {
+		return fmt.Sprintf("%.1f %s", f, units[i])
+	}
+	return fmt.Sprintf("%.0f %s", f, units[i])
+}
+
+// commaInt renders an int with thousands separators ("1234567" → "1,234,567").
+func commaInt(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte(s[i])
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+// fmtEtaSecs renders seconds-remaining as a compact "~2m 30s" / "~45s" / "~1h" (matches the
+// client's old fmtEta); "" when unknown.
+func fmtEtaSecs(sec int) string {
+	if sec <= 0 {
+		return ""
+	}
+	switch {
+	case sec >= 3600:
+		return fmt.Sprintf("~%dh", (sec+1800)/3600)
+	case sec >= 60:
+		m, r := sec/60, sec%60
+		if r != 0 {
+			return fmt.Sprintf("~%dm %ds", m, r)
+		}
+		return fmt.Sprintf("~%dm", m)
+	default:
+		return fmt.Sprintf("~%ds", sec)
+	}
 }
 
 // importStatus returns a job's state as JSON (one-shot poll).

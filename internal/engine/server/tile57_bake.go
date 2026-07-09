@@ -152,7 +152,9 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 		return fail(fmt.Errorf("import produced no coverage (no valid S-57 data)"))
 	}
 
-	s.imports.update(jobID, func(j *importJob) { j.Phase, j.Note = "meta", "Reading chart metadata" })
+	s.imports.update(jobID, func(j *importJob) {
+		j.Phase, j.Note, j.Zoom, j.Unit, j.Done, j.Total, j.ETA = "meta", "Reading chart metadata", 0, "", 0, 0, 0
+	})
 	cells := s.providerCellData(provider)
 	aux := s.providerAux(provider)
 	cat := s.providerCatalog(provider)
@@ -172,19 +174,43 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
 	tilesPath := filepath.Join(outDir, "tiles", "chart.pmtiles")
 	start := time.Now()
+	var composeStart time.Time // set when the per-cell bakes finish and the compose begins
 	return baker.ComposeENCRoot(encRoot, tilesPath,
 		func(done, total int) {
-			note := "Baking charts"
+			s.imports.update(jobID, func(j *importJob) {
+				j.Phase, j.Band, j.Zoom = "bake", "", 0
+				if done >= total {
+					// Per-cell bakes done → the ownership-partition compose runs. Until its first
+					// zoom-progress arrives, sweep (total 0) under "Composing tiles".
+					composeStart = time.Now()
+					j.Unit, j.Note, j.Done, j.Total, j.ETA = "", "Composing tiles", 0, 0, 0
+					return
+				}
+				// Per-cell portrayal: a determinate bar plus an ETA from the mean per-cell rate so far.
+				eta := 0
+				if done > 0 {
+					per := time.Since(start) / time.Duration(done)
+					eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
+				}
+				j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", "Baking charts", done, total, eta
+			})
+		},
+		func(p tile57.ComposeProgress) {
+			// Live compose progress: the engine weights zooms by tile count, so p.Done/p.Total is
+			// a smooth fraction. ETA extrapolates from elapsed compose time and that fraction.
+			if composeStart.IsZero() {
+				composeStart = time.Now()
+			}
 			eta := 0
-			if done >= total { // bakes finished → the partition compose runs
-				note = "Composing tiles"
-			} else if done > 0 { // seconds remaining from the mean per-cell rate so far
-				per := time.Since(start) / time.Duration(done)
-				eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
+			if p.Total > 0 && p.Done > 0 && p.Done < p.Total {
+				frac := float64(p.Done) / float64(p.Total)
+				remain := time.Duration(float64(time.Since(composeStart)) * (1 - frac) / frac)
+				eta = int(remain.Round(time.Second).Seconds())
 			}
 			s.imports.update(jobID, func(j *importJob) {
-				j.Phase, j.Band, j.Unit, j.Note = "bake", "", "cells", note
-				j.Done, j.Total, j.ETA = done, total, eta
+				j.Phase, j.Band, j.Unit, j.Note = "bake", "", "", "Composing tiles"
+				j.Done, j.Total, j.ETA = int(p.Done), int(p.Total), eta
+				j.Zoom, j.ZoomMin, j.ZoomMax = p.Zoom, p.MinZoom, p.MaxZoom
 			})
 		},
 		func(cell string, err error) {

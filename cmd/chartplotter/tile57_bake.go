@@ -95,6 +95,7 @@ func (c bakeCmd) runTile57Archive() error {
 					fmt.Printf("\rbaking cells %d/%d…      ", done, total)
 				}
 			},
+			nil, // CLI shows no separate compose bar; the per-cell line above suffices
 			func(cell string, e error) { fmt.Fprintf(os.Stderr, "\nwarning: bake %s: %v (skipping)\n", cell, e) })
 		fmt.Println()
 		if err != nil {

@@ -18,10 +18,12 @@ import (
 // half only; a host builds the style dynamically and serves global assets.
 //
 // onProgress(done, total) is called before each cell bake (done 0..total-1) and once more with
-// done==total when the bakes are finished and the partition compose begins; nil to skip. onSkip
-// (nil to skip) reports a cell that failed to bake. Returns the count of cells that contributed;
-// an error (not 0) is returned when cells were present but none baked.
-func ComposeENCRoot(input, outPath string, onProgress func(done, total int), onSkip func(cell string, err error)) (int, error) {
+// done==total when the bakes are finished and the partition compose begins; nil to skip.
+// onCompose (nil to skip) then reports live progress THROUGH that partition compose as it walks
+// the zoom ladder (a smooth Done/Total fraction). onSkip (nil to skip) reports a cell that failed
+// to bake. Returns the count of cells that contributed; an error (not 0) is returned when cells
+// were present but none baked.
+func ComposeENCRoot(input, outPath string, onProgress func(done, total int), onCompose func(tile57.ComposeProgress), onSkip func(cell string, err error)) (int, error) {
 	cells, err := ListCells(input)
 	if err != nil {
 		return 0, err
@@ -77,7 +79,7 @@ func ComposeENCRoot(input, outPath string, onProgress func(done, total int), onS
 			return 0, err
 		}
 	}
-	return tile57.ComposeFiles(perCell, outPath)
+	return tile57.ComposeFiles(perCell, outPath, onCompose)
 }
 
 // ListCells returns every base cell (.000) path under `root` (a single file or a directory),
