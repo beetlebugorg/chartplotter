@@ -176,6 +176,12 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 	for _, prov := range s.installedProviders() {
 		seen[prov] = true
 	}
+	// Runtime-registered sets with no disk pack (e.g. the live runtime compositor) — so a set
+	// that only lives in the registry still surfaces as a first-class, toggleable map layer.
+	// Its bounds/metadata come from the TileJSON (src.Meta()), not a disk pack.
+	for _, name := range s.sets.names() {
+		seen[providerOf(name)] = true
+	}
 	providers := make([]string, 0, len(seen))
 	for p := range seen {
 		providers = append(providers, p)
