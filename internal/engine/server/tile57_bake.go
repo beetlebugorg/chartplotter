@@ -45,24 +45,36 @@ func (s *Server) bakeProgress(jobID string) func(tile57.BakeProgress) {
 // Returns false (recording a job error) if the bundle can't be opened. `set` is the
 // provider name (one archive per provider).
 func (s *Server) registerBakedSet(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, created string) bool {
-	outDir := s.setDir(set)
-	chart := filepath.Join(outDir, "tiles", "chart.pmtiles")
+	chart := filepath.Join(s.setDir(set), "tiles", "chart.pmtiles")
 	src, err := tilesource.Open(chart)
 	if err != nil {
 		log.Printf("import %s (%s): open baked bundle: %v", jobID, set, err)
 		return false
 	}
+	return s.registerProviderSet(jobID, set, src, chart, cells, aux, cat, created)
+}
+
+// registerProviderSet registers `src` as provider `set`'s live tile set and writes its tail (bake
+// stamps, cell manifest, companion aux, metadata sidecar) so the provider is as complete in the
+// chart library as any pack. `packPath` is the on-disk chart.pmtiles of a BATCH-baked provider
+// (recorded for the pack list + stamped with the bake/engine version), or "" for a LIVE
+// runtime-compositor provider (no disk archive — its bounds come from the TileSource Meta/TileJSON,
+// and it is surfaced in /api/packs straight from the registry).
+func (s *Server) registerProviderSet(jobID, set string, src tilesource.TileSource, packPath string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, created string) bool {
+	outDir := s.setDir(set)
 	s.sets.register(set, src)
-	s.packAdd(set, chart)
 	s.prefs.setDisabled(set, false)
-	if s.Version != "" {
-		_ = os.WriteFile(chart+bakeVerExt, []byte(s.Version), 0o644)
-	}
-	// Bake-time engine stamp (<pack>.enginever): the tile57 commit THIS binary links,
-	// recorded beside the pack so the set's TileJSON can report which engine baked
-	// these tiles even after the binary is upgraded. Best-effort, like .bakever.
-	if s.EngineCommit != "" {
-		_ = os.WriteFile(chart+engineVerExt, []byte(s.EngineCommit), 0o644)
+	if packPath != "" {
+		s.packAdd(set, packPath)
+		if s.Version != "" {
+			_ = os.WriteFile(packPath+bakeVerExt, []byte(s.Version), 0o644)
+		}
+		// Bake-time engine stamp (<pack>.enginever): the tile57 commit THIS binary links,
+		// recorded beside the pack so the set's TileJSON can report which engine baked
+		// these tiles even after the binary is upgraded. Best-effort, like .bakever.
+		if s.EngineCommit != "" {
+			_ = os.WriteFile(packPath+engineVerExt, []byte(s.EngineCommit), 0o644)
+		}
 	}
 	if err := s.writeSetCells(set, cells); err != nil {
 		log.Printf("import %s: cell manifest %q: %v", jobID, set, err)
@@ -131,8 +143,10 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 	// sprite/glyphs/colortables are global server assets, so the composite path skips the
 	// bundle's (unused) assets/style/manifest emission.
 	var n int
+	var liveSrc tilesource.TileSource // non-nil → register the live compositor directly; nil → batch chart.pmtiles
 	var err error
-	if os.Getenv("TILE57_LEGACY_BAKE") != "" {
+	switch {
+	case os.Getenv("TILE57_LEGACY_BAKE") != "":
 		// MaxZoom 24 = the ABI's "no clamp" (each cell's full native band).
 		var bbox [4]float64
 		n, bbox, err = tile57.BakeBundle(encRoot, outDir, tile57.BakeOpts{Created: created, MaxZoom: 24}, s.bakeProgress(jobID))
@@ -140,8 +154,13 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 			os.RemoveAll(outDir)
 			return fail(fmt.Errorf("import produced no coverage (%d cell(s), no valid S-57 data)", n))
 		}
-	} else {
+	case os.Getenv("TILE57_BATCH_COMPOSE") != "":
+		// Escape hatch: produce a portable district chart.pmtiles (the per-cell composite batch).
 		n, err = s.composeProvider(jobID, encRoot, outDir)
+	default:
+		// DEFAULT: live runtime compositor — the per-cell bakes are KEPT and tiles compose on
+		// demand. No district compose pass, and adding a district re-bakes only its new cells.
+		n, liveSrc, err = s.prepareLiveProvider(jobID, encRoot, provider)
 	}
 	if err != nil {
 		return fail(err)
@@ -158,8 +177,14 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 	cells := s.providerCellData(provider)
 	aux := s.providerAux(provider)
 	cat := s.providerCatalog(provider)
-	if !s.registerBakedSet(jobID, provider, cells, aux, cat, created) {
-		return fail(fmt.Errorf("could not register baked bundle for %q", provider))
+	registered := false
+	if liveSrc != nil {
+		registered = s.registerProviderSet(jobID, provider, liveSrc, "", cells, aux, cat, created)
+	} else {
+		registered = s.registerBakedSet(jobID, provider, cells, aux, cat, created)
+	}
+	if !registered {
+		return fail(fmt.Errorf("could not register set for %q", provider))
 	}
 	s.imports.update(jobID, func(j *importJob) { j.Cells = n })
 	log.Printf("import %s: baked provider %q (%d cell(s)) → %s", jobID, provider, n, outDir)

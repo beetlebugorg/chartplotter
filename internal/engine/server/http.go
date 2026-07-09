@@ -92,8 +92,9 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if len(s.packs) > 0 {
 		log.Printf("tilesets: %d pack(s) on disk, %d enabled (from %s)", len(s.packs), n, cacheDir)
 	}
+	s.registerLiveProviders()  // re-register live runtime compositors from kept per-cell archives (survives restart)
 	s.registerLiveCompose()    // dev/test: on-demand runtime compositor from TILE57_LIVE_COMPOSE (no-op if unset)
-	s.rebakeMissingProviders() // self-heal: bake any provider with an ENC_ROOT but no bundle (post-migration)
+	s.rebakeMissingProviders() // self-heal: bake any provider with an ENC_ROOT but no set (→ live prep)
 	return s
 }
 
@@ -105,6 +106,9 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 func (s *Server) rebakeMissingProviders() {
 	var missing []string
 	for _, prov := range s.installedProviders() {
+		if _, live := s.sets.get(prov); live {
+			continue // already serving (a live compositor from kept archives, or a registered pack)
+		}
 		if _, ok := s.packPath(prov); !ok {
 			missing = append(missing, prov)
 		}

@@ -103,7 +103,15 @@ func (p *prefs) setDisabled(set string, off bool) {
 func scanPacks(cacheDir string) map[string]string {
 	out := map[string]string{}
 	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			// The live compositor's per-cell PMTiles are INPUTS, not packs — skip them, else every
+			// cell would surface as its own provider (and the client would probe /tiles/<cell>.json).
+			if d.Name() == "cells-pm" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".pmtiles") && !strings.HasSuffix(path, ".mbtiles") {

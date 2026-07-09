@@ -47,5 +47,9 @@ func (c *Composer) Tile(z uint8, x, y uint32) ([]byte, error) {
 // Meta returns the compositor's display metadata (zoom range + coverage bounds).
 func (c *Composer) Meta() TileMeta { return c.meta }
 
+// SavePartition persists the resident ownership partition to path, so a later NewComposer can load
+// it (as partitionPath) and skip the owned-face build.
+func (c *Composer) SavePartition(path string) error { return c.src.SavePartition(path) }
+
 // Close releases the compositor (io.Closer, so tilesource.Close finds it).
 func (c *Composer) Close() error { return c.src.Close() }
