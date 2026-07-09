@@ -17,13 +17,13 @@ import (
 // never resident. This replaces the in-bake cross-cell combiner (tile57.BakeBundle) — the tiles
 // half only; a host builds the style dynamically and serves global assets.
 //
-// onProgress(done, total) is called before each cell bake (done 0..total-1) and once more with
-// done==total when the bakes are finished and the partition compose begins; nil to skip.
-// onCompose (nil to skip) then reports live progress THROUGH that partition compose as it walks
-// the zoom ladder (a smooth Done/Total fraction). onSkip (nil to skip) reports a cell that failed
-// to bake. Returns the count of cells that contributed; an error (not 0) is returned when cells
-// were present but none baked.
-func ComposeENCRoot(input, outPath string, onProgress func(done, total int), onCompose func(tile57.ComposeProgress), onSkip func(cell string, err error)) (int, error) {
+// onProgress(done, total, cell) is called before each cell bake (done 0..total-1, cell = the
+// stem about to bake, e.g. "US5MD1MD") and once more with done==total (cell "") when the bakes
+// are finished and the partition compose begins; nil to skip. onCompose (nil to skip) then
+// reports live progress THROUGH that partition compose as it walks the zoom ladder (a smooth
+// Done/Total fraction). onSkip (nil to skip) reports a cell that failed to bake. Returns the count
+// of cells that contributed; an error (not 0) is returned when cells were present but none baked.
+func ComposeENCRoot(input, outPath string, onProgress func(done, total int, cell string), onCompose func(tile57.ComposeProgress), onSkip func(cell string, err error)) (int, error) {
 	cells, err := ListCells(input)
 	if err != nil {
 		return 0, err
@@ -43,7 +43,7 @@ func ComposeENCRoot(input, outPath string, onProgress func(done, total int), onC
 	perCell := make([]string, 0, len(cells))
 	for i, cp := range cells {
 		if onProgress != nil {
-			onProgress(i, len(cells))
+			onProgress(i, len(cells), strings.TrimSuffix(filepath.Base(cp), ".000"))
 		}
 		b, err := tile57.BakeCell(cp)
 		if err != nil {
@@ -72,7 +72,7 @@ func ComposeENCRoot(input, outPath string, onProgress func(done, total int), onC
 
 	// 2. Stream-compose the per-cell archives into outPath via the ownership partition.
 	if onProgress != nil {
-		onProgress(len(cells), len(cells))
+		onProgress(len(cells), len(cells), "")
 	}
 	if dir := filepath.Dir(outPath); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

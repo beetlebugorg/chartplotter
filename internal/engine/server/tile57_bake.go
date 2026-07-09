@@ -176,7 +176,7 @@ func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
 	start := time.Now()
 	var composeStart time.Time // set when the per-cell bakes finish and the compose begins
 	return baker.ComposeENCRoot(encRoot, tilesPath,
-		func(done, total int) {
+		func(done, total int, cell string) {
 			s.imports.update(jobID, func(j *importJob) {
 				j.Phase, j.Band, j.Zoom = "bake", "", 0
 				if done >= total {
@@ -186,13 +186,18 @@ func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
 					j.Unit, j.Note, j.Done, j.Total, j.ETA = "", "Composing tiles", 0, 0, 0
 					return
 				}
-				// Per-cell portrayal: a determinate bar plus an ETA from the mean per-cell rate so far.
+				// Per-cell portrayal: name the chart being baked, plus a determinate bar and an ETA
+				// from the mean per-cell rate so far.
+				note := "Baking charts"
+				if cell != "" {
+					note = "Baking " + cell
+				}
 				eta := 0
 				if done > 0 {
 					per := time.Since(start) / time.Duration(done)
 					eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
 				}
-				j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", "Baking charts", done, total, eta
+				j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", note, done, total, eta
 			})
 		},
 		func(p tile57.ComposeProgress) {

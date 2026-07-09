@@ -147,6 +147,7 @@ export class ChartService {
       label: name || "",
       sub: s.action ? `${s.action}…` : "",
       detail: s.detail || "",
+      eta: s.eta || "", // kept separate from detail so each pins in its own fixed slot
       frac,
       pack: s.pack || "", packNum: s.packNum || 0, packTotal: s.packTotal || 0,
     };

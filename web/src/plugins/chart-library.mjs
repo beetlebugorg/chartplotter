@@ -906,10 +906,16 @@ export class ChartLibrary extends HTMLElement {
     return (pack ? `${pack}${count} · ` : "") + ((p && p.sub) || "Downloading…");
   }
 
+  // "1,234 / 4,567 charts · ~2m left" — the count and (when present) the ETA, which the server
+  // reports separately so the card can pin each; the banner is one line, so re-join them here.
+  _batchDetail(p) {
+    return (p && p.detail ? p.detail : "") + (p && p.eta ? ` · ${p.eta}` : "");
+  }
+
   // The in-dialog banner descriptor for the packs header (bar + text).
   _batchBanner() {
     const p = this._batchStatus;
-    return { busy: true, sub: this._batchSub(p), detail: (p && p.detail) || "", frac: (p && p.frac) || 0 };
+    return { busy: true, sub: this._batchSub(p), detail: this._batchDetail(p), frac: (p && p.frac) || 0 };
   }
 
   // Update the banner in place from a formatted status (no re-render → the bar animates).
@@ -921,7 +927,7 @@ export class ChartLibrary extends HTMLElement {
     const sub = r.querySelector(".dl-banner .dl-sub");
     if (sub) sub.textContent = this._batchSub(p);
     const detail = r.querySelector(".dl-banner .dl-detail");
-    if (detail) detail.textContent = p.detail || "";
+    if (detail) detail.textContent = this._batchDetail(p);
   }
 
   // Find-a-chart search box.

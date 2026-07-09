@@ -85,14 +85,14 @@ func (c bakeCmd) runTile57Archive() error {
 		// apply — each cell bakes at its native band and the compositor expands zoom.
 		start := time.Now()
 		n, err = baker.ComposeENCRoot(input, outAbs,
-			func(done, total int) {
+			func(done, total int, cell string) {
 				if done >= total {
 					fmt.Printf("\rcomposing %d cells…                 ", total)
 				} else if done > 0 {
 					per := time.Since(start) / time.Duration(done)
-					fmt.Printf("\rbaking cells %d/%d · ~%s left      ", done, total, (per * time.Duration(total-done)).Round(time.Second))
+					fmt.Printf("\rbaking %s (%d/%d) · ~%s left      ", cell, done, total, (per * time.Duration(total-done)).Round(time.Second))
 				} else {
-					fmt.Printf("\rbaking cells %d/%d…      ", done, total)
+					fmt.Printf("\rbaking %s (%d/%d)…      ", cell, done, total)
 				}
 			},
 			nil, // CLI shows no separate compose bar; the per-cell line above suffices

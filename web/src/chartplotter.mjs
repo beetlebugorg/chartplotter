@@ -1875,9 +1875,11 @@ export class ChartPlotter extends HTMLElement {
     const title = p.label || p.pill || "";
     const action = p.error ? String(p.error) : (p.sub || "");
     const count = p.error ? "" : (p.detail || "");
+    const eta = p.error ? "" : (p.eta || "");
     r.getElementById("db-prog-title").textContent = title;
     r.getElementById("db-prog-action").textContent = action;
     r.getElementById("db-prog-count").textContent = count;
+    r.getElementById("db-prog-eta").textContent = eta;
     const fill = r.getElementById("db-prog-fill");
     fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
     fill.classList.toggle("indet", p.frac == null && !done); // slow sweep when no fraction

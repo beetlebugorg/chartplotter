@@ -598,18 +598,21 @@ func (s *Server) setCells(set string) ([]string, bool) {
 // bar fill (0..1, or null for an indeterminate/opaque-step bar). The raw fields ride along for the
 // client's own use (pack context, region title), but it must not re-derive the status from them.
 func (j importJob) statusJSON() string {
-	action, detail, frac := j.statusDisplay()
+	action, detail, eta, frac := j.statusDisplay()
 	return fmt.Sprintf(
-		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"band":%q,"pack":%q,"packNum":%d,"packTotal":%d,"note":%q,"done":%d,"total":%d,"unit":%q,"eta":%d,"cells":%d,"action":%q,"detail":%q,"frac":%s,"error":%q}`,
-		j.ID, j.Set, j.State, j.Phase, j.Band, j.Pack, j.PackNum, j.PackTotal, j.Note, j.Done, j.Total, j.Unit, j.ETA, j.Cells, action, detail, fracJSON(frac), j.Err)
+		`{"ok":true,"id":%q,"set":%q,"state":%q,"phase":%q,"band":%q,"pack":%q,"packNum":%d,"packTotal":%d,"note":%q,"done":%d,"total":%d,"unit":%q,"cells":%d,"action":%q,"detail":%q,"eta":%q,"frac":%s,"error":%q}`,
+		j.ID, j.Set, j.State, j.Phase, j.Band, j.Pack, j.PackNum, j.PackTotal, j.Note, j.Done, j.Total, j.Unit, j.Cells, action, detail, eta, fracJSON(frac), j.Err)
 }
 
-// statusDisplay composes the display-ready progress strings the client renders verbatim:
+// statusDisplay composes the display-ready progress strings the client renders verbatim. `detail`
+// (the count) and `eta` are kept SEPARATE so the client can pin each in its own fixed, right-
+// aligned slot — glued together they change width and the whole line jitters as the numbers move:
 //
-//	action — the live step ("Baking charts", "Composing tiles", "Downloading charts")
-//	detail — the count beside it ("1,234 / 4,567 charts · ~2m left", "zoom 12 / 16 · ~1m left")
+//	action — the live step ("Baking US5MD1MD", "Composing tiles", "Downloading charts")
+//	detail — the count beside it ("1,234 / 4,567 charts", "zoom 12 / 16")
+//	eta    — the time remaining ("~2m 30s left"), or "" when unknown
 //	frac   — bar fill 0..1, or a negative value for an indeterminate (opaque-step) bar.
-func (j importJob) statusDisplay() (action, detail string, frac float64) {
+func (j importJob) statusDisplay() (action, detail, eta string, frac float64) {
 	action = j.actionText()
 
 	switch {
@@ -628,12 +631,8 @@ func (j importJob) statusDisplay() (action, detail string, frac float64) {
 		}
 		detail = commaInt(j.Done) + " / " + commaInt(j.Total) + " " + unit
 	}
-	if eta := fmtEtaSecs(j.ETA); eta != "" {
-		if detail != "" {
-			detail += " · " + eta + " left"
-		} else {
-			detail = eta + " left"
-		}
+	if e := fmtEtaSecs(j.ETA); e != "" {
+		eta = e + " left"
 	}
 
 	// A known total → a determinate bar (the compose weights or the chart count both work). An
