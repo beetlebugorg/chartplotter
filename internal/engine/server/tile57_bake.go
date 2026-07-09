@@ -13,46 +13,6 @@ import (
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
-// bakeProgress returns a per-band progress callback for a provider bake. BakeBundle
-// fires stage-0 (portraying a band's cells) then stage-1 (writing that band's tiles)
-// events per navigational-purpose band. A calm per-band bar: it fills 0→100% per band
-// and resets at each band — clamped monotonic WITHIN a band (the engine double-counts a
-// band's tiles across its parallel-gen + serial-write phases, which would otherwise
-// rewind). The multi-district DOWNLOAD phase sets pack "N of M" on the job separately.
-func (s *Server) bakeProgress(jobID string) func(tile57.BakeProgress) {
-	curBand, bandDoneMax := -1, 0
-	return func(p tile57.BakeProgress) {
-		s.imports.update(jobID, func(j *importJob) {
-			j.Phase, j.Band = "bake", p.BandName
-			if p.Stage == 0 { // portraying this band's cells
-				j.Unit, j.Note, j.Done, j.Total = "cells", "Preparing charts", p.Done, p.Total
-				return
-			}
-			if p.BandIndex != curBand { // new band → reset the within-band floor
-				curBand, bandDoneMax = p.BandIndex, 0
-			}
-			if p.Done > bandDoneMax {
-				bandDoneMax = p.Done
-			}
-			j.Unit, j.Note, j.Done, j.Total = "tiles", "Generating tiles", bandDoneMax, p.Total
-		})
-	}
-}
-
-// registerBakedSet registers a freshly-baked PROVIDER's chart.pmtiles as the live tile
-// set and writes its tail — bake stamps, cell manifest, companion aux.zip, metadata
-// sidecar — so a tile57 provider is as complete in the chart library as any pack.
-// Returns false (recording a job error) if the bundle can't be opened. `set` is the
-// provider name (one archive per provider).
-func (s *Server) registerBakedSet(jobID, set string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, created string) bool {
-	chart := filepath.Join(s.setDir(set), "tiles", "chart.pmtiles")
-	src, err := tilesource.Open(chart)
-	if err != nil {
-		log.Printf("import %s (%s): open baked bundle: %v", jobID, set, err)
-		return false
-	}
-	return s.registerProviderSet(jobID, set, src, chart, cells, aux, cat, created)
-}
 
 // registerProviderSet registers `src` as provider `set`'s live tile set and writes its tail (bake
 // stamps, cell manifest, companion aux, metadata sidecar) so the provider is as complete in the
@@ -139,37 +99,17 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 	})
 	created := time.Now().UTC().Format(time.RFC3339)
 
-	// The per-cell COMPOSITE model (default): bake each cell to its own native-scale PMTiles,
-	// then combine them via the engine's ownership partition into tiles/chart.pmtiles. This
-	// replaces the in-bake cross-cell combiner (BakeBundle) — kept behind TILE57_LEGACY_BAKE=1
-	// as an escape hatch while the composite model beds in. The served bundle only needs
-	// tiles/chart.pmtiles: the MapLibre style is built dynamically (tile57.Style) and the
-	// sprite/glyphs/colortables are global server assets, so the composite path skips the
-	// bundle's (unused) assets/style/manifest emission.
-	var n int
-	var liveSrc tilesource.TileSource // non-nil → register the live compositor directly; nil → batch chart.pmtiles
-	var err error
-	switch {
-	case os.Getenv("TILE57_LEGACY_BAKE") != "":
-		// MaxZoom 24 = the ABI's "no clamp" (each cell's full native band).
-		var bbox [4]float64
-		n, bbox, err = tile57.BakeBundle(encRoot, outDir, tile57.BakeOpts{Created: created, MaxZoom: 24}, s.bakeProgress(jobID))
-		if err == nil && (n == 0 || bbox[2] <= bbox[0] || bbox[3] <= bbox[1]) {
-			os.RemoveAll(outDir)
-			return fail(fmt.Errorf("import produced no coverage (%d cell(s), no valid S-57 data)", n))
-		}
-	case os.Getenv("TILE57_BATCH_COMPOSE") != "":
-		// Escape hatch: produce a portable district chart.pmtiles (the per-cell composite batch).
-		n, err = s.composeProvider(jobID, encRoot, outDir)
-	default:
-		// DEFAULT: live runtime compositor — the per-cell bakes are KEPT and tiles compose on
-		// demand. No district compose pass, and adding a district re-bakes only its new cells.
-		n, liveSrc, err = s.prepareLiveProvider(jobID, encRoot, provider)
-	}
+	// Live runtime compositor — the ONLY tile-production path. Bake each cell to its own
+	// native-scale PMTiles (KEPT under <setDir>/tiles), build + save the ownership-partition
+	// sidecar, and register a Composer that composes tiles on demand. Adding a district re-bakes
+	// only its new cells. There is no district compose pass and no chart.pmtiles bundle; the
+	// MapLibre style + sprite/glyph/colortable assets are served at runtime (tile57.Style + the
+	// asset endpoints), not emitted per provider.
+	n, liveSrc, err := s.prepareLiveProvider(jobID, encRoot, provider)
 	if err != nil {
 		return fail(err)
 	}
-	// Zero cells means nothing valid parsed → a failed import (don't register an empty pack).
+	// Zero cells means nothing valid parsed → a failed import (don't register an empty set).
 	if n == 0 {
 		os.RemoveAll(outDir)
 		return fail(fmt.Errorf("import produced no coverage (no valid S-57 data)"))
@@ -181,75 +121,12 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 	cells := s.providerCellData(provider)
 	aux := s.providerAux(provider)
 	cat := s.providerCatalog(provider)
-	registered := false
-	if liveSrc != nil {
-		registered = s.registerProviderSet(jobID, provider, liveSrc, "", cells, aux, cat, created)
-	} else {
-		registered = s.registerBakedSet(jobID, provider, cells, aux, cat, created)
-	}
-	if !registered {
+	if !s.registerProviderSet(jobID, provider, liveSrc, "", cells, aux, cat, created) {
 		return fail(fmt.Errorf("could not register set for %q", provider))
 	}
 	s.imports.update(jobID, func(j *importJob) { j.Cells = n })
 	log.Printf("import %s: baked provider %q (%d cell(s)) → %s", jobID, provider, n, outDir)
 	return true
-}
-
-// composeProvider bakes each cell under encRoot to its own native-scale PMTiles (coverage
-// embedded in the metadata) and streams them through the engine's ownership partition into
-// <outDir>/tiles/chart.pmtiles. Per-cell archives go to a temp dir (mmap'd by the compositor,
-// then discarded), so the whole cell set is never resident. Returns the count of cells that
-// contributed to the composite, or 0 if none produced coverage.
-func (s *Server) composeProvider(jobID, encRoot, outDir string) (int, error) {
-	tilesPath := filepath.Join(outDir, "tiles", "chart.pmtiles")
-	start := time.Now()
-	var composeStart time.Time // set when the per-cell bakes finish and the compose begins
-	return baker.ComposeENCRoot(encRoot, tilesPath,
-		func(done, total int, cell string) {
-			s.imports.update(jobID, func(j *importJob) {
-				j.Phase, j.Band, j.Zoom = "bake", "", 0
-				if done >= total {
-					// Per-cell bakes done → the ownership-partition compose runs. Until its first
-					// zoom-progress arrives, sweep (total 0) under "Composing tiles".
-					composeStart = time.Now()
-					j.Unit, j.Note, j.Done, j.Total, j.ETA = "", "Composing tiles", 0, 0, 0
-					return
-				}
-				// Per-cell portrayal: name the chart being baked, plus a determinate bar and an ETA
-				// from the mean per-cell rate so far.
-				note := "Baking charts"
-				if cell != "" {
-					note = "Baking " + cell
-				}
-				eta := 0
-				if done > 0 {
-					per := time.Since(start) / time.Duration(done)
-					eta = int((per * time.Duration(total-done)).Round(time.Second).Seconds())
-				}
-				j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", note, done, total, eta
-			})
-		},
-		func(p tile57.ComposeProgress) {
-			// Live compose progress: the engine weights zooms by tile count, so p.Done/p.Total is
-			// a smooth fraction. ETA extrapolates from elapsed compose time and that fraction.
-			if composeStart.IsZero() {
-				composeStart = time.Now()
-			}
-			eta := 0
-			if p.Total > 0 && p.Done > 0 && p.Done < p.Total {
-				frac := float64(p.Done) / float64(p.Total)
-				remain := time.Duration(float64(time.Since(composeStart)) * (1 - frac) / frac)
-				eta = int(remain.Round(time.Second).Seconds())
-			}
-			s.imports.update(jobID, func(j *importJob) {
-				j.Phase, j.Band, j.Unit, j.Note = "bake", "", "", "Composing tiles"
-				j.Done, j.Total, j.ETA = int(p.Done), int(p.Total), eta
-				j.Zoom, j.ZoomMin, j.ZoomMax = p.Zoom, p.MinZoom, p.MaxZoom
-			})
-		},
-		func(cell string, err error) {
-			log.Printf("import %s: bake cell %s: %v (skipping)", jobID, cell, err)
-		})
 }
 
 // dropProviderSet unregisters a provider whose ENC_ROOT is now empty and removes its
