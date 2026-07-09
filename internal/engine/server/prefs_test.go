@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-// TestScanPacksSkipsLiveProvider: a live runtime-compositor provider keeps its per-cell
-// PMTiles under <provider>/tiles next to a partition.tpart sidecar. scanPacks must skip that
-// whole dir — those archives are compositor INPUTS — so no cell surfaces as a phantom provider,
-// while a legacy batch bundle's tiles/chart.pmtiles (no sidecar) still registers by provider name.
-func TestScanPacksSkipsLiveProvider(t *testing.T) {
+// TestScanPacksStandaloneArchivesOnly: scanPacks discovers only STANDALONE archives dropped
+// into the flat <cache>/tiles dir (keyed by basename). A live runtime-compositor provider owns
+// <provider>/tiles/*.pmtiles + partition.tpart — compositor INPUTS discovered
+// provider-centrically by registerLiveProviders — and must NEVER be scavenged here (no phantom
+// per-cell sets), even when its partition sidecar isn't saved yet.
+func TestScanPacksStandaloneArchivesOnly(t *testing.T) {
 	cache := t.TempDir()
 	write := func(rel, body string) {
 		t.Helper()
@@ -23,25 +24,29 @@ func TestScanPacksSkipsLiveProvider(t *testing.T) {
 		}
 	}
 
-	// A live provider: per-cell archives under tiles/ + the partition sidecar alongside.
-	write("NOAA/tiles/US5MD1MC.pmtiles", "pm")
-	write("NOAA/tiles/US4MD81M.pmtiles", "pm")
-	write("NOAA/partition.tpart", "part")
+	// Standalone archives in the flat <cache>/tiles dir → registered by basename.
+	write("tiles/charts.pmtiles", "pm")
+	write("tiles/overlay.mbtiles", "mb")
 
-	// A legacy batch bundle: tiles/chart.pmtiles, no sidecar.
-	write("LEGACY/tiles/chart.pmtiles", "pm")
+	// A live provider's per-cell inputs under <provider>/tiles — WITH a partition sidecar...
+	write("NOAA/tiles/US5MD1MC.pmtiles", "pm")
+	write("NOAA/partition.tpart", "part")
+	// ...and one mid-import (archives present, partition not saved yet).
+	write("IENC/tiles/US4MD81M.pmtiles", "pm")
 
 	got := scanPacks(cache)
 
-	if _, ok := got["legacy"]; !ok {
-		t.Errorf("legacy batch bundle not registered: %v", got)
-	}
-	for _, phantom := range []string{"noaa", "us5md1mc", "us4md81m", "chart", "partition"} {
-		if p, ok := got[phantom]; ok {
-			t.Errorf("live-provider input mis-registered as pack %q -> %q", phantom, p)
+	for _, want := range []string{"charts", "overlay"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("standalone archive %q not discovered: %v", want, got)
 		}
 	}
-	if len(got) != 1 {
-		t.Errorf("scanPacks = %v, want only {legacy}", got)
+	for _, phantom := range []string{"noaa", "ienc", "us5md1mc", "us4md81m", "US5MD1MC", "US4MD81M", "partition"} {
+		if p, ok := got[phantom]; ok {
+			t.Errorf("live-provider input mis-registered as set %q -> %q", phantom, p)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("scanPacks = %v, want {charts, overlay}", got)
 	}
 }

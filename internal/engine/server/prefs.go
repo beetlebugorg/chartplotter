@@ -95,47 +95,35 @@ func (p *prefs) setDisabled(set string, off bool) {
 	}
 }
 
-// scanPacks walks the cache and returns every baked provider bundle keyed by set name
-// (= provider) → path. The tile57 bundle writes <cache>/<PROVIDER>/tiles/chart.pmtiles
-// (one archive per provider, provider-enc-root), so the set name is the provider dir —
-// otherwise every bundle collapses to "chart" and the chart library can't list them
-// after a restart.
+// scanPacks discovers STANDALONE tile archives — prebaked .pmtiles/.mbtiles hand-dropped
+// into the flat <cache>/tiles dir — keyed set name (the file basename) → path. This is the
+// narrow overlay path for hand-placed archives.
+//
+// It scans ONLY the flat tiles dir, never the whole cache: a live runtime-compositor
+// provider owns <cache>/<PROVIDER>/tiles/*.pmtiles + partition.tpart, and those per-cell
+// archives are compositor INPUTS discovered provider-centrically by registerLiveProviders —
+// never scavenged here (else every cell would surface as its own phantom set, and an
+// interrupted import that hasn't saved its partition yet would leak cells as packs).
 func scanPacks(cacheDir string) map[string]string {
 	out := map[string]string{}
-	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	dir := tilesDir(cacheDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
 		}
-		if d.IsDir() {
-			// A live runtime-compositor provider keeps its per-cell PMTiles under
-			// <provider>/tiles next to a partition.tpart sidecar. Those archives are INPUTS,
-			// not packs — skip the whole dir, else every cell would surface as its own
-			// provider (and the client would probe /tiles/<cell>.json). Detect the live
-			// provider by the sidecar, so a legacy batch bundle's tiles/chart.pmtiles still
-			// registers below.
-			if d.Name() == "tiles" {
-				if _, err := os.Stat(filepath.Join(filepath.Dir(path), "partition.tpart")); err == nil {
-					return filepath.SkipDir
-				}
-			}
-			return nil
+		name := e.Name()
+		if !strings.HasSuffix(name, ".pmtiles") && !strings.HasSuffix(name, ".mbtiles") {
+			continue
 		}
-		if !strings.HasSuffix(path, ".pmtiles") && !strings.HasSuffix(path, ".mbtiles") {
-			return nil
+		set := strings.TrimSuffix(name, filepath.Ext(name))
+		if isSetName(set) {
+			out[set] = filepath.Join(dir, name)
 		}
-		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		// tile57 bundle: <cache>/<PROVIDER>/tiles/chart.pmtiles → the provider name.
-		if name == "chart" && filepath.Base(filepath.Dir(path)) == "tiles" {
-			provider := filepath.Base(filepath.Dir(filepath.Dir(path)))
-			if provider != "" && provider != "." {
-				name = strings.ToLower(provider)
-			}
-		}
-		if isSetName(name) {
-			out[name] = path
-		}
-		return nil
-	})
+	}
 	return out
 }
 
