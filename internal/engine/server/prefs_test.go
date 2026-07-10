@@ -100,6 +100,23 @@ func TestLiveGenTokenContentAddressed(t *testing.T) {
 		t.Errorf("token not restored after removing the cell: %d vs %d", got, base)
 	}
 
+	// The engine composes live tiles at serve time, so its commit is part of the
+	// content address: a rebuilt engine must move the token even over identical
+	// archives (serve-path fixes bust client caches), deterministically.
+	s.EngineCommit = "abc123"
+	withEngine := s.liveGenToken("noaa")
+	if withEngine == base {
+		t.Errorf("token unchanged after engine commit set")
+	}
+	if got := s.liveGenToken("noaa"); got != withEngine {
+		t.Errorf("engine-stamped token not stable: %d vs %d", got, withEngine)
+	}
+	s.EngineCommit = "def456"
+	if got := s.liveGenToken("noaa"); got == withEngine {
+		t.Errorf("token unchanged after engine commit changed")
+	}
+	s.EngineCommit = ""
+
 	if got := (&Server{cacheDir: t.TempDir()}).liveGenToken("noaa"); got != 0 { // empty set → 0
 		t.Errorf("empty token = %d, want 0", got)
 	}

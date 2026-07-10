@@ -40,15 +40,21 @@ func (s *Server) liveGenPath(provider string) string {
 }
 
 // liveGenToken is the provider's CONTENT cache-bust token: a sha-of-shas over its per-cell
-// archives (each archive's content sha, from the .sha sidecar written at bake). The lines are
-// sorted so the token is order-independent, and the low 63 bits become the positive ?g int. It
-// changes exactly when the set of cells or any cell's content changes.
+// archives (each archive's content sha, from the .sha sidecar written at bake) plus the engine
+// commit serving them. The lines are sorted so the token is order-independent, and the low 63
+// bits become the positive ?g int. It changes exactly when the set of cells, any cell's
+// content, or the engine build changes — the engine composes live tiles at SERVE time, so its
+// identity is part of a tile's content address: a serve-path fix must bust client caches even
+// when the baked archives are byte-identical.
 func (s *Server) liveGenToken(provider string) int64 {
 	paths := s.liveCellArchives(provider)
 	if len(paths) == 0 {
 		return 0
 	}
-	lines := make([]string, 0, len(paths))
+	lines := make([]string, 0, len(paths)+1)
+	if s.EngineCommit != "" {
+		lines = append(lines, "engine:"+s.EngineCommit)
+	}
 	for _, p := range paths {
 		stem := strings.TrimSuffix(filepath.Base(p), ".pmtiles")
 		sha, err := os.ReadFile(p + ".sha")
@@ -243,6 +249,9 @@ func (s *Server) registerLiveProviders() {
 			continue
 		}
 		s.sets.register(prov, c)
+		// Re-persist the token: the archives are unchanged, but the serving
+		// engine may not be the one that wrote live.gen, and the token embeds it.
+		s.bumpLiveGen(prov)
 		m := c.Meta()
 		log.Printf("live: registered %q from kept per-cell archives (z%d..%d)", prov, m.MinZoom, m.MaxZoom)
 	}
