@@ -186,23 +186,31 @@ func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tile
 	return len(paths), c, nil
 }
 
+// liveEngineCurrent reports whether the kept per-cell archives in cellsDir were baked by the
+// RUNNING engine (the .enginever stamp matches the linked tile57 commit). An unstamped dir
+// counts as stale — the next prepareLiveProvider re-bakes and stamps it. With no engine
+// commit linked in, everything counts as current (nothing to compare against).
+func (s *Server) liveEngineCurrent(cellsDir string) bool {
+	if s.EngineCommit == "" {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(cellsDir, ".enginever"))
+	return err == nil && string(b) == s.EngineCommit
+}
+
 // invalidateLiveOnEngineChange drops the kept per-cell archives when the tile57 engine commit
 // changed since they were baked (a new engine portrays different tiles), so a binary upgrade
 // re-bakes them. The partition sidecar is coverage-derived (engine-independent) and self-validates
 // via its input key, so it is left in place. First bake just records the stamp.
 func (s *Server) invalidateLiveOnEngineChange(cellsDir string) {
-	if s.EngineCommit == "" {
-		return
-	}
-	stamp := filepath.Join(cellsDir, ".enginever")
-	if b, err := os.ReadFile(stamp); err == nil && string(b) == s.EngineCommit {
+	if s.liveEngineCurrent(cellsDir) {
 		return
 	}
 	if _, err := os.Stat(cellsDir); err == nil {
 		_ = os.RemoveAll(cellsDir)
 	}
 	_ = os.MkdirAll(cellsDir, 0o755)
-	_ = os.WriteFile(stamp, []byte(s.EngineCommit), 0o644)
+	_ = os.WriteFile(filepath.Join(cellsDir, ".enginever"), []byte(s.EngineCommit), 0o644)
 }
 
 // registerLiveProviders re-registers, at boot, a runtime compositor for every installed provider
@@ -218,6 +226,13 @@ func (s *Server) registerLiveProviders() {
 		// left partial by an interrupted bake has tiles/ but no live.gen → skip it here, and
 		// rebakeMissingProviders finishes it (incremental) instead of serving a partial map.
 		if _, err := os.Stat(s.liveGenPath(prov)); err != nil {
+			continue
+		}
+		// Archives baked by an older engine are stale (a new engine portrays different
+		// tiles) — don't re-serve them; rebakeMissingProviders re-bakes the provider,
+		// and prepareLiveProvider drops + re-stamps the dir.
+		if !s.liveEngineCurrent(s.liveCellsDir(prov)) {
+			log.Printf("live %s: kept archives are from another engine build — re-baking", prov)
 			continue
 		}
 		c, err := s.openLiveComposer(prov)
