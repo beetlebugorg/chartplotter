@@ -174,54 +174,6 @@ func (s *Server) cacheDistrict(provider, district string, cells map[string]baker
 	}
 }
 
-// providerCellData reads every base cell (+ its .001… updates) under a provider's
-// ENC_ROOT, DE-DUPLICATED by stem (a boundary cell shared by two districts is read
-// once), for the bake's metadata sidecar + cell manifest. The bake itself reads the
-// tree directly (BakeTree); this is only the in-memory view the register tail needs.
-func (s *Server) providerCellData(provider string) map[string]baker.CellData {
-	root := s.encRootDir(provider)
-	cells := map[string]baker.CellData{}      // stem+".000" → base
-	updates := map[string]map[string][]byte{} // stem → update-name → bytes
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		ext := encExtServer(d.Name())
-		if ext == "" {
-			return nil
-		}
-		stem := strings.TrimSuffix(d.Name(), filepath.Ext(d.Name()))
-		if !isCellName(stem) {
-			return nil
-		}
-		if ext == ".000" {
-			if _, seen := cells[stem+".000"]; seen {
-				return nil // dedup: first district's copy wins
-			}
-			if b, e := os.ReadFile(path); e == nil {
-				cells[stem+".000"] = baker.CellData{Base: b}
-			}
-			return nil
-		}
-		if updates[stem] == nil {
-			updates[stem] = map[string][]byte{}
-		}
-		if _, seen := updates[stem][d.Name()]; !seen {
-			if b, e := os.ReadFile(path); e == nil {
-				updates[stem][d.Name()] = b
-			}
-		}
-		return nil
-	})
-	for name, cd := range cells {
-		if u := updates[strings.TrimSuffix(name, ".000")]; len(u) > 0 {
-			cd.Updates = u
-			cells[name] = cd
-		}
-	}
-	return cells
-}
-
 // providerAux gathers the aux content files (TXTDSC/PICREP text + pictures) across a
 // provider's ENC_ROOT, de-duplicated by upper-cased basename, for the provider's one
 // companion aux.zip.

@@ -20,7 +20,7 @@ import (
 // (recorded for the pack list + stamped with the bake/engine version), or "" for a LIVE
 // runtime-compositor provider (no disk archive — its bounds come from the TileSource Meta/TileJSON,
 // and it is surfaced in /api/packs straight from the registry).
-func (s *Server) registerProviderSet(jobID, set string, src tilesource.TileSource, packPath string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry, created string) bool {
+func (s *Server) registerProviderSet(jobID, set string, src tilesource.TileSource, packPath string, aux map[string][]byte, cat []tile57.CatalogEntry, created string) bool {
 	outDir := s.setDir(set)
 	s.sets.register(set, src)
 	s.prefs.setDisabled(set, false)
@@ -40,7 +40,17 @@ func (s *Server) registerProviderSet(jobID, set string, src tilesource.TileSourc
 		// invalidating any tiles (incl. blank 204s) it cached against a previous, less-complete set.
 		s.bumpLiveGen(set)
 	}
-	if err := s.writeSetCells(set, cells); err != nil {
+	// Per-cell metadata straight from the provider's on-disk ENC tree — the whole
+	// point of the path-based read is that a catalogue-sized import never holds
+	// cell bytes in memory (the previous in-RAM staging peaked in the gigabytes).
+	cellMeta := baker.ExtractCellMetaDir(s.encRootDir(set), func(name string, e error) {
+		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
+	})
+	stems := make([]string, 0, len(cellMeta))
+	for n := range cellMeta {
+		stems = append(stems, n)
+	}
+	if err := s.writeSetCells(set, stems); err != nil {
 		log.Printf("import %s: cell manifest %q: %v", jobID, set, err)
 	}
 
@@ -57,9 +67,6 @@ func (s *Server) registerProviderSet(jobID, set string, src tilesource.TileSourc
 
 	// Per-pack metadata sidecar for the chart library (per-cell scale/edition/date/
 	// agency/coverage + catalogue titles).
-	cellMeta := baker.ExtractCellMeta(cells, func(name string, e error) {
-		log.Printf("import %s: meta skip %s: %v", jobID, name, e)
-	})
 	meta := buildSetMeta(set, cellMeta, cat)
 	meta.Imported = created
 	if err := s.writeSetMeta(set, meta); err != nil {
@@ -120,10 +127,9 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 	s.imports.update(jobID, func(j *importJob) {
 		j.Phase, j.Note, j.Zoom, j.Unit, j.Done, j.Total, j.ETA = "meta", "Reading chart metadata", 0, "", 0, 0, 0
 	})
-	cells := s.providerCellData(provider)
 	aux := s.providerAux(provider)
 	cat := s.providerCatalog(provider)
-	if !s.registerProviderSet(jobID, provider, liveSrc, "", cells, aux, cat, created) {
+	if !s.registerProviderSet(jobID, provider, liveSrc, "", aux, cat, created) {
 		return fail(fmt.Errorf("could not register set for %q", provider))
 	}
 	s.imports.update(jobID, func(j *importJob) { j.Cells = n })

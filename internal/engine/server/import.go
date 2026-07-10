@@ -574,11 +574,7 @@ func (s *Server) looseCellsDir() string {
 // (<setDir>/<set>.cells.json). /api/cells?active reads these to return exactly the
 // installed cells, instead of every cached cell whose bounds overlap the pack's
 // (often global, for a worldwide-scattered import) bounding box.
-func (s *Server) writeSetCells(set string, cells map[string]baker.CellData) error {
-	stems := make([]string, 0, len(cells))
-	for n := range cells {
-		stems = append(stems, strings.TrimSuffix(n, ".000"))
-	}
+func (s *Server) writeSetCells(set string, stems []string) error {
 	sort.Strings(stems)
 	dir := s.setDir(set)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

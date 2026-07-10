@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
 // activeCells GETs /api/cells?active=1 and returns the cell-name set.
@@ -55,7 +54,7 @@ func TestActiveCellsDropOnDelete(t *testing.T) {
 	}
 	// Register the provider set with an exact cell manifest, and add it as an enabled pack.
 	const provider = "noaa"
-	if err := s.writeSetCells(provider, map[string]baker.CellData{cell + ".000": {}}); err != nil {
+	if err := s.writeSetCells(provider, []string{cell}); err != nil {
 		t.Fatal(err)
 	}
 	manifest := filepath.Join(s.setDir(provider), provider+".cells.json")
