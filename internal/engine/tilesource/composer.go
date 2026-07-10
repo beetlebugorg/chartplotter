@@ -50,13 +50,13 @@ type OwnershipTiler interface {
 
 // Tile composes (z,x,y) on demand, returning decompressed MLT, or (nil, nil) for a blank tile.
 func (c *Composer) Tile(z uint8, x, y uint32) ([]byte, error) {
-	body, _, err := c.src.Serve(z, x, y)
+	body, _, err := c.src.Tile(z, x, y)
 	return body, err
 }
 
 // TileOwned is Tile plus the ownership flag (implements OwnershipTiler).
 func (c *Composer) TileOwned(z uint8, x, y uint32) (body []byte, owned bool, err error) {
-	return c.src.Serve(z, x, y)
+	return c.src.Tile(z, x, y)
 }
 
 // Meta returns the compositor's display metadata (zoom range + coverage bounds).

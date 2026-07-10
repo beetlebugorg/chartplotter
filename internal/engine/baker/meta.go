@@ -83,12 +83,7 @@ func ExtractCellMeta(cells map[string]CellData, onSkip func(name string, err err
 		}
 	}
 
-	src, err := tile57.Open(dir)
-	if err != nil {
-		return skipAll(err)
-	}
-	defer src.Close()
-	infos, err := src.Cells()
+	infos, err := tile57.Cells(dir)
 	if err != nil {
 		return skipAll(err)
 	}
