@@ -70,7 +70,7 @@ func (c serveCmd) Run() error {
 	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote, engineCommit)
 	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
-	srv.ReportStaleCache()          // loud warning if any served pack predates this binary
+	srv.ReportStaleCache() // loud warning if any served pack predates this binary
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""

@@ -13,7 +13,6 @@ import (
 	tile57 "github.com/beetlebugorg/tile57/bindings/go"
 )
 
-
 // registerProviderSet registers `src` as provider `set`'s live tile set and writes its tail (bake
 // stamps, cell manifest, companion aux, metadata sidecar) so the provider is as complete in the
 // chart library as any pack. `packPath` is the on-disk chart.pmtiles of a BATCH-baked provider

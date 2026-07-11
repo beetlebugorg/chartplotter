@@ -34,25 +34,25 @@ import (
 type importJob struct {
 	ID        string `json:"id"`
 	Set       string `json:"set"`
-	State     string `json:"state"`     // "running" | "done" | "error"
-	Phase     string `json:"phase"`     // "download" | "extract" | "bake"
-	Band      string `json:"band"`      // usage band being baked (e.g. "coastal"); "" outside the bake phase
-	Pack      string `json:"pack"`      // set key of the pack being processed now (multi-pack import); "" for a single set
-	PackNum   int    `json:"packNum"`   // 1-based position of the current pack in the batch (0 = n/a)
-	PackTotal int    `json:"packTotal"` // packs in the batch (0/1 = single, no "N of M" shown)
-	Note      string `json:"note"`      // human-readable current step (e.g. "downloading US5MD1MC")
-	Done      int    `json:"done"`      // phase units done (bytes/cells downloaded, then tiles emitted)
-	Total     int    `json:"total"`     // phase total (0 until known)
+	State     string `json:"state"`         // "running" | "done" | "error"
+	Phase     string `json:"phase"`         // "download" | "extract" | "bake"
+	Band      string `json:"band"`          // usage band being baked (e.g. "coastal"); "" outside the bake phase
+	Pack      string `json:"pack"`          // set key of the pack being processed now (multi-pack import); "" for a single set
+	PackNum   int    `json:"packNum"`       // 1-based position of the current pack in the batch (0 = n/a)
+	PackTotal int    `json:"packTotal"`     // packs in the batch (0/1 = single, no "N of M" shown)
+	Note      string `json:"note"`          // human-readable current step (e.g. "downloading US5MD1MC")
+	Done      int    `json:"done"`          // phase units done (bytes/cells downloaded, then tiles emitted)
+	Total     int    `json:"total"`         // phase total (0 until known)
 	ETA       int    `json:"eta,omitempty"` // seconds remaining in this phase (0 = unknown/none)
-	Unit      string `json:"unit"`      // what done/total count: "bytes" | "cells" | "tiles" | "" (opaque)
-	Cells     int    `json:"cells"`     // cells successfully parsed
+	Unit      string `json:"unit"`          // what done/total count: "bytes" | "cells" | "tiles" | "" (opaque)
+	Cells     int    `json:"cells"`         // cells successfully parsed
 	// Compose-step zoom progress: the ownership-partition compose walks the zoom ladder, so it
 	// reports "zoom N of M" instead of a chart count. Zoom == 0 means "not composing".
-	Zoom      int    `json:"-"`
-	ZoomMin   int    `json:"-"`
-	ZoomMax   int    `json:"-"`
-	Err       string `json:"error,omitempty"`
-	Started   string `json:"started"`
+	Zoom    int    `json:"-"`
+	ZoomMin int    `json:"-"`
+	ZoomMax int    `json:"-"`
+	Err     string `json:"error,omitempty"`
+	Started string `json:"started"`
 }
 
 // importJobs is the (in-memory) registry of import jobs.

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
 )
 
 // activeCells GETs /api/cells?active=1 and returns the cell-name set.
