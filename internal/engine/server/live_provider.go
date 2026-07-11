@@ -82,7 +82,12 @@ func (s *Server) bumpLiveGen(provider string) {
 // liveCellArchives lists a provider's kept per-cell PMTiles paths (sorted). The bake mirrors the
 // ENC tree, so the archives live in subdirs (<tiles>/d1/US4CT1AA.pmtiles, …) — walk, don't ReadDir.
 func (s *Server) liveCellArchives(provider string) []string {
-	root := s.liveCellsDir(provider)
+	return archivesUnder(s.liveCellsDir(provider))
+}
+
+// archivesUnder lists the per-cell PMTiles under any tree (sorted) — the kept live
+// dir or an engine re-bake's staging dir.
+func archivesUnder(root string) []string {
 	var paths []string
 	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -157,14 +162,38 @@ func (s *Server) progressiveReKey(provider string) {
 	s.bumpLiveGen(provider)
 }
 
-// prepareLiveProvider bakes the provider's cells to its kept live-cells dir (incremental) and opens
-// a runtime compositor over them — the live counterpart of composeProvider, with NO district
-// compose pass (tiles compose on demand). Returns the contributing cell count + the Composer.
+// stagingSuffix names the engine re-bake staging tree beside the kept live dir
+// (<setDir>/tiles.next): a full re-bake lands there while the previous archives
+// keep serving, and the swap into place is the LAST step.
+const stagingSuffix = ".next"
+
+// prepareLiveProvider bakes the provider's cells to its kept live-cells dir and opens a runtime
+// compositor over them — the live counterpart of composeProvider, with NO district compose pass
+// (tiles compose on demand). Same-engine bakes are incremental IN PLACE (adding a district bakes
+// only its new cells). An ENGINE change re-bakes everything into a staging tree (tiles.next)
+// while the previous archives keep serving, and replaces the served tree only as the LAST step —
+// a failed or interrupted re-bake leaves the old tiles in place (and the staging tree resumes
+// incrementally on the next run under the same build). Returns the contributing cell count +
+// the Composer.
 func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tilesource.TileSource, error) {
 	cellsDir := s.liveCellsDir(provider)
-	s.invalidateLiveOnEngineChange(cellsDir)
+	bakeDir := cellsDir
+	staged := !s.liveEngineCurrent(cellsDir)
+	if staged {
+		bakeDir = cellsDir + stagingSuffix
+		// A staging tree left by a DIFFERENT engine build is itself stale — start over.
+		if !s.liveEngineCurrent(bakeDir) {
+			_ = os.RemoveAll(bakeDir)
+		}
+	}
+	if err := os.MkdirAll(bakeDir, 0o755); err != nil {
+		return 0, nil, err
+	}
+	// Stamp the tree with the baking engine up front: an interrupted run resumes
+	// incrementally under the same build and restarts under a different one.
+	_ = os.WriteFile(filepath.Join(bakeDir, ".enginever"), []byte(s.EngineCommit), 0o644)
 	start := time.Now()
-	if _, err := baker.PrepareLive(encRoot, cellsDir, liveBakeWorkers(), func(done, total int) {
+	if _, err := baker.PrepareLive(encRoot, bakeDir, liveBakeWorkers(), func(done, total int) {
 		s.imports.update(jobID, func(j *importJob) {
 			j.Phase, j.Band, j.Zoom = "bake", "", 0
 			eta := 0
@@ -175,11 +204,26 @@ func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tile
 			j.Unit, j.Note, j.Done, j.Total, j.ETA = "cells", "Baking charts", done, total, eta
 		})
 	}); err != nil {
-		return 0, nil, err
+		return 0, nil, err // old tiles untouched; a staging tree stays for resume
+	}
+	if staged {
+		// Everything baked — swap the staged tree into place. This is the ONLY point
+		// the previous archives are dropped.
+		if len(archivesUnder(bakeDir)) == 0 {
+			_ = os.RemoveAll(bakeDir) // staged bake produced nothing — keep serving the old tiles
+			return 0, nil, nil
+		}
+		if err := os.RemoveAll(cellsDir); err != nil {
+			return 0, nil, err
+		}
+		if err := os.Rename(bakeDir, cellsDir); err != nil {
+			return 0, nil, err
+		}
 	}
 	// The mirrored tree holds every kept per-cell archive (baked + reused).
 	paths := s.liveCellArchives(provider)
 	if len(paths) == 0 {
+		_ = os.RemoveAll(cellsDir) // nothing valid parsed — clean the empty tree
 		return 0, nil, nil
 	}
 	c, err := s.openLiveComposer(provider)
@@ -192,10 +236,10 @@ func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tile
 	return len(paths), c, nil
 }
 
-// liveEngineCurrent reports whether the kept per-cell archives in cellsDir were baked by the
-// RUNNING engine (the .enginever stamp matches the linked tile57 commit). An unstamped dir
-// counts as stale — the next prepareLiveProvider re-bakes and stamps it. With no engine
-// commit linked in, everything counts as current (nothing to compare against).
+// liveEngineCurrent reports whether the per-cell archives in a tree were baked by the
+// RUNNING engine (the .enginever stamp matches the linked tile57 commit). An unstamped
+// tree counts as stale — prepareLiveProvider re-bakes it to staging and swaps. With no
+// engine commit linked in, everything counts as current (nothing to compare against).
 func (s *Server) liveEngineCurrent(cellsDir string) bool {
 	if s.EngineCommit == "" {
 		return true
@@ -204,27 +248,25 @@ func (s *Server) liveEngineCurrent(cellsDir string) bool {
 	return err == nil && string(b) == s.EngineCommit
 }
 
-// invalidateLiveOnEngineChange drops the kept per-cell archives when the tile57 engine commit
-// changed since they were baked (a new engine portrays different tiles), so a binary upgrade
-// re-bakes them. The partition sidecar is coverage-derived (engine-independent) and self-validates
-// via its input key, so it is left in place. First bake just records the stamp.
-func (s *Server) invalidateLiveOnEngineChange(cellsDir string) {
-	if s.liveEngineCurrent(cellsDir) {
-		return
-	}
-	if _, err := os.Stat(cellsDir); err == nil {
-		_ = os.RemoveAll(cellsDir)
-	}
-	_ = os.MkdirAll(cellsDir, 0o755)
-	_ = os.WriteFile(filepath.Join(cellsDir, ".enginever"), []byte(s.EngineCommit), 0o644)
-}
-
 // registerLiveProviders re-registers, at boot, a runtime compositor for every installed provider
 // that has kept per-cell archives (a live provider from a previous run) and isn't disabled — so
 // live layers survive a restart without re-baking. A batch pack registered for the same provider is
 // replaced (live wins). Runs before rebakeMissingProviders, which then skips the ones registered here.
 func (s *Server) registerLiveProviders() {
 	for _, prov := range s.installedProviders() {
+		// Finish an interrupted engine re-bake swap: a crash between dropping the old
+		// tree and renaming the staged one leaves tiles/ missing with tiles.next
+		// present (the staged tree was complete — the swap only runs after a full
+		// bake). Move it into place; dropping live.gen routes the set through the
+		// self-heal bake (a fast incremental no-op) before it re-registers.
+		cellsDir := s.liveCellsDir(prov)
+		if _, err := os.Stat(cellsDir); os.IsNotExist(err) {
+			if _, e := os.Stat(cellsDir + stagingSuffix); e == nil {
+				log.Printf("live %s: recovering an interrupted engine re-bake swap", prov)
+				_ = os.Rename(cellsDir+stagingSuffix, cellsDir)
+				_ = os.Remove(s.liveGenPath(prov))
+			}
+		}
 		if s.prefs.isDisabled(prov) || len(s.liveCellArchives(prov)) == 0 {
 			continue
 		}
@@ -234,12 +276,11 @@ func (s *Server) registerLiveProviders() {
 		if _, err := os.Stat(s.liveGenPath(prov)); err != nil {
 			continue
 		}
-		// Archives baked by an older engine are stale (a new engine portrays different
-		// tiles) — don't re-serve them; rebakeMissingProviders re-bakes the provider,
-		// and prepareLiveProvider drops + re-stamps the dir.
+		// Archives baked by an older engine are stale (a new engine portrays
+		// different tiles) — but stale tiles beat NO tiles: keep serving them while
+		// rebakeMissingProviders re-bakes to staging and swaps when done.
 		if !s.liveEngineCurrent(s.liveCellsDir(prov)) {
-			log.Printf("live %s: kept archives are from another engine build — re-baking", prov)
-			continue
+			log.Printf("live %s: kept archives are from another engine build — serving them while the re-bake runs", prov)
 		}
 		c, err := s.openLiveComposer(prov)
 		if err != nil || c == nil {

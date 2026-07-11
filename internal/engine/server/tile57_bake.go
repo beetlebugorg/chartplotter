@@ -117,10 +117,10 @@ func (s *Server) bakeProvider(jobID, provider string) bool {
 		return fail(err)
 	}
 	// Zero cells means nothing valid parsed → a failed import (don't register an empty set).
-	// Clean only the (empty) baked tiles dir, NOT the whole set dir — in single-dir mode the set
-	// dir also holds the source ENC_ROOT, which must survive a failed bake.
+	// prepareLiveProvider already cleaned whichever tree it baked (a fresh dir, or a staged
+	// engine re-bake that never replaced the served tiles); the set dir itself survives — in
+	// single-dir mode it also holds the source ENC_ROOT.
 	if n == 0 {
-		os.RemoveAll(s.liveCellsDir(provider))
 		return fail(fmt.Errorf("import produced no coverage (no valid S-57 data)"))
 	}
 

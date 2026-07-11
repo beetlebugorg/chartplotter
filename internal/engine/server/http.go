@@ -112,7 +112,13 @@ func (s *Server) rebakeMissingProviders() {
 	var missing []string
 	for _, prov := range s.installedProviders() {
 		if _, live := s.sets.get(prov); live {
-			continue // already serving (a live compositor from kept archives, or a registered pack)
+			// Serving, but from another engine build's archives: re-bake to a staging
+			// tree and swap when done (prepareLiveProvider) — the old tiles keep
+			// serving meanwhile, and registerProviderSet replaces the composer.
+			if !s.liveEngineCurrent(s.liveCellsDir(prov)) {
+				missing = append(missing, prov)
+			}
+			continue
 		}
 		if _, ok := s.packPath(prov); !ok {
 			missing = append(missing, prov)
