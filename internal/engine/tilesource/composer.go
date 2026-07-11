@@ -15,7 +15,7 @@ type Composer struct {
 }
 
 // NewComposer opens a runtime compositor over the per-cell PMTiles at paths (each from
-// `tile57 compose --keep-cells` / tile57.BakeCell). partitionPath (or "") names a partition
+// `tile57 compose --keep-cells` / tile57.BakeChart). partitionPath (or "") names a partition
 // sidecar (`tile57 compose --save-partition`) to load and skip the owned-face build. Close it
 // when done — callers must not Close while any request can still call Tile.
 func NewComposer(paths []string, partitionPath string) (*Composer, error) {

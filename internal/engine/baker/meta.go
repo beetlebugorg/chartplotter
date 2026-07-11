@@ -48,7 +48,7 @@ type CellMeta struct {
 // flat. Duplicate stems (a boundary cell shared by two district subfolders)
 // collapse to one entry, matching the first-copy-wins district dedup.
 func ExtractCellMetaDir(root string, onSkip func(name string, err error)) map[string]CellMeta {
-	infos, err := tile57.Cells(root)
+	infos, err := tile57.Charts(root)
 	if err != nil {
 		if onSkip != nil {
 			onSkip(root, err)
@@ -115,7 +115,7 @@ func ExtractCellMeta(cells map[string]CellData, onSkip func(name string, err err
 		}
 	}
 
-	infos, err := tile57.Cells(dir)
+	infos, err := tile57.Charts(dir)
 	if err != nil {
 		return skipAll(err)
 	}
