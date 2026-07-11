@@ -25,7 +25,7 @@ func TestImportPacks(t *testing.T) {
 		t.Skipf("testdata cell absent: %v", err)
 	}
 	cacheDir, dataDir := t.TempDir(), t.TempDir()
-	s := New(t.TempDir(), cacheDir, dataDir, false)
+	s := New(t.TempDir(), cacheDir, dataDir, false, "")
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 

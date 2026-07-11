@@ -68,7 +68,7 @@ func TestServeAux(t *testing.T) {
 	writeLegacyAuxZip(t, filepath.Join(cache, "NOAA", "D17-OVERVIEW"), "noaa-d17-overview", map[string][]byte{
 		"NOTE17.TXT": []byte("Caution: ice"),
 	})
-	s := New("", cache, cache, true)
+	s := New("", cache, cache, true, "")
 
 	// Manifest lists every referenced filename → {stored,type}, across both layouts.
 	rec := httptest.NewRecorder()
@@ -117,7 +117,7 @@ func TestServeAux(t *testing.T) {
 
 func TestAuxIndexInvalidate(t *testing.T) {
 	cache := t.TempDir()
-	s := New("", cache, cache, true)
+	s := New("", cache, cache, true, "")
 	if got := s.auxIdx.manifest(cache); len(got) != 0 {
 		t.Fatalf("empty cache manifest = %v", got)
 	}

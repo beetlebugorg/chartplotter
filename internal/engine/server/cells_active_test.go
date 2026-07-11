@@ -40,7 +40,7 @@ func activeCells(t *testing.T, base string) map[string]bool {
 // delete also reclaims the provider's source ENC_ROOT.
 func TestActiveCellsDropOnDelete(t *testing.T) {
 	dir := t.TempDir()
-	s := New(dir, dir, dir, false)
+	s := New(dir, dir, dir, false, "")
 
 	const cell = "US5MD11M"
 	// The cell's source .000 must exist in the provider ENC_ROOT (serveCells lists

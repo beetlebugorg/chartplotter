@@ -63,13 +63,18 @@ type Server struct {
 // that must survive a cache wipe — pass "" to default it to cacheDir (single-dir
 // mode). allowRemote is true when the bind host is not loopback (the operator
 // opted into network exposure), which skips the per-request Host-header check.
-func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
+func New(assetsDir, cacheDir, dataDir string, allowRemote bool, engineCommit string) *Server {
 	if dataDir == "" {
 		dataDir = cacheDir
 	}
 	migrateLegacyENCRoot(dataDir)             // one-time: retired flat ENC_ROOT → loose/cells (before indexing)
 	migrateProviderEncRoot(dataDir, cacheDir) // one-time: per-district-pack layout → per-provider ENC_ROOT
 	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex(), cellIdx: newCellIndex(dataDir)}
+	// The engine commit must be known BEFORE the boot registration below:
+	// registerLiveProviders/rebakeMissingProviders gate on the .enginever stamp,
+	// and an empty commit counts every kept archive as current (stale tiles
+	// would register and the self-heal re-bake would never fire).
+	s.EngineCommit = engineCommit
 	s.cellIdx.build() // backfill cell bounds in the background (kick spawns its own goroutine)
 	// Discover every baked pack on disk (provider trees + flat tiles/), then
 	// register the ENABLED ones (disabled packs stay on disk but off the map). State

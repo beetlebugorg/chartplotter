@@ -46,7 +46,7 @@ func doReq(t *testing.T, method, url, body string) (int, connResp) {
 
 func TestConnections_CRUDAndPersistence(t *testing.T) {
 	dir := t.TempDir()
-	s := New("", dir, dir, true)
+	s := New("", dir, dir, true, "")
 	defer s.Close()
 	ts := httptest.NewServer(s)
 	defer ts.Close()
@@ -88,7 +88,7 @@ func TestConnections_CRUDAndPersistence(t *testing.T) {
 
 func TestConnections_Validation(t *testing.T) {
 	dir := t.TempDir()
-	s := New("", dir, dir, true)
+	s := New("", dir, dir, true, "")
 	defer s.Close()
 	ts := httptest.NewServer(s)
 	defer ts.Close()
@@ -105,7 +105,7 @@ func TestConnections_Validation(t *testing.T) {
 
 func TestConnections_PersistAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
-	s1 := New("", dir, dir, true)
+	s1 := New("", dir, dir, true, "")
 	ts1 := httptest.NewServer(s1)
 	code, _ := doReq(t, http.MethodPost, ts1.URL+"/api/connections",
 		`{"name":"Mux","host":"h","port":2000,"enabled":false}`)
@@ -114,7 +114,7 @@ func TestConnections_PersistAcrossRestart(t *testing.T) {
 	s1.Close()
 
 	// A fresh Server over the same dataDir reloads the connection.
-	s2 := New("", dir, dir, true)
+	s2 := New("", dir, dir, true, "")
 	defer s2.Close()
 	ts2 := httptest.NewServer(s2)
 	defer ts2.Close()
@@ -126,7 +126,7 @@ func TestConnections_PersistAcrossRestart(t *testing.T) {
 
 func TestVessel_SnapshotAndStream(t *testing.T) {
 	dir := t.TempDir()
-	s := New("", dir, dir, true)
+	s := New("", dir, dir, true, "")
 	defer s.Close()
 	ts := httptest.NewServer(s)
 	defer ts.Close()

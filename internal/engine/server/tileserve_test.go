@@ -36,7 +36,7 @@ func TestServeTileSet(t *testing.T) {
 	dir := t.TempDir()
 	body := writeTestPMTiles(t, dir, "charts", 8, 10, 20)
 
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 
 	// A present tile → 200 with the MVT body and the vector-tile content type.
@@ -120,7 +120,7 @@ func TestServeTileSet(t *testing.T) {
 func TestServeTileGzip(t *testing.T) {
 	dir := t.TempDir()
 	body := writeTestPMTiles(t, dir, "charts", 8, 10, 20)
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 
 	// Go's transport transparently decodes gzip unless we set Accept-Encoding
@@ -148,7 +148,7 @@ func TestServeTileGzip(t *testing.T) {
 func TestServeTileJSONAndList(t *testing.T) {
 	dir := t.TempDir()
 	writeTestPMTiles(t, dir, "charts", 8, 10, 20)
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 
 	// TileJSON descriptor.
@@ -205,7 +205,7 @@ func TestServeTileJSONEngineStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := New(dir, dir, dir, false)
+	srv := New(dir, dir, dir, false, "")
 	srv.EngineCommit = "fff999000" // the RUNNING binary's engine
 	// A dynamic set: registered without a pack path (plugin tiles).
 	live, err := tilesource.Open(filepath.Join(tilesDir(dir), "legacy.pmtiles"))
@@ -263,7 +263,7 @@ func TestServeTileSetMLT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 
 	resp, _ := http.Get(ts.URL + "/tiles/mltcharts.json")

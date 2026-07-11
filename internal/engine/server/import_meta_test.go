@@ -50,7 +50,7 @@ func buildExchangeZip(t *testing.T) []byte {
 // title falls back to the cell's dataset name; the client resolves a nicer name
 // where it can.
 func TestImport_NoCatalog(t *testing.T) {
-	s := New(t.TempDir(), t.TempDir(), t.TempDir(), false)
+	s := New(t.TempDir(), t.TempDir(), t.TempDir(), false, "")
 	cell, err := os.ReadFile("../../../testdata/US5MD1MC.000")
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestImport_NoCatalog(t *testing.T) {
 // post-bake metadata tail (ExtractCellMeta → sidecar) independently of a real bake.
 func TestImport_AutoNameAndMeta(t *testing.T) {
 	cacheDir, dataDir := t.TempDir(), t.TempDir()
-	s := New(t.TempDir(), cacheDir, dataDir, false)
+	s := New(t.TempDir(), cacheDir, dataDir, false, "")
 
 	zipData := buildExchangeZip(t)
 	cells, _, cat, err := extractZipCells(zipData)

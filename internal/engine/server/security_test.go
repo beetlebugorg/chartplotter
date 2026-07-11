@@ -63,7 +63,7 @@ func TestCrossSiteWrite(t *testing.T) {
 // A cross-site POST to a state-changing endpoint must be rejected before any
 // handler runs, and security headers must be present on every response.
 func TestHandlerBlocksCrossSiteAndSetsHeaders(t *testing.T) {
-	s := New("", t.TempDir(), t.TempDir(), false)
+	s := New("", t.TempDir(), t.TempDir(), false, "")
 	defer s.Close()
 
 	r := httptest.NewRequest("POST", "http://127.0.0.1:8080/api/settings", nil)
@@ -85,7 +85,7 @@ func TestHandlerBlocksCrossSiteAndSetsHeaders(t *testing.T) {
 
 // The proxy must refuse a non-provider URL (SSRF).
 func TestProxyRejectsNonProviderURL(t *testing.T) {
-	s := New("", t.TempDir(), t.TempDir(), false)
+	s := New("", t.TempDir(), t.TempDir(), false, "")
 	defer s.Close()
 
 	r := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/proxy?url=http://169.254.169.254/", nil)
