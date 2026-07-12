@@ -2,15 +2,18 @@ package main
 
 import (
 	"archive/zip"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
+	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 )
 
 // bakeCmd bakes S-57 ENC base cells into a PMTiles archive of MVT tiles, for
@@ -28,42 +31,67 @@ type bakeCmd struct {
 }
 
 func (c bakeCmd) Run() error {
-	// libtile57 is the sole bake engine. A *.pmtiles/-mbtiles -o writes ONE flat
-	// merged archive (+ optional --manifest / aux.zip) — the coverage-clipped
-	// composite resolves best-available inside the single archive, so there are
-	// no per-band archives any more (the retired --bands). Any other -o is a
-	// self-contained bundle directory (tiles/chart.pmtiles + per-scheme style +
-	// assets + manifest.json).
-	switch strings.ToLower(filepath.Ext(c.Out)) {
-	case ".pmtiles", ".mbtiles":
-		return c.runTile57Archive()
-	}
-	return c.runTile57Bundle()
-}
-
-// runTile57Bundle bakes the ENC inputs with the native libtile57 engine into a
-// self-contained chart bundle (tiles/chart.pmtiles + per-scheme SCAMIN-bucketed
-// style-*.json + assets + manifest.json) under the output directory. The engine
-// reads the ENC from disk, so a lone directory or .000 is handed over directly and
-// only zips / multiple inputs are staged into a temp directory of cells first.
-func (c bakeCmd) runTile57Bundle() error {
+	// libtile57 makes tiles ONE way: bake each cell to its own native-scale PMTiles + build the
+	// ownership partition. This CLI writes that LIVE STRUCTURE — the exact inputs the runtime
+	// compositor consumes: <outDir>/tiles/<cell>.pmtiles + <outDir>/partition.tpart. There is no
+	// merged chart.pmtiles bundle; the style + assets are produced separately (the asset commands /
+	// the server's runtime style), not per bake.
 	input, cleanup, err := c.tile57Input()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	outDir := bundleOutDir(c.Out)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	outDir := bundleOutDir(c.Out) // a *.pmtiles path → its stem dir; any other -o used verbatim
+	tilesDir := filepath.Join(outDir, "tiles")
+	if err := os.MkdirAll(tilesDir, 0o755); err != nil {
 		return err
 	}
-	// nil progress → the lib's built-in per-band console progress (good CLI output).
-	n, bbox, err := bakeTile57Bundle(input, outDir, c.MaxZoom, c.Format, nil)
+
+	// Bake each cell IN PARALLEL to <outDir>/tiles/<rel>.pmtiles, mirroring the input tree
+	// (incremental — reruns re-bake only changed cells). The engine writes + frees each archive.
+	start := time.Now()
+	if _, err := baker.PrepareLive(input, tilesDir, runtime.NumCPU(), func(done, total int) {
+		if done >= total {
+			fmt.Printf("\rbaked %d cell(s), building partition…              ", total)
+		} else if done > 0 {
+			per := time.Since(start) / time.Duration(done)
+			fmt.Printf("\rbaking %d/%d · ~%s left      ", done, total, (per * time.Duration(total-done)).Round(time.Second))
+		} else {
+			fmt.Printf("\rbaking %d/%d…      ", done, total)
+		}
+	}); err != nil {
+		fmt.Println()
+		return err
+	}
+	fmt.Println()
+
+	// Collect the mirrored per-cell archives (baked + reused) for the compositor.
+	var paths []string
+	_ = filepath.WalkDir(tilesDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".pmtiles") {
+			paths = append(paths, p)
+		}
+		return nil
+	})
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return fmt.Errorf("no coverage: no valid S-57 cells under %s", input)
+	}
+
+	// Build + save the ownership-partition sidecar next to the tiles (the compositor loads it on
+	// open to skip the build).
+	comp, err := tilesource.NewComposer(paths, "")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("baked %d cell(s) → %s/ via libtile57 — bundle: tiles/chart.pmtiles + assets/style-{day,dusk,night}.json + manifest.json (bbox %.4f,%.4f,%.4f,%.4f)\n",
-		n, outDir, bbox[0], bbox[1], bbox[2], bbox[3])
+	defer comp.Close()
+	if err := comp.SavePartition(filepath.Join(outDir, "partition.tpart")); err != nil {
+		return err
+	}
+	m := comp.Meta()
+	fmt.Printf("baked %d cell(s) → %s/tiles/*.pmtiles + partition.tpart (z%d..%d, bounds %.4f,%.4f,%.4f,%.4f)\n",
+		len(paths), outDir, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N)
 	return nil
 }
 
@@ -118,21 +146,6 @@ func (c bakeCmd) tile57Input() (path string, cleanup func(), err error) {
 		}
 	}
 	return dir, func() { os.RemoveAll(dir) }, nil
-}
-
-// writeManifestJSON writes a charts-index.json manifest (indented) to path.
-func writeManifestJSON(path string, man map[string]any) error {
-	mf, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(mf)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(man); err != nil {
-		mf.Close()
-		return err
-	}
-	return mf.Close()
 }
 
 // bundleOutDir derives the bundle output DIRECTORY from the -o value: a *.pmtiles /

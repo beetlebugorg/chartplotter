@@ -3,6 +3,7 @@ package server
 import (
 	"compress/gzip"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -60,27 +61,42 @@ func (s *Server) serveTileSet(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusNotFound, "unknown tile set")
 		return
 	}
-	body, err := src.Tile(uint8(z), x, y)
+	// Fetch the tile, plus — where the backend can tell us (the runtime compositor) — whether the
+	// ownership partition says a cell SHOULD render here. `owned` lets us tell a transient/erroneous
+	// empty (a cell owns this ground but produced nothing) from true empty ocean.
+	var body []byte
+	var owned bool
+	var err error
+	if ot, ok := src.(tilesource.OwnershipTiler); ok {
+		body, owned, err = ot.TileOwned(uint8(z), x, y)
+	} else {
+		body, err = src.Tile(uint8(z), x, y)
+	}
 	if err != nil {
 		apiErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Cache policy first, so it rides the 204 too: an EMPTY tile at a given ?g is
-	// as content-addressed as a full one (emptiness is baked into that generation),
-	// and empty ocean tiles are the MAJORITY of a viewport's grid — caching those
-	// 204s saves the most round-trips. Tiles are immutable per bake generation: the
-	// ?g token in the URL (the pack archive's mtime) changes on every re-bake, so a
-	// given tile URL always maps to identical bytes/emptiness and can cache forever.
-	// The live/dynamic set carries no generation (?g absent or 0) and regenerates on
-	// demand, so it stays no-cache. Keying off the token — not pack-vs-live plumbing
-	// — ties the policy exactly to the content-addressing guarantee.
-	if g := r.URL.Query().Get("g"); g != "" && g != "0" {
+
+	// Cache policy (rides the 204 too). A tile is immutable-per-generation ONLY when it is stable:
+	// it has content, or it is truly empty (no cell owns this ground — open ocean, the majority of a
+	// viewport). Two cases must NEVER cache, so they re-fetch once content lands (the ?g bumps on
+	// bake completion): the set is still baking (its content is in flux), or the partition says a
+	// cell SHOULD render here but it came back blank (its per-cell bake hasn't produced the tile
+	// yet). Emptiness at a given ?g is otherwise as content-addressed as bytes are.
+	blank := len(body) == 0
+	generating := s.imports.runningFor(set)
+	shouldFill := blank && owned // expected content, not here yet
+	if g := r.URL.Query().Get("g"); g != "" && g != "0" && !generating && !shouldFill {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
-	if len(body) == 0 {
-		w.WriteHeader(http.StatusNoContent) // blank/missing tile (still cacheable per ?g)
+	if shouldFill && !generating {
+		// Bakes are done, yet a tile a cell owns rendered nothing — a missing or failed cell.
+		log.Printf("tiles %s: z%d/%d/%d owned but empty (missing or failed cell?)", set, z, x, y)
+	}
+	if blank {
+		w.WriteHeader(http.StatusNoContent) // blank/missing tile
 		return
 	}
 	// Tiles serve BYTES-VERBATIM in the set's stored encoding (no transcode).

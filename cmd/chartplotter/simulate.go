@@ -172,12 +172,7 @@ func loadWaterFeatures(p string) ([]tile57.Feature, error) {
 	if err != nil {
 		return nil, err
 	}
-	src, err := tile57.OpenChartBytes(data)
-	if err != nil {
-		return nil, err
-	}
-	defer src.Close()
-	return src.Features("DEPARE", "DRGARE")
+	return tile57.FeaturesBytes(data, "DEPARE", "DRGARE")
 }
 
 // readBaseCell returns the raw base-cell bytes from a .000 file or the first

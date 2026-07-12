@@ -33,7 +33,7 @@ jobs:
           git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
           cache: true
           cache-dependency-path: chartplotter/go.sum
       - name: Install Zig
@@ -65,7 +65,7 @@ jobs:
           git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
           cache: true
           cache-dependency-path: chartplotter/go.sum
       - name: Install Zig
@@ -95,7 +95,7 @@ jobs:
           git -C chartplotter submodule update --init --recursive tile57
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
           cache: true
           cache-dependency-path: chartplotter/go.sum
       - name: Install Zig

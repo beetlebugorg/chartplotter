@@ -91,6 +91,10 @@ export class DevTools {
     this._inspectLastKey = "";
     this._areaCleanup = null; // mirrors the shell's box-download guard (kept null here)
     this._busy = false;       // a rebake is running (in addition to the injected isBusy)
+    // Ownership-partition debug overlay state.
+    this._partitions = null;  // [{provider, ready, tiles}] from GET /api/debug/partition (null = not loaded)
+    this._partOn = new Set(); // providers whose partition overlay is currently on the map
+    this._partGen = false;    // a generate run is in flight
 
     this._registerSelf(deps.registry);
     this._wireMap();
@@ -128,12 +132,16 @@ export class DevTools {
     const busy = this._isBusy();
     // The dialog's shadow has its own sheet; inject our chrome once per render so
     // the dev-tools + inspector classes resolve inside it.
-    host.innerHTML = `<style>${STYLE}</style>${devToolsPanel(busy, this._inspectMode, this._selectingArea)}`;
+    const part = { list: this._partitions, on: this._partOn, gen: this._partGen };
+    host.innerHTML = `<style>${STYLE}</style>${devToolsPanel(busy, this._inspectMode, this._selectingArea, part)}`;
     const q = (id) => host.querySelector("#" + id);
     const rebuild = q("dev-rebuild"); if (rebuild && !rebuild.disabled) rebuild.onclick = (e) => this._rebuildAllPerBand(e.currentTarget);
     const inspect = q("dev-inspect"); if (inspect) inspect.onclick = () => this.setInspectMode(!this._inspectMode);
     const area = q("dev-area"); if (area && !area.disabled) area.onclick = () => this._toggleSelectArea();
     const feat = q("dev-feat"); if (feat && !feat.disabled) feat.onclick = (e) => this._copyInspectDebug(e.currentTarget);
+    const pgen = q("dev-part-gen"); if (pgen && !pgen.disabled) pgen.onclick = () => this._generatePartitions();
+    host.querySelectorAll("[data-part-toggle]").forEach((el) => (el.onclick = () => this._togglePartitionOverlay(el.dataset.partToggle, !this._partOn.has(el.dataset.partToggle))));
+    if (this._partitions == null && !this._partLoading) this._loadPartitions(); // lazy: fetch status once
     // If inspect is on with a live selection, repaint the result panel.
     if (this._inspectMode && this._inspectFeats.length) this._renderInspect();
     else if (this._inspectMode) this._inspectHint(INSPECT_HINT);
@@ -194,6 +202,82 @@ export class DevTools {
     this._refreshPanel();
     if (btn) flashBtn(btn, `✓ rebuilt ${todo.length}`);
   }
+
+  // --- ownership-partition debug overlay -----------------------------------
+  // GET the per-provider partition status (is each provider's partition tile set baked
+  // and ready to overlay?) and repaint the panel.
+  async _loadPartitions() {
+    this._partLoading = true;
+    const assets = this._d.assets || "";
+    try {
+      const j = await fetch(`${assets}api/debug/partition?t=${Date.now()}`).then((r) => (r.ok ? r.json() : null));
+      this._partitions = (j && j.partitions) || [];
+    } catch (e) { this._partitions = []; }
+    this._partLoading = false;
+    this._refreshPanel();
+  }
+
+  // POST to (re)generate every provider's partition PMTiles on the server, then poll the
+  // status until they're all ready (or give up), repainting as each lands.
+  async _generatePartitions() {
+    if (this._partGen) return;
+    const assets = this._d.assets || "";
+    this._partGen = true;
+    this._refreshPanel();
+    try { await fetch(`${assets}api/debug/partition`, { method: "POST" }); } catch (e) { console.warn("[partition] generate", e); }
+    for (let i = 0; i < 90; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      await this._loadPartitions();
+      const ps = this._partitions || [];
+      if (ps.length && ps.every((p) => p.ready)) break;
+    }
+    this._partGen = false;
+    this._refreshPanel();
+  }
+
+  // Show/hide a provider's partition overlay on the chart map.
+  _togglePartitionOverlay(provider, on) {
+    if (!provider) return;
+    if (on) { this._partOn.add(provider); this._addPartitionLayers(provider); }
+    else { this._partOn.delete(provider); this._removePartitionLayers(provider); }
+    this._refreshPanel();
+  }
+
+  _partSourceId(provider) { return `dbg-part-${provider}`; }
+
+  // Add the vector source + fill (by face colour) + symbol (cell name) layers for a
+  // provider's partition, pointing at the server's /tiles/{provider}-partition set.
+  _addPartitionLayers(provider) {
+    const map = this._map;
+    if (!map || !map.isStyleLoaded || !map.isStyleLoaded()) return;
+    this._removePartitionLayers(provider); // idempotent re-add
+    const sid = this._partSourceId(provider);
+    const base = new URL(`${this._d.assets || ""}tiles/${provider}-partition/`, document.baseURI).href;
+    try {
+      map.addSource(sid, { type: "vector", tiles: [base + "{z}/{x}/{y}.mvt"], minzoom: 0, maxzoom: 12 });
+      map.addLayer({
+        id: sid + "-fill", type: "fill", source: sid, "source-layer": "partition",
+        paint: { "fill-color": ["get", "color"], "fill-opacity": 0.35, "fill-outline-color": "#000000" },
+      });
+      map.addLayer({
+        id: sid + "-label", type: "symbol", source: sid, "source-layer": "labels",
+        layout: { "text-field": ["get", "cell"], "text-font": ["Noto Sans Regular"], "text-size": 11, "text-allow-overlap": false },
+        paint: { "text-color": "#ffffff", "text-halo-color": "#000000", "text-halo-width": 1.4 },
+      });
+    } catch (e) { console.warn("[partition] add layers", provider, e); }
+  }
+
+  _removePartitionLayers(provider) {
+    const map = this._map;
+    if (!map) return;
+    const sid = this._partSourceId(provider);
+    for (const id of [sid + "-fill", sid + "-label"]) { if (map.getLayer && map.getLayer(id)) map.removeLayer(id); }
+    if (map.getSource && map.getSource(sid)) map.removeSource(sid);
+  }
+
+  // The chart style is rebuilt on mariner changes (setStyle drops every source); re-add
+  // any active partition overlays once the new style has loaded.
+  _reapplyPartitions() { for (const p of this._partOn) this._addPartitionLayers(p); }
 
   // --- feature inspector ---------------------------------------------------
   // Add the inspector's map listeners ONCE. They all no-op unless inspect mode is
@@ -273,6 +357,9 @@ export class DevTools {
     c.addEventListener("pointerup", this._onPointerUp);
     c.addEventListener("pointercancel", this._onPointerUp);
     map.on("click", this._onClick);
+    // A mariner change rebuilds the style (setStyle), dropping our overlay sources —
+    // re-add any that are toggled on once the new style loads.
+    map.on("style.load", this._onStyleLoad = () => this._reapplyPartitions());
   }
 
   _unwireMap() {
@@ -285,6 +372,8 @@ export class DevTools {
       if (this._onPointerUp) { c.removeEventListener("pointerup", this._onPointerUp); c.removeEventListener("pointercancel", this._onPointerUp); }
     }
     if (this._onClick) map.off("click", this._onClick);
+    if (this._onStyleLoad) { map.off("style.load", this._onStyleLoad); this._onStyleLoad = null; }
+    try { this._partOn.forEach((p) => this._removePartitionLayers(p)); } catch (e) { /* map gone */ }
     if (this._hoverRaf) { cancelAnimationFrame(this._hoverRaf); this._hoverRaf = 0; }
   }
 

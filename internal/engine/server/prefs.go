@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -95,33 +96,35 @@ func (p *prefs) setDisabled(set string, off bool) {
 	}
 }
 
-// scanPacks walks the cache and returns every baked provider bundle keyed by set name
-// (= provider) → path. The tile57 bundle writes <cache>/<PROVIDER>/tiles/chart.pmtiles
-// (one archive per provider, provider-enc-root), so the set name is the provider dir —
-// otherwise every bundle collapses to "chart" and the chart library can't list them
-// after a restart.
+// scanPacks discovers STANDALONE tile archives — prebaked .pmtiles/.mbtiles hand-dropped
+// into the flat <cache>/tiles dir — keyed set name (the file basename) → path. This is the
+// narrow overlay path for hand-placed archives.
+//
+// It scans ONLY the flat tiles dir, never the whole cache: a live runtime-compositor
+// provider owns <cache>/<PROVIDER>/tiles/*.pmtiles + partition.tpart, and those per-cell
+// archives are compositor INPUTS discovered provider-centrically by registerLiveProviders —
+// never scavenged here (else every cell would surface as its own phantom set, and an
+// interrupted import that hasn't saved its partition yet would leak cells as packs).
 func scanPacks(cacheDir string) map[string]string {
 	out := map[string]string{}
-	_ = filepath.WalkDir(cacheDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	dir := tilesDir(cacheDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
 		}
-		if !strings.HasSuffix(path, ".pmtiles") && !strings.HasSuffix(path, ".mbtiles") {
-			return nil
+		name := e.Name()
+		if !strings.HasSuffix(name, ".pmtiles") && !strings.HasSuffix(name, ".mbtiles") {
+			continue
 		}
-		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		// tile57 bundle: <cache>/<PROVIDER>/tiles/chart.pmtiles → the provider name.
-		if name == "chart" && filepath.Base(filepath.Dir(path)) == "tiles" {
-			provider := filepath.Base(filepath.Dir(filepath.Dir(path)))
-			if provider != "" && provider != "." {
-				name = strings.ToLower(provider)
-			}
+		set := strings.TrimSuffix(name, filepath.Ext(name))
+		if isSetName(set) {
+			out[set] = filepath.Join(dir, name)
 		}
-		if isSetName(name) {
-			out[name] = path
-		}
-		return nil
-	})
+	}
 	return out
 }
 
@@ -155,6 +158,14 @@ func (s *Server) packGen(set string) int64 {
 	if p, ok := s.packPath(set); ok {
 		if fi, err := os.Stat(p); err == nil {
 			return fi.ModTime().UnixNano()
+		}
+	}
+	// Live runtime-compositor provider (no disk pack): the CONTENT token stored in live.gen (a
+	// sha-of-shas over its per-cell archives), so its tiles are content-addressed by ?g — a no-op
+	// re-bake keeps the token, and each progressive re-key advances it as cells fill in.
+	if b, err := os.ReadFile(s.liveGenPath(set)); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			return n
 		}
 	}
 	return 0

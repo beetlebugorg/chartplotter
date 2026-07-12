@@ -76,7 +76,7 @@ func TestExtractZipCells(t *testing.T) {
 
 func TestImportValidation(t *testing.T) {
 	dir := t.TempDir()
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 
 	// Bad set name → 400.
@@ -121,7 +121,7 @@ func TestImportValidation(t *testing.T) {
 // real cell. No archive is registered.
 func TestImportJobErrorPath(t *testing.T) {
 	dir := t.TempDir()
-	srv := New(dir, dir, dir, false)
+	srv := New(dir, dir, dir, false, "")
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -175,7 +175,7 @@ func TestImportJobErrorPath(t *testing.T) {
 
 func TestImportFetchValidation(t *testing.T) {
 	dir := t.TempDir()
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 
 	post := func(body string) int {
@@ -210,7 +210,7 @@ func TestImportFetchDownloadOnly(t *testing.T) {
 	if err := os.WriteFile(cp, []byte("cell-bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv := New(dir, dir, dir, false)
+	srv := New(dir, dir, dir, false, "")
 	// The seeded USER/ENC_ROOT makes New() kick off a self-heal bake of "user" in the
 	// background; drain it (srv.Close → bakeWG.Wait) before t.TempDir's RemoveAll, else
 	// that bake's USER/assets write races cleanup ("directory not empty" on CI).
@@ -266,7 +266,7 @@ func TestServeCells(t *testing.T) {
 		}
 		os.WriteFile(p, []byte("x"), 0o644)
 	}
-	ts := httptest.NewServer(New(dir, dir, dir, false))
+	ts := httptest.NewServer(New(dir, dir, dir, false, ""))
 	defer ts.Close()
 	resp, _ := http.Get(ts.URL + "/api/cells")
 	body, _ := io.ReadAll(resp.Body)

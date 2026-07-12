@@ -42,6 +42,38 @@ type CellMeta struct {
 	HasBBox   bool       `json:"-"`
 }
 
+// ExtractCellMetaDir reads per-cell metadata straight from an on-disk ENC tree:
+// the engine walks the .000s (applying each cell's update chain) and reports the
+// inventory — no cell bytes are held in memory, so a whole-catalogue import stays
+// flat. Duplicate stems (a boundary cell shared by two district subfolders)
+// collapse to one entry, matching the first-copy-wins district dedup.
+func ExtractCellMetaDir(root string, onSkip func(name string, err error)) map[string]CellMeta {
+	infos, err := tile57.Charts(root)
+	if err != nil {
+		if onSkip != nil {
+			onSkip(root, err)
+		}
+		return map[string]CellMeta{}
+	}
+	out := make(map[string]CellMeta, len(infos))
+	for _, ci := range infos {
+		if _, seen := out[ci.Name]; seen {
+			continue
+		}
+		out[ci.Name] = CellMeta{
+			Name:      ci.Name,
+			Scale:     ci.Scale,
+			Edition:   ci.Edition,
+			Update:    ci.Update,
+			IssueDate: ci.IssueDate,
+			Agency:    ci.Agency,
+			BBox:      ci.BBox,
+			HasBBox:   ci.HasBBox,
+		}
+	}
+	return out
+}
+
 // ExtractCellMeta stages the cells (base + updates) to a temporary ENC dir,
 // opens it with the native engine, and returns per-cell metadata keyed by cell
 // stem (the DSNM stem the engine reports). Cells that fail to parse are
@@ -83,12 +115,7 @@ func ExtractCellMeta(cells map[string]CellData, onSkip func(name string, err err
 		}
 	}
 
-	src, err := tile57.Open(dir)
-	if err != nil {
-		return skipAll(err)
-	}
-	defer src.Close()
-	infos, err := src.Cells()
+	infos, err := tile57.Charts(dir)
 	if err != nil {
 		return skipAll(err)
 	}

@@ -176,6 +176,12 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 	for _, prov := range s.installedProviders() {
 		seen[prov] = true
 	}
+	// Runtime-registered sets with no disk pack (e.g. the live runtime compositor) — so a set
+	// that only lives in the registry still surfaces as a first-class, toggleable map layer.
+	// Its bounds/metadata come from the TileJSON (src.Meta()), not a disk pack.
+	for _, name := range s.sets.names() {
+		seen[providerOf(name)] = true
+	}
 	providers := make([]string, 0, len(seen))
 	for p := range seen {
 		providers = append(providers, p)
@@ -189,18 +195,26 @@ func (s *Server) handlePacks(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, ",")
 		}
 		fmt.Fprintf(w, `{"name":%q,"enabled":%t`, prov, !s.prefs.isDisabled(prov))
-		// Bounds straight from the baked archive on disk — works even while DISABLED (its
-		// tiles aren't served, but the boundary still marks "you have this chart here").
+		meta, hasMeta := s.readSetMeta(prov)
+		// Coverage bounds, so the client marks "you have this chart here" even while a set is
+		// DISABLED. A standalone archive reads them off the file; a live runtime-compositor
+		// provider (no disk archive) takes them from the registry when enabled, else from its
+		// meta sidecar — surfaced first-class from provider structure, not a pack path.
 		if path, ok := s.packPath(prov); ok {
 			if src, err := tilesource.Open(path); err == nil {
 				m := src.Meta()
 				_ = tilesource.Close(src)
 				fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, m.W, m.S, m.E, m.N)
 			}
+		} else if src, live := s.sets.get(prov); live {
+			m := src.Meta()
+			fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, m.W, m.S, m.E, m.N)
+		} else if hasMeta && len(meta.BBox) == 4 {
+			fmt.Fprintf(w, `,"bounds":[%g,%g,%g,%g]`, meta.BBox[0], meta.BBox[1], meta.BBox[2], meta.BBox[3])
 		}
 		// Extracted metadata (title/agency/scale range/counts/imported date), from the
 		// <provider>.meta.json sidecar. Cells omitted here — GET /api/pack/<provider>.
-		if m, ok := s.readSetMeta(prov); ok {
+		if m := meta; hasMeta {
 			if m.Title != "" {
 				fmt.Fprintf(w, `,"title":%q`, m.Title)
 			}
@@ -267,14 +281,22 @@ func (s *Server) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
 	enable := strings.HasSuffix(r.URL.Path, "/enable")
 	s.prefs.setDisabled(provider, !enable)
 	if enable {
-		if path, ok := s.packPath(provider); ok {
-			if _, live := s.sets.get(provider); !live {
+		if _, live := s.sets.get(provider); !live {
+			if path, ok := s.packPath(provider); ok {
+				// Standalone/overlay archive: re-open the disk pack.
 				if src, err := tilesource.Open(path); err == nil {
 					s.sets.register(provider, src)
 				} else {
 					apiErr(w, http.StatusInternalServerError, err.Error())
 					return
 				}
+			} else if c, err := s.openLiveComposer(provider); err != nil {
+				apiErr(w, http.StatusInternalServerError, err.Error())
+				return
+			} else if c != nil {
+				// Live runtime-compositor provider (no disk pack): re-open the compositor
+				// from its kept per-cell archives + partition sidecar.
+				s.sets.register(provider, c)
 			}
 		}
 	} else {
@@ -350,6 +372,22 @@ func (s *Server) enabledPackCells() (map[string]bool, [][4]float64) {
 			m := src.Meta()
 			_ = tilesource.Close(src)
 			legacy = append(legacy, [4]float64{m.W, m.S, m.E, m.N})
+		}
+	}
+	// Live runtime-compositor providers (no disk pack): their cells come from the SAME
+	// per-provider cell manifest (writeSetCells at import), keyed provider-centrically —
+	// so a live provider's charts count as "on the map" for ?active just like a pack's.
+	for _, prov := range s.installedProviders() {
+		if s.prefs.isDisabled(prov) {
+			continue
+		}
+		if _, isPack := s.packPath(prov); isPack {
+			continue // already covered above
+		}
+		if stems, ok := s.setCells(prov); ok {
+			for _, st := range stems {
+				cells[st] = true
+			}
 		}
 	}
 	return cells, legacy

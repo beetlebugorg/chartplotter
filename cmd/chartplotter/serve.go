@@ -67,11 +67,10 @@ func (c serveCmd) Run() error {
 	// Loopback bind → enforce the Host-header DNS-rebind check on /api. Any
 	// other bind means the operator opted into network exposure.
 	allowRemote := !(c.Host == "127.0.0.1" || c.Host == "localhost" || c.Host == "::1")
-	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote)
+	srv := server.New(c.Assets, cacheDir, dataDir, allowRemote, engineCommit)
 	srv.SetAssetFallback(s101AssetDir) // emitted S-101 assets, searched after --assets, before embedded
 	srv.Version = version
-	srv.EngineCommit = engineCommit // stamped onto every bake
-	srv.ReportStaleCache()          // loud warning if any served pack predates this binary
+	srv.ReportStaleCache() // loud warning if any served pack predates this binary
 
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	remoteNote := ""

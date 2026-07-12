@@ -25,7 +25,7 @@ func TestImportPacks(t *testing.T) {
 		t.Skipf("testdata cell absent: %v", err)
 	}
 	cacheDir, dataDir := t.TempDir(), t.TempDir()
-	s := New(t.TempDir(), cacheDir, dataDir, false)
+	s := New(t.TempDir(), cacheDir, dataDir, false, "")
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
@@ -79,14 +79,28 @@ func TestImportPacks(t *testing.T) {
 		t.Fatalf("job state=%q error=%q", st.State, st.Error)
 	}
 
-	// ONE provider set ("noaa") registered, with a baked chart.pmtiles under the cache
-	// dir, and both districts' source cells kept under the data dir.
+	// ONE provider set ("noaa") registered, serving from the live-composite structure
+	// under the cache dir (per-cell tiles/<STEM>.pmtiles + partition.tpart), and both
+	// districts' source cells kept under the data dir.
 	if _, ok := s.sets.get("noaa"); !ok {
 		t.Errorf("provider set %q not registered", "noaa")
 	}
-	chart := filepath.Join(s.setDir("noaa"), "tiles", "chart.pmtiles")
-	if fi, err := os.Stat(chart); err != nil || fi.Size() == 0 {
-		t.Errorf("provider %q: no baked pmtiles (%v)", "noaa", err)
+	// The bake mirrors the ENC tree, so the cell's archive lives under its district subdir
+	// (tiles/d5/US5MD1MC.pmtiles) — walk for it.
+	var found bool
+	for _, p := range s.liveCellArchives("noaa") {
+		if strings.HasSuffix(p, "US5MD1MC.pmtiles") {
+			found = true
+			if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+				t.Errorf("provider %q: empty archive %s (%v)", "noaa", p, err)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("provider %q: no baked US5MD1MC archive in the mirrored tree", "noaa")
+	}
+	if _, err := os.Stat(filepath.Join(s.setDir("noaa"), "partition.tpart")); err != nil {
+		t.Errorf("provider %q: no partition sidecar (%v)", "noaa", err)
 	}
 	for _, dist := range []string{"d5", "d7"} {
 		if _, err := os.Stat(filepath.Join(s.districtDir("noaa", dist), "US5MD1MC.000")); err != nil {
@@ -96,5 +110,54 @@ func TestImportPacks(t *testing.T) {
 	// The shared cell bakes ONCE (stem de-dup): the provider cell manifest has one entry.
 	if stems, ok := s.setCells("noaa"); !ok || len(stems) != 1 || stems[0] != "US5MD1MC" {
 		t.Errorf("provider cell manifest = %v (ok=%t), want [US5MD1MC]", stems, ok)
+	}
+
+	// A live provider is a FIRST-CLASS set, surfaced provider-centrically (no disk pack):
+	// /api/packs reports its coverage bounds from the registry.
+	pr, _ := http.Get(ts.URL + "/api/packs")
+	pb, _ := io.ReadAll(pr.Body)
+	pr.Body.Close()
+	var packs struct {
+		Packs []struct {
+			Name   string    `json:"name"`
+			Bounds []float64 `json:"bounds"`
+		} `json:"packs"`
+	}
+	json.Unmarshal(pb, &packs)
+	var noaaBounds []float64
+	for _, p := range packs.Packs {
+		if p.Name == "noaa" {
+			noaaBounds = p.Bounds
+		}
+	}
+	if len(noaaBounds) != 4 {
+		t.Errorf("/api/packs: live provider noaa has no bounds: %v", noaaBounds)
+	}
+
+	// disable → enable round-trips through the registry (re-opening the runtime
+	// compositor from kept per-cell archives), not just disk packs.
+	if resp, err := http.Post(ts.URL+"/api/set/disable?set=noaa", "", nil); err == nil {
+		resp.Body.Close()
+	}
+	if _, live := s.sets.get("noaa"); live {
+		t.Error("disabled live provider still registered")
+	}
+	if resp, err := http.Post(ts.URL+"/api/set/enable?set=noaa", "", nil); err == nil {
+		resp.Body.Close()
+	}
+	if _, live := s.sets.get("noaa"); !live {
+		t.Error("re-enabled live provider not re-registered from kept archives")
+	}
+
+	// progressiveReKey re-opens + re-registers the set over the cells baked so far — the
+	// mechanism that fills the map in batch-by-batch during a long import — and stamps the
+	// content token so the client re-fetches.
+	s.sets.remove("noaa")
+	s.progressiveReKey("noaa")
+	if _, live := s.sets.get("noaa"); !live {
+		t.Error("progressiveReKey did not register the live set")
+	}
+	if s.packGen("noaa") <= 0 {
+		t.Error("progressiveReKey did not persist the content token")
 	}
 }

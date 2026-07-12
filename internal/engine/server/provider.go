@@ -54,7 +54,7 @@ func (s *Server) providerDataDir(provider string) string {
 }
 
 // encRootDir is <DATA>/<PROVIDER>/ENC_ROOT/ — the bake input, walked recursively by
-// tile57.BakeBundle for every *.000 across all installed district subfolders. It
+// tile57.BakeTree for every *.000 across all installed district subfolders. It
 // lives under the DATA dir (persistent, survives a cache wipe: it is the downloads'
 // home + the bake input), so ClearCache never touches it.
 func (s *Server) encRootDir(provider string) string {
@@ -111,15 +111,15 @@ func (s *Server) installedProviders() []string {
 }
 
 // districtCatFile is the per-district sidecar of parsed CATALOG.031 titles (the raw
-// catalogue isn't kept at the ENC_ROOT root — that would flip BakeBundle into
-// catalog-only mode — so titles are stashed here and re-gathered per provider bake).
+// catalogue isn't kept at the ENC_ROOT root, so titles are stashed here and
+// re-gathered per provider bake).
 const districtCatFile = "_catalog.json"
 
 // cacheDistrict writes one district's downloaded exchange-set content into its
 // ENC_ROOT subfolder: each cell FLAT as <STEM>.000 (+ .001… updates), aux content
 // files (TXTDSC/PICREP) flat beside them, and a _catalog.json of parsed titles. The
 // bake reads the whole provider ENC_ROOT from here (no temp staging); the flat layout
-// is transparent to BakeBundle's recursive *.000 walk. Best-effort; errors logged.
+// is transparent to BakeTree's recursive *.000 walk. Best-effort; errors logged.
 func (s *Server) cacheDistrict(provider, district string, cells map[string]baker.CellData, aux map[string][]byte, cat []tile57.CatalogEntry) {
 	dir := s.districtDir(provider, district)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -172,54 +172,6 @@ func (s *Server) cacheDistrict(provider, district string, cells map[string]baker
 		s.cellIdx.forget(stems) // re-imported cells: drop stale bounds so the rebuild re-parses
 		s.cellIdx.rebuild()     // re-index in the background (single-flight; a mid-scan rebuild re-runs)
 	}
-}
-
-// providerCellData reads every base cell (+ its .001… updates) under a provider's
-// ENC_ROOT, DE-DUPLICATED by stem (a boundary cell shared by two districts is read
-// once), for the bake's metadata sidecar + cell manifest. The bake itself reads the
-// tree directly (BakeBundle); this is only the in-memory view the register tail needs.
-func (s *Server) providerCellData(provider string) map[string]baker.CellData {
-	root := s.encRootDir(provider)
-	cells := map[string]baker.CellData{}      // stem+".000" → base
-	updates := map[string]map[string][]byte{} // stem → update-name → bytes
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		ext := encExtServer(d.Name())
-		if ext == "" {
-			return nil
-		}
-		stem := strings.TrimSuffix(d.Name(), filepath.Ext(d.Name()))
-		if !isCellName(stem) {
-			return nil
-		}
-		if ext == ".000" {
-			if _, seen := cells[stem+".000"]; seen {
-				return nil // dedup: first district's copy wins
-			}
-			if b, e := os.ReadFile(path); e == nil {
-				cells[stem+".000"] = baker.CellData{Base: b}
-			}
-			return nil
-		}
-		if updates[stem] == nil {
-			updates[stem] = map[string][]byte{}
-		}
-		if _, seen := updates[stem][d.Name()]; !seen {
-			if b, e := os.ReadFile(path); e == nil {
-				updates[stem][d.Name()] = b
-			}
-		}
-		return nil
-	})
-	for name, cd := range cells {
-		if u := updates[strings.TrimSuffix(name, ".000")]; len(u) > 0 {
-			cd.Updates = u
-			cells[name] = cd
-		}
-	}
-	return cells
 }
 
 // providerAux gathers the aux content files (TXTDSC/PICREP text + pictures) across a

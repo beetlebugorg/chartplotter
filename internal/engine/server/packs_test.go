@@ -36,7 +36,7 @@ func TestProviderKeys(t *testing.T) {
 // installed districts read from the ENC_ROOT folder listing (not per-district sets).
 func TestHandlePacksProviders(t *testing.T) {
 	dir := t.TempDir()
-	s := New(dir, dir, dir, false)
+	s := New(dir, dir, dir, false, "")
 
 	// Create ENC_ROOT district folders (each with a placeholder .000) for two providers.
 	for _, dd := range []struct{ prov, dist string }{

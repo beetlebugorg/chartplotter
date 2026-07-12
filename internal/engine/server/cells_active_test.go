@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/beetlebugorg/chartplotter/internal/engine/baker"
 )
 
 // activeCells GETs /api/cells?active=1 and returns the cell-name set.
@@ -41,7 +39,7 @@ func activeCells(t *testing.T, base string) map[string]bool {
 // delete also reclaims the provider's source ENC_ROOT.
 func TestActiveCellsDropOnDelete(t *testing.T) {
 	dir := t.TempDir()
-	s := New(dir, dir, dir, false)
+	s := New(dir, dir, dir, false, "")
 
 	const cell = "US5MD11M"
 	// The cell's source .000 must exist in the provider ENC_ROOT (serveCells lists
@@ -55,7 +53,7 @@ func TestActiveCellsDropOnDelete(t *testing.T) {
 	}
 	// Register the provider set with an exact cell manifest, and add it as an enabled pack.
 	const provider = "noaa"
-	if err := s.writeSetCells(provider, map[string]baker.CellData{cell + ".000": {}}); err != nil {
+	if err := s.writeSetCells(provider, []string{cell}); err != nil {
 		t.Fatal(err)
 	}
 	manifest := filepath.Join(s.setDir(provider), provider+".cells.json")

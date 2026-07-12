@@ -462,7 +462,11 @@ export const STYLE = `
         .db-prog-status { display:flex; align-items:baseline; gap:10px;
           font:500 11.5px/1.3 system-ui,sans-serif; color:var(--ui-text-dim); }
         .db-prog-action { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .db-prog-count { flex:none; font-variant-numeric:tabular-nums; }
+        /* Count + ETA are fixed, right-aligned tabular slots so the text stays put as the numbers
+           change width (the ETA reserves a min-width; both right-align so their right edge is pinned). */
+        .db-prog-count { flex:none; text-align:right; font-variant-numeric:tabular-nums; }
+        .db-prog-eta { flex:none; min-width:7em; text-align:right; font-variant-numeric:tabular-nums; }
+        .db-prog-eta:empty { display:none; }
         .db-prog-status:empty { display:none; }
         .db-prog.error .db-prog-title, .db-prog.error .db-prog-action { color:#c0392b; }
         .db-prog-track { position:relative; width:100%; height:6px; border-radius:3px; overflow:hidden; background:var(--ui-surface-2); }
@@ -611,6 +615,7 @@ export const CHROME = `
           <div class="db-prog-status">
             <span id="db-prog-action" class="db-prog-action"></span>
             <span id="db-prog-count" class="db-prog-count"></span>
+            <span id="db-prog-eta" class="db-prog-eta"></span>
           </div>
           <div class="db-prog-track"><span id="db-prog-fill" class="db-prog-fill"></span></div>
         </div>

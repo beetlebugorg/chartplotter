@@ -171,12 +171,7 @@ func (ci *cellIndex) scan() {
 		if _, ok := ci.get(name); ok {
 			return nil // already indexed (forget() drops a re-imported cell so it re-parses)
 		}
-		src, err := tile57.Open(path)
-		if err != nil {
-			return nil
-		}
-		infos, err := src.Cells()
-		src.Close()
+		infos, err := tile57.Charts(path)
 		if err != nil || len(infos) == 0 {
 			return nil
 		}

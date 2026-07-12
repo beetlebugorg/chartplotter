@@ -1010,7 +1010,7 @@ export class ChartPlotter extends HTMLElement {
     if (!j || j.state !== "running" || !j.id) return;
     this._task = { kind: "download", status: "running" };
     const name = this._reattachName(j.set);
-    this._setProgress({ label: "Working", pill: `Working on ${name}`, sub: "", frac: j.percent ? j.percent / 100 : null });
+    this._setProgress({ label: "Working", pill: `Working on ${name}`, sub: j.action ? `${j.action}…` : "", frac: (j.frac === null || j.frac === undefined) ? null : j.frac });
     this._pollImport(j.id, (p) => this._setProgress(p), name).catch(() => {}).then(async () => {
       this._task = null;
       this._setProgress(null);
@@ -1875,9 +1875,11 @@ export class ChartPlotter extends HTMLElement {
     const title = p.label || p.pill || "";
     const action = p.error ? String(p.error) : (p.sub || "");
     const count = p.error ? "" : (p.detail || "");
+    const eta = p.error ? "" : (p.eta || "");
     r.getElementById("db-prog-title").textContent = title;
     r.getElementById("db-prog-action").textContent = action;
     r.getElementById("db-prog-count").textContent = count;
+    r.getElementById("db-prog-eta").textContent = eta;
     const fill = r.getElementById("db-prog-fill");
     fill.style.width = p.frac != null ? `${Math.round(p.frac * 100)}%` : "100%";
     fill.classList.toggle("indet", p.frac == null && !done); // slow sweep when no fraction

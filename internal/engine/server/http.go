@@ -63,13 +63,18 @@ type Server struct {
 // that must survive a cache wipe — pass "" to default it to cacheDir (single-dir
 // mode). allowRemote is true when the bind host is not loopback (the operator
 // opted into network exposure), which skips the per-request Host-header check.
-func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
+func New(assetsDir, cacheDir, dataDir string, allowRemote bool, engineCommit string) *Server {
 	if dataDir == "" {
 		dataDir = cacheDir
 	}
 	migrateLegacyENCRoot(dataDir)             // one-time: retired flat ENC_ROOT → loose/cells (before indexing)
 	migrateProviderEncRoot(dataDir, cacheDir) // one-time: per-district-pack layout → per-provider ENC_ROOT
 	s := &Server{assetsDir: assetsDir, cacheDir: cacheDir, dataDir: dataDir, allowRemote: allowRemote, sets: newTileSets(), imports: newImportJobs(), auxIdx: newAuxIndex(), cellIdx: newCellIndex(dataDir)}
+	// The engine commit must be known BEFORE the boot registration below:
+	// registerLiveProviders/rebakeMissingProviders gate on the .enginever stamp,
+	// and an empty commit counts every kept archive as current (stale tiles
+	// would register and the self-heal re-bake would never fire).
+	s.EngineCommit = engineCommit
 	s.cellIdx.build() // backfill cell bounds in the background (kick spawns its own goroutine)
 	// Discover every baked pack on disk (provider trees + flat tiles/), then
 	// register the ENABLED ones (disabled packs stay on disk but off the map). State
@@ -92,7 +97,9 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 	if len(s.packs) > 0 {
 		log.Printf("tilesets: %d pack(s) on disk, %d enabled (from %s)", len(s.packs), n, cacheDir)
 	}
-	s.rebakeMissingProviders() // self-heal: bake any provider with an ENC_ROOT but no bundle (post-migration)
+	s.registerLiveProviders()  // re-register live runtime compositors from kept per-cell archives (survives restart)
+	s.registerLiveCompose()    // dev/test: on-demand runtime compositor from TILE57_LIVE_COMPOSE (no-op if unset)
+	s.rebakeMissingProviders() // self-heal: bake any provider with an ENC_ROOT but no set (→ live prep)
 	return s
 }
 
@@ -104,6 +111,15 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool) *Server {
 func (s *Server) rebakeMissingProviders() {
 	var missing []string
 	for _, prov := range s.installedProviders() {
+		if _, live := s.sets.get(prov); live {
+			// Serving, but from another engine build's archives: re-bake to a staging
+			// tree and swap when done (prepareLiveProvider) — the old tiles keep
+			// serving meanwhile, and registerProviderSet replaces the composer.
+			if !s.liveEngineCurrent(s.liveCellsDir(prov)) {
+				missing = append(missing, prov)
+			}
+			continue
+		}
 		if _, ok := s.packPath(prov); !ok {
 			missing = append(missing, prov)
 		}
@@ -325,6 +341,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleDeleteDistrict(w, r) // DELETE: remove one district + re-bake the provider
 	case r.URL.Path == "/api/proxy":
 		s.serveProxy(w, r) // dumb CORS/Range passthrough for a NOAA URL (e.g. All_ENCs.zip)
+	case strings.HasPrefix(r.URL.Path, "/api/debug/partition"):
+		s.handleDebugPartition(w, r) // POST: bake ownership-partition overlays; GET: their status
 	default:
 		apiErr(w, http.StatusNotFound, "unknown endpoint")
 	}

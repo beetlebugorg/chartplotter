@@ -305,16 +305,16 @@ vet:
 
 # Format with the gofmt of the toolchain go.mod pins (Go 1.26), NOT whatever
 # gofmt happens to be on PATH — gofmt's rules change between Go minor releases,
-# so a stray 1.25 gofmt reintroduces drift that the 1.26 CI check rejects. Invoke
-# gofmt over `.` (not `go fmt ./...`, which can skip build-tagged files) so the
-# file set matches the CI `gofmt -l .` gate exactly.
+# so a stray 1.25 gofmt reintroduces drift that the 1.26 CI check rejects. Scope
+# to THIS repo's tracked *.go via `git ls-files` (not `.`, which walks into the
+# ./tile57 engine submodule — chartplotter-go doesn't own its formatting).
 fmt:
-	@"$$(go env GOROOT)/bin/gofmt" -w .
+	@"$$(go env GOROOT)/bin/gofmt" -w $$(git ls-files '*.go')
 
 # Mirror the CI gofmt gate exactly, using the same toolchain gofmt as `fmt`.
 fmt-check:
 	@GOFMT="$$(go env GOROOT)/bin/gofmt"; \
-	  out="$$($$GOFMT -l .)"; \
+	  out="$$($$GOFMT -l $$(git ls-files '*.go'))"; \
 	  test -z "$$out" || { echo "needs gofmt:"; echo "$$out"; exit 1; }
 
 tidy:

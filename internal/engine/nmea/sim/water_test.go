@@ -29,10 +29,7 @@ func TestWaterMask_RealCell(t *testing.T) {
 	if err != nil {
 		t.Skip("test cell not available")
 	}
-	src, err := tile57.OpenChartBytes(data)
-	require.NoError(t, err)
-	defer src.Close()
-	feats, err := src.Features("DEPARE", "DRGARE")
+	feats, err := tile57.FeaturesBytes(data, "DEPARE", "DRGARE")
 	require.NoError(t, err)
 	m := NewWaterMask(feats, 2)
 	require.NotNil(t, m, "cell should yield navigable depth areas")
