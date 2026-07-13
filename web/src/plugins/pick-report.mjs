@@ -53,6 +53,19 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+// The display name from an S-101 `featureName` complex — an array of
+// { name, language, nameUsage } instances; prefer the English one.
+function pickName(fn) {
+  if (!Array.isArray(fn) || !fn.length) return "";
+  const eng = fn.find((x) => x && (x.language === "eng" || x.language === "en"));
+  return ((eng || fn[0]) || {}).name || "";
+}
+
+// Left-indent a nested attribute's label by its depth in the S-101 complex tree.
+function indentK(depth) {
+  return depth > 0 ? ` style="padding-left:${depth * 14}px"` : "";
+}
+
 // Format an S-57 date value (YYYYMMDD / YYYYMM / YYYY) as the spec form (rule 6).
 function fmtS57Date(v) {
   const s = String(v).trim();
@@ -142,6 +155,10 @@ const STYLE = `
     line-height:1.4; word-break:break-word; }
   /* Block rows: one column spanning both tracks; label over content. */
   .row.block { grid-template-columns:1fr; gap:5px; }
+  /* Header row of an S-101 complex attribute: bold label, no value, no trailing colon;
+     its sub-attributes follow indented. */
+  .row.group .k { font-weight:600; color:var(--ui-text,#20252b); }
+  .row.group .k::after { content:""; }
   .empty { grid-column:1 / -1; color:var(--ui-text-faint,#9aa0a8); font-size:12.5px; padding:10px 0 14px; }
   /* Aux content (TXTDSC text / PICREP picture) resolved from the companion zip. */
   .aux-text { white-space:pre-wrap; font-size:12.5px; line-height:1.4; }
@@ -319,18 +336,22 @@ export class PickReport extends HTMLElement {
 
     let attrs = {};
     if (p.s57) { try { attrs = JSON.parse(p.s57); } catch { attrs = {}; } }
-    $("name").innerHTML = attrs.OBJNAM ? `<div class="name">${esc(attrs.OBJNAM)}</div>` : "";
+    // Subtitle name: S-57 OBJNAM, or the S-101 `featureName` complex (its English name).
+    const featName = attrs.OBJNAM || pickName(attrs.featureName);
+    $("name").innerHTML = featName ? `<div class="name">${esc(featName)}</div>` : "";
 
     const rows = [];
     let adminTotal = 0, adminHidden = 0;
     for (const acr of Object.keys(attrs).sort()) {
-      if (acr === "OBJNAM") continue; // shown as the subtitle
+      if (acr === "OBJNAM" || acr === "featureName") continue; // shown as the subtitle
       const meta = cat.attributes && cat.attributes[acr];
       const isAdmin = !!(meta && meta.admin);
       if (isAdmin) adminTotal++;
       const show = !isAdmin || this._admin || (acr === "SORDAT" && sordatException(cls, attrs));
       if (!show) { adminHidden++; continue; }
-      rows.push(this._row(acr, attrs[acr], meta));
+      // A value may be a string (simple attr) or, for an S-101 complex attribute, a
+      // nested object / array of instances — render those as an indented group.
+      rows.push(...this._attrRows(acr, attrs[acr], meta, 0));
     }
     $("kv").innerHTML = rows.length ? rows.join("") : `<div class="empty">No attributes encoded.</div>`;
     this._fillAux(seq); // resolve any TXTDSC/PICREP rows from the aux zip
@@ -355,10 +376,40 @@ export class PickReport extends HTMLElement {
       : "";
   }
 
+  // Render one attribute — possibly a nested S-101 complex — to an array of row HTML
+  // strings. A simple value is a single leaf row; a complex attribute arrives as an
+  // array of instances (each a nested object of sub-attributes) and renders as an
+  // indented group (a bold header, then its sub-attributes one level deeper, and so
+  // on recursively). Repeated instances are numbered.
+  _attrRows(key, val, meta, depth) {
+    if (val == null || typeof val !== "object") return [this._row(key, val, meta, depth)];
+    const cat = this._cat;
+    const entries = (obj) =>
+      Object.keys(obj)
+        .map((k) => this._attrRows(k, obj[k], cat.attributes && cat.attributes[k], depth + 1))
+        .flat();
+    if (Array.isArray(val)) {
+      const rows = [];
+      val.forEach((inst, i) => {
+        rows.push(this._groupHeader(val.length > 1 ? `${key} ${i + 1}` : key, meta, depth));
+        rows.push(...(inst && typeof inst === "object" ? entries(inst) : [this._row("", inst, null, depth + 1)]));
+      });
+      return rows;
+    }
+    return [this._groupHeader(key, meta, depth), ...entries(val)];
+  }
+
+  // A complex attribute's header row: its name, no value; sub-rows follow indented.
+  _groupHeader(label, meta, depth) {
+    const rawName = (meta && meta.name) || label;
+    const k = `${esc(rawName)}${rawName !== label ? `<span class="acr">${esc(label)}</span>` : ""}`;
+    return `<div class="row group"><div class="k"${indentK(depth)}>${k}</div><div class="v"></div></div>`;
+  }
+
   // One decoded attribute row: full name + acronym; value with enumerated names
   // (rule 2), units (rule 4) and dates as DD-MMM-YYYY (rule 6). Numbers arrive
   // unpadded from the tile (rule 3). Unknown attributes still show, by acronym (§10.8.6).
-  _row(acr, raw, meta) {
+  _row(acr, raw, meta, depth = 0) {
     // Label = the attribute's full name; the acronym follows as a dim tag, but only
     // when it isn't already the name (no catalogue → name falls back to the acronym,
     // and "CATLMK CATLMK" is just noise). See the title's matching guard.
@@ -371,7 +422,7 @@ export class PickReport extends HTMLElement {
       const ref = String(raw).trim();
       const tag = this._aux && this._aux.has(ref) ? ` data-aux="${esc(ref)}" data-auxkind="${isPic ? "image" : "text"}"` : "";
       // Block row: the resolved text/picture wants its own full-width line under the label.
-      return `<div class="row block"><div class="k">${k}</div><div class="v"${tag}>${esc(ref)}</div></div>`;
+      return `<div class="row block"><div class="k"${indentK(depth)}>${k}</div><div class="v"${tag}>${esc(ref)}</div></div>`;
     }
     let val;
     if (PICK_DATE_ATTRS.has(acr)) {
@@ -391,7 +442,7 @@ export class PickReport extends HTMLElement {
         if (meta && meta.unit) val += " " + meta.unit;
       }
     }
-    return `<div class="row"><div class="k">${k}</div><div class="v">${esc(val)}</div></div>`;
+    return `<div class="row"><div class="k"${indentK(depth)}>${k}</div><div class="v">${esc(val)}</div></div>`;
   }
 
   // Swap external-file filenames for their resolved content. Async (the aux zip
