@@ -33,6 +33,8 @@ export class PluginHost {
     this._layers = new PluginLayers({ map: services.map, plotter: services.plotter });
     this._ais = new AISFeed(services.aisStreamURL, services.aisPollURL);
     this._loaded = new Map(); // id -> { controller, cleanups }
+    this._installed = new Set(); // ids loaded dynamically from installed archives
+    this._es = null;
   }
 
   // register loads a controller for a plugin: builds its ctx, instantiates the
@@ -47,6 +49,68 @@ export class PluginHost {
       await controller.start?.();
     } catch (e) {
       console.warn(`[plugin ${id}] start failed`, e);
+    }
+  }
+
+  // start discovers installed, enabled plugins that ship a UI (manifest ui.entry),
+  // dynamically imports each one's entry module from its archive, and keeps the set
+  // in sync as plugins are enabled/disabled (via the /api/plugins SSE). Builtins are
+  // registered separately by the shell before this runs.
+  start() {
+    this._syncInstalled();
+    if (typeof EventSource !== "undefined") {
+      this._es = new EventSource(this._svc.assets + "api/plugins/stream");
+      this._es.onmessage = (ev) => {
+        let d;
+        try {
+          d = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        this._syncInstalled(d.plugins);
+      };
+      this._es.onerror = () => {};
+    }
+  }
+
+  async _syncInstalled(list) {
+    let plugins = list;
+    if (!plugins) {
+      try {
+        plugins = (await (await fetch(this._svc.assets + "api/plugins", { cache: "no-store" })).json()).plugins || [];
+      } catch {
+        return;
+      }
+    }
+    const want = new Set();
+    for (const p of plugins) {
+      const ui = p.manifest && p.manifest.ui;
+      if (p.record.enabled && ui && ui.entry) {
+        want.add(p.record.id);
+        this._loadInstalled(p.record.id, p.record.version, ui.entry);
+      }
+    }
+    // Unload any installed (non-builtin) plugin UI that is no longer enabled.
+    for (const id of [...this._installed]) {
+      if (!want.has(id)) {
+        this._installed.delete(id);
+        this.unregister(id);
+      }
+    }
+  }
+
+  async _loadInstalled(id, version, entry) {
+    if (this._loaded.has(id) || this._installed.has(id)) return;
+    this._installed.add(id);
+    const rel = String(entry).replace(/^ui\//, "");
+    const url = `${this._svc.assets}plugins/${encodeURIComponent(id)}/ui/${rel}`;
+    try {
+      const mod = await import(url);
+      if (mod && mod.default) await this.register({ id, version, ControllerClass: mod.default });
+      else console.warn(`[plugin ${id}] ui entry has no default export`);
+    } catch (e) {
+      this._installed.delete(id);
+      console.warn(`[plugin ${id}] UI load failed`, e);
     }
   }
 
@@ -70,6 +134,7 @@ export class PluginHost {
   }
 
   destroy() {
+    if (this._es) this._es.close();
     for (const id of [...this._loaded.keys()]) this.unregister(id);
     this._ais.destroy();
     this._layers.destroy();
@@ -111,6 +176,18 @@ export class PluginHost {
       layers: {
         add: (layerId, spec) => this._layers.add(id, layerId, spec),
       },
+
+      // The raw MapLibre instance — the use-at-your-own-risk tier (spec §8, §13).
+      // The declarative handles (layers/markers/camera) cover the common cases and
+      // carry the compatibility promise; a controller that needs more (a custom
+      // WebGL/canvas overlay like the wind-particle layer) uses this and accepts the
+      // same contract the built-ins live with (handle palette/style re-adds, stay in
+      // its z-band). own-ship/AIS deliberately do NOT use it.
+      map,
+
+      // App asset base, so a plugin can fetch its own served artifacts
+      // (GET /plugins/<id>/serve/…, same-origin under the app CSP).
+      assets: svc.assets || "/",
 
       // DOM markers (rotated glyphs) without handing the plugin the raw map. The
       // controller owns marker teardown (own-ship removes its one marker; AIS its

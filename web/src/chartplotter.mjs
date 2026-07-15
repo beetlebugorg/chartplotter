@@ -732,6 +732,7 @@ export class ChartPlotter extends HTMLElement {
         map,
         plotter: this._plotter,
         vessel: this._vessel,
+        assets: this._assets,
         aisStreamURL: this._assets + "api/ais/stream",
         aisPollURL: this._assets + "api/ais",
         chrome: this.shadowRoot,
@@ -743,6 +744,8 @@ export class ChartPlotter extends HTMLElement {
       });
       this._pluginHost.register({ id: "core.own-ship", version: "1.0.0", ControllerClass: OwnShip });
       this._pluginHost.register({ id: "core.ais", version: "1.0.0", ControllerClass: AISOverlay });
+      // Discover + load installed plugins that ship UI (e.g. the weather overlay).
+      this._pluginHost.start();
       // Precise DOM tap pads on the INFORM01 "additional information" and CHDATD01
       // "date-dependent" callout boxes (each floats offset from the feature, so the
       // fuzzy symbol pick can't own it). Sparse by nature — only info-bearing /
