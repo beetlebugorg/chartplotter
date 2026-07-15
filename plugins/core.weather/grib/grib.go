@@ -1,0 +1,188 @@
+// Package grib is a minimal GRIB2 codec for gridded wind fields: it decodes (and, for
+// building fixtures, encodes) regular lat/lon grids with grid-point simple packing —
+// GRIB2 grid-definition template 3.0, product template 4.0, data-representation
+// template 5.0, no bitmap. That subset is spec-compliant and covers many
+// simple-packed products; GFS's complex packing + spatial differencing (template 5.3)
+// is a documented follow-up. Big-endian throughout (GRIB2 is network byte order).
+package grib
+
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+	"time"
+)
+
+// Grid is one decoded GRIB2 message: a field over a regular lat/lon grid.
+type Grid struct {
+	Nx, Ny             int       // columns, rows
+	La1, Lo1, La2, Lo2 float64   // grid corners, degrees (La1/Lo1 = first point)
+	Dx, Dy             float64   // increments, degrees
+	RefTime            time.Time // reference (analysis) time, UTC
+	Category, Number   int       // product discipline-2 category/number (2/2=UGRD, 2/3=VGRD)
+	ForecastHour       int       // forecast offset, hours
+	Values             []float64 // row-major from (La1,Lo1), len Nx*Ny
+}
+
+// Decode parses every GRIB2 message in b.
+func Decode(b []byte) ([]Grid, error) {
+	var out []Grid
+	for len(b) >= 16 {
+		if string(b[0:4]) != "GRIB" {
+			// Skip to the next "GRIB" (products can be concatenated with padding).
+			i := indexGRIB(b[1:])
+			if i < 0 {
+				break
+			}
+			b = b[1+i:]
+			continue
+		}
+		if b[7] != 2 {
+			return nil, fmt.Errorf("unsupported GRIB edition %d", b[7])
+		}
+		total := int(binary.BigEndian.Uint64(b[8:16]))
+		if total <= 0 || total > len(b) {
+			return nil, fmt.Errorf("bad message length %d (have %d)", total, len(b))
+		}
+		g, err := decodeMessage(b[:total])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+		b = b[total:]
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no GRIB2 messages found")
+	}
+	return out, nil
+}
+
+func decodeMessage(b []byte) (Grid, error) {
+	var g Grid
+	var refValue float32
+	var binScale, decScale int
+	var bitsPerValue int
+	var numPoints int
+	p := 16 // past Section 0
+
+	for p+5 <= len(b) {
+		if string(b[p:p+4]) == "7777" { // Section 8: end
+			break
+		}
+		secLen := int(binary.BigEndian.Uint32(b[p : p+4]))
+		secNum := b[p+4]
+		if secLen < 5 || p+secLen > len(b) {
+			return g, fmt.Errorf("bad section %d length %d", secNum, secLen)
+		}
+		s := b[p : p+secLen]
+		switch secNum {
+		case 1: // Identification: reference time
+			year := int(binary.BigEndian.Uint16(s[12:14]))
+			g.RefTime = time.Date(year, time.Month(s[14]), int(s[15]), int(s[16]), int(s[17]), int(s[18]), 0, time.UTC)
+		case 3: // Grid definition (template 3.0, regular lat/lon)
+			tmpl := binary.BigEndian.Uint16(s[12:14])
+			if tmpl != 0 {
+				return g, fmt.Errorf("unsupported grid template %d (want 3.0)", tmpl)
+			}
+			g.Nx = int(binary.BigEndian.Uint32(s[30:34]))
+			g.Ny = int(binary.BigEndian.Uint32(s[34:38]))
+			g.La1 = micro(s[46:50])
+			g.Lo1 = micro(s[50:54])
+			g.La2 = micro(s[55:59])
+			g.Lo2 = micro(s[59:63])
+			g.Dx = micro(s[63:67])
+			g.Dy = micro(s[67:71])
+		case 4: // Product definition (template 4.0)
+			tmpl := binary.BigEndian.Uint16(s[7:9])
+			if tmpl != 0 {
+				return g, fmt.Errorf("unsupported product template %d (want 4.0)", tmpl)
+			}
+			g.Category = int(s[9])
+			g.Number = int(s[10])
+			g.ForecastHour = int(binary.BigEndian.Uint32(s[18:22]))
+		case 5: // Data representation (template 5.0, simple packing)
+			numPoints = int(binary.BigEndian.Uint32(s[5:9]))
+			tmpl := binary.BigEndian.Uint16(s[9:11])
+			if tmpl != 0 {
+				return g, fmt.Errorf("unsupported data-rep template %d (want 5.0 simple packing)", tmpl)
+			}
+			refValue = math.Float32frombits(binary.BigEndian.Uint32(s[11:15]))
+			binScale = signed16(s[15:17])
+			decScale = signed16(s[17:19])
+			bitsPerValue = int(s[19])
+		case 7: // Data
+			g.Values = unpackSimple(s[5:], numPoints, float64(refValue), binScale, decScale, bitsPerValue)
+		}
+		p += secLen
+	}
+	if g.Values == nil {
+		return g, fmt.Errorf("message has no data section")
+	}
+	return g, nil
+}
+
+// unpackSimple applies the simple-packing formula:
+//
+//	Y = (R + X·2^E) / 10^D
+//
+// where X is the bitsPerValue-bit unsigned integer read big-endian from the stream.
+func unpackSimple(data []byte, n int, ref float64, binScale, decScale, bits int) []float64 {
+	out := make([]float64, n)
+	bs := math.Pow(2, float64(binScale))
+	ds := math.Pow(10, float64(decScale))
+	if bits == 0 { // constant field: every value == ref/10^D
+		for i := range out {
+			out[i] = ref / ds
+		}
+		return out
+	}
+	var bitPos int
+	for i := 0; i < n; i++ {
+		x := readBits(data, bitPos, bits)
+		out[i] = (ref + float64(x)*bs) / ds
+		bitPos += bits
+	}
+	return out
+}
+
+// readBits reads `bits` bits starting at bit offset `pos` (MSB-first).
+func readBits(data []byte, pos, bits int) uint64 {
+	var v uint64
+	for i := 0; i < bits; i++ {
+		bit := pos + i
+		byteIdx := bit >> 3
+		if byteIdx >= len(data) {
+			break
+		}
+		b := (data[byteIdx] >> (7 - uint(bit&7))) & 1
+		v = (v << 1) | uint64(b)
+	}
+	return v
+}
+
+// micro reads a GRIB2 lat/lon/increment (unsigned 1e-6 degrees, high bit = sign for
+// lat/lon but increments are unsigned; we treat as signed magnitude for corners).
+func micro(b []byte) float64 {
+	u := binary.BigEndian.Uint32(b)
+	if u&0x80000000 != 0 { // sign bit (GRIB2 uses sign-magnitude for lat/lon)
+		return -float64(u&0x7fffffff) / 1e6
+	}
+	return float64(u) / 1e6
+}
+
+func signed16(b []byte) int {
+	u := binary.BigEndian.Uint16(b)
+	if u&0x8000 != 0 {
+		return -int(u & 0x7fff)
+	}
+	return int(u)
+}
+
+func indexGRIB(b []byte) int {
+	for i := 0; i+4 <= len(b); i++ {
+		if string(b[i:i+4]) == "GRIB" {
+			return i
+		}
+	}
+	return -1
+}
