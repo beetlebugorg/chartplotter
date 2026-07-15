@@ -240,12 +240,23 @@ func (s *Server) prepareLiveProvider(jobID, encRoot, provider string) (int, tile
 // RUNNING engine (the .enginever stamp matches the linked tile57 commit). An unstamped
 // tree counts as stale — prepareLiveProvider re-bakes it to staging and swaps. With no
 // engine commit linked in, everything counts as current (nothing to compare against).
+//
+// Dev escape hatch: set CHARTPLOTTER_NO_REBAKE=1 to treat all baked charts as current,
+// so rebuilding the app (which bumps the version/engine stamp) doesn't kick off a slow
+// re-bake on every restart. Genuinely-missing charts still bake — this only suppresses
+// the "engine changed" staleness re-bake. Tiles may then be from an older engine build.
 func (s *Server) liveEngineCurrent(cellsDir string) bool {
-	if s.EngineCommit == "" {
+	if s.EngineCommit == "" || noRebake() {
 		return true
 	}
 	b, err := os.ReadFile(filepath.Join(cellsDir, ".enginever"))
 	return err == nil && string(b) == s.EngineCommit
+}
+
+// noRebake reports whether the dev "don't re-bake on engine change" override is set.
+func noRebake() bool {
+	v := os.Getenv("CHARTPLOTTER_NO_REBAKE")
+	return v != "" && v != "0" && v != "false"
 }
 
 // registerLiveProviders re-registers, at boot, a runtime compositor for every installed provider
