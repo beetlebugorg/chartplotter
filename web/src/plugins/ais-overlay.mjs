@@ -26,10 +26,24 @@ export default class AISOverlay {
   constructor(ctx) {
     this.ctx = ctx;
     this._markers = new Map(); // mmsi -> {marker, hasDir, danger, t}
+    this._visible = true;
   }
 
   start() {
     this._off = this.ctx.ais.subscribe((targets) => this._apply(targets || []));
+    // Show/hide all AIS glyphs from the Layers control — the feed keeps running
+    // (CPA/collision tracking is unaffected), only the markers hide.
+    this.ctx.overlays.register({
+      id: "targets",
+      title: "AIS targets",
+      group: "AIS",
+      onVisible: (v) => this._setVisible(v),
+    });
+  }
+
+  _setVisible(v) {
+    this._visible = v;
+    for (const rec of this._markers.values()) rec.marker.element.style.display = v ? "" : "none";
   }
 
   _apply(targets) {
@@ -54,6 +68,7 @@ export default class AISOverlay {
     if (!rec) {
       const marker = this.ctx.markers.add(`ais-${t.mmsi}`, { rotationAlignment: "map", anchor: "center" });
       marker.setStyle(GLYPH_STYLE);
+      if (!this._visible) marker.element.style.display = "none"; // honor a hidden overlay
       marker.element.title = t.name || String(t.mmsi);
       marker.setLngLat([t.lon, t.lat]);
       rec = { marker, hasDir: undefined, danger: undefined, t };

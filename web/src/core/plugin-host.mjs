@@ -177,6 +177,17 @@ export class PluginHost {
         add: (layerId, spec) => this._layers.add(id, layerId, spec),
       },
 
+      // Register a show/hide-able overlay in the Layers control. desc:
+      // { id, title, group?, defaultVisible?, onVisible(visible) }. The id is
+      // namespaced by plugin; onVisible fires immediately + on each toggle, so the
+      // plugin can pause expensive work while hidden (spec §8, visibility signal).
+      overlays: {
+        register: (desc) => {
+          if (!svc.overlays) return () => {};
+          return track(svc.overlays.register({ ...desc, id: `${id}:${desc.id}`, group: desc.group || (svc.pluginTitle && svc.pluginTitle(id)) || "Overlays" }));
+        },
+      },
+
       // The raw MapLibre instance — the use-at-your-own-risk tier (spec §8, §13).
       // The declarative handles (layers/markers/camera) cover the common cases and
       // carry the compatibility promise; a controller that needs more (a custom

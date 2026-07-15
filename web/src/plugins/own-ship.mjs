@@ -131,6 +131,18 @@ export default class OwnShip {
     // Wheel-zoom anchor: keep the vessel fixed while zooming when we're following.
     ctx.camera.registerFollowAnchor(() => (this._follow && this._fix) ? [this._fix.lng, this._fix.lat] : null);
 
+    // Course/heading vectors are a show/hide-able overlay in the Layers control
+    // (the boat glyph itself always shows — you never hide own-ship).
+    ctx.overlays.register({
+      id: "vectors",
+      title: "Course & heading vectors",
+      group: "Own ship",
+      onVisible: (v) => {
+        this._predLayer.setVisible(v);
+        this._headLayer.setVisible(v);
+      },
+    });
+
     // GPS-freshness watchdog (ages the fix independent of the feed cadence).
     this._gpsTimer = setInterval(() => this._tickGps(), 1000);
 

@@ -47,20 +47,20 @@ export default class WindOverlay {
     map.on("movestart", this._onMove);
     map.on("zoomstart", this._onMove);
 
-    // A HUD toggle (also demonstrates per-layer show/hide, distinct from disabling
-    // the plugin — hiding stops the animation but keeps the data loaded).
-    const hud = ctx.hud.mount("wind");
-    hud.innerHTML = `<style>
-      .wx{display:flex;align-items:center;gap:6px;color:var(--ob-on-surface,var(--ui-text,#e6edf3));}
-      .wx button{font:inherit;color:inherit;background:var(--ui-surface,#161b22);
-        border:1px solid var(--ui-border,#30363d);border-radius:16px;padding:5px 12px;cursor:pointer;}
-      .wx button.on{background:var(--ui-accent,#2f81f7);color:var(--ui-accent-text,#fff);border-color:transparent;}
-    </style><div class="wx"><button id="t" class="on" title="Wind overlay">🌬 Wind</button></div>`;
-    hud.getElementById("t").addEventListener("click", () => this._toggle(hud.getElementById("t")));
+    // Show/hide from the Layers control — hiding stops the animation but keeps the
+    // wind data loaded (the "visual only" contract, distinct from disabling the
+    // plugin). onVisible fires immediately with the persisted state.
+    ctx.overlays.register({
+      id: "wind",
+      title: "Wind streamlines",
+      group: "Wind",
+      onVisible: (v) => this._setOn(v),
+    });
 
     await this._loadGrid();
     this._seed();
-    this._loop();
+    // The animation is driven by _setOn (from the overlay's persisted state,
+    // registered above). If it started before the grid loaded, it now has data.
   }
 
   async _loadGrid() {
@@ -112,9 +112,29 @@ export default class WindOverlay {
     };
   }
 
-  _loop() {
-    if (!this._on) return;
-    this._raf = requestAnimationFrame(() => this._loop());
+  _setOn(on) {
+    this._on = on;
+    if (this._canvas) this._canvas.style.display = on ? "" : "none";
+    if (on) this._start();
+    else this._stop();
+  }
+
+  _start() {
+    if (this._raf) return; // already animating
+    const step = () => {
+      this._raf = requestAnimationFrame(step);
+      this._frame();
+    };
+    this._raf = requestAnimationFrame(step);
+  }
+
+  _stop() {
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    if (this._c2d) this._c2d.clearRect(0, 0, this._cw, this._ch);
+  }
+
+  _frame() {
     const c = this._c2d;
     if (!c || !this._grid) return;
     const W = this._cw, H = this._ch;
@@ -147,14 +167,6 @@ export default class WindOverlay {
       p.lat = b.lat;
       p.age++;
     }
-  }
-
-  _toggle(btn) {
-    this._on = !this._on;
-    btn.classList.toggle("on", this._on);
-    this._canvas.style.display = this._on ? "" : "none";
-    if (this._on) this._loop();
-    else if (this._c2d) this._c2d.clearRect(0, 0, this._cw, this._ch);
   }
 
   _resize() {

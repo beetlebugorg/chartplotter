@@ -56,6 +56,14 @@ export class PluginLayers {
         const src = this._map.getSource(rec.srcId);
         if (src) src.setData(rec.data);
       },
+      // Show/hide the layer(s) without removing them (drives the Layers control).
+      setVisible: (visible) => {
+        rec.hidden = !visible;
+        const v = visible ? "visible" : "none";
+        for (const lid of rec.layerIds) {
+          if (this._map.getLayer(lid)) this._map.setLayoutProperty(lid, "visibility", v);
+        }
+      },
       remove: () => this._remove(key),
     };
   }
@@ -73,8 +81,10 @@ export class PluginLayers {
     specs.forEach((ls, i) => {
       const lid = `${rec.key}-l${i}`;
       rec.layerIds.push(lid);
+      const layout = { ...(ls.layout || {}) };
+      if (rec.hidden) layout.visibility = "none"; // preserve hidden state across style rebuilds
       this._plotter.addOverlayLayer(
-        { id: lid, type: ls.type, source: rec.srcId, layout: ls.layout || {}, paint: ls.paint || {} },
+        { id: lid, type: ls.type, source: rec.srcId, layout, paint: ls.paint || {} },
         { belowLabels: band.belowLabels },
       );
     });

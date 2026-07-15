@@ -31,6 +31,8 @@ import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 d
 import { PluginsController } from "./plugins/plugins-manager.mjs"; // install + manage plugins (Plugins tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { PluginHost } from "./core/plugin-host.mjs"; // loads builtin/plugin UI controllers with a declarative ctx
+import { LayerRegistry } from "./core/layer-registry.mjs"; // map-overlay show/hide registry (Layers tab)
+import { LayersController } from "./plugins/layers-panel.mjs"; // Layers settings tab
 import OwnShip from "./plugins/own-ship.mjs"; // builtin core.own-ship: marker + course predictor + follow camera
 import AISOverlay from "./plugins/ais-overlay.mjs"; // builtin core.ais: AIS targets (other vessels) from the live feed
 import { InfoCallouts } from "./plugins/info-callouts.mjs"; // precise DOM tap pads on INFORM01 + CHDATD01 callout boxes
@@ -407,6 +409,10 @@ export class ChartPlotter extends HTMLElement {
     }
     // Display calibration (ruler-measure the 5 mm check box → true physical scale).
     this._settingsRegistry.register(calibrationContribution(this));
+    // Map-overlay show/hide registry + its Layers settings tab. Core overlays and
+    // plugins register their layers here (via ctx.overlays); the tab lists them.
+    this._layerRegistry = new LayerRegistry();
+    if (!this._widget) this._layersCtl = new LayersController({ registry: this._settingsRegistry, layers: this._layerRegistry });
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
     if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
@@ -741,6 +747,7 @@ export class ChartPlotter extends HTMLElement {
         registerZoomAnchor: (fn) => { this._zoomAnchors.add(fn); return () => this._zoomAnchors.delete(fn); },
         settings: this._settingsRegistry,
         notify: this._notify,
+        overlays: this._layerRegistry,
       });
       this._pluginHost.register({ id: "core.own-ship", version: "1.0.0", ControllerClass: OwnShip });
       this._pluginHost.register({ id: "core.ais", version: "1.0.0", ControllerClass: AISOverlay });
