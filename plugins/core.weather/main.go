@@ -15,6 +15,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/plugins/core.weather/grib"
@@ -50,71 +51,86 @@ func (p *weather) Start(h *sdk.Host) {
 
 func (p *weather) Stop() {}
 
-// publish decodes GRIB2 wind (UGRD/VGRD) and serves it as the standard wind-particle
-// JSON (a two-record "velocity" document the frontend layer consumes).
+// publish decodes GRIB2 wind (UGRD/VGRD, possibly several forecast hours) and serves
+// it as a multi-step wind document the frontend layer scrubs through.
 func (p *weather) publish(gribBytes []byte, srcLabel string) {
 	grids, err := grib.Decode(gribBytes)
 	if err != nil {
 		p.h.Status("error", "GRIB decode: "+err.Error())
 		return
 	}
-	var u, v *grib.Grid
+	// Group U/V by forecast hour, preserving hour order.
+	type uv struct{ u, v *grib.Grid }
+	byHour := map[int]*uv{}
+	var order []int
 	for i := range grids {
 		g := &grids[i]
-		if g.Category == 2 && g.Number == 2 {
-			u = g
+		if g.Category != 2 || (g.Number != 2 && g.Number != 3) {
+			continue
 		}
-		if g.Category == 2 && g.Number == 3 {
-			v = g
+		e := byHour[g.ForecastHour]
+		if e == nil {
+			e = &uv{}
+			byHour[g.ForecastHour] = e
+			order = append(order, g.ForecastHour)
+		}
+		if g.Number == 2 {
+			e.u = g
+		} else {
+			e.v = g
 		}
 	}
-	if u == nil || v == nil {
+	sort.Ints(order)
+
+	var doc windDoc
+	for _, hr := range order {
+		e := byHour[hr]
+		if e.u == nil || e.v == nil {
+			continue
+		}
+		if doc.Header == (gridHeader{}) {
+			g := e.u
+			doc.RefTime = g.RefTime.Format(time.RFC3339)
+			doc.Header = gridHeader{Nx: g.Nx, Ny: g.Ny, Lo1: g.Lo1, La1: g.La1, Lo2: g.Lo2, La2: g.La2, Dx: g.Dx, Dy: g.Dy}
+		}
+		doc.Steps = append(doc.Steps, step{Hour: hr, U: e.u.Values, V: e.v.Values})
+	}
+	if len(doc.Steps) == 0 {
 		p.h.Status("degraded", "no UGRD/VGRD in GRIB")
 		return
 	}
-	doc := []record{recordOf(u, "U-component_of_wind", "eastward_wind"), recordOf(v, "V-component_of_wind", "northward_wind")}
 	body, _ := json.Marshal(doc)
 	p.h.ServeSet("wind.json", body, func(url string, err error) {
 		if err != nil {
 			p.h.Status("error", "publish: "+err.Error())
 			return
 		}
-		p.h.Status("running", "wind field published ("+srcLabel+"), "+isize(u.Nx, u.Ny))
+		p.h.Status("running", "wind published ("+srcLabel+"): "+isize(doc.Header.Nx, doc.Header.Ny)+", "+itoa(len(doc.Steps))+" step(s)")
 	})
 }
 
-// record is one field in the wind-particle JSON (the de-facto "velocity" format).
-type record struct {
-	Header header    `json:"header"`
-	Data   []float64 `json:"data"`
+// windDoc is the published multi-step wind field (one grid header, N forecast steps).
+type windDoc struct {
+	RefTime string     `json:"refTime"`
+	Header  gridHeader `json:"header"`
+	Steps   []step     `json:"steps"`
 }
 
-type header struct {
-	ParameterCategory int     `json:"parameterCategory"`
-	ParameterNumber   int     `json:"parameterNumber"`
-	ParameterName     string  `json:"parameterNumberName"`
-	ParameterUnit     string  `json:"parameterUnit"`
-	Nx                int     `json:"nx"`
-	Ny                int     `json:"ny"`
-	Lo1               float64 `json:"lo1"`
-	La1               float64 `json:"la1"`
-	Lo2               float64 `json:"lo2"`
-	La2               float64 `json:"la2"`
-	Dx                float64 `json:"dx"`
-	Dy                float64 `json:"dy"`
-	RefTime           string  `json:"refTime"`
-	ForecastTime      int     `json:"forecastTime"`
+type gridHeader struct {
+	Nx  int     `json:"nx"`
+	Ny  int     `json:"ny"`
+	Lo1 float64 `json:"lo1"`
+	La1 float64 `json:"la1"`
+	Lo2 float64 `json:"lo2"`
+	La2 float64 `json:"la2"`
+	Dx  float64 `json:"dx"`
+	Dy  float64 `json:"dy"`
 }
 
-func recordOf(g *grib.Grid, name, _ string) record {
-	return record{
-		Header: header{
-			ParameterCategory: g.Category, ParameterNumber: g.Number, ParameterName: name, ParameterUnit: "m.s-1",
-			Nx: g.Nx, Ny: g.Ny, Lo1: g.Lo1, La1: g.La1, Lo2: g.Lo2, La2: g.La2, Dx: g.Dx, Dy: g.Dy,
-			RefTime: g.RefTime.Format(time.RFC3339), ForecastTime: g.ForecastHour,
-		},
-		Data: g.Values,
-	}
+type step struct {
+	Hour int       `json:"hour"`
+	U    []float64 `json:"u"`
+	V    []float64 `json:"v"`
 }
 
 func isize(nx, ny int) string { return itoa(nx) + "×" + itoa(ny) }

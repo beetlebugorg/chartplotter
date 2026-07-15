@@ -23,6 +23,7 @@ export default class WindOverlay {
   constructor(ctx) {
     this.ctx = ctx;
     this._grid = null;
+    this._doc = null;
     this._particles = [];
     this._raf = 0;
     this._on = true;
@@ -57,27 +58,45 @@ export default class WindOverlay {
       onVisible: (v) => this._setOn(v),
     });
 
-    await this._loadGrid();
+    this._mountSlider();
+    await this._loadDoc();
     this._seed();
     // The animation is driven by _setOn (from the overlay's persisted state,
     // registered above). If it started before the grid loaded, it now has data.
   }
 
-  async _loadGrid() {
+  async _loadDoc() {
     try {
       const url = `${this.ctx.assets}plugins/${this.ctx.plugin.id}/serve/wind.json`;
       const doc = await (await fetch(url, { cache: "no-store" })).json();
-      const u = doc.find((r) => r.header.parameterNumber === 2);
-      const v = doc.find((r) => r.header.parameterNumber === 3);
-      if (!u || !v) return;
-      const h = u.header;
-      this._grid = {
-        nx: h.nx, ny: h.ny, lo1: h.lo1, la1: h.la1, dx: h.dx, dy: h.dy,
-        lo2: h.lo2, la2: h.la2, u: u.data, v: v.data,
-      };
+      if (!doc.header || !doc.steps || !doc.steps.length) return;
+      this._doc = doc;
+      this._setStep(0); // build the initial grid from the first forecast step
+      this._buildSlider();
     } catch (e) {
-      this.ctx.plugin.log("warn", "wind grid load failed", e);
+      this.ctx.plugin.log("warn", "wind doc load failed", e);
     }
+  }
+
+  // _setStep sets the active wind grid from a fractional step position, linearly
+  // interpolating u/v between the two bracketing forecast steps.
+  _setStep(frac) {
+    const d = this._doc;
+    if (!d) return;
+    const n = d.steps.length;
+    frac = Math.max(0, Math.min(n - 1, frac));
+    const i0 = Math.floor(frac), i1 = Math.min(i0 + 1, n - 1), t = frac - i0;
+    const s0 = d.steps[i0], s1 = d.steps[i1];
+    const len = s0.u.length;
+    const u = new Array(len), v = new Array(len);
+    for (let k = 0; k < len; k++) {
+      u[k] = s0.u[k] * (1 - t) + s1.u[k] * t;
+      v[k] = s0.v[k] * (1 - t) + s1.v[k] * t;
+    }
+    const h = d.header;
+    this._grid = { nx: h.nx, ny: h.ny, lo1: h.lo1, la1: h.la1, lo2: h.lo2, la2: h.la2, dx: h.dx, dy: h.dy, u, v };
+    this._hour = Math.round(s0.hour * (1 - t) + s1.hour * t);
+    if (this._label) this._label.textContent = "+" + this._hour + "h";
   }
 
   // Bilinear-sample the wind at (lng,lat); returns [u,v] or null if off-grid.
@@ -112,9 +131,41 @@ export default class WindOverlay {
     };
   }
 
+  // _mountSlider builds the forecast time scrubber (hidden until data loads / the
+  // overlay is shown). Mounted in the shell chrome; theme vars inherit.
+  _mountSlider() {
+    const hud = this.ctx.hud.mount("wind-time");
+    hud.innerHTML = `<style>
+      .wt{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(var(--botbar-h,0px) + 92px);
+        z-index:6;display:none;align-items:center;gap:10px;padding:7px 14px;border-radius:20px;
+        background:var(--ui-surface,#161b22);border:1px solid var(--ui-border,#30363d);
+        box-shadow:0 3px 14px rgba(0,0,0,.28);color:var(--ui-text,#e6edf3);font:600 12px/1 system-ui,sans-serif;}
+      .wt input{width:180px;accent-color:var(--ui-accent,#2f81f7);}
+      .wt .lbl{min-width:46px;text-align:right;}
+    </style><div class="wt"><span>🌬</span><input type="range" min="0" max="0" value="0"><span class="lbl">+0h</span></div>`;
+    this._sliderWrap = hud.querySelector(".wt");
+    this._slider = hud.querySelector("input");
+    this._label = hud.querySelector(".lbl");
+    this._slider.addEventListener("input", () => this._setStep(Number(this._slider.value) / 10));
+  }
+
+  _buildSlider() {
+    if (!this._slider || !this._doc) return;
+    this._slider.max = String((this._doc.steps.length - 1) * 10); // ×10 for smooth interpolation
+    this._slider.value = "0";
+    this._syncSlider();
+  }
+
+  _syncSlider() {
+    if (this._sliderWrap) {
+      this._sliderWrap.style.display = this._on && this._doc && this._doc.steps.length > 1 ? "flex" : "none";
+    }
+  }
+
   _setOn(on) {
     this._on = on;
     if (this._canvas) this._canvas.style.display = on ? "" : "none";
+    this._syncSlider();
     if (on) this._start();
     else this._stop();
   }
