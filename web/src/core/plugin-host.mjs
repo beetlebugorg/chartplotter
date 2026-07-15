@@ -183,10 +183,19 @@ export class PluginHost {
       // { id, title, group?, defaultVisible?, onVisible(visible) }. The id is
       // namespaced by plugin; onVisible fires immediately + on each toggle, so the
       // plugin can pause expensive work while hidden (spec §8, visibility signal).
+      // Returns a handle so the plugin can also drive the same overlay (e.g. a HUD
+      // toggle) — the Layers control and the handle share the registry as the single
+      // source of truth, so they stay in sync.
       overlays: {
         register: (desc) => {
-          if (!svc.overlays) return () => {};
-          return track(svc.overlays.register({ ...desc, id: `${id}:${desc.id}`, group: desc.group || (svc.pluginTitle && svc.pluginTitle(id)) || "Overlays" }));
+          if (!svc.overlays) return { setVisible() {}, toggle() {}, unregister() {} };
+          const fullId = `${id}:${desc.id}`;
+          const unreg = track(svc.overlays.register({ ...desc, id: fullId, group: desc.group || (svc.pluginTitle && svc.pluginTitle(id)) || "Overlays" }));
+          return {
+            setVisible: (v) => svc.overlays.setVisible(fullId, v),
+            toggle: () => svc.overlays.toggle(fullId),
+            unregister: unreg,
+          };
         },
       },
 

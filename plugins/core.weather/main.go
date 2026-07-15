@@ -14,7 +14,6 @@ package main
 
 import (
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -181,14 +180,50 @@ func (p *weather) publish(gribBytes []byte, srcLabel string) {
 		p.h.Status("degraded", "no UGRD/VGRD in GRIB")
 		return
 	}
-	body, _ := json.Marshal(doc)
-	p.h.ServeSet("wind.json", body, func(url string, err error) {
+	// Publish as a compact binary blob (Float32), not JSON: ~8× smaller, so a full
+	// 0.25° field fits the wire without downsampling. The frontend zero-copies the
+	// Float32 arrays out of the buffer.
+	body := encodeWindBin(&doc)
+	p.h.ServeSet("wind.bin", body, func(url string, err error) {
 		if err != nil {
 			p.h.Status("error", "publish: "+err.Error())
 			return
 		}
 		p.h.Status("running", "wind published ("+srcLabel+"): "+isize(doc.Header.Nx, doc.Header.Ny)+", "+itoa(len(doc.Steps))+" step(s)")
 	})
+}
+
+// encodeWindBin serialises the multi-step wind field as little-endian binary. Every
+// section is 4-byte aligned so the browser can view the u/v arrays as Float32Array
+// with zero copying:
+//
+//	"WGRD" | version u32 | nx u32 | ny u32 | nSteps u32 | lo1,la1,dx,dy f32
+//	per step: hour i32 | u[nx*ny] f32 | v[nx*ny] f32
+func encodeWindBin(d *windDoc) []byte {
+	h := d.Header
+	np := h.Nx * h.Ny
+	out := make([]byte, 0, 36+len(d.Steps)*(4+np*8))
+	put32 := func(v uint32) { out = append(out, byte(v), byte(v>>8), byte(v>>16), byte(v>>24)) }
+	putF := func(f float64) { put32(math.Float32bits(float32(f))) }
+	out = append(out, 'W', 'G', 'R', 'D')
+	put32(1)
+	put32(uint32(h.Nx))
+	put32(uint32(h.Ny))
+	put32(uint32(len(d.Steps)))
+	putF(h.Lo1)
+	putF(h.La1)
+	putF(h.Dx)
+	putF(h.Dy)
+	for _, s := range d.Steps {
+		put32(uint32(int32(s.Hour)))
+		for _, x := range s.U {
+			putF(x)
+		}
+		for _, x := range s.V {
+			putF(x)
+		}
+	}
+	return out
 }
 
 // windDoc is the published multi-step wind field (one grid header, N forecast steps).
@@ -215,9 +250,11 @@ type step struct {
 	V    []float64 `json:"v"`
 }
 
-// maxGridPoints caps a published field so its JSON stays well under the 16 MiB wire
-// line limit (each value is ~8 JSON bytes; ~200k points → ~3 MB per step).
-const maxGridPoints = 200000
+// maxGridPoints caps a published field so the binary blob (2 × Float32 per point,
+// base64 on the wire) stays under the 16 MiB line limit. As binary, a full 0.25°
+// global field (~1.04M points ≈ 8.3 MB → ~11 MB base64) fits without downsampling;
+// finer/multi-step grids are still thinned.
+const maxGridPoints = 1_100_000
 
 // capGrid downsamples u/v (row-major from the grid's first point) by an integer
 // stride if the grid exceeds max points, adjusting the header increments. Streamlines

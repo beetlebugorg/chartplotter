@@ -8,15 +8,19 @@
 // uses ctx.map (accepting the same contract the built-ins live with) rather than the
 // declarative layers API.
 
-const PARTICLES = 3000;
-const MAX_AGE = 90; // frames before a particle respawns
-const STEP = 0.35; // screen px per (m/s) per frame
-const FADE = 0.94; // trail persistence (higher = longer tails)
+const PARTICLES = 2600;
+const MAX_AGE = 130; // frames before a particle respawns (longer → longer streamlines)
+const STEP = 0.16; // screen px per (m/s) per frame (lower → slower, calmer motion)
+const FADE = 0.96; // trail persistence (higher = longer tails)
+const LINE_WIDTH = 2.1;
 
-// Wind-speed colour ramp (m/s → colour), light→strong.
+// Wind-speed colour ramp (m/s → colour), interpolated. A cool→warm scale that reads
+// on day/dusk/night charts: calm blues, moderate greens/gold, strong oranges/reds,
+// gale magenta.
 const RAMP = [
-  [0, "#6ea8d8"], [5, "#78c07a"], [10, "#e8d24a"],
-  [15, "#e79a3c"], [22, "#dc5a3c"], [32, "#b03060"],
+  [0, "#5b9bd5"], [4, "#4fb0c6"], [8, "#5ec4a0"],
+  [12, "#8ecf6a"], [16, "#e6c84b"], [21, "#ef9a3d"],
+  [27, "#e5623c"], [34, "#c23b6b"], [45, "#8e3ca0"],
 ];
 
 export default class WindOverlay {
@@ -42,16 +46,17 @@ export default class WindOverlay {
     this._resize();
     this._onResize = () => this._resize();
     map.on("resize", this._onResize);
-    // Panning/zooming reprojects every frame; clear the trail canvas so old trails
-    // don't smear at stale screen positions.
-    this._onMove = () => this._c2d && this._c2d.clearRect(0, 0, canvas.width, canvas.height);
-    map.on("movestart", this._onMove);
-    map.on("zoomstart", this._onMove);
+    // Only clear on ZOOM (the projection scale changes, so trails would stretch).
+    // Do NOT clear on pan: the follow camera eases the map on every fix, and clearing
+    // there made the whole field flicker each time — re-projecting per frame already
+    // tracks a pan, and the trail fade cleans up any brief smear.
+    this._onZoom = () => this._c2d && this._c2d.clearRect(0, 0, this._cw, this._ch);
+    map.on("zoomstart", this._onZoom);
 
-    // Show/hide from the Layers control — hiding stops the animation but keeps the
-    // wind data loaded (the "visual only" contract, distinct from disabling the
-    // plugin). onVisible fires immediately with the persisted state.
-    ctx.overlays.register({
+    // Show/hide from the Layers control AND the on-map control below — both drive the
+    // same registry entry, so they stay in sync. Hiding stops the animation but keeps
+    // the wind data loaded (visual-only, distinct from disabling the plugin).
+    this._layer = ctx.overlays.register({
       id: "wind",
       title: "Wind streamlines",
       group: "Wind",
@@ -59,6 +64,7 @@ export default class WindOverlay {
     });
 
     this._mountSlider();
+    this._mountControl();
     await this._loadDoc();
     this._seed();
     // The animation is driven by _setOn (from the overlay's persisted state,
@@ -67,14 +73,15 @@ export default class WindOverlay {
 
   async _loadDoc() {
     try {
-      const url = `${this.ctx.assets}plugins/${this.ctx.plugin.id}/serve/wind.json`;
-      const doc = await (await fetch(url, { cache: "no-store" })).json();
-      if (!doc.header || !doc.steps || !doc.steps.length) return;
+      const url = `${this.ctx.assets}plugins/${this.ctx.plugin.id}/serve/wind.bin`;
+      const buf = await (await fetch(url, { cache: "no-store" })).arrayBuffer();
+      const doc = parseWindBin(buf);
+      if (!doc) return;
       this._doc = doc;
       this._setStep(0); // build the initial grid from the first forecast step
       this._buildSlider();
     } catch (e) {
-      this.ctx.plugin.log("warn", "wind doc load failed", e);
+      this.ctx.plugin.log("warn", "wind grid load failed", e);
     }
   }
 
@@ -97,6 +104,7 @@ export default class WindOverlay {
     this._grid = { nx: h.nx, ny: h.ny, lo1: h.lo1, la1: h.la1, lo2: h.lo2, la2: h.la2, dx: h.dx, dy: h.dy, u, v };
     this._hour = Math.round(s0.hour * (1 - t) + s1.hour * t);
     if (this._label) this._label.textContent = "+" + this._hour + "h";
+    this._updateReadout(); // wind at the vessel changes with the forecast step
   }
 
   // Bilinear-sample the wind at (lng,lat); returns [u,v] or null if off-grid. Handles
@@ -169,10 +177,58 @@ export default class WindOverlay {
     }
   }
 
+  // One on-map control that is both the enable/disable toggle AND the live wind
+  // readout: click to turn the overlay on/off; while on it shows the actual wind at
+  // the vessel (speed in the mariner's units + compass direction it blows FROM, with
+  // an arrow pointing where it blows). Kept in sync with the Layers control via the
+  // shared registry.
+  _mountControl() {
+    const hud = this.ctx.hud.mount("wind-control");
+    hud.innerHTML = `<style>
+      .wc{position:absolute;right:calc(12px + env(safe-area-inset-right,0px));top:calc(var(--topbar-h,0px) + 60px);
+        z-index:6;display:flex;align-items:center;gap:7px;padding:6px 12px;border-radius:16px;cursor:pointer;
+        background:var(--ui-surface,#161b22);border:1px solid var(--ui-border,#30363d);
+        color:var(--ui-text,#e6edf3);font:600 12px/1 system-ui,sans-serif;box-shadow:0 3px 14px rgba(0,0,0,.28);
+        -webkit-user-select:none;user-select:none;}
+      .wc.off{opacity:.65;}
+      .wc .arrow{display:inline-block;font-size:13px;line-height:1;}
+    </style><div class="wc off" id="c"><span>🌬</span><span class="arrow" id="ar" hidden>↓</span><span id="v">Wind</span></div>`;
+    this._ctl = hud.getElementById("c");
+    this._ctlVal = hud.getElementById("v");
+    this._ctlArrow = hud.getElementById("ar");
+    this._ctl.addEventListener("click", () => this._layer.toggle());
+    this.ctx.vessel.subscribe(() => this._updateReadout());
+  }
+
+  _updateReadout() {
+    if (!this._ctl) return;
+    this._ctl.classList.toggle("off", !this._on);
+    const w = this._on ? this._sample(this._readoutPos().lng, this._readoutPos().lat) : null;
+    if (!w) {
+      this._ctlVal.textContent = "Wind";
+      this._ctlArrow.hidden = true;
+      return;
+    }
+    const spdKn = Math.hypot(w[0], w[1]) * 1.94384; // m/s → knots
+    const from = (Math.atan2(-w[0], -w[1]) * 180 / Math.PI + 360) % 360; // meteorological "from"
+    this._ctlArrow.hidden = false;
+    this._ctlArrow.style.transform = `rotate(${from}deg)`; // ↓ (south) rotated to blow-toward
+    this._ctlVal.textContent = `${this.ctx.units.format("wind", spdKn)} ${Math.round(from)}° ${compass(from)}`;
+  }
+
+  _readoutPos() {
+    const v = this.ctx.vessel.get();
+    const p = v && v.navigation && v.navigation.position;
+    if (p && typeof p.lat === "number") return { lng: p.lon, lat: p.lat };
+    const c = this.ctx.map.getCenter(); // no fix → wind at the map centre
+    return { lng: c.lng, lat: c.lat };
+  }
+
   _setOn(on) {
     this._on = on;
     if (this._canvas) this._canvas.style.display = on ? "" : "none";
     this._syncSlider();
+    this._updateReadout();
     if (on) this._start();
     else this._stop();
   }
@@ -201,9 +257,13 @@ export default class WindOverlay {
     c.fillStyle = `rgba(0,0,0,${FADE})`;
     c.fillRect(0, 0, W, H);
     c.globalCompositeOperation = "source-over";
-    c.lineWidth = 1.2;
+    c.lineCap = "round";
 
     const map = this.ctx.map;
+    // Pass 1: advect every particle and collect its screen segment (flat array of
+    // x0,y0,x1,y1,speed to avoid per-frame allocations).
+    const segs = this._segs || (this._segs = []);
+    segs.length = 0;
     for (const p of this._particles) {
       const wind = this._sample(p.lng, p.lat);
       if (!wind || p.age > MAX_AGE) {
@@ -215,15 +275,28 @@ export default class WindOverlay {
       const nx = a.x + wind[0] * STEP;
       const ny = a.y - wind[1] * STEP;
       const b = map.unproject([nx, ny]);
-      const spd = Math.hypot(wind[0], wind[1]);
-      c.strokeStyle = rampColor(spd);
-      c.beginPath();
-      c.moveTo(a.x, a.y);
-      c.lineTo(nx, ny);
-      c.stroke();
+      segs.push(a.x, a.y, nx, ny, Math.hypot(wind[0], wind[1]));
       p.lng = b.lng;
       p.lat = b.lat;
       p.age++;
+    }
+    // Pass 2a: a dark casing (one batched stroke) so streamlines read on LIGHT charts.
+    c.strokeStyle = "rgba(0,0,0,0.5)";
+    c.lineWidth = LINE_WIDTH + 2;
+    c.beginPath();
+    for (let i = 0; i < segs.length; i += 5) {
+      c.moveTo(segs[i], segs[i + 1]);
+      c.lineTo(segs[i + 2], segs[i + 3]);
+    }
+    c.stroke();
+    // Pass 2b: bright coloured cores (visible on DARK charts) on top.
+    c.lineWidth = LINE_WIDTH;
+    for (let i = 0; i < segs.length; i += 5) {
+      c.strokeStyle = rampColor(segs[i + 4]);
+      c.beginPath();
+      c.moveTo(segs[i], segs[i + 1]);
+      c.lineTo(segs[i + 2], segs[i + 3]);
+      c.stroke();
     }
   }
 
@@ -244,16 +317,19 @@ export default class WindOverlay {
     if (this._raf) cancelAnimationFrame(this._raf);
     const map = this.ctx.map;
     if (this._onResize) map.off("resize", this._onResize);
-    if (this._onMove) {
-      map.off("movestart", this._onMove);
-      map.off("zoomstart", this._onMove);
-    }
+    if (this._onZoom) map.off("zoomstart", this._onZoom);
     if (this._canvas) this._canvas.remove();
   }
 }
 
-// rampColor maps a wind speed (m/s) to a colour along RAMP.
+// rampColor maps a wind speed (m/s) to a colour, linearly interpolated between the two
+// bracketing RAMP stops for smooth transitions. Interp results are memoised per
+// integer m/s so it stays cheap across thousands of particles per frame.
+const rampCache = new Map();
 function rampColor(spd) {
+  const key = Math.round(spd);
+  let c = rampCache.get(key);
+  if (c) return c;
   let lo = RAMP[0], hi = RAMP[RAMP.length - 1];
   for (let i = 0; i < RAMP.length - 1; i++) {
     if (spd >= RAMP[i][0] && spd <= RAMP[i + 1][0]) {
@@ -262,5 +338,48 @@ function rampColor(spd) {
       break;
     }
   }
-  return hi[1]; // stepped ramp is plenty for streamlines; avoids per-pixel lerp cost
+  const t = hi[0] === lo[0] ? 0 : Math.max(0, Math.min(1, (spd - lo[0]) / (hi[0] - lo[0])));
+  c = lerpHex(lo[1], hi[1], t);
+  rampCache.set(key, c);
+  return c;
+}
+
+// parseWindBin decodes the plugin's binary wind blob (see encodeWindBin, Go side):
+// a small aligned header then, per forecast step, an hour and zero-copy Float32 u/v.
+function parseWindBin(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint8(0) !== 0x57 || dv.getUint8(1) !== 0x47 || dv.getUint8(2) !== 0x52 || dv.getUint8(3) !== 0x44) {
+    return null; // not "WGRD"
+  }
+  const nx = dv.getUint32(8, true), ny = dv.getUint32(12, true), nSteps = dv.getUint32(16, true);
+  const lo1 = dv.getFloat32(20, true), la1 = dv.getFloat32(24, true);
+  const dx = dv.getFloat32(28, true), dy = dv.getFloat32(32, true);
+  const np = nx * ny;
+  let o = 36;
+  const steps = [];
+  for (let s = 0; s < nSteps; s++) {
+    const hour = dv.getInt32(o, true);
+    o += 4;
+    const u = new Float32Array(buf, o, np);
+    o += np * 4;
+    const v = new Float32Array(buf, o, np);
+    o += np * 4;
+    steps.push({ hour, u, v });
+  }
+  const lo2 = lo1 + (nx - 1) * dx, la2 = la1 - (ny - 1) * dy;
+  return { header: { nx, ny, lo1, la1, lo2, la2, dx, dy }, steps };
+}
+
+// compass maps a bearing (deg) to an 8-point label.
+function compass(deg) {
+  return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(deg / 45) % 8];
+}
+
+// lerpHex blends two #rrggbb colours.
+function lerpHex(a, b, t) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const r = Math.round(((pa >> 16) & 255) * (1 - t) + ((pb >> 16) & 255) * t);
+  const g = Math.round(((pa >> 8) & 255) * (1 - t) + ((pb >> 8) & 255) * t);
+  const bl = Math.round((pa & 255) * (1 - t) + (pb & 255) * t);
+  return `rgb(${r},${g},${bl})`;
 }
