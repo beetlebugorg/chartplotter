@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "id": "core.tcp-client",
+  "name": "TCP Client (NMEA0183)",
+  "version": "1.0.0",
+  "description": "Reads NMEA0183 sentences from a TCP server and publishes vessel/AIS state. The reference Tier-A (WASM) plugin; a drop-in for the built-in tcp-client source.",
+  "publisher": "beetlebug.org",
+  "license": "MIT",
+  "apiVersion": 1,
+  "entry": { "wasm": "plugin.wasm" },
+  "capabilities": [
+    { "cap": "vessel.write" },
+    { "cap": "ais.write" },
+    { "cap": "net.tcp-client", "hosts": ["${config:host}"] }
+  ],
+  "provides": [
+    { "service": "nmea.source", "apiVersion": 1 }
+  ]
+}

@@ -27,7 +27,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 tile57-lib vendor-style-engine xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 build-plugins tile57-lib vendor-style-engine xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -121,6 +121,16 @@ build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches 
 
 # Back-compat alias — libtile57 is now the default engine, so this is just `build`.
 build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
+
+# In-tree reference plugins compiled to Tier-A WASM (wasip1). Pure Go, CGO off, no
+# tile57 — builds standalone. Output stays beside each plugin's manifest so the
+# directory is directly runnable with `chartplotter plugin dev`.
+CORE_PLUGINS := core.tcp-client
+build-plugins: ## Build the in-tree reference plugins to plugin.wasm (wasip1)
+	@for p in $(CORE_PLUGINS); do \
+		echo "→ plugins/$$p/plugin.wasm (wasip1)"; \
+		GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -o plugins/$$p/plugin.wasm ./plugins/$$p || exit 1; \
+	done
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps

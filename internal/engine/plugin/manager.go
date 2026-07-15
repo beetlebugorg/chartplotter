@@ -38,8 +38,11 @@ const (
 // ManagerOpts configures a Manager.
 type ManagerOpts struct {
 	DataDir string // <dataDir>; plugins unpack under <dataDir>/plugins, state at <dataDir>/plugins.json
-	Host    Host   // capability backend (the server's shared stores); required
+	Host    Host   // capability backend (the server's shared stores); required unless NoStart
 	Logf    func(format string, args ...any)
+	// NoStart makes the Manager a pure state manipulator (CLI one-shots): it never
+	// spawns runners, so install/list/enable/disable/remove just edit plugins.json.
+	NoStart bool
 }
 
 // Manager is the host-side plugin engine.
@@ -76,9 +79,11 @@ func NewManager(ctx context.Context, opts ManagerOpts) *Manager {
 		state:      newStateStore(filepath.Join(opts.DataDir, "plugins.json")),
 		runners:    map[string]*pluginRunner{},
 	}
-	for _, rec := range m.state.list() {
-		if rec.Enabled {
-			m.startRunner(rec)
+	if !opts.NoStart {
+		for _, rec := range m.state.list() {
+			if rec.Enabled {
+				m.startRunner(rec)
+			}
 		}
 	}
 	return m
@@ -108,12 +113,16 @@ func (m *Manager) List() []PluginInfo {
 		m.mu.Lock()
 		r := m.runners[rec.ID]
 		m.mu.Unlock()
-		if r != nil {
+		switch {
+		case r != nil:
 			info.Running = true
 			info.Status = r.currentStatus()
-		} else if rec.Enabled {
+		case m.opts.NoStart && rec.Enabled:
+			// A state-only (CLI) manager doesn't run plugins; enabled means "will run".
+			info.Status = PluginStatus{State: "enabled"}
+		case rec.Enabled:
 			info.Status = PluginStatus{State: "error", Detail: "not running"}
-		} else {
+		default:
 			info.Status = PluginStatus{State: "disabled"}
 		}
 		out = append(out, info)
@@ -203,6 +212,18 @@ func (m *Manager) Close() {
 	}
 }
 
+// VersionDir returns the unpacked directory of a plugin's active version.
+func (m *Manager) VersionDir(id string) (string, bool) {
+	rec, ok := m.state.get(id)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(m.pluginsDir, id, rec.Version), true
+}
+
+// DataDir returns a plugin's persistent per-plugin storage root (survives upgrades).
+func (m *Manager) DataDir(id string) string { return filepath.Join(m.pluginsDir, id, "data") }
+
 func (m *Manager) loadManifest(id, version string) (*Manifest, error) {
 	b, err := os.ReadFile(filepath.Join(m.pluginsDir, id, version, "plugin.json"))
 	if err != nil {
@@ -215,6 +236,9 @@ func (m *Manager) loadManifest(id, version string) (*Manifest, error) {
 // point. UI-only plugins (no wasm/native) have no host runner — the frontend loads
 // them; enabling them is purely a state flag.
 func (m *Manager) startRunner(rec PluginRecord) {
+	if m.opts.NoStart {
+		return // pure state manipulator (CLI); the server's Manager runs plugins
+	}
 	man, err := m.loadManifest(rec.ID, rec.Version)
 	if err != nil {
 		m.opts.Logf("plugin %s: load manifest: %v", rec.ID, err)
@@ -341,28 +365,33 @@ func (r *pluginRunner) runOnce(parent context.Context) error {
 	return serveErr
 }
 
-// startInstance selects the runtime: WASM (Tier A, preferred) unless the plugin has
-// no wasm entry or the user forced native (spec §2).
+// startInstance selects the runtime for this runner.
 func (r *pluginRunner) startInstance(ctx context.Context) (rtInstance, error) {
 	logw := &lineLogger{logf: func(level, msg string) { r.mgr.opts.Host.Log(r.id, level, msg) }}
-	useNative := r.record.ForceNative || r.manifest.Entry.WASM == ""
+	return startInstance(ctx, r.dir, r.manifest, r.record.ForceNative, r.storeDir(), logw)
+}
+
+// startInstance selects the runtime — WASM (Tier A, preferred) unless the plugin has
+// no wasm entry or native is forced (spec §2) — and starts an instance from an
+// unpacked plugin dir. Shared by the Manager's runners and DevRun.
+func startInstance(ctx context.Context, dir string, man *Manifest, forceNative bool, storeDir string, stderr io.Writer) (rtInstance, error) {
+	useNative := forceNative || man.Entry.WASM == ""
 	if !useNative {
-		wasmPath := filepath.Join(r.dir, r.manifest.Entry.WASM)
-		b, err := os.ReadFile(wasmPath)
+		b, err := os.ReadFile(filepath.Join(dir, man.Entry.WASM))
 		if err != nil {
 			return nil, fmt.Errorf("read wasm: %w", err)
 		}
-		return wasm.Start(ctx, b, wasm.Config{Name: r.id, Stderr: logw})
+		return wasm.Start(ctx, b, wasm.Config{Name: man.ID, Stderr: stderr})
 	}
-	rel, ok := r.manifest.Entry.Native[platformKey()]
+	rel, ok := man.Entry.Native[platformKey()]
 	if !ok {
 		return nil, fmt.Errorf("no native entry for %s", platformKey())
 	}
 	return native.Start(ctx, native.Config{
-		Path:   filepath.Join(r.dir, rel),
-		Dir:    r.storeDir(),
+		Path:   filepath.Join(dir, rel),
+		Dir:    storeDir,
 		Env:    []string{}, // minimal env (spec §9)
-		Stderr: logw,
+		Stderr: stderr,
 	})
 }
 

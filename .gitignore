@@ -58,3 +58,4 @@ web/sprite.png
 /testdata/*.zip
 /testdata/*.pdf
 /.claude/
+plugins/*/plugin.wasm
