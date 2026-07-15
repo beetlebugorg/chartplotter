@@ -31,9 +31,10 @@ import (
 
 // Re-exported wire types so plugin authors import only the SDK.
 type (
-	Capability = proto.Capability
-	Delta      = proto.Delta
-	AISTarget  = proto.AISTargetDTO
+	Capability   = proto.Capability
+	Delta        = proto.Delta
+	AISTarget    = proto.AISTargetDTO
+	HTTPResponse = proto.HTTPResponse
 )
 
 // Plugin is the interface an author implements. Start runs once after the handshake,
@@ -289,6 +290,53 @@ func (h *Host) StorageSet(key string, value json.RawMessage, cb func(error)) {
 				cb(nil)
 			}
 		}
+	})
+}
+
+// --- served artifacts + http ------------------------------------------------
+
+// ServeSet publishes data at GET /plugins/<id>/serve/<name>, host-served with Range +
+// caching. The zero-RPC path for tile archives, weather grids, and other static
+// products (spec §4). cb receives the served URL (or an error).
+func (h *Host) ServeSet(name string, data []byte, cb func(url string, err error)) {
+	h.request(proto.MethodServeSet, proto.ServeSet{Name: name, Data: data}, func(res json.RawMessage, rerr *proto.RPCError) {
+		if cb == nil {
+			return
+		}
+		if rerr != nil {
+			cb("", rerr)
+			return
+		}
+		var r struct {
+			URL string `json:"url"`
+		}
+		_ = json.Unmarshal(res, &r)
+		cb(r.URL, nil)
+	})
+}
+
+// ServeClear removes a published artifact.
+func (h *Host) ServeClear(name string) {
+	h.request(proto.MethodServeClear, proto.ServeClear{Name: name}, nil)
+}
+
+// Fetch makes a host-mediated outbound HTTP request (subject to the net.http
+// allowlist). cb receives the response (or an error).
+func (h *Host) Fetch(url string, cb func(*HTTPResponse, error)) {
+	h.request(proto.MethodHTTPFetch, proto.HTTPFetch{URL: url}, func(res json.RawMessage, rerr *proto.RPCError) {
+		if cb == nil {
+			return
+		}
+		if rerr != nil {
+			cb(nil, rerr)
+			return
+		}
+		var r HTTPResponse
+		if err := json.Unmarshal(res, &r); err != nil {
+			cb(nil, err)
+			return
+		}
+		cb(&r, nil)
 	})
 }
 

@@ -112,6 +112,13 @@ const (
 	MethodStorageSet    = "storage.set"    // ← req
 	MethodStorageDelete = "storage.delete" // ← req
 	MethodStorageList   = "storage.list"   // ← req
+
+	// Served artifacts: publish a blob at GET /plugins/<id>/serve/<name> (§4).
+	MethodServeSet   = "serve.set"   // ← req: {name, data} → served file
+	MethodServeClear = "serve.clear" // ← req: {name}
+
+	// Outbound HTTP (host-mediated, allowlisted).
+	MethodHTTPFetch = "http.fetch" // ← req: request/response
 )
 
 // --- handshake (spec §4) ---------------------------------------------------
@@ -253,6 +260,35 @@ type StorageValue struct {
 // StorageList is the storage.list reply.
 type StorageList struct {
 	Keys []string `json:"keys"`
+}
+
+// ServeSet publishes a blob at GET /plugins/<id>/serve/<name> (spec §4 "Served
+// artifacts"): the zero-RPC path for tile archives, weather grids, and other static
+// products. Data is base64 in ndjson framing.
+type ServeSet struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
+}
+
+// ServeClear removes a published artifact.
+type ServeClear struct {
+	Name string `json:"name"`
+}
+
+// HTTPFetch is the http.fetch params (spec §4): a host-mediated outbound request,
+// allowlisted by the net.http grant and size-capped.
+type HTTPFetch struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method,omitempty"` // default GET
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    []byte            `json:"body,omitempty"`
+}
+
+// HTTPResponse is the http.fetch reply.
+type HTTPResponse struct {
+	Status  int               `json:"status"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    []byte            `json:"body"`
 }
 
 // --- message constructors --------------------------------------------------

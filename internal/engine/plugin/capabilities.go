@@ -1,17 +1,25 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/nmea"
 )
+
+// maxHTTPBody caps an http.fetch response body (spec §6 "response size caps").
+const maxHTTPBody = 32 << 20
 
 // capabilities.go implements the plugin→host surface: it dispatches inbound requests
 // and notifications to the granted capability, enforcing the grant set first (spec
@@ -35,6 +43,10 @@ func (b *brokerSession) handleRequest(ctx context.Context, m *Message) {
 		b.serialOpen(m)
 	case MethodStorageGet, MethodStorageSet, MethodStorageDelete, MethodStorageList:
 		b.handleStorage(m)
+	case MethodServeSet, MethodServeClear:
+		b.handleServe(m)
+	case MethodHTTPFetch:
+		b.handleHTTPFetch(m)
 	default:
 		// Unknown methods answer MethodNotFound; SDKs surface this as "capability
 		// not available" (spec §5).
@@ -310,6 +322,112 @@ func (b *brokerSession) handleStorage(m *Message) {
 		b.reply(m.ID, StorageList{Keys: keys})
 	}
 }
+
+// --- served artifacts: serve.set / serve.clear -----------------------------
+
+func (b *brokerSession) handleServe(m *Message) {
+	if !b.hasCap(CapStorage) {
+		b.replyErr(m.ID, CodeCapabilityDenied, "storage not granted (required to publish served artifacts)")
+		return
+	}
+	serveDir := filepath.Join(b.storeDir, "serve")
+	switch m.Method {
+	case MethodServeSet:
+		var s ServeSet
+		if json.Unmarshal(m.Params, &s) != nil {
+			b.replyErr(m.ID, CodeInvalidParams, "bad params")
+			return
+		}
+		full, ok := safeJoin(serveDir, s.Name)
+		if !ok || full == serveDir {
+			b.replyErr(m.ID, CodeInvalidParams, "invalid serve name")
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			b.replyErr(m.ID, CodeInternalError, err.Error())
+			return
+		}
+		if err := os.WriteFile(full, s.Data, 0o644); err != nil {
+			b.replyErr(m.ID, CodeInternalError, err.Error())
+			return
+		}
+		b.reply(m.ID, map[string]any{"ok": true, "url": "/plugins/" + b.id + "/serve/" + strings.TrimPrefix(cleanServeName(s.Name), "/")})
+	case MethodServeClear:
+		var s ServeClear
+		if json.Unmarshal(m.Params, &s) == nil {
+			if full, ok := safeJoin(serveDir, s.Name); ok {
+				_ = os.Remove(full)
+			}
+		}
+		b.reply(m.ID, map[string]any{"ok": true})
+	}
+}
+
+func cleanServeName(name string) string { return filepathToSlash(name) }
+
+// --- host-mediated HTTP: http.fetch ----------------------------------------
+
+func (b *brokerSession) handleHTTPFetch(m *Message) {
+	grant, ok := b.grantFor(CapHTTP)
+	if !ok {
+		b.replyErr(m.ID, CodeCapabilityDenied, "net.http not granted")
+		return
+	}
+	var f HTTPFetch
+	if json.Unmarshal(m.Params, &f) != nil {
+		b.replyErr(m.ID, CodeInvalidParams, "bad params")
+		return
+	}
+	u, err := url.Parse(f.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		b.replyErr(m.ID, CodeInvalidParams, "url must be http(s)")
+		return
+	}
+	if !matchHostAllow(grant.Hosts, u.Hostname(), schemePort(u)) {
+		b.replyErr(m.ID, CodeCapabilityDenied, u.Hostname()+" not in the net.http allowlist")
+		return
+	}
+	method := f.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+	req, err := http.NewRequest(method, f.URL, bytes.NewReader(f.Body))
+	if err != nil {
+		b.replyErr(m.ID, CodeInvalidParams, err.Error())
+		return
+	}
+	for k, v := range f.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		b.replyErr(m.ID, CodeInternalError, "fetch: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBody))
+	hdr := map[string]string{}
+	for _, h := range []string{"Content-Type", "ETag", "Last-Modified", "Cache-Control", "Content-Length"} {
+		if v := resp.Header.Get(h); v != "" {
+			hdr[h] = v
+		}
+	}
+	b.reply(m.ID, HTTPResponse{Status: resp.StatusCode, Headers: hdr, Body: body})
+}
+
+// schemePort returns the explicit port or the scheme default.
+func schemePort(u *url.URL) int {
+	if p := u.Port(); p != "" {
+		n, _ := strconv.Atoi(p)
+		return n
+	}
+	if u.Scheme == "https" {
+		return 443
+	}
+	return 80
+}
+
+func filepathToSlash(p string) string { return filepath.ToSlash(filepath.Clean("/" + p)) }
 
 func (b *brokerSession) kvPath() string { return filepath.Join(b.storeDir, "storage.json") }
 
