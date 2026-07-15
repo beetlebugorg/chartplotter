@@ -28,6 +28,7 @@ import { VgRail } from "./plugins/vg-rail.mjs"; // mid-left viewing-group quick-
 import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
 import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
+import { PluginsController } from "./plugins/plugins-manager.mjs"; // install + manage plugins (Plugins tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { PluginHost } from "./core/plugin-host.mjs"; // loads builtin/plugin UI controllers with a declarative ctx
 import OwnShip from "./plugins/own-ship.mjs"; // builtin core.own-ship: marker + course predictor + follow camera
@@ -705,6 +706,12 @@ export class ChartPlotter extends HTMLElement {
       this._vessel = new VesselStateStore({ assets: this._assets, widget: this._widget });
       this._vessel.start();
       this._connections = new ConnectionsController({
+        registry: this._settingsRegistry,
+        assets: this._assets,
+        notify: this._notify,
+      });
+      // Plugins settings tab: install/enable/disable/grant/remove plugins.
+      this._pluginsCtl = new PluginsController({
         registry: this._settingsRegistry,
         assets: this._assets,
         notify: this._notify,
