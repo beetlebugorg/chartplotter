@@ -1,13 +1,14 @@
 // Command core.weather is a GRIB weather plugin (Tier A, WASM). It decodes a GRIB2
-// surface-wind field into a compact grid and publishes it as a served artifact at
-// GET /plugins/core.weather/serve/wind.json — the "grid, not tiles" model: the plugin
-// is never in the render path, and the frontend animates the grid as wind particles
-// entirely client-side.
+// surface-wind field into a compact binary grid and publishes it as a served artifact
+// at GET /plugins/core.weather/serve/wind.bin — the "grid, not tiles" model: the
+// plugin is never in the render path, and the frontend animates the grid as wind
+// particles entirely client-side.
 //
 // Data source (config "source"):
-//   - "sample" (default): an embedded offline GRIB2 sample, decoded on start.
-//   - a URL: fetched via the host (net.http) and decoded — for a live GRIB feed
-//     that uses grid-point simple packing.
+//   - "gfs" (default): the latest real GFS forecast, auto-discovered from the NOAA
+//     open-data archive and byte-range-fetched (10 m wind only) via net.http.
+//   - "sample": an embedded offline GRIB2 sample (simple packing), for demos/offline.
+//   - a GFS product URL or any GRIB2 URL: fetched and decoded.
 //
 // Build (Tier A): GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm ./plugins/core.weather
 package main
@@ -16,6 +17,7 @@ import (
 	_ "embed"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,38 +32,79 @@ var sampleGRIB []byte
 
 type weather struct{ h *sdk.Host }
 
+// gfsBucket is the NOAA GFS open-data archive (S3).
+const gfsBucket = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
+
 func (p *weather) Start(h *sdk.Host) {
 	p.h = h
 	src := h.ConfigString("source")
-	if src == "" || src == "sample" {
+	if src == "" {
+		src = "gfs" // default: the latest real GFS forecast
+	}
+	switch {
+	case src == "sample":
 		p.publish(sampleGRIB, "embedded sample")
-		return
+	case src == "gfs":
+		p.discoverGFS() // auto-resolve the latest cycle → fetch
+	case strings.Contains(src, "pgrb2"): // an explicit GFS product URL
+		h.Status("running", "fetching GFS…")
+		p.fetchGFS(src, func(reason string) { h.Status("degraded", reason) })
+	default: // any other GRIB2 URL
+		h.Status("running", "fetching "+src)
+		h.Fetch(src, func(resp *sdk.HTTPResponse, err error) { p.onFetch(resp, err, src) })
 	}
-	// Live GRIB over the host-mediated, allow-listed net.http capability.
-	h.Status("running", "fetching "+src)
-	if strings.Contains(src, "pgrb2") { // a GFS product: byte-range just the 10 m wind
-		p.fetchGFS(src)
-		return
-	}
-	h.Fetch(src, func(resp *sdk.HTTPResponse, err error) { p.onFetch(resp, err, src) })
+}
+
+// discoverGFS finds the newest available GFS cycle in the archive (so "gfs" stays
+// current without a hardcoded date) and fetches its 10 m wind. On any failure it
+// reports degraded and draws nothing — no fabricated data.
+func (p *weather) discoverGFS() {
+	p.h.Status("running", "finding latest GFS cycle…")
+	p.h.Fetch(gfsBucket+"/?list-type=2&prefix=gfs.&delimiter=/", func(resp *sdk.HTTPResponse, err error) {
+		date := ""
+		if err == nil && resp != nil && resp.Status == 200 {
+			date = latestGroup(string(resp.Body), gfsDateRE)
+		}
+		if date == "" {
+			p.h.Status("degraded", "could not list the GFS archive")
+			return
+		}
+		p.h.Fetch(gfsBucket+"/?list-type=2&prefix=gfs."+date+"/&delimiter=/", func(r2 *sdk.HTTPResponse, e2 error) {
+			cyc := "00"
+			if e2 == nil && r2 != nil && r2.Status == 200 {
+				if c := latestGroup(string(r2.Body), gfsCycleRE); c != "" {
+					cyc = c
+				}
+			}
+			url := fmt.Sprintf("%s/gfs.%s/%s/atmos/gfs.t%sz.pgrb2.0p25.f000", gfsBucket, date, cyc, cyc)
+			p.h.Status("running", "fetching GFS "+date+" "+cyc+"z…")
+			p.fetchGFS(url, func(reason string) { p.h.Status("degraded", "GFS "+date+" "+cyc+"z: "+reason) })
+		})
+	})
 }
 
 // fetchGFS byte-ranges only the 10 m UGRD/VGRD messages out of a GFS product, using
 // its wgrib2 .idx to find their offsets — so a plugin never downloads the whole
-// multi-hundred-MB file.
-func (p *weather) fetchGFS(url string) {
+// multi-hundred-MB file. onErr is called (with a reason) if the fetch fails.
+func (p *weather) fetchGFS(url string, onErr func(string)) {
 	p.h.Fetch(url+".idx", func(resp *sdk.HTTPResponse, err error) {
 		if err != nil || resp == nil || resp.Status != 200 {
-			p.h.Status("degraded", "GFS index fetch failed")
+			onErr("index fetch failed")
 			return
 		}
 		start, end, ok := windRange(string(resp.Body))
 		if !ok {
-			p.h.Status("degraded", "no 10 m wind in GFS index")
+			onErr("no 10 m wind in index")
 			return
 		}
 		rng := fmt.Sprintf("bytes=%d-%d", start, end)
-		p.h.FetchOpts(url, map[string]string{"Range": rng}, func(r *sdk.HTTPResponse, e error) { p.onFetch(r, e, "GFS") })
+		p.h.FetchOpts(url, map[string]string{"Range": rng}, func(r *sdk.HTTPResponse, e error) {
+			if e != nil || r == nil || (r.Status != 200 && r.Status != 206) {
+				onErr("data fetch failed")
+				return
+			}
+			p.publish(r.Body, "GFS")
+		})
 	})
 }
 
@@ -77,6 +120,25 @@ func (p *weather) onFetch(resp *sdk.HTTPResponse, err error, label string) {
 		return
 	}
 	p.publish(resp.Body, label)
+}
+
+// GFS archive listing patterns (S3 XML CommonPrefixes).
+var (
+	gfsDateRE  = regexp.MustCompile(`gfs\.(\d{8})/`)       // gfs.YYYYMMDD/
+	gfsCycleRE = regexp.MustCompile(`gfs\.\d{8}/(\d{2})/`) // gfs.YYYYMMDD/HH/
+)
+
+// latestGroup returns the lexicographically-largest first capture group of re in s
+// ("" if none). YYYYMMDD dates and HH cycles sort correctly as strings, so the max is
+// the newest.
+func latestGroup(s string, re *regexp.Regexp) string {
+	best := ""
+	for _, m := range re.FindAllStringSubmatch(s, -1) {
+		if m[1] > best {
+			best = m[1]
+		}
+	}
+	return best
 }
 
 // windRange parses a wgrib2 .idx and returns the byte range [start,end] spanning the
