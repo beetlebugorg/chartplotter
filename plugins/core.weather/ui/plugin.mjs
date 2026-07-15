@@ -99,15 +99,20 @@ export default class WindOverlay {
     if (this._label) this._label.textContent = "+" + this._hour + "h";
   }
 
-  // Bilinear-sample the wind at (lng,lat); returns [u,v] or null if off-grid.
+  // Bilinear-sample the wind at (lng,lat); returns [u,v] or null if off-grid. Handles
+  // global grids expressed in 0–360° longitude (GFS) as well as −180..180.
   _sample(lng, lat) {
     const g = this._grid;
     if (!g) return null;
-    const fx = (lng - g.lo1) / g.dx;
+    const global = g.nx * g.dx >= 359; // spans the whole planet → longitude wraps
+    let fx = (lng - g.lo1) / g.dx;
+    if (global) fx = ((fx % g.nx) + g.nx) % g.nx; // wrap (e.g. lon -76 → 284 on a 0–360 grid)
     const fy = (g.la1 - lat) / g.dy; // la1 is the north edge; rows go south
-    if (fx < 0 || fy < 0 || fx > g.nx - 1 || fy > g.ny - 1) return null;
+    if (fy < 0 || fy > g.ny - 1) return null;
+    if (!global && (fx < 0 || fx > g.nx - 1)) return null;
     const x0 = Math.floor(fx), y0 = Math.floor(fy);
-    const x1 = Math.min(x0 + 1, g.nx - 1), y1 = Math.min(y0 + 1, g.ny - 1);
+    const x1 = global ? (x0 + 1) % g.nx : Math.min(x0 + 1, g.nx - 1);
+    const y1 = Math.min(y0 + 1, g.ny - 1);
     const tx = fx - x0, ty = fy - y0;
     const at = (arr, x, y) => arr[y * g.nx + x];
     const bil = (arr) =>

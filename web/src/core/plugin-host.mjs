@@ -103,7 +103,9 @@ export class PluginHost {
     if (this._loaded.has(id) || this._installed.has(id)) return;
     this._installed.add(id);
     const rel = String(entry).replace(/^ui\//, "");
-    const url = `${this._svc.assets}plugins/${encodeURIComponent(id)}/ui/${rel}`;
+    // Resolve against the document base, not this module's URL: a dynamic import()
+    // otherwise resolves relative to /src/core/plugin-host.mjs and 404s.
+    const url = new URL(`${this._svc.assets || ""}plugins/${encodeURIComponent(id)}/ui/${rel}`, document.baseURI).href;
     try {
       const mod = await import(url);
       if (mod && mod.default) await this.register({ id, version, ControllerClass: mod.default });
