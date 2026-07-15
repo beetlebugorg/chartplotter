@@ -59,10 +59,8 @@ func Decode(b []byte) ([]Grid, error) {
 
 func decodeMessage(b []byte) (Grid, error) {
 	var g Grid
-	var refValue float32
-	var binScale, decScale int
-	var bitsPerValue int
-	var numPoints int
+	var s5, s7 []byte // data-representation + data sections, decoded after the walk
+	numPoints := 0
 	p := 16 // past Section 0
 
 	for p+5 <= len(b) {
@@ -100,20 +98,31 @@ func decodeMessage(b []byte) (Grid, error) {
 			g.Category = int(s[9])
 			g.Number = int(s[10])
 			g.ForecastHour = int(binary.BigEndian.Uint32(s[18:22]))
-		case 5: // Data representation (template 5.0, simple packing)
+		case 5:
 			numPoints = int(binary.BigEndian.Uint32(s[5:9]))
-			tmpl := binary.BigEndian.Uint16(s[9:11])
-			if tmpl != 0 {
-				return g, fmt.Errorf("unsupported data-rep template %d (want 5.0 simple packing)", tmpl)
-			}
-			refValue = math.Float32frombits(binary.BigEndian.Uint32(s[11:15]))
-			binScale = signed16(s[15:17])
-			decScale = signed16(s[17:19])
-			bitsPerValue = int(s[19])
-		case 7: // Data
-			g.Values = unpackSimple(s[5:], numPoints, float64(refValue), binScale, decScale, bitsPerValue)
+			s5 = s
+		case 7:
+			s7 = s[5:]
 		}
 		p += secLen
+	}
+	if s5 == nil || s7 == nil {
+		return g, fmt.Errorf("message missing data-representation or data section")
+	}
+
+	tmpl := binary.BigEndian.Uint16(s5[9:11])
+	switch tmpl {
+	case 0: // simple packing
+		refValue := math.Float32frombits(binary.BigEndian.Uint32(s5[11:15]))
+		g.Values = unpackSimple(s7, numPoints, float64(refValue), signed16(s5[15:17]), signed16(s5[17:19]), int(s5[19]))
+	case 2, 3: // complex packing (2), with spatial differencing (3)
+		vals, err := unpackComplex(s5, s7, numPoints)
+		if err != nil {
+			return g, err
+		}
+		g.Values = vals
+	default:
+		return g, fmt.Errorf("unsupported data-rep template %d (want 5.0/5.2/5.3)", tmpl)
 	}
 	if g.Values == nil {
 		return g, fmt.Errorf("message has no data section")
