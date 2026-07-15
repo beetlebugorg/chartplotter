@@ -122,11 +122,13 @@ export default class WindOverlay {
   }
 
   _spawn() {
-    const g = this._grid;
-    if (!g) return { lng: 0, lat: 0, age: 9999 };
+    if (!this._grid) return { lng: 0, lat: 0, age: 9999 };
+    // Spawn within the current viewport so particles are visible whatever the grid's
+    // extent (a global GFS field would otherwise scatter them across the planet).
+    const b = this.ctx.map.getBounds();
     return {
-      lng: g.lo1 + Math.random() * (g.lo2 - g.lo1),
-      lat: g.la2 + Math.random() * (g.la1 - g.la2),
+      lng: b.getWest() + Math.random() * (b.getEast() - b.getWest()),
+      lat: b.getSouth() + Math.random() * (b.getNorth() - b.getSouth()),
       age: Math.floor(Math.random() * MAX_AGE),
     };
   }

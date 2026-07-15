@@ -320,10 +320,14 @@ func (h *Host) ServeClear(name string) {
 	h.request(proto.MethodServeClear, proto.ServeClear{Name: name}, nil)
 }
 
-// Fetch makes a host-mediated outbound HTTP request (subject to the net.http
-// allowlist). cb receives the response (or an error).
-func (h *Host) Fetch(url string, cb func(*HTTPResponse, error)) {
-	h.request(proto.MethodHTTPFetch, proto.HTTPFetch{URL: url}, func(res json.RawMessage, rerr *proto.RPCError) {
+// Fetch makes a host-mediated outbound GET (subject to the net.http allowlist). cb
+// receives the response (or an error).
+func (h *Host) Fetch(url string, cb func(*HTTPResponse, error)) { h.FetchOpts(url, nil, cb) }
+
+// FetchOpts is Fetch with request headers — e.g. a Range header to byte-range a large
+// file without downloading all of it.
+func (h *Host) FetchOpts(url string, headers map[string]string, cb func(*HTTPResponse, error)) {
+	h.request(proto.MethodHTTPFetch, proto.HTTPFetch{URL: url, Headers: headers}, func(res json.RawMessage, rerr *proto.RPCError) {
 		if cb == nil {
 			return
 		}
