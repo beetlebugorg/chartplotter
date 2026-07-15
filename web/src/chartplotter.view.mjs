@@ -414,7 +414,7 @@ export const STYLE = `
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
-        #drawer.set-wide { width:min(520px, calc(100vw - 24px)); } /* settings: rail + content */
+        #drawer.set-wide { width:min(760px, calc(100vw - 24px)); } /* settings: rail + content */
         #drawer.wide .miller { height:calc(100dvh - var(--botbar-h) - 208px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
         /* caret on the TOP edge, pointing up at the button above */

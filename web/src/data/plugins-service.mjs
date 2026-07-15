@@ -38,6 +38,11 @@ export class PluginsService {
     return this._send("PUT", "api/plugins/" + encodeURIComponent(id) + "/grants", { grants, config });
   }
 
+  /** Replace a plugin's settings (config), leaving grants intact. */
+  setConfig(id, config) {
+    return this._send("PUT", "api/plugins/" + encodeURIComponent(id) + "/config", config);
+  }
+
   async remove(id, purgeData) {
     const q = purgeData ? "?purgeData=1" : "";
     const r = await fetch(this._assets + "api/plugins/" + encodeURIComponent(id) + q, { method: "DELETE" });

@@ -18,7 +18,7 @@ import { esc } from "../lib/util.mjs";
 export const STYLE = `
   :host { display:block; }
   #body { padding-top:2px; }
-  .set-shell { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:11px; overflow:hidden; min-height:360px; max-height:min(66vh,620px); max-height:min(66dvh,620px); }
+  .set-shell { display:flex; align-items:stretch; border:1px solid var(--ui-border-2); border-radius:11px; overflow:hidden; min-height:420px; max-height:min(82vh,860px); max-height:min(82dvh,860px); }
   .set-rail { flex:0 0 124px; display:flex; flex-direction:column; gap:3px; padding:8px 7px; border-right:1px solid var(--ui-border-2); background:var(--ui-surface-2); }
   .set-rail button { text-align:left; border:none; background:none; color:var(--ui-text-dim); font:inherit; font-size:13px; font-weight:600; padding:9px 11px; border-radius:8px; cursor:pointer; transition:background .1s,color .1s; }
   .set-rail button:hover { background:var(--ui-surface); color:var(--ui-text); }

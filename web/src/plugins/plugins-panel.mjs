@@ -1,48 +1,67 @@
 // <plugins-panel> — the Plugins settings UI. Lists installed plugins with live
 // status badges (fed by the /api/plugins/stream SSE), an "Install plugin" upload,
-// enable/disable, a per-plugin capability-grant editor, and remove. Mounted into the
-// "Plugins" settings tab by PluginsController via the settings-dialog render(host)
-// escape hatch.
+// enable/disable, a per-plugin capability-grant editor, a per-plugin settings
+// (config) editor, and remove. Mounted into the "Plugins" settings tab by
+// PluginsController via the settings-dialog render(host) escape hatch.
 //
 // Status ticks patch each row's badge in place; structural changes (install / enable
-// / grant edits / remove) re-render the list.
+// / grant or config edits / remove) re-render the list.
 
 const STYLE = `
   :host { display: block; color: var(--ui-text, #e6edf3); font-size: 13px; }
-  .bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; }
-  .bar .hint { color: var(--ui-text-dim, #8b949e); font-size: 12px; }
+  .bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 14px; }
+  .bar .hint { color: var(--ui-text-dim, #8b949e); font-size: 12px; line-height: 1.5; flex: 1; min-width: 0; }
   button {
     background: var(--ui-surface-2, #21262d); color: var(--ui-text, #e6edf3);
     border: 1px solid var(--ui-border, #30363d); border-radius: 6px;
-    padding: 5px 10px; font: inherit; cursor: pointer;
+    padding: 6px 12px; font: inherit; cursor: pointer; white-space: nowrap;
     touch-action: manipulation; -webkit-user-select: none; user-select: none;
   }
   button:hover { background: var(--ui-hover, #30363d); }
   button.primary { background: var(--ui-accent, #2f81f7); color: var(--ui-accent-text, #fff); border-color: transparent; }
   button.danger { color: #f85149; }
-  .empty { color: var(--ui-text-dim, #8b949e); padding: 18px 4px; text-align: center; }
+  button.danger:hover { background: rgba(248,81,73,.12); }
+  .empty { color: var(--ui-text-dim, #8b949e); padding: 26px 4px; text-align: center; border: 1px dashed var(--ui-border, #30363d); border-radius: 10px; }
 
   .row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 10px; border: 1px solid var(--ui-border, #30363d);
-    border-radius: 8px; margin-bottom: 8px; background: var(--ui-surface, #161b22);
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; border: 1px solid var(--ui-border, #30363d);
+    border-radius: 10px; margin-bottom: 10px; background: var(--ui-surface, #161b22);
   }
+  .row.open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-bottom: 0; }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #6e7681; }
   .info { flex: 1; min-width: 0; }
-  .name { font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .badge { font-size: 11px; font-weight: 500; color: var(--ui-text-dim, #8b949e); text-transform: uppercase; letter-spacing: .03em; }
-  .tag { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 10px; background: var(--ui-surface-2,#21262d); color: var(--ui-text-dim,#8b949e); text-transform: uppercase; letter-spacing:.03em; }
-  .meta { color: var(--ui-text-dim, #8b949e); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .actions { display: flex; align-items: center; gap: 8px; flex: none; }
+  .tag { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: var(--ui-surface-2,#21262d); color: var(--ui-text-dim,#8b949e); text-transform: uppercase; letter-spacing:.03em; }
+  .meta { color: var(--ui-text-dim, #8b949e); font-size: 12px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .actions { display: flex; align-items: center; gap: 7px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 
-  .grants { border: 1px solid var(--ui-border, #30363d); border-radius: 8px; padding: 10px 12px; margin: -4px 0 10px; background: var(--ui-bg, #0d1117); }
-  .grants h5 { margin: 0 0 8px; font-size: 12px; color: var(--ui-text-dim,#8b949e); text-transform: uppercase; letter-spacing:.03em; }
-  .cap { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; }
-  .cap input { margin-top: 3px; }
-  .cap .desc { color: var(--ui-text-dim, #8b949e); font-size: 12px; }
+  .editor {
+    border: 1px solid var(--ui-border, #30363d); border-top: none;
+    border-radius: 0 0 10px 10px; padding: 14px 16px; margin: 0 0 10px;
+    background: var(--ui-bg, #0d1117);
+  }
+  .editor h5 { margin: 0 0 12px; font-size: 12px; color: var(--ui-text-dim,#8b949e); text-transform: uppercase; letter-spacing:.03em; }
+  .cap { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 10px; }
+  .cap input[type=checkbox] { margin-top: 3px; flex: none; }
+  .cap .desc { color: var(--ui-text-dim, #8b949e); font-size: 12px; margin-top: 2px; }
   .cap code { color: var(--ui-text, #e6edf3); }
-  .grants-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-  .err { color: #f85149; font-size: 12px; margin-top: 6px; }
+
+  .field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .field label { width: 110px; flex: none; color: var(--ui-text-dim, #8b949e); }
+  .field .input { flex: 1; min-width: 0; }
+  .field input[type=text], .field input[type=number], .field input[type=password], .field select, .editor textarea {
+    width: 100%; box-sizing: border-box;
+    background: var(--ui-surface, #161b22); color: var(--ui-text, #e6edf3);
+    border: 1px solid var(--ui-border-strong, #444c56); border-radius: 6px; padding: 7px 9px; font: inherit;
+    font-size: 16px; /* >=16px or iOS zooms on focus */
+  }
+  .editor textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; white-space: pre; }
+  .field .unit { color: var(--ui-text-dim, #8b949e); font-size: 12px; flex: none; }
+  .switch { display: inline-flex; align-items: center; }
+  .editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  .err { color: #f85149; font-size: 12px; margin: 8px 0; }
   input[type=file] { display: none; }
 `;
 
@@ -81,7 +100,7 @@ export class PluginsPanel extends HTMLElement {
     this._service = null;
     this._notify = null;
     this._plugins = []; // [{record, manifest, status, running}]
-    this._grantsOpen = null; // id whose grant editor is open
+    this._open = null; // { id, mode: "grants"|"config" }
     this._stop = null;
     this._err = "";
   }
@@ -95,7 +114,6 @@ export class PluginsPanel extends HTMLElement {
     this.shadowRoot.innerHTML = `<style>${STYLE}</style><div id="root"></div>`;
     this._root = this.shadowRoot.getElementById("root");
     this._load();
-    // Live updates: patch badges when only status changed, else re-render.
     this._stop = this._service.stream((plugins) => this._onStream(plugins));
   }
 
@@ -115,32 +133,29 @@ export class PluginsPanel extends HTMLElement {
   }
 
   _onStream(plugins) {
-    const sameStructure = structureSig(plugins) === structureSig(this._plugins);
+    const same = structureSig(plugins) === structureSig(this._plugins);
     this._plugins = plugins;
-    if (sameStructure && !this._grantsOpen) {
-      this._patchBadges();
-    } else {
-      this._render();
-    }
+    if (same && !this._open) this._patchBadges();
+    else this._render();
   }
 
   _render() {
     const rows = this._plugins.map((p) => this._rowHTML(p)).join("");
     this._root.innerHTML = `
       <div class="bar">
-        <span class="hint">Plugins add data sources, map layers, and panels. Installed plugins are trusted.</span>
+        <span class="hint">Plugins add data sources, map layers, and panels. Installed plugins run trusted — review their capabilities before enabling.</span>
         <button class="primary" id="install">Install plugin…</button>
       </div>
       <input type="file" id="file" accept=".zip">
       ${this._err ? `<div class="err">${esc(this._err)}</div>` : ""}
-      ${this._plugins.length ? rows : `<div class="empty">No plugins installed.</div>`}
+      ${this._plugins.length ? rows : `<div class="empty">No plugins installed yet.</div>`}
     `;
     this._root.querySelector("#install").onclick = () => this._root.querySelector("#file").click();
     this._root.querySelector("#file").onchange = (e) => this._install(e.target.files[0]);
     for (const el of this._root.querySelectorAll("[data-act]")) {
       el.onclick = () => this._action(el.dataset.act, el.dataset.id);
     }
-    if (this._grantsOpen) this._renderGrants(this._grantsOpen);
+    if (this._open) this._renderEditor();
   }
 
   _rowHTML(p) {
@@ -152,15 +167,18 @@ export class PluginsPanel extends HTMLElement {
     const tier = man.entry && man.entry.wasm ? "wasm" : man.entry && man.entry.native ? "native" : "ui";
     const detail = (p.status && p.status.detail) || "";
     const toggle = p.record.enabled ? "Disable" : "Enable";
+    const openHere = this._open && this._open.id === id;
+    const hasCaps = man.capabilities && man.capabilities.length;
     return `
-      <div class="row" data-row="${esc(id)}">
+      <div class="row${openHere ? " open" : ""}" data-row="${esc(id)}">
         <span class="dot" style="background:${color}"></span>
         <div class="info">
           <div class="name">${esc(name)} <span class="badge">${esc(label)}</span> <span class="tag">${tier}</span></div>
           <div class="meta">${esc(id)} · v${esc(man.version || p.record.version || "?")}${detail ? " · " + esc(detail) : ""}</div>
         </div>
         <div class="actions">
-          ${man.capabilities && man.capabilities.length ? `<button data-act="grants" data-id="${esc(id)}">Grants</button>` : ""}
+          <button data-act="config" data-id="${esc(id)}">Configure</button>
+          ${hasCaps ? `<button data-act="grants" data-id="${esc(id)}">Grants</button>` : ""}
           <button data-act="toggle" data-id="${esc(id)}">${toggle}</button>
           <button class="danger" data-act="remove" data-id="${esc(id)}">Remove</button>
         </div>
@@ -170,7 +188,7 @@ export class PluginsPanel extends HTMLElement {
   _patchBadges() {
     for (const p of this._plugins) {
       const row = this._root.querySelector(`[data-row="${cssEsc(p.record.id)}"]`);
-      if (!row) return this._render(); // structure drifted; full render
+      if (!row) return this._render();
       const state = p.record.enabled ? (p.status && p.status.state) || "enabled" : "disabled";
       const [color, label] = BADGE[state] || ["#6e7681", state];
       row.querySelector(".dot").style.background = color;
@@ -188,28 +206,35 @@ export class PluginsPanel extends HTMLElement {
       } else if (act === "remove") {
         if (!confirm(`Remove plugin ${id}?`)) return;
         await this._service.remove(id, false);
-        this._grantsOpen = null;
+        this._open = null;
         await this._load();
-      } else if (act === "grants") {
-        this._grantsOpen = this._grantsOpen === id ? null : id;
+      } else if (act === "grants" || act === "config") {
+        this._open = this._open && this._open.id === id && this._open.mode === act ? null : { id, mode: act };
         this._render();
       }
     } catch (e) {
       this._err = e.message || String(e);
       this._render();
-      if (this._notify) this._notify.error && this._notify.error(this._err);
+      if (this._notify && this._notify.error) this._notify.error(this._err);
     }
   }
 
-  // _renderGrants injects the grant editor beneath the open plugin's row.
-  _renderGrants(id) {
-    const p = this._plugins.find((x) => x.record.id === id);
-    const row = this._root.querySelector(`[data-row="${cssEsc(id)}"]`);
+  _renderEditor() {
+    const p = this._plugins.find((x) => x.record.id === this._open.id);
+    const row = this._root.querySelector(`[data-row="${cssEsc(this._open.id)}"]`);
     if (!p || !row) return;
+    const box = document.createElement("div");
+    box.className = "editor";
+    if (this._open.mode === "grants") this._buildGrants(box, p);
+    else this._buildConfig(box, p);
+    row.after(box);
+  }
+
+  // --- grant editor ---
+  _buildGrants(box, p) {
+    const id = p.record.id;
     const caps = (p.manifest && p.manifest.capabilities) || [];
     const granted = new Set((p.record.grants || []).map((g) => g.cap));
-    const box = document.createElement("div");
-    box.className = "grants";
     box.innerHTML = `
       <h5>Capabilities</h5>
       ${caps
@@ -222,26 +247,89 @@ export class PluginsPanel extends HTMLElement {
         </label>`,
         )
         .join("")}
-      <div class="grants-actions">
-        <button data-g="cancel">Cancel</button>
-        <button class="primary" data-g="save">Save grants</button>
+      <div class="editor-actions">
+        <button data-x="cancel">Cancel</button>
+        <button class="primary" data-x="save">Save grants</button>
       </div>`;
-    row.after(box);
-    box.querySelector('[data-g="cancel"]').onclick = () => { this._grantsOpen = null; this._render(); };
-    box.querySelector('[data-g="save"]').onclick = async () => {
+    box.querySelector('[data-x="cancel"]').onclick = () => { this._open = null; this._render(); };
+    box.querySelector('[data-x="save"]').onclick = async () => {
       const chosen = [];
-      box.querySelectorAll("input[data-cap]").forEach((cb) => {
-        if (cb.checked) chosen.push(caps[Number(cb.dataset.cap)]);
-      });
-      try {
-        await this._service.setGrants(id, chosen, null);
-        this._grantsOpen = null;
-        await this._load();
-      } catch (e) {
-        this._err = e.message || String(e);
-        this._render();
-      }
+      box.querySelectorAll("input[data-cap]").forEach((cb) => { if (cb.checked) chosen.push(caps[Number(cb.dataset.cap)]); });
+      await this._save(() => this._service.setGrants(id, chosen, null));
     };
+  }
+
+  // --- config editor: schema-driven form, or raw-JSON fallback ---
+  _buildConfig(box, p) {
+    const id = p.record.id;
+    const cfg = p.record.config || {};
+    const schema = p.manifest && p.manifest.ui && p.manifest.ui.settings;
+    const items = schema && Array.isArray(schema.items) ? schema.items : null;
+
+    if (items) {
+      box.innerHTML = `<h5>Settings</h5>${items.map((it) => this._fieldHTML(it, cfg)).join("")}
+        <div class="editor-actions"><button data-x="cancel">Cancel</button><button class="primary" data-x="save">Save settings</button></div>`;
+      box.querySelector('[data-x="cancel"]').onclick = () => { this._open = null; this._render(); };
+      box.querySelector('[data-x="save"]').onclick = async () => {
+        const out = {};
+        for (const it of items) out[it.key] = this._fieldValue(box, it);
+        await this._save(() => this._service.setConfig(id, out));
+      };
+    } else {
+      // No schema: a raw JSON editor so any plugin's config is still editable.
+      box.innerHTML = `<h5>Settings (JSON)</h5>
+        <textarea data-json spellcheck="false">${esc(JSON.stringify(cfg, null, 2))}</textarea>
+        <div class="editor-actions"><button data-x="cancel">Cancel</button><button class="primary" data-x="save">Save settings</button></div>`;
+      box.querySelector('[data-x="cancel"]').onclick = () => { this._open = null; this._render(); };
+      box.querySelector('[data-x="save"]').onclick = async () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(box.querySelector("[data-json]").value || "{}");
+        } catch (e) {
+          this._err = "Invalid JSON: " + e.message;
+          this._render();
+          return;
+        }
+        await this._save(() => this._service.setConfig(id, parsed));
+      };
+    }
+  }
+
+  _fieldHTML(it, cfg) {
+    const v = cfg[it.key] ?? it.default ?? "";
+    const label = esc(it.label || it.key);
+    let ctl;
+    if (it.type === "toggle") {
+      ctl = `<span class="switch"><input type="checkbox" data-k="${esc(it.key)}" ${v ? "checked" : ""}></span>`;
+    } else if (it.type === "select" && Array.isArray(it.options)) {
+      ctl = `<select data-k="${esc(it.key)}">${it.options
+        .map((o) => `<option value="${esc(o.value ?? o)}" ${String(v) === String(o.value ?? o) ? "selected" : ""}>${esc(o.label ?? o)}</option>`)
+        .join("")}</select>`;
+    } else {
+      const type = it.type === "number" ? "number" : it.type === "password" ? "password" : "text";
+      ctl = `<input type="${type}" data-k="${esc(it.key)}" value="${esc(v)}" placeholder="${esc(it.placeholder || "")}">`;
+    }
+    return `<div class="field"><label>${label}</label><div class="input">${ctl}</div>${it.unit ? `<span class="unit">${esc(it.unit)}</span>` : ""}</div>`;
+  }
+
+  _fieldValue(box, it) {
+    const el = box.querySelector(`[data-k="${cssEsc(it.key)}"]`);
+    if (!el) return it.default;
+    if (it.type === "toggle") return el.checked;
+    if (it.type === "number") return el.value === "" ? null : Number(el.value);
+    return el.value;
+  }
+
+  async _save(fn) {
+    try {
+      await fn();
+      this._open = null;
+      this._err = "";
+      await this._load();
+    } catch (e) {
+      this._err = e.message || String(e);
+      this._render();
+    }
   }
 
   async _install(file) {
@@ -261,7 +349,7 @@ export class PluginsPanel extends HTMLElement {
 // structureSig is a signature of everything that requires a re-render (not status).
 function structureSig(plugins) {
   return JSON.stringify(
-    plugins.map((p) => [p.record.id, p.record.version, p.record.enabled, (p.record.grants || []).map((g) => g.cap)]),
+    plugins.map((p) => [p.record.id, p.record.version, p.record.enabled, (p.record.grants || []).map((g) => g.cap), p.record.config]),
   );
 }
 
@@ -269,7 +357,7 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-// cssEsc escapes a plugin id for use inside an attribute selector.
+// cssEsc escapes a value for use inside an attribute selector.
 function cssEsc(s) {
   return String(s).replace(/["\\]/g, "\\$&");
 }
