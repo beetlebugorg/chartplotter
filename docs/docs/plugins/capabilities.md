@@ -54,7 +54,7 @@ The `hosts` allowlist patterns support:
 - An optional `:port` suffix: `nmea.example.com:2000` restricts to that port.
 - `${config:key}` substitution: `${config:host}` is filled from the plugin's
   config at grant time, so the user's chosen server is the allowed one. (This is
-  how the reference tcp-client plugin scopes its dial to the configured host.)
+  how the reference NMEA 0183 plugin scopes its dial to the configured host.)
 
 An **empty** `hosts` list denies every connection.
 

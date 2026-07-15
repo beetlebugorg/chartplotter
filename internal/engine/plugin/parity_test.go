@@ -18,7 +18,7 @@ import (
 )
 
 // parity_test.go is the Phase-1 acceptance test (spec §12): the reference
-// core.tcp-client WASM plugin, driven end-to-end through the real Manager → broker →
+// core.nmea0183 WASM plugin, driven end-to-end through the real Manager → broker →
 // wazero → tcp.connect pipeline, must reproduce the exact vessel/AIS state the
 // built-in nmea parse path produces from the same sentences.
 
@@ -100,14 +100,14 @@ func TestTCPClientPluginParity(t *testing.T) {
 
 	// Lay out an installed, enabled plugin under a temp data dir.
 	dataDir := t.TempDir()
-	verDir := filepath.Join(dataDir, "plugins", "core.tcp-client", "1.0.0")
+	verDir := filepath.Join(dataDir, "plugins", "core.nmea0183", "1.0.0")
 	require.NoError(t, os.MkdirAll(verDir, 0o755))
 	wasmBytes, err := os.ReadFile(wasmPath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(verDir, "plugin.wasm"), wasmBytes, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(verDir, "plugin.json"), []byte(testManifest), 0o644))
 
-	stateJSON := `[{"id":"core.tcp-client","version":"1.0.0","enabled":true,` +
+	stateJSON := `[{"id":"core.nmea0183","version":"1.0.0","enabled":true,` +
 		`"grants":[{"cap":"vessel.write"},{"cap":"ais.write"},{"cap":"net.tcp-client","hosts":["127.0.0.1"]}],` +
 		`"config":{"host":"127.0.0.1","port":` + strconv.Itoa(port) + `}}]`
 	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "plugins.json"), []byte(stateJSON), 0o644))
@@ -153,8 +153,8 @@ func TestTCPClientPluginParity(t *testing.T) {
 
 const testManifest = `{
   "manifestVersion": 1,
-  "id": "core.tcp-client",
-  "name": "TCP Client (NMEA0183)",
+  "id": "core.nmea0183",
+  "name": "NMEA 0183",
   "version": "1.0.0",
   "apiVersion": 1,
   "entry": { "wasm": "plugin.wasm" },
@@ -171,7 +171,7 @@ func buildPluginWasm(t *testing.T) string {
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)
 	out := filepath.Join(t.TempDir(), "plugin.wasm")
-	cmd := exec.Command("go", "build", "-o", out, "./plugins/core.tcp-client")
+	cmd := exec.Command("go", "build", "-o", out, "./plugins/core.nmea0183")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
 	if b, err := cmd.CombinedOutput(); err != nil {

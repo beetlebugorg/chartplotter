@@ -1,11 +1,11 @@
-// Command core.tcp-client is the reference chartplotter plugin (spec §12, Phase 1
-// milestone): the built-in tcp-client NMEA source reimplemented as a Tier-A WASM
-// plugin. It owns no I/O of its own — the host dials the socket (net.tcp-client
+// Command core.nmea0183 is the reference chartplotter plugin (spec §12, Phase 1
+// milestone): the built-in NMEA 0183 (tcp-client) source reimplemented as a Tier-A
+// WASM plugin. It owns no I/O of its own — the host dials the socket (net.tcp-client
 // capability) and streams bytes; this plugin only frames lines, parses them with the
 // same nmea package the built-in runner uses, and publishes vessel/AIS/raw deltas
 // back to the host. The built-in stays; parity between the two is the acceptance test.
 //
-// Build (Tier A): GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm ./plugins/core.tcp-client
+// Build (Tier A): GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm ./plugins/core.nmea0183
 package main
 
 import (

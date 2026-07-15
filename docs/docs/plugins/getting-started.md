@@ -10,7 +10,7 @@ This page walks a minimal host-side plugin from source to running, end to end.
 We'll build a Tier-A (WASM) plugin that publishes a fixed vessel position, run
 it with the live dev harness, then install and enable it.
 
-For a full, realistic plugin see the [tcp-client example](./examples.md); this
+For a full, realistic plugin see the [NMEA 0183 example](./examples.md); this
 page keeps the logic trivial so the mechanics are clear.
 
 ## Prerequisites
@@ -171,4 +171,4 @@ the runner immediately. See [packaging & CLI](./packaging.md).
 
 - [SDK reference](./sdk.md) — every `Host` method with examples.
 - [Capabilities](./capabilities.md) — what each grant lets you do.
-- [Examples](./examples.md) — the full tcp-client NMEA source, walked through.
+- [Examples](./examples.md) — the full NMEA 0183 source, walked through.

@@ -1,9 +1,9 @@
 {
   "manifestVersion": 1,
-  "id": "core.tcp-client",
-  "name": "TCP Client (NMEA0183)",
+  "id": "core.nmea0183",
+  "name": "NMEA 0183",
   "version": "1.0.0",
-  "description": "Reads NMEA0183 sentences from a TCP server and publishes vessel/AIS state. The reference Tier-A (WASM) plugin; a drop-in for the built-in tcp-client source.",
+  "description": "Connects to a NMEA 0183 server over TCP and reads instrument sentences — GPS position, heading, speed, depth, wind — plus AIS targets, feeding them to the plotter as a data source.",
   "publisher": "beetlebug.org",
   "license": "MIT",
   "apiVersion": 1,

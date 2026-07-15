@@ -125,7 +125,7 @@ build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
 # In-tree reference plugins compiled to Tier-A WASM (wasip1). Pure Go, CGO off, no
 # tile57 — builds standalone. Output stays beside each plugin's manifest so the
 # directory is directly runnable with `chartplotter plugin dev`.
-CORE_PLUGINS := core.tcp-client
+CORE_PLUGINS := core.nmea0183
 build-plugins: ## Build the in-tree reference plugins to plugin.wasm (wasip1)
 	@for p in $(CORE_PLUGINS); do \
 		echo "→ plugins/$$p/plugin.wasm (wasip1)"; \

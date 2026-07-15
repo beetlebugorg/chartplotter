@@ -251,4 +251,4 @@ go build -o bin/<id>-linux-amd64 ./plugins/<id>
 
 - [Getting started](./getting-started.md) — end-to-end build & run.
 - [Protocol](./protocol.md) — the wire methods the SDK wraps.
-- [Examples](./examples.md) — the tcp-client plugin, walked through.
+- [Examples](./examples.md) — the NMEA 0183 plugin, walked through.

@@ -33,7 +33,6 @@ const STYLE = `
   .info { flex: 1; min-width: 0; }
   .name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .badge { font-size: 11px; font-weight: 500; color: var(--ui-text-dim, #8b949e); text-transform: uppercase; letter-spacing: .03em; }
-  .tag { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: var(--ui-surface-2,#21262d); color: var(--ui-text-dim,#8b949e); text-transform: uppercase; letter-spacing:.03em; }
   .meta { color: var(--ui-text-dim, #8b949e); font-size: 12px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .actions { display: flex; align-items: center; gap: 7px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 
@@ -164,7 +163,6 @@ export class PluginsPanel extends HTMLElement {
     const name = man.name || id;
     const state = p.record.enabled ? (p.status && p.status.state) || "enabled" : "disabled";
     const [color, label] = BADGE[state] || ["#6e7681", state];
-    const tier = man.entry && man.entry.wasm ? "wasm" : man.entry && man.entry.native ? "native" : "ui";
     const detail = (p.status && p.status.detail) || "";
     const toggle = p.record.enabled ? "Disable" : "Enable";
     const openHere = this._open && this._open.id === id;
@@ -173,7 +171,7 @@ export class PluginsPanel extends HTMLElement {
       <div class="row${openHere ? " open" : ""}" data-row="${esc(id)}">
         <span class="dot" style="background:${color}"></span>
         <div class="info">
-          <div class="name">${esc(name)} <span class="badge">${esc(label)}</span> <span class="tag">${tier}</span></div>
+          <div class="name">${esc(name)} <span class="badge">${esc(label)}</span></div>
           <div class="meta">${esc(id)} · v${esc(man.version || p.record.version || "?")}${detail ? " · " + esc(detail) : ""}</div>
         </div>
         <div class="actions">

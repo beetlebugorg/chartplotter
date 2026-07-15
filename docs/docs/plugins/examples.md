@@ -10,9 +10,9 @@ Two complete, real examples: a **backend Tier-A** data source (the reference
 plugin that ships in-tree), and a **UI-only** overlay in the built-in style.
 Both are runnable and live in the repo.
 
-## Backend (Tier A): the tcp-client NMEA source
+## Backend (Tier A): the NMEA 0183 source
 
-`plugins/core.tcp-client` is the reference plugin — the built-in tcp-client NMEA
+`plugins/core.nmea0183` is the reference plugin — the built-in NMEA 0183 (tcp-client)
 source, reimplemented as a WASM plugin. It owns **no I/O of its own**: the host
 dials the socket (`net.tcp-client`) and streams bytes; the plugin frames lines,
 parses them with the same `nmea` package the built-in runner uses, and publishes
@@ -23,7 +23,7 @@ vessel/AIS/raw deltas back. Parity between the two is the acceptance test.
 ```jsonc
 {
   "manifestVersion": 1,
-  "id": "core.tcp-client",
+  "id": "core.nmea0183",
   "name": "TCP Client (NMEA0183)",
   "version": "1.0.0",
   "description": "Reads NMEA0183 from a TCP server and publishes vessel/AIS state.",
@@ -145,19 +145,19 @@ unknown paths would be dropped by the host anyway.
 
 ```bash
 # Build to WASM (this is what `make build-plugins` runs)
-GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -o plugins/core.tcp-client/plugin.wasm ./plugins/core.tcp-client
+GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go build -o plugins/core.nmea0183/plugin.wasm ./plugins/core.nmea0183
 
 # Run live against a local NMEA source; dev grants all declared caps
-chartplotter plugin dev plugins/core.tcp-client --config '{"host":"127.0.0.1","port":10110}'
+chartplotter plugin dev plugins/core.nmea0183 --config '{"host":"127.0.0.1","port":10110}'
 ```
 
 `dev` prints the effects as they happen:
 
 ```
-status[core.tcp-client]: running connected to 127.0.0.1:10110
-raw[core.tcp-client]: $GPGGA,123519,4807.038,N,01131.000,E,…
-vessel[core.tcp-client]: 3 delta(s)
-ais[core.tcp-client]: 1 target(s)
+status[core.nmea0183]: running connected to 127.0.0.1:10110
+raw[core.nmea0183]: $GPGGA,123519,4807.038,N,01131.000,E,…
+vessel[core.nmea0183]: 3 delta(s)
+ais[core.nmea0183]: 1 target(s)
 ```
 
 ## UI-only plugin: track line + SOG HUD
