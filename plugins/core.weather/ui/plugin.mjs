@@ -8,11 +8,14 @@
 // uses ctx.map (accepting the same contract the built-ins live with) rather than the
 // declarative layers API.
 
-const PARTICLES = 2600;
-const MAX_AGE = 130; // frames before a particle respawns (longer → longer streamlines)
+// Density is scaled to the viewport in _seed (not a fixed count) so a zoomed-in view
+// isn't a solid mat of lines; this is the target per ~1M screen px.
+const DENSITY = 900; // particles per megapixel of map
+const MAX_PARTICLES = 1600; // hard cap on big screens
+const MAX_AGE = 100; // frames before a particle respawns
 const STEP = 0.16; // screen px per (m/s) per frame (lower → slower, calmer motion)
-const FADE = 0.96; // trail persistence (higher = longer tails)
-const LINE_WIDTH = 2.1;
+const FADE = 0.92; // trail persistence (lower → shorter, lighter tails)
+const LINE_WIDTH = 1.3;
 
 // Wind-speed colour ramp (m/s → colour), interpolated. A cool→warm scale that reads
 // on day/dusk/night charts: calm blues, moderate greens/gold, strong oranges/reds,
@@ -130,8 +133,10 @@ export default class WindOverlay {
   }
 
   _seed() {
+    const megapixels = (this._cw * this._ch) / 1e6 || 1;
+    const n = Math.min(MAX_PARTICLES, Math.max(250, Math.round(DENSITY * megapixels)));
     this._particles = [];
-    for (let i = 0; i < PARTICLES; i++) this._particles.push(this._spawn());
+    for (let i = 0; i < n; i++) this._particles.push(this._spawn());
   }
 
   _spawn() {
@@ -193,9 +198,9 @@ export default class WindOverlay {
       .wc.off{opacity:.65;}
       .wc .arrow{display:inline-block;font-size:13px;line-height:1;}
     </style><div class="wc off" id="c"><span>🌬</span><span class="arrow" id="ar" hidden>↓</span><span id="v">Wind</span></div>`;
-    this._ctl = hud.getElementById("c");
-    this._ctlVal = hud.getElementById("v");
-    this._ctlArrow = hud.getElementById("ar");
+    this._ctl = hud.querySelector("#c");
+    this._ctlVal = hud.querySelector("#v");
+    this._ctlArrow = hud.querySelector("#ar");
     this._ctl.addEventListener("click", () => this._layer.toggle());
     this.ctx.vessel.subscribe(() => this._updateReadout());
   }
@@ -280,9 +285,10 @@ export default class WindOverlay {
       p.lat = b.lat;
       p.age++;
     }
-    // Pass 2a: a dark casing (one batched stroke) so streamlines read on LIGHT charts.
-    c.strokeStyle = "rgba(0,0,0,0.5)";
-    c.lineWidth = LINE_WIDTH + 2;
+    // Pass 2a: a subtle dark casing (one batched stroke) so streamlines read on LIGHT
+    // charts without looking heavy.
+    c.strokeStyle = "rgba(0,0,0,0.4)";
+    c.lineWidth = LINE_WIDTH + 1;
     c.beginPath();
     for (let i = 0; i < segs.length; i += 5) {
       c.moveTo(segs[i], segs[i + 1]);

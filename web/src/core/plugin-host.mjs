@@ -327,11 +327,14 @@ export class PluginHost {
     return handle;
   }
 
-  // _mount returns a fresh element in the shell chrome for a plugin's overlay UI.
+  // _mount returns a fresh element in the shell chrome for a plugin's overlay UI. A
+  // plain element has querySelector but not getElementById; the docs' examples use
+  // getElementById on a mount, so provide it as a scoped convenience.
   _mount(pluginId, slotId, track) {
     const el = document.createElement("div");
     el.dataset.plugin = pluginId;
     el.dataset.slot = slotId || "";
+    el.getElementById = (id) => el.querySelector(`#${CSS.escape(id)}`);
     if (this._svc.chrome) this._svc.chrome.appendChild(el);
     track(() => el.remove());
     return el;
