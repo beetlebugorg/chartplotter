@@ -61,6 +61,13 @@ func devRunOnce(parent context.Context, dir string, man *Manifest, storeDir stri
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// serve() blocks reading the plugin's stdout; a context cancel (Ctrl-C →
+	// signal.NotifyContext) won't unblock it on its own, so kill the session on
+	// cancellation to make the read return EOF and DevRun exit promptly.
+	go func() {
+		<-ctx.Done()
+		sess.Kill()
+	}()
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- b.serve(ctx) }()
 
