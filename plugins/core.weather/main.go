@@ -17,7 +17,6 @@ import (
 	_ "embed"
 	"fmt"
 	"math"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,62 +47,61 @@ func (p *weather) Start(h *sdk.Host) {
 		p.discoverGFS() // auto-resolve the latest cycle → fetch
 	case strings.Contains(src, "pgrb2"): // an explicit GFS product URL
 		h.Status("running", "fetching GFS…")
-		p.fetchGFS(src, func(reason string) { h.Status("degraded", reason) })
+		p.fetchGFS(src, "GFS", func() { h.Status("degraded", "GFS product not available") })
 	default: // any other GRIB2 URL
 		h.Status("running", "fetching "+src)
 		h.Fetch(src, func(resp *sdk.HTTPResponse, err error) { p.onFetch(resp, err, src) })
 	}
 }
 
-// discoverGFS finds the newest available GFS cycle in the archive (so "gfs" stays
-// current without a hardcoded date) and fetches its 10 m wind. On any failure it
-// reports degraded and draws nothing — no fabricated data.
+// discoverGFS fetches the latest available GFS cycle. GFS runs at 00/06/12/18Z and a
+// cycle is published a few hours after its nominal time, so we start ~5h back, floor
+// to a 6h boundary, and walk older until a cycle's .idx is available. Uses the wall
+// clock (available to the module) — no bucket listing, which is paginated oldest-first.
 func (p *weather) discoverGFS() {
 	p.h.Status("running", "finding latest GFS cycle…")
-	p.h.Fetch(gfsBucket+"/?list-type=2&prefix=gfs.&delimiter=/", func(resp *sdk.HTTPResponse, err error) {
-		date := ""
-		if err == nil && resp != nil && resp.Status == 200 {
-			date = latestGroup(string(resp.Body), gfsDateRE)
-		}
-		if date == "" {
-			p.h.Status("degraded", "could not list the GFS archive")
-			return
-		}
-		p.h.Fetch(gfsBucket+"/?list-type=2&prefix=gfs."+date+"/&delimiter=/", func(r2 *sdk.HTTPResponse, e2 error) {
-			cyc := "00"
-			if e2 == nil && r2 != nil && r2.Status == 200 {
-				if c := latestGroup(string(r2.Body), gfsCycleRE); c != "" {
-					cyc = c
-				}
-			}
-			url := fmt.Sprintf("%s/gfs.%s/%s/atmos/gfs.t%sz.pgrb2.0p25.f000", gfsBucket, date, cyc, cyc)
-			p.h.Status("running", "fetching GFS "+date+" "+cyc+"z…")
-			p.fetchGFS(url, func(reason string) { p.h.Status("degraded", "GFS "+date+" "+cyc+"z: "+reason) })
-		})
-	})
+	c := time.Now().UTC().Add(-5 * time.Hour).Truncate(6 * time.Hour) // newest likely-published cycle
+	p.tryCycle(c, 0)
+}
+
+// tryCycle attempts the cycle `back` steps before c, falling to the previous one if it
+// isn't up yet, up to ~2 days back.
+func (p *weather) tryCycle(c time.Time, back int) {
+	if back > 8 {
+		p.h.Status("degraded", "no recent GFS cycle available")
+		return
+	}
+	t := c.Add(time.Duration(-back*6) * time.Hour)
+	date, hh := t.Format("20060102"), t.Format("15")
+	// 0.5° (not 0.25°): ~4× fewer points → far faster to decode + transfer, and plenty
+	// for streamlines. Users wanting finer can set an explicit 0p25 URL.
+	url := fmt.Sprintf("%s/gfs.%s/%s/atmos/gfs.t%sz.pgrb2.0p50.f000", gfsBucket, date, hh, hh)
+	p.fetchGFS(url, "GFS "+date+" "+hh+"z", func() { p.tryCycle(c, back+1) })
 }
 
 // fetchGFS byte-ranges only the 10 m UGRD/VGRD messages out of a GFS product, using
 // its wgrib2 .idx to find their offsets — so a plugin never downloads the whole
-// multi-hundred-MB file. onErr is called (with a reason) if the fetch fails.
-func (p *weather) fetchGFS(url string, onErr func(string)) {
+// multi-hundred-MB file. onMiss is called if this product isn't available (the caller
+// may try an older cycle); on success it publishes with label.
+func (p *weather) fetchGFS(url, label string, onMiss func()) {
 	p.h.Fetch(url+".idx", func(resp *sdk.HTTPResponse, err error) {
 		if err != nil || resp == nil || resp.Status != 200 {
-			onErr("index fetch failed")
+			onMiss()
 			return
 		}
 		start, end, ok := windRange(string(resp.Body))
 		if !ok {
-			onErr("no 10 m wind in index")
+			onMiss()
 			return
 		}
 		rng := fmt.Sprintf("bytes=%d-%d", start, end)
+		p.h.Status("running", "fetching "+label+"…")
 		p.h.FetchOpts(url, map[string]string{"Range": rng}, func(r *sdk.HTTPResponse, e error) {
 			if e != nil || r == nil || (r.Status != 200 && r.Status != 206) {
-				onErr("data fetch failed")
+				onMiss()
 				return
 			}
-			p.publish(r.Body, "GFS")
+			p.publish(r.Body, label)
 		})
 	})
 }
@@ -120,25 +118,6 @@ func (p *weather) onFetch(resp *sdk.HTTPResponse, err error, label string) {
 		return
 	}
 	p.publish(resp.Body, label)
-}
-
-// GFS archive listing patterns (S3 XML CommonPrefixes).
-var (
-	gfsDateRE  = regexp.MustCompile(`gfs\.(\d{8})/`)       // gfs.YYYYMMDD/
-	gfsCycleRE = regexp.MustCompile(`gfs\.\d{8}/(\d{2})/`) // gfs.YYYYMMDD/HH/
-)
-
-// latestGroup returns the lexicographically-largest first capture group of re in s
-// ("" if none). YYYYMMDD dates and HH cycles sort correctly as strings, so the max is
-// the newest.
-func latestGroup(s string, re *regexp.Regexp) string {
-	best := ""
-	for _, m := range re.FindAllStringSubmatch(s, -1) {
-		if m[1] > best {
-			best = m[1]
-		}
-	}
-	return best
 }
 
 // windRange parses a wgrib2 .idx and returns the byte range [start,end] spanning the

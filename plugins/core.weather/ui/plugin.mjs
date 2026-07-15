@@ -9,13 +9,14 @@
 // declarative layers API.
 
 // Density is scaled to the viewport in _seed (not a fixed count) so a zoomed-in view
-// isn't a solid mat of lines; this is the target per ~1M screen px.
-const DENSITY = 900; // particles per megapixel of map
-const MAX_PARTICLES = 1600; // hard cap on big screens
-const MAX_AGE = 100; // frames before a particle respawns
-const STEP = 0.16; // screen px per (m/s) per frame (lower → slower, calmer motion)
-const FADE = 0.92; // trail persistence (lower → shorter, lighter tails)
-const LINE_WIDTH = 1.3;
+// isn't a solid mat of lines. Kept deliberately sparse — wind is a background hint,
+// not a wall of streamlines.
+const DENSITY = 180; // particles per megapixel of map
+const MAX_PARTICLES = 450; // hard cap on big screens
+const MAX_AGE = 110; // frames before a particle respawns
+const STEP = 0.07; // screen px per (m/s) per frame (lower → slower, calmer motion)
+const FADE = 0.94; // trail persistence (higher → longer streamline tails)
+const LINE_WIDTH = 2.3;
 
 // Wind-speed colour ramp (m/s → colour), interpolated. A cool→warm scale that reads
 // on day/dusk/night charts: calm blues, moderate greens/gold, strong oranges/reds,
@@ -155,14 +156,16 @@ export default class WindOverlay {
   // overlay is shown). Mounted in the shell chrome; theme vars inherit.
   _mountSlider() {
     const hud = this.ctx.hud.mount("wind-time");
+    // Docked under the wind control (top-right), so it never collides with the app's
+    // bottom status/progress chrome.
     hud.innerHTML = `<style>
-      .wt{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(var(--botbar-h,0px) + 92px);
-        z-index:6;display:none;align-items:center;gap:10px;padding:7px 14px;border-radius:20px;
+      .wt{position:absolute;right:calc(12px + env(safe-area-inset-right,0px));top:calc(var(--topbar-h,0px) + 104px);
+        z-index:6;display:none;align-items:center;gap:9px;padding:7px 12px;border-radius:18px;
         background:var(--ui-surface,#161b22);border:1px solid var(--ui-border,#30363d);
         box-shadow:0 3px 14px rgba(0,0,0,.28);color:var(--ui-text,#e6edf3);font:600 12px/1 system-ui,sans-serif;}
-      .wt input{width:180px;accent-color:var(--ui-accent,#2f81f7);}
+      .wt input{width:150px;accent-color:var(--ui-accent,#2f81f7);}
       .wt .lbl{min-width:46px;text-align:right;}
-    </style><div class="wt"><span>🌬</span><input type="range" min="0" max="0" value="0"><span class="lbl">+0h</span></div>`;
+    </style><div class="wt"><input type="range" min="0" max="0" value="0"><span class="lbl">+0h</span></div>`;
     this._sliderWrap = hud.querySelector(".wt");
     this._slider = hud.querySelector("input");
     this._label = hud.querySelector(".lbl");
