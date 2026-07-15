@@ -36,6 +36,8 @@ type Host interface {
 	PublishAIS(source string, targets []nmea.AISTarget)
 	PublishRaw(source string, lines []string)
 	UpdateStatus(source string, st PluginStatus)
+	// EvictAIS drops the targets a source published (its ais.write grant was revoked).
+	EvictAIS(source string)
 	Log(pluginID, level, msg string)
 }
 
@@ -53,6 +55,7 @@ type brokerSession struct {
 	host     Host
 	storeDir string // <dataDir>/plugins/<id>/data — storage KV root
 	dialer   net.Dialer
+	statusFn func(PluginStatus) // optional: the runner records the plugin's reported status
 
 	mu      sync.Mutex
 	grants  []Capability
@@ -228,13 +231,32 @@ func (b *brokerSession) configCopy() map[string]any {
 }
 
 // setGrants swaps the grant set + config at runtime and notifies the plugin
-// (host.grantsChanged, spec §4).
+// (host.grantsChanged, spec §4). Revoking a transport capability tears down the
+// host-mediated connections it authorized — otherwise a plugin keeps pumping data
+// over a socket the host dialed under a grant that no longer exists.
 func (b *brokerSession) setGrants(ctx context.Context, grants []Capability, config map[string]any) {
 	b.mu.Lock()
+	_, hadTCP := HasCap(b.grants, CapTCPClient)
+	_, hadSerial := HasCap(b.grants, CapSerial)
+	_, hadAIS := HasCap(b.grants, CapAISWrite)
 	b.grants = grants
 	b.config = config
 	b.quota = storageQuota(grants)
+	_, nowTCP := HasCap(grants, CapTCPClient)
+	_, nowSerial := HasCap(grants, CapSerial)
+	_, nowAIS := HasCap(grants, CapAISWrite)
 	b.mu.Unlock()
+	// All host-mediated handles in this build are transport sockets; if any transport
+	// grant was revoked, close them so the plugin stops receiving (and thus stops
+	// publishing). The plugin sees io.closed and degrades.
+	if (hadTCP && !nowTCP) || (hadSerial && !nowSerial) {
+		b.closeHandles()
+	}
+	// Revoking ais.write also removes the targets this plugin already contributed, so
+	// stale AIS doesn't linger on the chart until TTL eviction.
+	if hadAIS && !nowAIS {
+		b.host.EvictAIS(b.id)
+	}
 	_ = b.notify(MethodGrantsChanged, GrantsChanged{Grants: grants, Config: config})
 }
 

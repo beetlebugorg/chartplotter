@@ -206,6 +206,25 @@ func (s *AISStore) Upsert(t AISTarget, source string) {
 	s.ver++
 }
 
+// EvictSource removes every target last written by source (e.g. when a plugin's
+// ais.write grant is revoked) and returns how many were removed.
+func (s *AISStore) EvictSource(source string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for mmsi, src := range s.sources {
+		if src == source {
+			delete(s.targets, mmsi)
+			delete(s.sources, mmsi)
+			n++
+		}
+	}
+	if n > 0 {
+		s.ver++
+	}
+	return n
+}
+
 // mergeTarget overlays src's set fields onto dst and refreshes LastSeen.
 func mergeTarget(dst, src *AISTarget, now time.Time) {
 	dst.LastSeen = now

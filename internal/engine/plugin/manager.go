@@ -150,14 +150,26 @@ func (m *Manager) Disable(id string) error {
 }
 
 // SetGrants swaps a plugin's grant set (and optionally config), hot-applying it to a
-// running plugin via host.grantsChanged (spec §4).
+// running plugin via host.grantsChanged (spec §4). A nil config leaves config
+// untouched (grants-only edit).
 func (m *Manager) SetGrants(id string, grants []Capability, config map[string]any) error {
-	rec, ok := m.state.mutate(id, func(r *PluginRecord) {
+	return m.hotApply(id, func(r *PluginRecord) {
 		r.Grants = grants
 		if config != nil {
 			r.Config = config
 		}
 	})
+}
+
+// SetConfig replaces a plugin's settings, leaving its grants intact, and hot-applies
+// the change to a running plugin (host.grantsChanged carries the new config).
+func (m *Manager) SetConfig(id string, config map[string]any) error {
+	return m.hotApply(id, func(r *PluginRecord) { r.Config = config })
+}
+
+// hotApply mutates a plugin's record and re-pushes grants+config to its live runner.
+func (m *Manager) hotApply(id string, fn func(*PluginRecord)) error {
+	rec, ok := m.state.mutate(id, fn)
 	if !ok {
 		return fmt.Errorf("no such plugin %q", id)
 	}
@@ -337,6 +349,11 @@ func (r *pluginRunner) runOnce(parent context.Context) error {
 	}
 	sess := newStdioSession(inst.Stdout(), inst.Stdin(), inst.Kill)
 	b := newBrokerSession(r.id, sess, r.mgr.opts.Host, r.storeDir(), r.record.Grants, r.record.Config)
+	b.statusFn = func(ps PluginStatus) { // reflect the plugin's own status.update in the UI
+		r.mu.Lock()
+		r.status = ps
+		r.mu.Unlock()
+	}
 	r.setBroker(b)
 	defer r.setBroker(nil)
 

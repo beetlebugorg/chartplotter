@@ -109,7 +109,11 @@ func (b *brokerSession) handleStatusUpdate(m *Message) {
 	if json.Unmarshal(m.Params, &s) != nil {
 		return
 	}
-	b.host.UpdateStatus(b.id, PluginStatus(s))
+	ps := PluginStatus(s)
+	b.host.UpdateStatus(b.id, ps)
+	if b.statusFn != nil {
+		b.statusFn(ps) // let the runner reflect it in the plugins UI
+	}
 }
 
 func aisFromDTO(t AISTargetDTO) nmea.AISTarget {

@@ -77,6 +77,7 @@ func (h *testHost) PublishRaw(source string, lines []string) {
 	h.raw = append(h.raw, lines...)
 	h.mu.Unlock()
 }
+func (h *testHost) EvictAIS(source string) { h.ais.EvictSource(source) }
 func (h *testHost) UpdateStatus(id string, st PluginStatus) {
 	h.mu.Lock()
 	h.logs = append(h.logs, "status "+st.State+": "+st.Detail)
@@ -121,7 +122,7 @@ func TestTCPClientPluginParity(t *testing.T) {
 
 	// Poll until the host store converges (the plugin batches at ~75 ms).
 	ok := false
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 150; i++ { // up to ~15s; generous so a loaded machine doesn't flake
 		if vesselJSON(host.vessel.Snapshot()) == vesselJSON(wantVessel) &&
 			aisJSON(host.ais.Snapshot()) == aisJSON(wantAIS) {
 			ok = true

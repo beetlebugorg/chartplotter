@@ -13,6 +13,14 @@
     { "cap": "ais.write" },
     { "cap": "net.tcp-client", "hosts": ["${config:host}"] }
   ],
+  "ui": {
+    "settings": {
+      "items": [
+        { "key": "host", "type": "text", "label": "Host", "placeholder": "127.0.0.1" },
+        { "key": "port", "type": "number", "label": "Port", "default": 10110 }
+      ]
+    }
+  },
   "provides": [
     { "service": "nmea.source", "apiVersion": 1 }
   ]

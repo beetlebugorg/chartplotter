@@ -53,6 +53,7 @@ func (h *pluginHost) PublishRaw(source string, lines []string) {
 		h.s.rawHub.publish(source, line)
 	}
 }
+func (h *pluginHost) EvictAIS(source string)                   { h.s.nmeaMgr.AIS().EvictSource(source) }
 func (h *pluginHost) UpdateStatus(string, plugin.PluginStatus) {} // surfaced via the SSE poll
 func (h *pluginHost) Log(id, level, msg string)                { log.Printf("[plugin %s] %s: %s", id, level, msg) }
 
@@ -132,7 +133,7 @@ func (s *Server) servePluginItem(w http.ResponseWriter, r *http.Request) {
 			apiErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		s.pluginErr(w, s.pluginMgr.SetGrants(id, nil, cfg)) // config-only update keeps grants
+		s.pluginErr(w, s.pluginMgr.SetConfig(id, cfg)) // config-only update keeps grants
 	case action == "" && r.Method == http.MethodDelete:
 		purge := r.URL.Query().Get("purgeData") != ""
 		s.pluginErr(w, s.pluginMgr.Remove(id, purge))

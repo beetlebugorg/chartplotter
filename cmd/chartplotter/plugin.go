@@ -161,6 +161,7 @@ func (consoleHost) PublishRaw(src string, lines []string) {
 		fmt.Printf("raw[%s]: %s\n", src, l)
 	}
 }
+func (consoleHost) EvictAIS(source string) { fmt.Printf("ais[%s]: evicted (grant revoked)\n", source) }
 func (consoleHost) UpdateStatus(id string, st plugin.PluginStatus) {
 	fmt.Printf("status[%s]: %s %s\n", id, st.State, st.Detail)
 }
