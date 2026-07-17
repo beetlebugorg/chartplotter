@@ -13,15 +13,22 @@ import (
 	"time"
 )
 
-// Grid is one decoded GRIB2 message: a field over a regular lat/lon grid.
+// Grid is one decoded GRIB2 message: a field over a regular lat/lon grid
+// (template 3.0) or a Lambert-conformal grid (template 3.30, e.g. HRRR).
 type Grid struct {
+	Template           int       // grid-definition template: 0 = lat/lon, 30 = Lambert
 	Nx, Ny             int       // columns, rows
 	La1, Lo1, La2, Lo2 float64   // grid corners, degrees (La1/Lo1 = first point)
-	Dx, Dy             float64   // increments, degrees
+	Dx, Dy             float64   // increments: degrees (3.0) or metres (3.30)
 	RefTime            time.Time // reference (analysis) time, UTC
 	Category, Number   int       // product discipline-2 category/number (2/2=UGRD, 2/3=VGRD)
 	ForecastHour       int       // forecast offset, hours
 	Values             []float64 // row-major from (La1,Lo1), len Nx*Ny
+
+	// Lambert-conformal parameters (template 3.30 only).
+	LoV, Latin1, Latin2 float64 // orientation longitude + standard parallels, degrees
+	ScanYUp             bool    // +j scanning: rows run south→north (HRRR does)
+	WindsGridRelative   bool    // u/v are along grid axes, not earth east/north
 }
 
 // Decode parses every GRIB2 message in b.
@@ -77,19 +84,34 @@ func decodeMessage(b []byte) (Grid, error) {
 		case 1: // Identification: reference time
 			year := int(binary.BigEndian.Uint16(s[12:14]))
 			g.RefTime = time.Date(year, time.Month(s[14]), int(s[15]), int(s[16]), int(s[17]), int(s[18]), 0, time.UTC)
-		case 3: // Grid definition (template 3.0, regular lat/lon)
+		case 3: // Grid definition (template 3.0 regular lat/lon, or 3.30 Lambert)
 			tmpl := binary.BigEndian.Uint16(s[12:14])
-			if tmpl != 0 {
-				return g, fmt.Errorf("unsupported grid template %d (want 3.0)", tmpl)
+			g.Template = int(tmpl)
+			switch tmpl {
+			case 0:
+				g.Nx = int(binary.BigEndian.Uint32(s[30:34]))
+				g.Ny = int(binary.BigEndian.Uint32(s[34:38]))
+				g.La1 = micro(s[46:50])
+				g.Lo1 = micro(s[50:54])
+				g.La2 = micro(s[55:59])
+				g.Lo2 = micro(s[59:63])
+				g.Dx = micro(s[63:67])
+				g.Dy = micro(s[67:71])
+			case 30: // Lambert conformal (HRRR/NAM); Dx/Dy are metres
+				g.Nx = int(binary.BigEndian.Uint32(s[30:34]))
+				g.Ny = int(binary.BigEndian.Uint32(s[34:38]))
+				g.La1 = micro(s[38:42])
+				g.Lo1 = micro(s[42:46])
+				g.WindsGridRelative = s[46]&0x08 != 0 // resolution/component flag bit 5
+				g.LoV = micro(s[51:55])
+				g.Dx = float64(binary.BigEndian.Uint32(s[55:59])) / 1e3
+				g.Dy = float64(binary.BigEndian.Uint32(s[59:63])) / 1e3
+				g.ScanYUp = s[64]&0x40 != 0
+				g.Latin1 = micro(s[65:69])
+				g.Latin2 = micro(s[69:73])
+			default:
+				return g, fmt.Errorf("unsupported grid template %d (want 3.0/3.30)", tmpl)
 			}
-			g.Nx = int(binary.BigEndian.Uint32(s[30:34]))
-			g.Ny = int(binary.BigEndian.Uint32(s[34:38]))
-			g.La1 = micro(s[46:50])
-			g.Lo1 = micro(s[50:54])
-			g.La2 = micro(s[55:59])
-			g.Lo2 = micro(s[59:63])
-			g.Dx = micro(s[63:67])
-			g.Dy = micro(s[67:71])
 		case 4: // Product definition (template 4.0)
 			tmpl := binary.BigEndian.Uint16(s[7:9])
 			if tmpl != 0 {
