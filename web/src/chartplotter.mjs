@@ -411,7 +411,13 @@ export class ChartPlotter extends HTMLElement {
     // Map-overlay show/hide registry + its Layers settings tab. Core overlays and
     // plugins register their layers here (via ctx.overlays); the tab lists them.
     this._layerRegistry = new LayerRegistry();
-    if (!this._widget) this._layersCtl = new LayersController({ registry: this._settingsRegistry, layers: this._layerRegistry });
+    if (!this._widget) {
+      this._layersCtl = new LayersController({
+        layers: this._layerRegistry,
+        button: this.shadowRoot.getElementById("layers-btn"),
+        pop: this.shadowRoot.getElementById("layers-pop"),
+      });
+    }
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
     if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
@@ -717,6 +723,7 @@ export class ChartPlotter extends HTMLElement {
       this._pluginsCtl = new PluginsController({
         registry: this._settingsRegistry,
         assets: this._assets,
+        uiLogs: (id) => (this._pluginHost ? this._pluginHost.uiLogs(id) : []),
         notify: this._notify,
       });
       // Tap-info picker for own-ship / AIS targets; dismissed on a map grab or tap.

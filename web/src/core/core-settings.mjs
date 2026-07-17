@@ -205,7 +205,7 @@ export function coreSettingsContributions(app) {
   // the tab; the rest slot into it. Ordered (0.96+) so the tab sits after Display.
   const viewingGroups = VIEWING_GROUP_SECTIONS.map((s, i) => ({
     id: `core-vg-${s.id}`,
-    tab: i === 0 ? { id: "viewing-groups", label: "Viewing groups", tabOrder: 2 } : "viewing-groups",
+    tab: "chart", // the chart's content selection lives WITH the chart controls
     order: 0.96 + i * 0.001,
     group: s.label,
     get, set,

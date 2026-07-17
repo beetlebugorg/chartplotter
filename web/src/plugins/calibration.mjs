@@ -21,7 +21,8 @@ const boxPx = (pitch) => Math.max(1, Math.round(REF_MM / pitch));
 export function calibrationContribution(app) {
   return {
     id: "calibration",
-    tab: { id: "vessel", label: "Vessel", tabOrder: 4 },
+    tab: "general",
+    order: 0.5, // after Units
     group: "Screen calibration",
     order: 4,
     render: (host) => renderCalibration(host, app),
