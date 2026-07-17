@@ -45,6 +45,13 @@ type Plugin interface {
 	Stop()
 }
 
+// ConfigWatcher is optionally implemented by plugins that react to live settings
+// edits (the host hot-applies config without a restart). Called on the read-loop
+// goroutine after Host.Config() reflects the new values.
+type ConfigWatcher interface {
+	ConfigChanged()
+}
+
 // TCPHandlers are the callbacks for a host-mediated TCP connection. All fire on the
 // read-loop goroutine.
 type TCPHandlers struct {
@@ -118,7 +125,7 @@ func (h *Host) dispatch(p Plugin, m *proto.Message) bool {
 			h.replyErr(m.ID, proto.CodeMethodNotFound, "unknown method: "+m.Method)
 		}
 	default: // host→plugin notification
-		h.onNotify(m)
+		h.onNotify(p, m)
 	}
 	return false
 }
@@ -133,13 +140,16 @@ func (h *Host) onHello(m *proto.Message) {
 	h.reply(m.ID, proto.HelloResult{APIVersion: proto.APIVersion, Framing: "ndjson"})
 }
 
-func (h *Host) onNotify(m *proto.Message) {
+func (h *Host) onNotify(p Plugin, m *proto.Message) {
 	switch m.Method {
 	case proto.MethodGrantsChanged:
 		var g proto.GrantsChanged
 		if json.Unmarshal(m.Params, &g) == nil {
 			h.grants = g.Grants
 			h.config = g.Config
+			if w, ok := p.(ConfigWatcher); ok {
+				w.ConfigChanged()
+			}
 		}
 	case proto.MethodTCPData, proto.MethodSerialData:
 		var d proto.IOData
