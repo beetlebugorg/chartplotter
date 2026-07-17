@@ -4,30 +4,47 @@
 const sidebars = {
   docs: [
     'intro',
-    'installation',
-    'getting-started',
-    'chart1',
-    'widget',
-    'cli',
-    'architecture',
     {
+      // Plain-language pages for people USING chartplotter on a boat.
       type: 'category',
-      label: 'Plugins',
+      label: 'Using chartplotter',
       items: [
-        'plugins/plugins-overview',
-        'plugins/plugins-getting-started',
-        'plugins/plugins-manifest',
-        'plugins/plugins-capabilities',
-        'plugins/plugins-sdk',
-        'plugins/plugins-protocol',
-        'plugins/plugins-ui',
-        'plugins/plugins-packaging',
-        'plugins/plugins-examples',
+        'installation',
+        'getting-started',
+        'chart1',
+        'nmea0183',
+        'weather',
+        'widget',
+        'cli',
+        'limitations',
       ],
     },
-    'style-guide',
-    'tile-schema',
-    'limitations',
+    {
+      // How chartplotter works inside, and how to extend it.
+      type: 'category',
+      label: 'Developing',
+      items: [
+        'architecture',
+        'style-guide',
+        'tile-schema',
+        {
+          type: 'category',
+          label: 'Plugins',
+          items: [
+            'plugins/plugins-overview',
+            'plugins/plugins-getting-started',
+            'plugins/plugins-manifest',
+            'plugins/plugins-capabilities',
+            'plugins/plugins-sdk',
+            'plugins/plugins-protocol',
+            'plugins/plugins-ui',
+            'plugins/weather-grid',
+            'plugins/plugins-packaging',
+            'plugins/plugins-examples',
+          ],
+        },
+      ],
+    },
   ],
 };
 
