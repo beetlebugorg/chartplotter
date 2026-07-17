@@ -127,6 +127,7 @@ func (p *weather) Start(h *sdk.Host) {
 func (p *weather) ConfigChanged() {
 	if r := p.h.ConfigString("refresh"); r != p.lastRefresh {
 		p.lastRefresh = r
+		p.h.Log("info", "refresh requested — re-resolving newest cycles")
 		src := p.h.ConfigString("source")
 		if src == "" || src == "gfs" {
 			p.gfsGen++
@@ -217,6 +218,7 @@ func (p *weather) tryHRRRCycle(gen int, c time.Time, back int) {
 		return // superseded by a newer window
 	}
 	if back > 6 {
+		p.h.Log("warn", "no recent HRRR cycle available (walked 6 h back)")
 		p.h.Status("degraded", "no recent HRRR cycle available")
 		return
 	}
@@ -227,6 +229,7 @@ func (p *weather) tryHRRRCycle(gen int, c time.Time, back int) {
 			p.tryHRRRCycle(gen, c, back+1)
 			return
 		}
+		p.h.Log("info", "HRRR cycle "+date+" "+hh+"z")
 		p.hiDoc, p.midDoc = windDoc{}, windDoc{}
 		p.fetchHRRRHour(gen, date, hh, 0)
 	})
@@ -246,6 +249,7 @@ func (p *weather) fetchHRRRHour(gen int, date, hh string, i int) {
 		}
 		done := func() {
 			p.hiLabel = fmt.Sprintf("HRRR %sz: %d step(s)", hh, len(p.midDoc.Steps))
+			p.h.Log("info", fmt.Sprintf("published HRRR layers: %d step(s), window %v", len(p.midDoc.Steps), len(p.hiDoc.Steps) > 0))
 			p.status()
 		}
 		p.h.ServeSet("wind-mid.bin", encodeWindBin(&p.midDoc), func(_ string, err error) {
@@ -404,6 +408,7 @@ func (p *weather) tryCycle(gen int, c time.Time, back int) {
 		return // superseded by a refresh
 	}
 	if back > 8 {
+		p.h.Log("warn", "no recent GFS cycle available (walked 2 days back)")
 		p.h.Status("degraded", "no recent GFS cycle available")
 		return
 	}
@@ -417,6 +422,7 @@ func (p *weather) tryCycle(gen int, c time.Time, back int) {
 			p.tryCycle(gen, c, back+1) // this cycle isn't up yet
 			return
 		}
+		p.h.Log("info", "GFS cycle "+date+" "+hh+"z")
 		p.doc = windDoc{}
 		p.fetchHour(gen, date, hh, 0)
 	})
@@ -449,6 +455,7 @@ func (p *weather) fetchHour(gen int, date, hh string, i int) {
 				return
 			}
 			p.gfsLabel = fmt.Sprintf("GFS %s %sz: %d step(s)", date, hh, len(p.doc.Steps))
+			p.h.Log("info", fmt.Sprintf("published wind.bin: %s, %d step(s)", isize(p.doc.Header.Nx, p.doc.Header.Ny), len(p.doc.Steps)))
 			p.status()
 		})
 		return

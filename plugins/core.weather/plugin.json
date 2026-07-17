@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "org.beetlebug.weather",
   "name": "Wind (GRIB)",
-  "version": "1.2.4",
+  "version": "1.2.6",
   "description": "Overlays forecast surface wind as animated streamlines. Decodes a GRIB2 wind field and draws it as moving particles on the chart, so you can see where the wind is going.",
   "publisher": "beetlebug.org",
   "license": "MIT",
