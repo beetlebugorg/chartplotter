@@ -297,8 +297,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/api/health":
+		// "app" identifies this as chartplotter to the dock launcher, which
+		// must distinguish an adoptable server from a stranger on the port.
 		w.Header().Set("Content-Type", jsonCT)
-		fmt.Fprintf(w, `{"ok":true,"version":%q}`, s.Version)
+		fmt.Fprintf(w, `{"ok":true,"app":"chartplotter","version":%q}`, s.Version)
 	case r.URL.Path == "/api/cells":
 		s.serveCells(w, r) // GET: names of cells currently in the server's ENC_ROOT cache
 	case r.URL.Path == "/api/ienc/catalog":

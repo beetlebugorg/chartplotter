@@ -94,8 +94,10 @@ func TestAPIHealthAndHostCheck(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	// /api/health also advertises the server version, so match the liveness
-	// marker rather than an exact body.
-	if !strings.Contains(string(got), `"ok":true`) {
+	// marker rather than an exact body. The "app" field is the dock launcher's
+	// adoption check — keep it stable.
+	if !strings.Contains(string(got), `"ok":true`) ||
+		!strings.Contains(string(got), `"app":"chartplotter"`) {
 		t.Errorf("health: got %q", got)
 	}
 

@@ -27,7 +27,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 tile57-lib vendor-style-engine xbuild xbuild-tile57 test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 build-dock tile57-lib vendor-style-engine xbuild xbuild-tile57 xbuild-dock package-macos test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -122,6 +122,13 @@ build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches 
 # Back-compat alias — libtile57 is now the default engine, so this is just `build`.
 build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
 
+# The dock is the desktop launcher (cmd/dock): a tray/menu-bar app that
+# spawns `chartplotter serve` as a child. Pure Go on linux/windows (no libtile57,
+# no Zig); systray needs cgo/Cocoa on darwin only.
+build-dock: ## Build bin/dock (desktop launcher tray app; no libtile57)
+	CGO_ENABLED=$(if $(filter darwin,$(shell go env GOOS)),1,0) go build -ldflags "-X main.version=$(VERSION)" -o bin/dock ./cmd/dock
+	@echo "→ bin/dock"
+
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps
 # the same version as `build`; strips symbols (-s -w) and paths (-trimpath) like a
@@ -136,6 +143,17 @@ build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
 # Outputs dist/chartplotter_<os>_<arch>[.exe].
 xbuild xbuild-tile57: $(TILE57)/include/tile57.h ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
 	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh
+	VERSION="$(VERSION)" scripts/xbuild-dock.sh
+
+# Dock-only cross-builds (pure Go, no Zig): dist/dock_<os>_<arch>[.exe] plus the
+# Linux desktop-integration files. darwin: see package-macos.
+xbuild-dock: ## Cross-compile the dock launcher for linux+windows into dist/
+	VERSION="$(VERSION)" scripts/xbuild-dock.sh
+
+# Assemble dist/ChartPlotter.app (+ zip) natively on macOS: engine + dock +
+# Info.plist (LSUIElement) + AppIcon.icns, ad-hoc signed (IDENTITY= to override).
+package-macos: ## Build ChartPlotter.app + zip into dist/ (run on macOS)
+	VERSION="$(VERSION)" scripts/macos-app.sh
 
 serve: build ## Serve the web frontend + provisioning API on :8080 (HOST/PORT/ASSETS overridable)
 	$(BIN) serve --host $(HOST) --port $(PORT) --assets $(ASSETS)
