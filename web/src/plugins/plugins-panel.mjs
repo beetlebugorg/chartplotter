@@ -60,6 +60,9 @@ const STYLE = `
 
   .field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
   .field label { width: 110px; flex: none; color: var(--ui-text-dim, #8b949e); }
+  /* Toggle rows: the label IS the row text — let it use the width, switch on the right. */
+  .field.toggle label { width: auto; flex: 1; min-width: 0; color: var(--ui-text, #e6edf3); }
+  .field.toggle .input { flex: none; }
   .field .input { flex: 1; min-width: 0; }
   .field input[type=text], .field input[type=number], .field input[type=password], .field select, .editor textarea {
     width: 100%; box-sizing: border-box;
@@ -68,6 +71,20 @@ const STYLE = `
     font-size: 16px; /* >=16px or iOS zooms on focus */
   }
   .editor textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; white-space: pre; }
+  .logbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .logbar input[type=text] { flex: 1; min-width: 120px; background: var(--ui-surface, #161b22); color: var(--ui-text, #e6edf3);
+    border: 1px solid var(--ui-border-strong, #444c56); border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 16px; }
+  .logbar .follow { display: inline-flex; align-items: center; gap: 5px; color: var(--ui-text-dim, #8b949e); font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--ui-border-strong, #444c56); border-radius: 8px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; border-left: 1px solid var(--ui-border, #30363d); background: var(--ui-surface, #161b22); padding: 6px 10px; font-size: 12px; }
+  .seg button:first-child { border-left: none; }
+  .seg button.sel { background: var(--ui-accent, #2f81f7); color: var(--ui-accent-text, #fff); }
+  pre.logs.tall { max-height: none; height: 44dvh; }
+  pre.logs { max-height: 240px; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+    margin: 0 0 10px; background: var(--ui-surface, #161b22); border: 1px solid var(--ui-border, #30363d);
+    border-radius: 10px; padding: 10px; font-size: 11px; line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ui-text-dim, #8b949e); white-space: pre-wrap; word-break: break-word; }
   .field .unit { color: var(--ui-text-dim, #8b949e); font-size: 12px; flex: none; }
   .switch { display: inline-flex; align-items: center; }
   .editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
@@ -116,10 +133,11 @@ export class PluginsPanel extends HTMLElement {
     this._err = "";
   }
 
-  configure({ service, notify, assets }) {
+  configure({ service, notify, assets, uiLogs }) {
     this._service = service;
     this._notify = notify;
     this._assets = assets || "/";
+    this._uiLogs = uiLogs || null; // (id) => [{time,level,msg}] from the UI half
   }
 
   // A plugin that provides nmea.source defines a connection type — its Configure
@@ -166,6 +184,10 @@ export class PluginsPanel extends HTMLElement {
     // Drill-down open: feed the child panel from THIS stream (it opens none of its
     // own — HTTP/1.1 socket budget) and leave the DOM alone; re-mounting the child
     // on every status tick would reset it mid-interaction.
+    if (this._open && this._open.mode === "logs") {
+      this._renderLogs();
+      return;
+    }
     if (this._open && this._open.mode === "connections") {
       if (this._connPanel) this._connPanel.pluginsPush(plugins);
       return;
@@ -178,6 +200,10 @@ export class PluginsPanel extends HTMLElement {
     // Connections drill-down: a plugin that defines a connection type pushes its
     // connections view over the list (back returns). The <connections-panel> is a
     // persistent element so its state (open form/sniffer) survives re-renders.
+    if (this._open && this._open.mode === "logs") {
+      this._renderLogs();
+      return;
+    }
     if (this._open && this._open.mode === "connections") {
       const p = this._plugins.find((x) => x.record.id === this._open.id);
       const name = (p && p.manifest && p.manifest.name) || this._open.id;
@@ -236,6 +262,7 @@ export class PluginsPanel extends HTMLElement {
           </div>
           <div class="actions">
             <button data-act="config" data-id="${esc(id)}">${this._isSource(p) ? "Connections" : "Configure"}</button>
+            <button data-act="logs" data-id="${esc(id)}">Logs</button>
             ${hasCaps ? `<button data-act="grants" data-id="${esc(id)}">Grants</button>` : ""}
             <button data-act="toggle" data-id="${esc(id)}">${toggle}</button>
             <button class="danger" data-act="remove" data-id="${esc(id)}">Remove</button>
@@ -269,11 +296,12 @@ export class PluginsPanel extends HTMLElement {
         await this._service.remove(id, false);
         this._open = null;
         await this._load();
-      } else if (act === "grants" || act === "config") {
+      } else if (act === "grants" || act === "config" || act === "logs") {
         // Data-source plugins drill into their connections view; others get the
         // inline config/grants editor.
         const p = this._plugins.find((x) => x.record.id === id);
         const mode = act === "config" && p && this._isSource(p) ? "connections" : act;
+        if (this._open && this._open.mode === "logs") clearInterval(this._logTimer);
         this._open = this._open && this._open.id === id && this._open.mode === mode ? null : { id, mode };
         this._render();
       }
@@ -293,6 +321,75 @@ export class PluginsPanel extends HTMLElement {
     if (this._open.mode === "grants") this._buildGrants(box, p);
     else this._buildConfig(box, p);
     row.after(box);
+  }
+
+  // --- log viewer: a full-pane drill-down (logs are voluminous; an inline box is
+  // too cramped). Level + substring filters, follow-tail, copy. The <pre> is the
+  // documented log-viewer exception to the one-scroll-container rule.
+  _renderLogs() {
+    const p = this._plugins.find((x) => x.record.id === this._open.id);
+    const name = (p && p.manifest && p.manifest.name) || this._open.id;
+    const id = this._open.id;
+    this._root.innerHTML = `
+      <div class="bar">
+        <button id="back">← Plugins</button>
+        <span class="hint" style="text-align:right">${esc(name)} — logs</span>
+      </div>
+      <div class="logbar">
+        <div class="seg" id="lvl">
+          ${["all", "info", "warn", "error"].map((l) =>
+            `<button data-lvl="${l}" class="${(this._logLevel || "all") === l ? "sel" : ""}">${l}</button>`).join("")}
+        </div>
+        <input type="text" id="lfilter" placeholder="filter…" value="${esc(this._logFilter || "")}">
+        <label class="follow"><input type="checkbox" id="lfollow" ${this._logFollow !== false ? "checked" : ""}> follow</label>
+        <button id="lcopy" title="Copy visible lines">Copy</button>
+        <span class="hint" id="lcount"></span>
+      </div>
+      <pre class="logs tall" id="lpre">loading…</pre>`;
+    this._root.querySelector("#back").onclick = () => {
+      clearInterval(this._logTimer);
+      this._open = null;
+      this._render();
+    };
+    this._root.querySelectorAll("#lvl button").forEach((b) => (b.onclick = () => {
+      this._logLevel = b.dataset.lvl;
+      this._root.querySelectorAll("#lvl button").forEach((x) => x.classList.toggle("sel", x === b));
+      this._logTick(id);
+    }));
+    this._root.querySelector("#lfilter").oninput = (e) => {
+      this._logFilter = e.target.value;
+      this._logTick(id);
+    };
+    this._root.querySelector("#lfollow").onchange = (e) => {
+      this._logFollow = e.target.checked;
+    };
+    this._root.querySelector("#lcopy").onclick = () => {
+      const pre = this._root.querySelector("#lpre");
+      if (pre && navigator.clipboard) navigator.clipboard.writeText(pre.textContent).catch(() => {});
+    };
+    clearInterval(this._logTimer);
+    this._logTick(id);
+    this._logTimer = setInterval(() => this._logTick(id), 2000);
+  }
+
+  async _logTick(id) {
+    if (!this._open || this._open.mode !== "logs" || this._open.id !== id) return;
+    const server = await this._service.logs(id).catch(() => []);
+    const ui = this._uiLogs ? this._uiLogs(id) : [];
+    const all = [...server, ...ui].sort((a, b) => new Date(a.time) - new Date(b.time));
+    const lvl = this._logLevel || "all";
+    const q = (this._logFilter || "").toLowerCase();
+    const shown = all.filter((l) =>
+      (lvl === "all" || (l.level || "info") === lvl) &&
+      (!q || (l.msg || "").toLowerCase().includes(q)));
+    const pre = this._root.querySelector("#lpre");
+    const count = this._root.querySelector("#lcount");
+    if (!pre) return;
+    pre.textContent = shown.length
+      ? shown.map((l) => `${String(l.time).slice(11, 19)} ${(l.level || "info").padEnd(5)} ${l.msg}`).join("\n")
+      : (all.length ? "nothing matches the filter" : "no log output yet");
+    if (count) count.textContent = `${shown.length}/${all.length}`;
+    if (this._logFollow !== false) pre.scrollTop = pre.scrollHeight;
   }
 
   // --- grant editor ---
@@ -366,6 +463,7 @@ export class PluginsPanel extends HTMLElement {
     let ctl;
     if (it.type === "toggle") {
       ctl = `<span class="switch"><input type="checkbox" data-k="${esc(it.key)}" ${v ? "checked" : ""}></span>`;
+      return `<div class="field toggle"><label>${label}</label><div class="input">${ctl}</div></div>`;
     } else if (it.type === "select" && Array.isArray(it.options)) {
       ctl = `<select data-k="${esc(it.key)}">${it.options
         .map((o) => `<option value="${esc(o.value ?? o)}" ${String(v) === String(o.value ?? o) ? "selected" : ""}>${esc(o.label ?? o)}</option>`)

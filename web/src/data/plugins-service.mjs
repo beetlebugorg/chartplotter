@@ -9,6 +9,13 @@ export class PluginsService {
   }
 
   /** List installed plugins, each as {record, manifest, status, running}. */
+  /** A plugin's captured log ring (WASM stderr, newest last). */
+  async logs(id) {
+    const r = await fetch(this._assets + `api/plugins/${encodeURIComponent(id)}/logs`, { cache: "no-store" });
+    const j = await r.json();
+    return j.logs || [];
+  }
+
   async list() {
     const r = await fetch(this._assets + "api/plugins", { cache: "no-store" });
     const j = await r.json();

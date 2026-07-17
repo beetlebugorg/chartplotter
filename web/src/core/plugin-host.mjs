@@ -156,7 +156,12 @@ export class PluginHost {
       plugin: {
         id,
         version,
-        log: (level, ...args) => console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](`[plugin ${id}]`, ...args),
+        // Logs go to the console AND a per-plugin ring the Plugins panel's Logs
+        // viewer merges with the WASM half's server-captured lines.
+        log: (level, ...args) => {
+          console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](`[plugin ${id}]`, ...args);
+          this._captureLog(id, level, args);
+        },
       },
 
       // Live vessel state (≤4 Hz coalesced) — same store the built-ins read.
@@ -287,6 +292,21 @@ export class PluginHost {
         format: (kind, value) => format(kind, value, svc.getUnits ? svc.getUnits() : null),
       },
     };
+  }
+
+  // _captureLog appends a UI-side log line to the plugin's capped ring.
+  _captureLog(id, level, args) {
+    this._uiLogs ||= new Map();
+    const l = this._uiLogs.get(id) || [];
+    const msg = args.map((a) => (typeof a === "string" ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())).join(" ");
+    l.push({ time: new Date().toISOString(), level: level === "log" ? "info" : level, msg: "[ui] " + msg });
+    if (l.length > 200) l.shift();
+    this._uiLogs.set(id, l);
+  }
+
+  // uiLogs returns a snapshot of a plugin's UI-side log ring (for the Logs viewer).
+  uiLogs(id) {
+    return [...((this._uiLogs && this._uiLogs.get(id)) || [])];
   }
 
   // _makeMarker wraps a MapLibre Marker in a small chainable handle.

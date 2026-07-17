@@ -12,6 +12,7 @@ export class PluginsController {
     this._assets = deps.assets || "/";
     this._service = new PluginsService({ assets: this._assets });
     this._notify = deps.notify;
+    this._uiLogs = deps.uiLogs || null;
     this._panel = null;
     this._unregister = deps.registry.register({
       id: "plugins",
@@ -24,7 +25,7 @@ export class PluginsController {
   _render(host) {
     if (!this._panel) {
       this._panel = document.createElement("plugins-panel");
-      this._panel.configure({ service: this._service, notify: this._notify, assets: this._assets });
+      this._panel.configure({ service: this._service, notify: this._notify, assets: this._assets, uiLogs: this._uiLogs });
     }
     host.appendChild(this._panel); // moving preserves the panel's state
   }

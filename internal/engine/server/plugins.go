@@ -113,6 +113,8 @@ func (s *Server) servePluginItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case action == "logs" && r.Method == http.MethodGet:
+		writeJSON(w, map[string]any{"ok": true, "logs": s.pluginMgr.Logs(id)})
 	case action == "enable" && r.Method == http.MethodPost:
 		s.pluginErr(w, s.pluginMgr.Enable(id))
 	case action == "disable" && r.Method == http.MethodPost:

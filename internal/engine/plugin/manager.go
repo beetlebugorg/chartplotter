@@ -54,6 +54,42 @@ type Manager struct {
 
 	mu      sync.Mutex
 	runners map[string]*pluginRunner
+
+	logMu sync.Mutex
+	logs  map[string][]LogEntry // plugin id → capped ring of captured log lines
+}
+
+// LogEntry is one captured plugin log line, served by /api/plugins/<id>/logs so a
+// plugin's behaviour is inspectable from its settings without shell access.
+type LogEntry struct {
+	Time  time.Time `json:"time"`
+	Level string    `json:"level"`
+	Msg   string    `json:"msg"`
+}
+
+// maxLogEntries caps the per-plugin ring (oldest lines drop off).
+const maxLogEntries = 400
+
+func (m *Manager) appendLog(id, level, msg string) {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	if m.logs == nil {
+		m.logs = map[string][]LogEntry{}
+	}
+	l := append(m.logs[id], LogEntry{Time: time.Now().UTC(), Level: level, Msg: msg})
+	if n := len(l) - maxLogEntries; n > 0 {
+		l = append(l[:0], l[n:]...)
+	}
+	m.logs[id] = l
+}
+
+// Logs returns a snapshot of a plugin's captured log ring (newest last).
+func (m *Manager) Logs(id string) []LogEntry {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	out := make([]LogEntry, len(m.logs[id]))
+	copy(out, m.logs[id])
+	return out
 }
 
 // PluginInfo is a plugin's install/grant state plus its manifest summary and live
@@ -384,7 +420,10 @@ func (r *pluginRunner) runOnce(parent context.Context) error {
 
 // startInstance selects the runtime for this runner.
 func (r *pluginRunner) startInstance(ctx context.Context) (rtInstance, error) {
-	logw := &lineLogger{logf: func(level, msg string) { r.mgr.opts.Host.Log(r.id, level, msg) }}
+	logw := &lineLogger{logf: func(level, msg string) {
+		r.mgr.appendLog(r.id, level, msg)
+		r.mgr.opts.Host.Log(r.id, level, msg)
+	}}
 	return startInstance(ctx, r.dir, r.manifest, r.record.ForceNative, r.storeDir(), logw)
 }
 
