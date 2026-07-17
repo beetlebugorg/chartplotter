@@ -1,24 +1,47 @@
 {
   "manifestVersion": 1,
-  "id": "core.weather",
+  "id": "org.beetlebug.weather",
   "name": "Wind (GRIB)",
-  "version": "1.0.0",
+  "version": "1.2.4",
   "description": "Overlays forecast surface wind as animated streamlines. Decodes a GRIB2 wind field and draws it as moving particles on the chart, so you can see where the wind is going.",
   "publisher": "beetlebug.org",
   "license": "MIT",
   "apiVersion": 1,
-  "entry": { "wasm": "plugin.wasm" },
+  "entry": {
+    "wasm": "plugin.wasm"
+  },
   "capabilities": [
-    { "cap": "storage", "quota": "16MB" },
-    { "cap": "net.http", "hosts": ["nomads.ncep.noaa.gov", "*.amazonaws.com"] },
-    { "cap": "ui.map-layer" }
+    {
+      "cap": "storage",
+      "quota": "16MB"
+    },
+    {
+      "cap": "net.http",
+      "hosts": [
+        "nomads.ncep.noaa.gov",
+        "*.amazonaws.com"
+      ]
+    },
+    {
+      "cap": "ui.map-layer"
+    }
   ],
   "ui": {
     "entry": "ui/plugin.mjs",
-    "mapLayers": [{ "id": "wind", "title": "Wind" }],
+    "mapLayers": [
+      {
+        "id": "wind",
+        "title": "Wind"
+      }
+    ],
     "settings": {
       "items": [
-        { "key": "source", "type": "text", "label": "GRIB source", "placeholder": "gfs", "default": "gfs" }
+        {
+          "key": "hires",
+          "type": "toggle",
+          "label": "High-res coastal wind (HRRR, ~60 MB/refresh)",
+          "default": true
+        }
       ]
     }
   }
