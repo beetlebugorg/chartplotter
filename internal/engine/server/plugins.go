@@ -116,7 +116,14 @@ func (s *Server) servePluginItem(w http.ResponseWriter, r *http.Request) {
 	case action == "enable" && r.Method == http.MethodPost:
 		s.pluginErr(w, s.pluginMgr.Enable(id))
 	case action == "disable" && r.Method == http.MethodPost:
-		s.pluginErr(w, s.pluginMgr.Disable(id))
+		err := s.pluginMgr.Disable(id)
+		if err == nil {
+			// Deliberately turning a data source OFF is not signal loss: drop every
+			// reading it wrote (position, wind, …) so no phantom own-ship lingers.
+			// (AIS targets it fed age out via the store TTL.)
+			s.vessel.ClearSource(id)
+		}
+		s.pluginErr(w, err)
 	case action == "grants" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
 		var body struct {
 			Grants []plugin.Capability `json:"grants"`
@@ -136,7 +143,11 @@ func (s *Server) servePluginItem(w http.ResponseWriter, r *http.Request) {
 		s.pluginErr(w, s.pluginMgr.SetConfig(id, cfg)) // config-only update keeps grants
 	case action == "" && r.Method == http.MethodDelete:
 		purge := r.URL.Query().Get("purgeData") != ""
-		s.pluginErr(w, s.pluginMgr.Remove(id, purge))
+		err := s.pluginMgr.Remove(id, purge)
+		if err == nil {
+			s.vessel.ClearSource(id) // as with disable: no phantom readings
+		}
+		s.pluginErr(w, err)
 	default:
 		apiErr(w, http.StatusNotFound, "unknown plugin endpoint")
 	}

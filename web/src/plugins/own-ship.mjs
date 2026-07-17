@@ -195,7 +195,10 @@ export default class OwnShip {
     const nav = s && s.navigation;
     const pos = nav && nav.position;
     if (!pos || typeof pos.lat !== "number") {
-      if (!this._fix) this._hide();
+      // Position REMOVED from the store — a source deliberately disabled, not signal
+      // loss (loss keeps the last fix in the store and only ages it via _tickGps).
+      // Drop the boat entirely: a phantom own-ship at a stale spot is worse than none.
+      this._hide();
       return;
     }
 
