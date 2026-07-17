@@ -45,6 +45,66 @@ export class ConnectionsService {
     return j.connection;
   }
 
+  // --- plugin-provided sources ---------------------------------------------
+  // Plugins that declare `provides: [{service:"nmea.source"}]` are data sources
+  // too; the Connections panel is the single place they're configured. Their
+  // config form comes from the manifest's ui.settings.items schema; state maps
+  // onto the plugin lifecycle (pause = disable plugin).
+
+  /** Installed plugins that provide nmea.source: [{id, name, config, enabled,
+      status, items}] (items = the manifest settings schema for the form). */
+  async pluginSources() {
+    const r = await fetch(this._assets + "api/plugins", { cache: "no-store" });
+    const j = await r.json();
+    return (j.plugins || [])
+      .filter((p) => ((p.manifest && p.manifest.provides) || []).some((x) => x.service === "nmea.source"))
+      .map((p) => ({
+        id: p.record.id,
+        name: (p.manifest && p.manifest.name) || p.record.id,
+        config: p.record.config || {},
+        enabled: !!p.record.enabled,
+        status: p.status || {},
+        items: (p.manifest && p.manifest.ui && p.manifest.ui.settings && p.manifest.ui.settings.items) || [],
+      }));
+  }
+
+  /** Save a plugin source's connection config and make sure it's running. */
+  async savePluginSource(id, config) {
+    await this._sendOK("POST", `api/plugins/${encodeURIComponent(id)}/config`, config);
+    await this._sendOK("POST", `api/plugins/${encodeURIComponent(id)}/enable`, null);
+  }
+
+  /** Pause/resume a plugin source (disable/enable the plugin). */
+  pausePluginSource(id, run) {
+    return this._sendOK("POST", `api/plugins/${encodeURIComponent(id)}/${run ? "enable" : "disable"}`, null);
+  }
+
+  /** Subscribe to plugin status updates (for plugin-source badges). */
+  streamPluginStatuses(onPlugins) {
+    if (!window.EventSource) return () => {};
+    const es = new EventSource(this._assets + "api/plugins/stream");
+    es.onmessage = (ev) => {
+      let s;
+      try {
+        s = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      onPlugins(s.plugins || []);
+    };
+    return () => es.close();
+  }
+
+  async _sendOK(method, path, body) {
+    const r = await fetch(this._assets + path, {
+      method,
+      headers: body != null ? { "Content-Type": "application/json" } : {},
+      body: body != null ? JSON.stringify(body) : undefined,
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "request failed");
+  }
+
   /**
    * Subscribe to the live status map (id → SourceStatus). Returns a stop function.
    */

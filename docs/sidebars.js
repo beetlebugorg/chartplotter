@@ -25,6 +25,7 @@ const sidebars = {
         'plugins/plugins-examples',
       ],
     },
+    'style-guide',
     'tile-schema',
     'limitations',
   ],

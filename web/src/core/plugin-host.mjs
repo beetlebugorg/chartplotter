@@ -273,6 +273,15 @@ export class PluginHost {
         show: (info) => svc.showInfo && svc.showInfo(info),
       },
 
+      // Map tap arbitration. claim(fn): fn(e) is offered each chart tap (e is the
+      // MapLibre click event — lngLat, point, originalEvent); return true to consume
+      // it (the ECDIS pick report and later claims don't fire), anything else to
+      // pass. This is how an overlay owns taps while it's active without stealing
+      // them permanently.
+      taps: {
+        claim: (fn) => track(svc.registerTapClaim ? svc.registerTapClaim(fn) : () => {}),
+      },
+
       // Unit formatting honoring the live mariner prefs (closed over, not exposed).
       units: {
         format: (kind, value) => format(kind, value, svc.getUnits ? svc.getUnits() : null),

@@ -415,6 +415,11 @@ export const STYLE = `
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
         #drawer.set-wide { width:min(760px, calc(100vw - 24px)); } /* settings: rail + content */
+        /* Settings owns its scrolling: <settings-dialog> has a FIXED-height shell whose
+           pane is the single scroll container, so the drawer body must never become a
+           second one around it (scrollbars-inside-scrollbars). Slimmer padding too —
+           the dialog's rail/pane provide their own gutters. */
+        #drawer.set-wide .body { overflow:hidden; padding:10px 16px 14px; }
         #drawer.wide .miller { height:calc(100dvh - var(--botbar-h) - 208px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
         /* caret on the TOP edge, pointing up at the button above */

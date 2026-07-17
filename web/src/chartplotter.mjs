@@ -27,7 +27,6 @@ import { coreSettingsContributions, vgGroupOn, vgSetGroupOn } from "./core/core-
 import { VgRail } from "./plugins/vg-rail.mjs"; // mid-left viewing-group quick-toggle pill rail
 import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
-import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
 import { PluginsController } from "./plugins/plugins-manager.mjs"; // install + manage plugins (Plugins tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
 import { PluginHost } from "./core/plugin-host.mjs"; // loads builtin/plugin UI controllers with a declarative ctx
@@ -684,6 +683,7 @@ export class ChartPlotter extends HTMLElement {
     if (!this._widget) {
       this._devTools = new DevTools({
         registry: this._settingsRegistry,
+        devMode: () => this._mariner.developerMode !== false, // default on until production flips it
         map,
         plotter: this._plotter,
         api: this._api,
@@ -706,16 +706,13 @@ export class ChartPlotter extends HTMLElement {
 
     // NMEA0183 live data (server mode only — the feed comes from the server's
     // connection manager). VesselStateStore streams /api/vessel for the render
-    // plugins (own-ship/AIS/HUD); ConnectionsController contributes the
-    // Connections settings tab for managing data sources.
+    // plugins (own-ship/AIS/HUD). There is no standalone Connections tab: data-
+    // source plugins DEFINE the connection types, so connections are managed by
+    // drilling into the plugin's row on the Plugins tab (plugins-panel pushes a
+    // <connections-panel> view for plugins that provide nmea.source).
     if (!this._widget) {
       this._vessel = new VesselStateStore({ assets: this._assets, widget: this._widget });
       this._vessel.start();
-      this._connections = new ConnectionsController({
-        registry: this._settingsRegistry,
-        assets: this._assets,
-        notify: this._notify,
-      });
       // Plugins settings tab: install/enable/disable/grant/remove plugins.
       this._pluginsCtl = new PluginsController({
         registry: this._settingsRegistry,
@@ -734,6 +731,10 @@ export class ChartPlotter extends HTMLElement {
       // load. registerZoomAnchor lets a plugin (own-ship) contribute the wheel-zoom
       // anchor without exposing WheelZoom; the shell aggregates the registered fns.
       this._zoomAnchors = new Set();
+      // Map tap arbitration: plugins claim chart taps in registration order — a
+      // handler returning true consumes the tap (the ECDIS pick report and later
+      // claims don't fire); anything else passes it down the chain.
+      this._tapClaims ||= new Set();
       this._pluginHost = new PluginHost({
         map,
         plotter: this._plotter,
@@ -745,6 +746,7 @@ export class ChartPlotter extends HTMLElement {
         showInfo,
         getUnits: () => this._mariner,
         registerZoomAnchor: (fn) => { this._zoomAnchors.add(fn); return () => this._zoomAnchors.delete(fn); },
+        registerTapClaim: (fn) => { this._tapClaims.add(fn); return () => this._tapClaims.delete(fn); },
         settings: this._settingsRegistry,
         notify: this._notify,
         overlays: this._layerRegistry,
@@ -1286,6 +1288,16 @@ export class ChartPlotter extends HTMLElement {
         // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
         // it so a pick/coverage tap doesn't fire under an active inspect lock.
         if (this._devTools && this._devTools.inspecting) return;
+        // Offer the tap to registered claimants (plugins — e.g. the wind probe while
+        // its layer is on). A claim consumes the tap; a pass falls through to the
+        // default ECDIS cursor pick below.
+        for (const fn of this._tapClaims ||= new Set()) {
+          try {
+            if (fn(e) === true) return;
+          } catch (err) {
+            console.warn("[taps] claim handler failed", err);
+          }
+        }
         // The coverage/cell-boundary overlay is a passive debug layer — a tap always
         // runs the default ECDIS cursor pick (S-52 PresLib §10.8), never flies.
         this._pickReportAt(e.point, e.originalEvent);

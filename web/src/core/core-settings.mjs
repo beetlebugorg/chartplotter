@@ -83,8 +83,9 @@ export function coreSettingsContributions(app) {
   // calibration has its own "Calibration" tab (plugins/calibration.mjs).
   const general = {
     id: "core-general",
-    tab: { id: "general", label: "General" },
+    tab: { id: "general", label: "General", tabOrder: 0 },
     order: 0,
+    group: "App",
     get, set,
     // A function: the basemap options depend on whether a vector basemap is
     // configured (app._osmVecUrl is resolved during boot).
@@ -96,6 +97,10 @@ export function coreSettingsContributions(app) {
       {
         key: "showChartRadar", type: "toggle", label: "Off-screen chart pointers",
         desc: "Edge arrows to installed charts you can't currently see — tap one to fly there",
+      },
+      {
+        key: "developerMode", type: "toggle", label: "Developer tools", default: true,
+        desc: "Show the Developer tab (diagnostics, chart rebuilds, feature inspector). Production builds ship this off; flip it on when debugging.",
       },
     ],
   };
@@ -112,7 +117,7 @@ export function coreSettingsContributions(app) {
   // the non-conformant Standard-off / Other-on state the old multi-select allowed.
   const displayDetail = {
     id: "core-display-detail",
-    tab: { id: "display", label: "Display" },
+    tab: { id: "chart", label: "Chart", tabOrder: 1 },
     order: 0.6,
     group: "Detail level",
     get, set,
@@ -128,7 +133,7 @@ export function coreSettingsContributions(app) {
   // Water, depth areas & soundings.
   const displayWater = {
     id: "core-display-water",
-    tab: "display",
+    tab: "chart",
     order: 0.7,
     group: "Water & soundings",
     get, set,
@@ -143,7 +148,7 @@ export function coreSettingsContributions(app) {
   // Point symbols & line styling.
   const displaySymbols = {
     id: "core-display-symbols",
-    tab: "display",
+    tab: "chart",
     order: 0.8,
     group: "Symbols & lines",
     get, set,
@@ -165,7 +170,7 @@ export function coreSettingsContributions(app) {
   // Dangers & data quality.
   const displayDangers = {
     id: "core-display-dangers",
-    tab: "display",
+    tab: "chart",
     order: 0.9,
     group: "Dangers & quality",
     get, set,
@@ -178,7 +183,7 @@ export function coreSettingsContributions(app) {
   // Chart boundaries & informational callouts.
   const displayBounds = {
     id: "core-display-bounds",
-    tab: "display",
+    tab: "chart",
     order: 0.95,
     group: "Boundaries & callouts",
     get, set,
@@ -200,7 +205,7 @@ export function coreSettingsContributions(app) {
   // the tab; the rest slot into it. Ordered (0.96+) so the tab sits after Display.
   const viewingGroups = VIEWING_GROUP_SECTIONS.map((s, i) => ({
     id: `core-vg-${s.id}`,
-    tab: i === 0 ? { id: "viewing-groups", label: "Viewing groups" } : "viewing-groups",
+    tab: i === 0 ? { id: "viewing-groups", label: "Viewing groups", tabOrder: 2 } : "viewing-groups",
     order: 0.96 + i * 0.001,
     group: s.label,
     get, set,
@@ -210,8 +215,9 @@ export function coreSettingsContributions(app) {
   // TEXT — the S-52 text-group toggles.
   const text = {
     id: "core-text",
-    tab: { id: "text", label: "Text" },
+    tab: "chart",
     order: 1,
+    group: "Text",
     get, set,
     // "Important text" (bridge/cable clearances, route bearings) has no toggle —
     // it is safety-critical and always shown (see textGroupFilter).
@@ -226,8 +232,9 @@ export function coreSettingsContributions(app) {
   // UNITS — one segmented picker per unit category (depth + the five others).
   const units = {
     id: "core-units",
-    tab: { id: "units", label: "Units" },
-    order: 2,
+    tab: "general",
+    order: 0.2,
+    group: "Units",
     get, set,
     items: UNIT_CATEGORIES.map((c) => ({ key: c.key, type: "segmented", label: c.label, options: c.opts, default: c.def })),
   };
@@ -236,8 +243,9 @@ export function coreSettingsContributions(app) {
   // (metres under the hood). A function so the unit/label/step track depthUnit.
   const depths = {
     id: "core-depths",
-    tab: { id: "depths", label: "Depths" },
-    order: 3,
+    tab: "chart",
+    order: 1.1,
+    group: "Depths",
     get, set,
     items: () => {
       const ft = app._mariner.depthUnit === "ft";
@@ -264,8 +272,9 @@ export function coreSettingsContributions(app) {
   // viewer there are no dev tools, so the tab is just the toggle.
   const advanced = {
     id: "core-advanced",
-    tab: { id: "advanced", label: "Advanced" },
+    tab: { id: "advanced", label: "Developer", tabOrder: 7 },
     order: 4,
+    when: () => get("developerMode", true),
     get, set,
     items: () => [
       {

@@ -55,13 +55,26 @@ export class SettingsRegistry {
     return [...this._byId.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.id).localeCompare(String(b.id)));
   }
 
+  // Contributions that are currently VISIBLE: an optional `when()` predicate lets a
+  // contribution (and any tab only it declares) hide itself — e.g. the Developer tab
+  // gated behind the developer-mode toggle. A throwing predicate fails open.
+  _visible() {
+    return this.list().filter((c) => {
+      try {
+        return !c.when || !!c.when();
+      } catch {
+        return true;
+      }
+    });
+  }
+
   // The tabs to show, derived from contributions. A contribution's `tab` is
   // either a string id (slot into a tab declared elsewhere) or {id,label} (which
   // also DECLARES that tab). Tabs appear in first-declaration/contribution order;
   // an explicit `tabOrder` on the {id,label} form overrides. Returns [{id,label}].
   tabs() {
     const seen = new Map();
-    for (const c of this.list()) {
+    for (const c of this._visible()) {
       const t = c.tab;
       if (!t) continue;
       const id = typeof t === "string" ? t : t.id;
@@ -74,7 +87,7 @@ export class SettingsRegistry {
 
   // Contributions targeting a given tab id (in render order).
   forTab(tabId) {
-    return this.list().filter((c) => {
+    return this._visible().filter((c) => {
       const t = c.tab;
       return t && (typeof t === "string" ? t : t.id) === tabId;
     });

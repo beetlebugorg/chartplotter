@@ -12,7 +12,7 @@ export class LayersController {
     this._panel = null;
     this._unregister = registry.register({
       id: "layers",
-      tab: { id: "layers", label: "Layers" },
+      tab: { id: "layers", label: "Layers", tabOrder: 3 },
       order: 3,
       render: (host) => this._render(host),
     });

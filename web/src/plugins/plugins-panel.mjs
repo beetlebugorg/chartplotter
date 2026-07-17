@@ -6,6 +6,13 @@
 //
 // Status ticks patch each row's badge in place; structural changes (install / enable
 // / grant or config edits / remove) re-render the list.
+//
+// Plugins that provide nmea.source DEFINE a connection type: their Configure button
+// drills into a pushed <connections-panel> view (back returns to the list) — there
+// is no separate Connections tab.
+
+import "./connections-panel.mjs";
+import { ConnectionsService } from "../data/connections-service.mjs";
 
 const STYLE = `
   :host { display: block; color: var(--ui-text, #e6edf3); font-size: 13px; }
@@ -24,16 +31,20 @@ const STYLE = `
   .empty { color: var(--ui-text-dim, #8b949e); padding: 26px 4px; text-align: center; border: 1px dashed var(--ui-border, #30363d); border-radius: 10px; }
 
   .row {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; flex-direction: column; gap: 8px;
     padding: 12px 14px; border: 1px solid var(--ui-border, #30363d);
     border-radius: 10px; margin-bottom: 10px; background: var(--ui-surface, #161b22);
   }
   .row.open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-bottom: 0; }
+  .row .head { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #6e7681; }
   .info { flex: 1; min-width: 0; }
   .name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .badge { font-size: 11px; font-weight: 500; color: var(--ui-text-dim, #8b949e); text-transform: uppercase; letter-spacing: .03em; }
-  .meta { color: var(--ui-text-dim, #8b949e); font-size: 12px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* The description spans the FULL row width under the header line — room to say
+     what the plugin actually does instead of an ellipsised fragment. */
+  .desc { color: var(--ui-text-dim, #8b949e); font-size: 12px; line-height: 1.5; max-width: 64ch; }
+  .meta { color: var(--ui-text-faint, #6e7681); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .actions { display: flex; align-items: center; gap: 7px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 
   .editor {
@@ -62,6 +73,7 @@ const STYLE = `
   .editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
   .err { color: #f85149; font-size: 12px; margin: 8px 0; }
   input[type=file] { display: none; }
+  @media (pointer:coarse) { button { min-height: var(--tap-min, 44px); } }
 `;
 
 // plugin status.State → [dot colour, badge label]
@@ -104,16 +116,26 @@ export class PluginsPanel extends HTMLElement {
     this._err = "";
   }
 
-  configure({ service, notify }) {
+  configure({ service, notify, assets }) {
     this._service = service;
     this._notify = notify;
+    this._assets = assets || "/";
+  }
+
+  // A plugin that provides nmea.source defines a connection type — its Configure
+  // drills into the connections view instead of a raw config form.
+  _isSource(p) {
+    return ((p.manifest && p.manifest.provides) || []).some((x) => x.service === "nmea.source");
   }
 
   connectedCallback() {
     this.shadowRoot.innerHTML = `<style>${STYLE}</style><div id="root"></div>`;
     this._root = this.shadowRoot.getElementById("root");
     this._load();
-    this._stop = this._service.stream((plugins) => this._onStream(plugins));
+    // Poll (transient fetches) instead of SSE: the app is HTTP/1.1 with a 6-socket
+    // budget per origin, and the core streams (vessel, AIS, plugin-host) already
+    // hold three. A settings panel doesn't justify pinning a socket while open.
+    this._stop = this._pollLoop(2000, async () => this._onStream(await this._service.list()));
   }
 
   disconnectedCallback() {
@@ -121,24 +143,62 @@ export class PluginsPanel extends HTMLElement {
     this._stop = null;
   }
 
+  _pollLoop(ms, fn) {
+    const t = setInterval(() => { fn().catch(() => {}); }, ms);
+    return () => clearInterval(t);
+  }
+
   async _load() {
+    this._render(); // paint the frame (with a loading hint) before data lands
     try {
       this._plugins = await this._service.list();
       this._err = "";
     } catch (e) {
       this._err = e.message || String(e);
     }
+    this._loaded = true;
     this._render();
   }
 
   _onStream(plugins) {
     const same = structureSig(plugins) === structureSig(this._plugins);
     this._plugins = plugins;
+    // Drill-down open: feed the child panel from THIS stream (it opens none of its
+    // own — HTTP/1.1 socket budget) and leave the DOM alone; re-mounting the child
+    // on every status tick would reset it mid-interaction.
+    if (this._open && this._open.mode === "connections") {
+      if (this._connPanel) this._connPanel.pluginsPush(plugins);
+      return;
+    }
     if (same && !this._open) this._patchBadges();
     else this._render();
   }
 
   _render() {
+    // Connections drill-down: a plugin that defines a connection type pushes its
+    // connections view over the list (back returns). The <connections-panel> is a
+    // persistent element so its state (open form/sniffer) survives re-renders.
+    if (this._open && this._open.mode === "connections") {
+      const p = this._plugins.find((x) => x.record.id === this._open.id);
+      const name = (p && p.manifest && p.manifest.name) || this._open.id;
+      this._root.innerHTML = `
+        <div class="bar">
+          <button id="back">← Plugins</button>
+          <span class="hint" style="text-align:right">${esc(name)} — connections</span>
+        </div>
+        <div id="conn-host"></div>`;
+      this._root.querySelector("#back").onclick = () => { this._open = null; this._render(); };
+      if (!this._connPanel) {
+        this._connPanel = document.createElement("connections-panel");
+        this._connPanel.configure({
+          service: new ConnectionsService({ assets: this._assets }),
+          notify: this._notify,
+        });
+      }
+      this._connPanel.setPlugin(this._open.id);
+      this._root.querySelector("#conn-host").appendChild(this._connPanel);
+      return;
+    }
     const rows = this._plugins.map((p) => this._rowHTML(p)).join("");
     this._root.innerHTML = `
       <div class="bar">
@@ -147,7 +207,7 @@ export class PluginsPanel extends HTMLElement {
       </div>
       <input type="file" id="file" accept=".zip">
       ${this._err ? `<div class="err">${esc(this._err)}</div>` : ""}
-      ${this._plugins.length ? rows : `<div class="empty">No plugins installed yet.</div>`}
+      ${this._plugins.length ? rows : `<div class="empty">${this._loaded ? "No plugins installed yet." : "Loading…"}</div>`}
     `;
     this._root.querySelector("#install").onclick = () => this._root.querySelector("#file").click();
     this._root.querySelector("#file").onchange = (e) => this._install(e.target.files[0]);
@@ -169,17 +229,20 @@ export class PluginsPanel extends HTMLElement {
     const hasCaps = man.capabilities && man.capabilities.length;
     return `
       <div class="row${openHere ? " open" : ""}" data-row="${esc(id)}">
-        <span class="dot" style="background:${color}"></span>
-        <div class="info">
-          <div class="name">${esc(name)} <span class="badge">${esc(label)}</span></div>
-          <div class="meta">${esc(id)} · v${esc(man.version || p.record.version || "?")}${detail ? " · " + esc(detail) : ""}</div>
+        <div class="head">
+          <span class="dot" style="background:${color}"></span>
+          <div class="info">
+            <div class="name">${esc(name)} <span class="badge">${esc(label)}</span></div>
+          </div>
+          <div class="actions">
+            <button data-act="config" data-id="${esc(id)}">${this._isSource(p) ? "Connections" : "Configure"}</button>
+            ${hasCaps ? `<button data-act="grants" data-id="${esc(id)}">Grants</button>` : ""}
+            <button data-act="toggle" data-id="${esc(id)}">${toggle}</button>
+            <button class="danger" data-act="remove" data-id="${esc(id)}">Remove</button>
+          </div>
         </div>
-        <div class="actions">
-          <button data-act="config" data-id="${esc(id)}">Configure</button>
-          ${hasCaps ? `<button data-act="grants" data-id="${esc(id)}">Grants</button>` : ""}
-          <button data-act="toggle" data-id="${esc(id)}">${toggle}</button>
-          <button class="danger" data-act="remove" data-id="${esc(id)}">Remove</button>
-        </div>
+        ${man.description ? `<div class="desc">${esc(man.description)}</div>` : ""}
+        <div class="meta">${esc(id)} · v${esc(man.version || p.record.version || "?")}${detail ? " · " + esc(detail) : ""}</div>
       </div>`;
   }
 
@@ -207,7 +270,11 @@ export class PluginsPanel extends HTMLElement {
         this._open = null;
         await this._load();
       } else if (act === "grants" || act === "config") {
-        this._open = this._open && this._open.id === id && this._open.mode === act ? null : { id, mode: act };
+        // Data-source plugins drill into their connections view; others get the
+        // inline config/grants editor.
+        const p = this._plugins.find((x) => x.record.id === id);
+        const mode = act === "config" && p && this._isSource(p) ? "connections" : act;
+        this._open = this._open && this._open.id === id && this._open.mode === mode ? null : { id, mode };
         this._render();
       }
     } catch (e) {
