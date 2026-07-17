@@ -78,6 +78,11 @@ implemented in `web/src/core/plugin-host.mjs`.
 
 ### `ctx.plugin`
 
+`ctx.plugin.log(level, ...args)` writes to the console **and** a per-plugin ring
+the Plugins panel's Logs viewer merges (tagged `[ui]`) with your WASM half's
+server-captured `Log` lines — one timeline for both halves of the plugin.
+
+
 | Member | Signature | Notes |
 | --- | --- | --- |
 | `id` | string | the plugin id |
@@ -230,6 +235,25 @@ this.ctx.callout.show({
   x: e.clientX, y: e.clientY,
 });
 ```
+
+### `ctx.taps` — chart tap arbitration
+
+| Member | Signature | Notes |
+| --- | --- | --- |
+| `claim` | `claim(fn) → unregister` | `fn(e)` is offered every chart tap (`e` is the MapLibre click event: `lngLat`, `point`, `originalEvent`). Return `true` to consume it — the ECDIS pick report and later claimants don't fire. Return anything else to pass. |
+
+Claim taps only while your overlay is **active**; pass when it isn't, so the
+chart behaves as if your plugin weren't installed. The wind probe is the model:
+
+```js
+ctx.taps.claim((e) => {
+  if (!this._on) return false;      // layer hidden → not our tap
+  this._setProbe(e.lngLat);
+  return true;                      // consumed: no pick report
+});
+```
+
+The unregister is tracked by the host and runs on plugin unload.
 
 ### `ctx.units` — unit-aware formatting
 

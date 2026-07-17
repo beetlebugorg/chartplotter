@@ -101,7 +101,7 @@ install error, not a silent no-op. The schema below is exactly the Go
 | `entry` | object | yes* | Runtime entry points. Required unless the manifest is UI-only. |
 | `capabilities` | array | — | Requested capabilities (see below). |
 | `ui` | object | — | UI contribution (see [UI plugins](./ui.md)). |
-| `provides` | array | — | Service declarations. **Roadmap** (see below). |
+| `provides` | array | — | Service declarations. `nmea.source` is live (see below); others are roadmap. |
 | `consumes` | array | — | Service dependencies. **Roadmap**. |
 | `files` | object | — | `path → sha256` for every other archive file. Verified on install. |
 
@@ -151,6 +151,24 @@ A `UISlot` is `{ "id": string, "title"?: string, "icon"?: string }`. See
 
 These fields parse and validate today but are **not acted on** by the current
 host:
+
+### `provides: nmea.source` — data-source plugins own a connection type
+
+A plugin declaring `provides: [{ "service": "nmea.source" }]` is treated as a
+**connection type**, and the app routes its configuration through the
+Connections UI rather than a generic settings form:
+
+- its row in Settings → Plugins shows a **Connections** button that drills into
+  the connections view (status badge, pause/resume, raw-sentence sniffer, edit);
+- its `ui.settings.items` schema becomes the connection form (text/number
+  fields), offered in "+ Add connection" alongside the built-in TCP client;
+- pausing the connection disables the plugin, and the host clears every vessel
+  reading the plugin wrote (no phantom own-ship);
+- the raw sentences it publishes (`PublishRaw`) feed the same sniffer stream as
+  built-in connections.
+
+Declare it plus `vessel.write` / `ais.write` capabilities and publish deltas —
+the shell does the rest.
 
 - **`provides` / `consumes`** — service declarations for cross-plugin
   `services.*` calls. The `services.*` call surface is not implemented; declaring

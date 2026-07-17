@@ -61,6 +61,33 @@ func main() {
 }
 ```
 
+## Reacting to live config edits (`ConfigWatcher`)
+
+Config is **hot-applied**: when the user (or your UI half) writes settings, the
+host pushes the new values to your running instance — there is no restart. If
+your plugin should react (reconnect, refetch, re-centre), implement the optional
+`ConfigWatcher` interface next to `Plugin`:
+
+```go
+// Called on the read-loop goroutine after Host.Config() reflects the new values.
+func (p *myPlugin) ConfigChanged() {
+    if addr := p.h.ConfigString("server"); addr != p.current {
+        p.reconnect(addr)
+    }
+}
+```
+
+Patterns that build on this:
+
+- **UI-driven state** — your UI half writes config keys (via
+  `POST /api/plugins/<id>/config`) that the WASM half watches. The weather
+  plugin's sailing-area centre (`hiLat`/`hiLon`, written from the GPS fix) works
+  this way.
+- **Refresh nonce** — a UI "refresh" button writes a changing `refresh` value;
+  `ConfigChanged` sees it differ from the last seen value and re-pulls sources.
+  Pair in-flight async chains with a generation counter so a newer trigger
+  cleanly supersedes an older one.
+
 ## Re-exported types
 
 The SDK re-exports the wire types so you import only `sdk`:
@@ -124,7 +151,7 @@ h.PublishVessel(
 | Method | Signature | Notes |
 | --- | --- | --- |
 | `Status` | `Status(state, detail string)` | Report health. `state` is `running` / `degraded` / `error`; surfaces in the plugins/connections UI. |
-| `Log` | `Log(level, msg string)` | Structured log line to stderr; the host tags it with your plugin id and level. |
+| `Log` | `Log(level, msg string)` | Structured log line. The host tags it with your plugin id, keeps the last 400 lines in a ring served at `GET /api/plugins/<id>/logs`, and shows them in the plugin's **Logs** view (Settings → Plugins → Logs) with level/text filtering. Log the events a user debugging your plugin would need: source cycles found, artifacts published, fetch failures. |
 
 ```go
 h.Status("running", "connected to "+server)
