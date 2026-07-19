@@ -1,6 +1,44 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# ---- host-OS shim (native Windows builds) -------------------------------------
+# The core dev targets — build, build-dock, tile57-lib, serve, test, vet, tidy,
+# clean — also run on a Windows host, where GNU Make (winget/choco/scoop) usually
+# executes recipes through cmd.exe, not a POSIX sh. Those targets therefore avoid
+# shell-isms: recipe env vars are set via make-level `export` (never `VAR=x cmd`
+# prefixes), file tests live in make ($(wildcard)/ifeq, not `[ ... ]`), and the
+# only shell syntax in their recipes is `cd x && y`, which cmd and sh parse the
+# same. File ops with no syntax common to both route through the shims below —
+# an explicit `cmd /C "..."` on Windows, so they behave identically whether
+# make's recipe shell is cmd.exe or an MSYS sh (Git Bash). Everything else
+# (bake/demo/docs/screenshot targets, xbuild) stays POSIX-only: on Windows run
+# those from WSL or Git Bash.
+ifeq ($(OS),Windows_NT)
+EXE     := .exe
+DEVNULL := NUL
+# Pin the engine lib AND the C toolchain to the <arch>-windows-gnu triple that
+# scripts/xbuild-tile57.sh already cross-links with, so a native build never
+# mixes Zig's detected-native ABI (possibly msvc) with the gnu-ABI link the
+# binding's `-lpthread` expects. Zig doubles as the C compiler — it's a hard
+# build dep anyway, so no MinGW install is needed (`make build CC=gcc` to
+# override).
+GOARCH_HOST     = $(shell go env GOARCH)
+ZIG_HOST_TARGET = $(if $(filter arm64,$(GOARCH_HOST)),aarch64,x86_64)-windows-gnu
+ZIG_BUILD_ARGS  = -Dtarget=$(ZIG_HOST_TARGET)
+# Zig names the Windows static lib tile57.lib, but the Go binding links the
+# fixed path zig-out/lib/libtile57.a — normalize after every engine build (the
+# same move xbuild-tile57.sh makes).
+NORMALIZE_TILE57_LIB = cmd /C "copy /Y $(subst /,\,$(TILE57)/zig-out/lib/tile57.lib) $(subst /,\,$(TILE57_LIB))"
+RM_BIN        = cmd /C "del /F /Q $(subst /,\,$(BIN)) 2>NUL & exit /B 0"
+RM_BUILD_DIRS = cmd /C "if exist bin rmdir /S /Q bin" && cmd /C "if exist dist rmdir /S /Q dist"
+else
+EXE     :=
+DEVNULL := /dev/null
+NORMALIZE_TILE57_LIB =
+RM_BIN        = rm -f $(BIN)
+RM_BUILD_DIRS = rm -rf bin dist
+endif
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>$(DEVNULL) || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
-BIN := bin/chartplotter
+BIN := bin/chartplotter$(EXE)
 
 # Cross-build matrix for `make xbuild`. Override for a subset, e.g.
 # `make xbuild PLATFORMS=darwin/arm64` or `PLATFORMS="darwin/arm64 linux/amd64"`.
@@ -77,11 +115,15 @@ TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
 # main.version so every bake can record WHICH engine produced its tiles (and the
 # client can flag a mixed-engine cache). Resolves for the default ./tile57 submodule
 # AND a TILE57=… override; "unknown" when git can't answer (submodule not yet
-# initialized, tarball checkout). The `test -e .git` guard matters: git -C into a
-# missing dir would walk up and report THIS repo's HEAD instead of failing (for the
-# submodule .git is a gitdir FILE, for a plain clone a directory — test -e matches
-# both, so either resolves cleanly).
-ENGINE_COMMIT ?= $(shell test -e "$(TILE57)/.git" && git -C "$(TILE57)" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
+# initialized, tarball checkout). The .git guard matters: git -C into a missing
+# dir would walk up and report THIS repo's HEAD instead of failing. It's a make
+# $(wildcard), not a shell `test -e`, so it needs no POSIX shell — wildcard
+# matches the submodule's gitdir FILE and a plain clone's directory alike.
+ifneq ($(wildcard $(TILE57)/.git),)
+ENGINE_COMMIT ?= $(shell git -C "$(TILE57)" rev-parse --short=9 HEAD 2>$(DEVNULL) || echo unknown)
+else
+ENGINE_COMMIT ?= unknown
+endif
 LDFLAGS += -X main.engineCommit=$(ENGINE_COMMIT)
 
 # Materialize the engine source if it isn't there yet. For the default ./tile57
@@ -89,45 +131,54 @@ LDFLAGS += -X main.engineCommit=$(ENGINE_COMMIT)
 # update --init --recursive`; for a TILE57=<path> override the checkout must already
 # exist (we don't guess where an external engine tree should come from).
 $(TILE57)/include/tile57.h:
-	@if [ "$(TILE57)" = "tile57" ] && [ -f .gitmodules ]; then \
-	  echo "fetching the tile57 engine submodule (git submodule update --init --recursive)…"; \
-	  git submodule update --init --recursive tile57; \
-	else \
-	  echo "missing $(TILE57)/include/tile57.h — TILE57=$(TILE57) is not the default submodule; point it at a github.com/beetlebugorg/tile57 checkout"; \
-	  exit 1; \
-	fi
+ifneq ($(and $(filter tile57,$(TILE57)),$(wildcard .gitmodules)),)
+	@echo fetching the tile57 engine submodule: git submodule update --init --recursive tile57
+	git submodule update --init --recursive tile57
+else
+	$(error missing $(TILE57)/include/tile57.h — TILE57=$(TILE57) is not the default submodule; point it at a github.com/beetlebugorg/tile57 checkout)
+endif
 
-# Build the static library on demand (only when absent). Needs Zig 0.16 on PATH.
+# Build the static library on demand (only when absent). Needs Zig 0.16 on PATH
+# (a missing zig surfaces as the shell's own command-not-found error).
 $(TILE57_LIB): $(TILE57)/include/tile57.h
-	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH and $(TILE57_LIB) missing — install Zig or prebuild the lib"; exit 1; }
-	@echo "building libtile57.a (zig build in $(TILE57))…"
-	cd "$(TILE57)" && zig build
+	cd "$(TILE57)" && zig build $(ZIG_BUILD_ARGS)
+	$(NORMALIZE_TILE57_LIB)
 
 tile57-lib: ## Force-rebuild $(TILE57)/zig-out/lib/libtile57.a (the native engine static lib)
-	@command -v zig >/dev/null 2>&1 || { echo "Zig 0.16 not on PATH"; exit 1; }
-	cd "$(TILE57)" && zig build
+	cd "$(TILE57)" && zig build $(ZIG_BUILD_ARGS)
+	$(NORMALIZE_TILE57_LIB)
 
 # Build bin/chartplotter. libtile57 is the sole engine, so this is a CGO build that
 # statically links the native lib; the S-101 catalogue lives inside libtile57, so
 # there is no separate sync/embed step (web/ is still embedded). Fetches the ./tile57
 # submodule on demand (see the $(TILE57)/include/tile57.h rule) + needs Zig 0.16.
+# The pre-build $(RM_BIN) forces the link: go's build-cache action ID does NOT
+# hash external static-lib content, so with an existing up-to-date-looking
+# $(BIN) `go build` silently skips the relink and a fresh libtile57.a never
+# reaches the output.
+build: export CGO_ENABLED = 1
+ifeq ($(OS),Windows_NT)
+build: export CC = zig cc -target $(ZIG_HOST_TARGET)
+build: export CXX = zig c++ -target $(ZIG_HOST_TARGET)
+endif
 build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches the ./tile57 submodule on demand + needs Zig 0.16)
-	@# Force the link: go's build-cache action ID does NOT hash external static-lib
-	@# content, so with an existing up-to-date-looking $(BIN) `go build` silently
-	@# skips the relink and a fresh libtile57.a never reaches the output.
-	@rm -f $(BIN)
-	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
-	@echo "→ $(BIN) (native libtile57 engine)"
+	@$(RM_BIN)
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
+	@echo → $(BIN) - native libtile57 engine
 
 # Back-compat alias — libtile57 is now the default engine, so this is just `build`.
 build-tile57: build ## Alias for `build` (libtile57 is the sole engine now)
 
 # The dock is the desktop launcher (cmd/dock): a tray/menu-bar app that
 # spawns `chartplotter serve` as a child. Pure Go on linux/windows (no libtile57,
-# no Zig); systray needs cgo/Cocoa on darwin only.
+# no Zig); systray needs cgo/Cocoa on darwin only. On windows, -H=windowsgui
+# keeps a double-clicked dock.exe from opening a console window (matching
+# scripts/xbuild-dock.sh).
+GOOS_HOST = $(shell go env GOOS)
+build-dock: export CGO_ENABLED = $(if $(filter darwin,$(GOOS_HOST)),1,0)
 build-dock: ## Build bin/dock (desktop launcher tray app; no libtile57)
-	CGO_ENABLED=$(if $(filter darwin,$(shell go env GOOS)),1,0) go build -ldflags "-X main.version=$(VERSION)" -o bin/dock ./cmd/dock
-	@echo "→ bin/dock"
+	go build -ldflags "$(if $(filter windows,$(GOOS_HOST)),-H=windowsgui )-X main.version=$(VERSION)" -o bin/dock$(EXE) ./cmd/dock
+	@echo → bin/dock$(EXE)
 
 # Quick cross-platform test builds. CGO is off, so this is pure `go build` per
 # target — fast cold, near-instant on re-runs thanks to the build cache. Stamps
@@ -339,7 +390,7 @@ tidy:
 	go mod tidy
 
 clean:
-	rm -rf bin dist
+	$(RM_BUILD_DIRS)
 
 clear-cache: ## Delete the provisioning cache (region zips, baked .pmtiles, charts-user, cell cache) for a clean slate
 	rm -rf "$(CACHE)"

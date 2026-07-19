@@ -162,6 +162,19 @@ bin/chartplotter version
 statically linking libtile57); [CLAUDE.md](CLAUDE.md) and the
 [Makefile](Makefile) describe the build contract.
 
+### Building on Windows
+
+The same recipe works natively on Windows — you need **GNU Make**
+(`winget install ezwinports.make`, or via scoop/choco) plus the Go/Zig/git
+requirements above; no MinGW or MSVC install, Zig doubles as the C compiler.
+The core targets (`make build`, `make build-dock`, `make tile57-lib`,
+`make serve`, `make test`, `make vet`, `make clean`) run from PowerShell, cmd,
+or Git Bash alike — their recipes avoid POSIX-shell syntax, so it doesn't
+matter which shell make picks. Outputs gain the `.exe` suffix
+(`bin\chartplotter.exe`, `bin\dock.exe`). The remaining targets (baking,
+demo/docs bundles, `make xbuild`) drive bash scripts — run those from WSL or
+Git Bash.
+
 ## 🚀 Get started
 
 The frontend is built into the binary, so one file is all you need. Start the
