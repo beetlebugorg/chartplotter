@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -28,7 +27,7 @@ func probe(port int) probeResult {
 	resp, err := probeClient.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", port))
 	if err != nil {
 		var opErr *net.OpError
-		if errors.As(err, &opErr) && errors.Is(err, syscall.ECONNREFUSED) {
+		if errors.As(err, &opErr) && errors.Is(err, errConnRefused) {
 			return probeFree
 		}
 		return probeOther
