@@ -5,8 +5,10 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/BertoldVdb/go-ais v0.4.0
 	github.com/alecthomas/kong v1.15.0
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.44.0
 	modernc.org/sqlite v1.53.0
@@ -24,7 +26,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

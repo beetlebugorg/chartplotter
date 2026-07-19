@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Chart Plotter
+Comment=Marine chart plotter — S-101 portrayed NOAA ENC charts
+Exec=dock
+Icon=chartplotter
+Terminal=false
+Categories=Utility;Geography;Maps;

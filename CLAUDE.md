@@ -40,6 +40,13 @@ support is planned.
   you develop in), overriding BOTH halves — a gitignored `go.work` replacing
   `github.com/beetlebugorg/tile57/bindings/go => <path>/bindings/go` plus
   `make TILE57=<path> …`. Never commit `go.work`.
+- **Windows-native builds.** The core Make targets (`build`, `build-dock`,
+  `tile57-lib`, `serve`, `test`, `vet`, `tidy`, `clean`) must run on a Windows
+  host where make's recipe shell may be cmd.exe: set recipe env vars via
+  make-level `export` (never `VAR=x cmd` prefixes), do file tests in make
+  (`$(wildcard)`/`ifeq`), route file ops through the OS shim block at the top of
+  the Makefile, and keep recipe shell syntax to `cd x && y`. The bake/demo/docs
+  targets are POSIX-only by design (WSL/Git Bash on Windows).
 - Use https://www.openbridge.no/ for design and icons.
 - Match the style of the code around you.
 - Never run `git add -A` or `git add .`. The repo holds large untracked files

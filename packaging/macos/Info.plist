@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for ChartPlotter.app: scripts/macos-app.sh
+     substitutes @VERSION@ and assembles the bundle. LSUIElement makes it a
+     menu-bar-only app — no Dock icon, no app switcher entry. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Chart Plotter</string>
+	<key>CFBundleDisplayName</key>
+	<string>Chart Plotter</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.beetlebug.chartplotter</string>
+	<key>CFBundleExecutable</key>
+	<string>dock</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
