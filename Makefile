@@ -65,7 +65,7 @@ CACHE ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/chartplotter
 S101_PC    ?= $(HOME)/Projects/s101-portrayal-catalogue/PortrayalCatalog
 S101_FC    ?= $(HOME)/Projects/s101-feature-catalogue/S-101FC/FeatureCatalogue.xml
 
-.PHONY: build build-tile57 build-dock tile57-lib vendor-style-engine xbuild xbuild-tile57 xbuild-dock package-macos test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
+.PHONY: build build-tile57 build-dock tile57-lib check-engine-override vendor-style-engine xbuild xbuild-tile57 xbuild-dock package-macos test vet fmt fmt-check tidy clean clear-cache serve docs docs-shots bake-ienc bake-noaa serve-widget demo demo-chart1 serve-demo preslib-chart1 s64-pages
 
 # Prebaked prod test set (US Inland ENC bundle + the NOAA world archive).
 # NB: keep these as bare values with NO inline `#` comments — Make folds any
@@ -110,6 +110,21 @@ NOAA_ARCHIVES := $(foreach d,$(DISTRICTS),noaa-d$(d).pmtiles)
 # built on demand with Zig 0.16.
 TILE57     ?= tile57
 TILE57_LIB := $(TILE57)/zig-out/lib/libtile57.a
+
+# A TILE57 override changes only the C lib make builds — the Go binding still
+# resolves via go.mod's replace at ./tile57/bindings/go. Building against
+# another engine checkout therefore needs a gitignored go.work overriding the
+# binding too (README.md "Developing the engine"). Catch the mismatch here,
+# up front, instead of letting go print the cryptic "replacement directory
+# ./tile57/bindings/go does not exist". Pure-make check (parse-time wildcard +
+# $(error)) so it works without a POSIX shell; GOWORK=off counts as absent,
+# GOWORK=<file> as present.
+check-engine-override:
+ifneq ($(TILE57),tile57)
+ifeq ($(filter-out off,$(GOWORK))$(wildcard go.work),)
+	$(error TILE57=$(TILE57) overrides the engine lib, but the Go binding still points at ./tile57/bindings/go — create a gitignored go.work: `go work init .` then `go work edit -replace github.com/beetlebugorg/tile57/bindings/go=$(TILE57)/bindings/go`; see README.md "Developing the engine")
+endif
+endif
 
 # Engine-commit stamp: the tile57 checkout's HEAD, linked into the binary beside
 # main.version so every bake can record WHICH engine produced its tiles (and the
@@ -161,7 +176,7 @@ ifeq ($(OS),Windows_NT)
 build: export CC = zig cc -target $(ZIG_HOST_TARGET)
 build: export CXX = zig c++ -target $(ZIG_HOST_TARGET)
 endif
-build: $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches the ./tile57 submodule on demand + needs Zig 0.16)
+build: check-engine-override $(TILE57_LIB) ## Build bin/chartplotter (CGO + native libtile57; fetches the ./tile57 submodule on demand + needs Zig 0.16)
 	@$(RM_BIN)
 	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/chartplotter
 	@echo → $(BIN) - native libtile57 engine
@@ -192,7 +207,7 @@ build-dock: ## Build bin/dock (desktop launcher tray app; no libtile57)
 # (Security/CoreFoundation) that Zig doesn't bundle. The S-101 catalogue lives in
 # libtile57, so there's no embed step. Fetches the ./tile57 submodule on demand + Zig 0.16.
 # Outputs dist/chartplotter_<os>_<arch>[.exe].
-xbuild xbuild-tile57: $(TILE57)/include/tile57.h ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
+xbuild xbuild-tile57: check-engine-override $(TILE57)/include/tile57.h ## Cross-compile CGO+libtile57 binaries with zig cc (linux+windows; darwin builds on a Mac runner)
 	VERSION="$(VERSION)" TILE57="$(TILE57)" ENGINE_COMMIT="$(ENGINE_COMMIT)" scripts/xbuild-tile57.sh
 	VERSION="$(VERSION)" scripts/xbuild-dock.sh
 
