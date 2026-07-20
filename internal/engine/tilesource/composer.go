@@ -15,11 +15,12 @@ type Composer struct {
 }
 
 // NewComposer opens a runtime compositor over the per-cell PMTiles at paths (each from
-// `tile57 compose --keep-cells` / tile57.BakeChart). partitionPath (or "") names a partition
-// sidecar (`tile57 compose --save-partition`) to load and skip the owned-face build. Close it
+// `tile57 compose --keep-cells` / tile57.BakeChart). The ownership partition is an internal
+// detail of the engine now — found beside the archives, reused when it still matches the cell
+// set, and rebuilt (and refreshed on disk) when it does not; nothing to pass or manage. Close it
 // when done — callers must not Close while any request can still call Tile.
-func NewComposer(paths []string, partitionPath string) (*Composer, error) {
-	src, err := tile57.OpenCompose(paths, partitionPath)
+func NewComposer(paths []string) (*Composer, error) {
+	src, err := tile57.OpenCompose(paths)
 	if err != nil {
 		return nil, err
 	}
@@ -61,10 +62,6 @@ func (c *Composer) TileOwned(z uint8, x, y uint32) (body []byte, owned bool, err
 
 // Meta returns the compositor's display metadata (zoom range + coverage bounds).
 func (c *Composer) Meta() TileMeta { return c.meta }
-
-// SavePartition persists the resident ownership partition to path, so a later NewComposer can load
-// it (as partitionPath) and skip the owned-face build.
-func (c *Composer) SavePartition(path string) error { return c.src.SavePartition(path) }
 
 // Close releases the compositor (io.Closer, so tilesource.Close finds it).
 func (c *Composer) Close() error { return c.src.Close() }

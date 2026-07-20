@@ -79,18 +79,16 @@ func (c bakeCmd) Run() error {
 		return fmt.Errorf("no coverage: no valid S-57 cells under %s", input)
 	}
 
-	// Build + save the ownership-partition sidecar next to the tiles (the compositor loads it on
-	// open to skip the build).
-	comp, err := tilesource.NewComposer(paths, "")
+	// Pre-warm the ownership partition: opening a compositor over the freshly baked cells
+	// builds it and persists it beside the archives, so the runtime open doesn't pay the
+	// owned-face build. (The engine owns the sidecar now — nothing to save by hand.)
+	comp, err := tilesource.NewComposer(paths)
 	if err != nil {
 		return err
 	}
 	defer comp.Close()
-	if err := comp.SavePartition(filepath.Join(outDir, "partition.tpart")); err != nil {
-		return err
-	}
 	m := comp.Meta()
-	fmt.Printf("baked %d cell(s) → %s/tiles/*.pmtiles + partition.tpart (z%d..%d, bounds %.4f,%.4f,%.4f,%.4f)\n",
+	fmt.Printf("baked %d cell(s) → %s/tiles/*.pmtiles (z%d..%d, bounds %.4f,%.4f,%.4f,%.4f)\n",
 		len(paths), outDir, m.MinZoom, m.MaxZoom, m.W, m.S, m.E, m.N)
 	return nil
 }

@@ -18,15 +18,11 @@ import (
 )
 
 // liveCellsDir is <setDir>/tiles — the KEPT per-cell PMTiles the runtime compositor mmaps.
-// This is the same layout `tile57 bake -o <dir>` writes (<dir>/tiles/<STEM>.pmtiles next to
-// <dir>/partition.tpart), so a CLI-baked structure drops straight into a provider's set dir.
+// This is the same layout `tile57 bake -o <dir>` writes (<dir>/tiles/<STEM>.pmtiles), so a
+// CLI-baked structure drops straight into a provider's set dir. The engine keeps its own
+// ownership-partition sidecar beside these archives; the host neither writes nor reads it.
 func (s *Server) liveCellsDir(provider string) string {
 	return filepath.Join(s.setDir(provider), "tiles")
-}
-
-// livePartitionPath is <setDir>/partition.tpart — the saved ownership-partition sidecar.
-func (s *Server) livePartitionPath(provider string) string {
-	return filepath.Join(s.setDir(provider), "partition.tpart")
 }
 
 // liveGenPath is <setDir>/live.gen — it holds the provider's CONTENT cache-bust token (a
@@ -125,23 +121,10 @@ func (s *Server) openLiveComposer(provider string) (*tilesource.Composer, error)
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	sidecar := s.livePartitionPath(provider)
-	load := ""
-	if fi, err := os.Stat(sidecar); err == nil && fi.Size() > 0 {
-		load = sidecar
-	}
-	c, err := tilesource.NewComposer(paths, load)
-	if err != nil {
-		return nil, err
-	}
-	// Persist the (possibly rebuilt) partition so the on-disk sidecar always matches the current
-	// cell set: a progressive re-key or an added/removed district changes the inputs, the
-	// compositor rebuilds from a stale sidecar, and saving keeps the sidecar current for a fast
-	// boot. (When the sidecar was loaded intact this re-writes identical bytes.)
-	if err := c.SavePartition(sidecar); err != nil {
-		log.Printf("live %s: save partition sidecar: %v", provider, err)
-	}
-	return c, nil
+	// The engine owns the ownership partition now: NewComposer finds it beside the archives,
+	// reuses it when it still matches the cell set, and rebuilds + refreshes it on disk when it
+	// does not. Nothing to load or save here.
+	return tilesource.NewComposer(paths)
 }
 
 // progressiveReKey re-opens the live compositor over the cells baked SO FAR, registers it as the
