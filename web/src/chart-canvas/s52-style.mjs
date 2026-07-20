@@ -234,7 +234,7 @@ export function categoryFilter(mariner) {
   // VALSOU dangers became DANGER01 (live danger_depth swap), so ISODGR01 here
   // is exactly the isolated-danger set. Every other feature uses its baked cat.
   const isoCat = m.showIsolatedDangersShallow ? 1 : 0;
-  const cat = ["case", ["==", ["get", "symbol_name"], "ISODGR01"], isoCat, ["coalesce", ["get", "cat"], 1]];
+  const cat = ["case", ["==", ["get", "symbol_name"], "ISODGR01"], isoCat, ["coalesce", ["get", "display_category"], 1]];
   const inCat = ["in", cat, ["literal", en]];
   // The M_QUAL data-quality overlay (CATZOC DQUAL* area patterns + boundary)
   // is baked display-category Other, so enabling Other dumped it on top of
