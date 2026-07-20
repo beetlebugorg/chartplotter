@@ -24,6 +24,23 @@ func NewComposer(paths []string) (*Composer, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newComposerFrom(src), nil
+}
+
+// NewComposerTree opens a runtime compositor over EVERY per-cell PMTiles under dir, in
+// one engine call: the walk, the mmap+open of each archive and the compose all happen
+// inside libtile57 on its batch path. Prefer this over NewComposer for a baked tree —
+// per-archive cgo opens cost ~35 ms each and a national library pays minutes for what
+// the batch open does in seconds.
+func NewComposerTree(dir string) (*Composer, error) {
+	src, err := tile57.OpenComposeTree(dir)
+	if err != nil {
+		return nil, err
+	}
+	return newComposerFrom(src), nil
+}
+
+func newComposerFrom(src *tile57.ComposeSource) *Composer {
 	m := src.Meta()
 	return &Composer{
 		src: src,
@@ -37,7 +54,7 @@ func NewComposer(paths []string) (*Composer, error) {
 			Gzipped:  false, // Serve returns decompressed MLT; the HTTP layer gzips on the wire
 			TileType: "mlt",
 		},
-	}, nil
+	}
 }
 
 // OwnershipTiler is a TileSource that also reports tile OWNERSHIP: whether its data model says a

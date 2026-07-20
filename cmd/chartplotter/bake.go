@@ -82,7 +82,7 @@ func (c bakeCmd) Run() error {
 	// Pre-warm the ownership partition: opening a compositor over the freshly baked cells
 	// builds it and persists it beside the archives, so the runtime open doesn't pay the
 	// owned-face build. (The engine owns the sidecar now — nothing to save by hand.)
-	comp, err := tilesource.NewComposer(paths)
+	comp, err := tilesource.NewComposerTree(tilesDir)
 	if err != nil {
 		return err
 	}

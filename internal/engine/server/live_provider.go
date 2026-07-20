@@ -113,18 +113,17 @@ func liveBakeWorkers() int {
 	return 8
 }
 
-// openLiveComposer opens a runtime compositor over a provider's kept per-cell archives, loading the
-// partition sidecar when present (else building it and saving one for next time). Returns nil when
-// the provider has no live-cells dir yet.
+// openLiveComposer opens a runtime compositor over a provider's kept per-cell archives.
+// One engine call opens the WHOLE tree (walk + mmap + compose on the batch path) —
+// per-archive cgo opens cost ~35 ms each, which on a national library turned boot
+// registration into a minute of chart_open churn. The ownership partition is the
+// engine's: found beside the archives, reused when it matches, rebuilt when not.
+// Returns nil when the provider has no live-cells dir (or no archives) yet.
 func (s *Server) openLiveComposer(provider string) (*tilesource.Composer, error) {
-	paths := s.liveCellArchives(provider)
-	if len(paths) == 0 {
+	if len(s.liveCellArchives(provider)) == 0 {
 		return nil, nil
 	}
-	// The engine owns the ownership partition now: NewComposer finds it beside the archives,
-	// reuses it when it still matches the cell set, and rebuilds + refreshes it on disk when it
-	// does not. Nothing to load or save here.
-	return tilesource.NewComposer(paths)
+	return tilesource.NewComposerTree(s.liveCellsDir(provider))
 }
 
 // progressiveReKey re-opens the live compositor over the cells baked SO FAR, registers it as the
