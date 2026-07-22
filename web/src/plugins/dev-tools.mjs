@@ -79,6 +79,7 @@ export class DevTools {
   constructor(deps = {}) {
     this._d = deps;
     this._map = deps.map || null;
+    this._devMode = deps.devMode || null; // () => bool: gates the Developer tab
     this._host = null;     // the contribution's custom-render host (a div in the dialog shadow)
     this._active = false;  // the Advanced tab is currently showing
     // Inspector state (lifted from the shell).
@@ -105,8 +106,9 @@ export class DevTools {
     if (!registry) return;
     this._unregister = registry.register({
       id: "dev-tools",
-      tab: { id: "advanced", label: "Advanced" },
+      tab: { id: "advanced", label: "Developer", tabOrder: 7 },
       order: 5, // after the core "Cell boundaries" toggle (order 4) on the same tab
+      when: () => (this._devMode ? this._devMode() : true),
       render: (host) => this._render(host),
     });
   }

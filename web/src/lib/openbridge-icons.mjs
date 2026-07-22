@@ -20,6 +20,13 @@ export const SETTINGS_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fi
 <path fill-rule="evenodd" clip-rule="evenodd" d="M12 13.5C12.8284 13.5 13.5 12.8284 13.5 12C13.5 11.1716 12.8284 10.5 12 10.5C11.1715 10.5 10.5 11.1716 10.5 12C10.5 12.8284 11.1715 13.5 12 13.5ZM12 15.5C13.9329 15.5 15.5 13.933 15.5 12C15.5 10.067 13.9329 8.5 12 8.5C10.067 8.5 8.49995 10.067 8.49995 12C8.49995 13.933 10.067 15.5 12 15.5Z" fill="currentColor"/>
 </svg>`;
 
+// Stacked map layers (OpenBridge-style outline: three offset sheets).
+export const LAYERS_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+  <path d="M12 3.6 21 8.4 12 13.2 3 8.4 12 3.6Z"/>
+  <path d="M4.8 11.7 3 12.6l9 4.8 9-4.8-1.8-.9"/>
+  <path d="M4.8 15.6 3 16.5l9 4.8 9-4.8-1.8-.9"/>
+</svg>`;
+
 export const CENTER_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
 <path fill-rule="evenodd" clip-rule="evenodd" d="M17.7078 6.29222C15.7061 5.75766 13.4818 6.27557 11.9114 7.84595L6.34312 13.4142L10.5858 17.6569L16.154 12.0886C17.7244 10.5182 18.2423 8.29392 17.7078 6.29222ZM15.9039 8.09607C14.9635 8.15453 14.0422 8.5436 13.3256 9.26016L9.17154 13.4142L10.5858 14.8285L14.7398 10.6744C15.4564 9.95781 15.8455 9.0365 15.9039 8.09607Z" fill="currentColor"/>
 <path d="M11 19V23H13V19H11Z" fill="currentColor"/>

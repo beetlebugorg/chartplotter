@@ -27,10 +27,13 @@ import { coreSettingsContributions, vgGroupOn, vgSetGroupOn } from "./core/core-
 import { VgRail } from "./plugins/vg-rail.mjs"; // mid-left viewing-group quick-toggle pill rail
 import { calibrationContribution } from "./plugins/calibration.mjs"; // "Calibration" tab — ruler-measure the 5 mm box → true physical scale
 import { DevTools } from "./plugins/dev-tools.mjs"; // the slim contributed Advanced-tab dev tools (rebake + feature inspector)
-import { ConnectionsController } from "./plugins/connections.mjs"; // NMEA0183 data-source manager (Connections tab)
+import { PluginsController } from "./plugins/plugins-manager.mjs"; // install + manage plugins (Plugins tab)
 import { VesselStateStore } from "./data/vessel-state-store.mjs"; // live NMEA0183 vessel state (own-ship/AIS/HUD feed)
-import { OwnShip } from "./plugins/own-ship.mjs"; // own-ship marker + course predictor + follow camera
-import { AISOverlay } from "./plugins/ais-overlay.mjs"; // AIS targets (other vessels) from the live feed
+import { PluginHost } from "./core/plugin-host.mjs"; // loads builtin/plugin UI controllers with a declarative ctx
+import { LayerRegistry } from "./core/layer-registry.mjs"; // map-overlay show/hide registry (Layers tab)
+import { LayersController } from "./plugins/layers-panel.mjs"; // Layers settings tab
+import OwnShip from "./plugins/own-ship.mjs"; // builtin core.own-ship: marker + course predictor + follow camera
+import AISOverlay from "./plugins/ais-overlay.mjs"; // builtin core.ais: AIS targets (other vessels) from the live feed
 import { InfoCallouts } from "./plugins/info-callouts.mjs"; // precise DOM tap pads on INFORM01 + CHDATD01 callout boxes
 import "./plugins/target-info.mjs"; // defines <target-info> (own-ship / AIS tap-info picker)
 import { PALETTE_DAY_ICON, PALETTE_DUSK_ICON, PALETTE_NIGHT_ICON } from "./lib/openbridge-icons.mjs"; // OpenBridge scheme glyphs
@@ -405,6 +408,16 @@ export class ChartPlotter extends HTMLElement {
     }
     // Display calibration (ruler-measure the 5 mm check box → true physical scale).
     this._settingsRegistry.register(calibrationContribution(this));
+    // Map-overlay show/hide registry + its Layers settings tab. Core overlays and
+    // plugins register their layers here (via ctx.overlays); the tab lists them.
+    this._layerRegistry = new LayerRegistry();
+    if (!this._widget) {
+      this._layersCtl = new LayersController({
+        layers: this._layerRegistry,
+        button: this.shadowRoot.getElementById("layers-btn"),
+        pop: this.shadowRoot.getElementById("layers-pop"),
+      });
+    }
     this._settingsDlg = this.shadowRoot.getElementById("settings-dlg");
     if (this._settingsDlg) this._settingsDlg.configure({ registry: this._settingsRegistry });
 
@@ -676,6 +689,7 @@ export class ChartPlotter extends HTMLElement {
     if (!this._widget) {
       this._devTools = new DevTools({
         registry: this._settingsRegistry,
+        devMode: () => this._mariner.developerMode !== false, // default on until production flips it
         map,
         plotter: this._plotter,
         api: this._api,
@@ -698,14 +712,18 @@ export class ChartPlotter extends HTMLElement {
 
     // NMEA0183 live data (server mode only — the feed comes from the server's
     // connection manager). VesselStateStore streams /api/vessel for the render
-    // plugins (own-ship/AIS/HUD); ConnectionsController contributes the
-    // Connections settings tab for managing data sources.
+    // plugins (own-ship/AIS/HUD). There is no standalone Connections tab: data-
+    // source plugins DEFINE the connection types, so connections are managed by
+    // drilling into the plugin's row on the Plugins tab (plugins-panel pushes a
+    // <connections-panel> view for plugins that provide nmea.source).
     if (!this._widget) {
       this._vessel = new VesselStateStore({ assets: this._assets, widget: this._widget });
       this._vessel.start();
-      this._connections = new ConnectionsController({
+      // Plugins settings tab: install/enable/disable/grant/remove plugins.
+      this._pluginsCtl = new PluginsController({
         registry: this._settingsRegistry,
         assets: this._assets,
+        uiLogs: (id) => (this._pluginHost ? this._pluginHost.uiLogs(id) : []),
         notify: this._notify,
       });
       // Tap-info picker for own-ship / AIS targets; dismissed on a map grab or tap.
@@ -714,11 +732,36 @@ export class ChartPlotter extends HTMLElement {
       const showInfo = (info) => tinfo.show(info);
       map.on("dragstart", () => tinfo.hide());
       map.on("click", () => tinfo.hide());
-      // Own-ship marker + course predictor; follows the vessel (break-out + a
-      // re-centre chip mounted in the shell chrome) and streams fixes to the camera.
-      this._ownShip = new OwnShip({ map, plotter: this._plotter, vessel: this._vessel, host: this.shadowRoot, onSelect: showInfo, units: () => this._mariner });
-      // AIS targets (other vessels) from the live feed.
-      this._ais = new AISOverlay({ map, assets: this._assets, widget: this._widget, onSelect: showInfo, units: () => this._mariner });
+      // own-ship + AIS now run as builtin plugins (core.own-ship / core.ais) through
+      // the PluginHost, driven only by the declarative ctx — no direct map/plotter.
+      // Behaviour is unchanged; this is the reference for how third-party UI plugins
+      // load. registerZoomAnchor lets a plugin (own-ship) contribute the wheel-zoom
+      // anchor without exposing WheelZoom; the shell aggregates the registered fns.
+      this._zoomAnchors = new Set();
+      // Map tap arbitration: plugins claim chart taps in registration order — a
+      // handler returning true consumes the tap (the ECDIS pick report and later
+      // claims don't fire); anything else passes it down the chain.
+      this._tapClaims ||= new Set();
+      this._pluginHost = new PluginHost({
+        map,
+        plotter: this._plotter,
+        vessel: this._vessel,
+        assets: this._assets,
+        aisStreamURL: this._assets + "api/ais/stream",
+        aisPollURL: this._assets + "api/ais",
+        chrome: this.shadowRoot,
+        showInfo,
+        getUnits: () => this._mariner,
+        registerZoomAnchor: (fn) => { this._zoomAnchors.add(fn); return () => this._zoomAnchors.delete(fn); },
+        registerTapClaim: (fn) => { this._tapClaims.add(fn); return () => this._tapClaims.delete(fn); },
+        settings: this._settingsRegistry,
+        notify: this._notify,
+        overlays: this._layerRegistry,
+      });
+      this._pluginHost.register({ id: "core.own-ship", version: "1.0.0", ControllerClass: OwnShip });
+      this._pluginHost.register({ id: "core.ais", version: "1.0.0", ControllerClass: AISOverlay });
+      // Discover + load installed plugins that ship UI (e.g. the weather overlay).
+      this._pluginHost.start();
       // Precise DOM tap pads on the INFORM01 "additional information" and CHDATD01
       // "date-dependent" callout boxes (each floats offset from the feature, so the
       // fuzzy symbol pick can't own it). Sparse by nature — only info-bearing /
@@ -1252,6 +1295,16 @@ export class ChartPlotter extends HTMLElement {
         // The dev feature inspector (DevTools) owns clicks while it's armed — defer to
         // it so a pick/coverage tap doesn't fire under an active inspect lock.
         if (this._devTools && this._devTools.inspecting) return;
+        // Offer the tap to registered claimants (plugins — e.g. the wind probe while
+        // its layer is on). A claim consumes the tap; a pass falls through to the
+        // default ECDIS cursor pick below.
+        for (const fn of this._tapClaims ||= new Set()) {
+          try {
+            if (fn(e) === true) return;
+          } catch (err) {
+            console.warn("[taps] claim handler failed", err);
+          }
+        }
         // The coverage/cell-boundary overlay is a passive debug layer — a tap always
         // runs the default ECDIS cursor pick (S-52 PresLib §10.8), never flies.
         this._pickReportAt(e.point, e.originalEvent);
@@ -1549,7 +1602,12 @@ export class ChartPlotter extends HTMLElement {
   // wins; null → cursor-anchored). Today only own-ship anchors on the vessel while
   // following; future camera plugins slot in here without WheelZoom changing.
   _zoomAnchor() {
-    return (this._ownShip && this._ownShip.zoomAnchor()) || null;
+    if (!this._zoomAnchors) return null;
+    for (const fn of this._zoomAnchors) {
+      const a = fn();
+      if (a) return a;
+    }
+    return null;
   }
 
   // List the catalog cells intersecting the current viewport in the coverage

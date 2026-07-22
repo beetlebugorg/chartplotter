@@ -8,6 +8,7 @@ require (
 	github.com/BertoldVdb/go-ais v0.4.0
 	github.com/alecthomas/kong v1.16.0
 	github.com/stretchr/testify v1.11.1
+	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/image v0.44.0
 	modernc.org/sqlite v1.54.0
 )

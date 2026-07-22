@@ -32,6 +32,7 @@ type cli struct {
 	Bake        bakeCmd        `cmd:"" name:"bake" help:"Bake S-57 ENC cells (.zip/.000/dir) into a PMTiles archive for a prebaked deployment."`
 	Serve       serveCmd       `cmd:"" name:"serve" help:"Serve the web frontend (embedded static) + the NOAA cell proxy."`
 	Simulate    simulateCmd    `cmd:"" name:"simulate" help:"Run a NMEA0183 traffic generator over TCP (own-ship + AIS targets) for testing."`
+	Plugin      pluginCmd      `cmd:"" name:"plugin" help:"Manage plugins: install, list, enable/disable, remove, dev."`
 }
 
 type emitAssetsCmd struct {

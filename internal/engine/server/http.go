@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/beetlebugorg/chartplotter/internal/engine/nmea"
+	"github.com/beetlebugorg/chartplotter/internal/engine/plugin"
 	"github.com/beetlebugorg/chartplotter/internal/engine/tilesource"
 	"github.com/beetlebugorg/chartplotter/web"
 )
@@ -50,10 +51,11 @@ type Server struct {
 	auxIdx  *auxIndex         // index of companion aux.zips for /api/aux (TXTDSC/PICREP)
 	cellIdx *cellIndex        // persistent name→bbox index over cached cells (/api/cells, search fly-to)
 
-	vessel  *nmea.Store       // latest NMEA0183 vessel state (fed by nmeaMgr)
-	nmeaMgr *nmea.Manager     // live NMEA0183 connections (writes into vessel)
-	conns   *connectionsStore // persisted connection configs (<data>/connections.json)
-	rawHub  *rawHub           // raw-sentence fan-out for the per-connection sniffer
+	vessel    *nmea.Store       // latest NMEA0183 vessel state (fed by nmeaMgr)
+	nmeaMgr   *nmea.Manager     // live NMEA0183 connections (writes into vessel)
+	conns     *connectionsStore // persisted connection configs (<data>/connections.json)
+	rawHub    *rawHub           // raw-sentence fan-out for the per-connection sniffer
+	pluginMgr *plugin.Manager   // installed plugins: lifecycle + broker (<data>/plugins.json)
 }
 
 // New returns a Server. Pass an empty assetsDir to serve the embedded asset
@@ -81,7 +83,8 @@ func New(assetsDir, cacheDir, dataDir string, allowRemote bool, engineCommit str
 	// lives in <data>/prefs.json so it survives restarts and is shared across clients.
 	s.packs = scanPacks(cacheDir)
 	s.prefs = loadPrefs(dataDir)
-	s.initNMEA() // load connections.json + start their live runners
+	s.initNMEA()    // load connections.json + start their live runners
+	s.initPlugins() // load plugins.json + start enabled plugins' host-side runners
 	n := 0
 	for _, name := range sortedKeys(s.packs) {
 		if s.prefs.isDisabled(name) {
@@ -148,6 +151,9 @@ func (s *Server) Close() error {
 	if s.nmeaMgr != nil {
 		s.nmeaMgr.Close()
 	}
+	if s.pluginMgr != nil {
+		s.pluginMgr.Close()
+	}
 	s.sets.closeAll()
 	return nil
 }
@@ -168,6 +174,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAPI(lw, r)
 	case strings.HasPrefix(r.URL.Path, "/tiles/"):
 		s.serveTileSet(lw, r)
+	case strings.HasPrefix(r.URL.Path, "/plugins/"):
+		// Per-plugin, plugin-owned static: /plugins/<id>/ui/* (ES modules/assets from
+		// the unpacked archive) and /plugins/<id>/serve/* (published artifacts).
+		s.servePluginStatic(lw, r)
 	case r.URL.Path == "/aux/index.json" || strings.HasPrefix(r.URL.Path, "/aux/"):
 		// Feature attachments (TXTDSC/PICREP) as loose static files: GET /aux/index.json
 		// (the manifest) + GET /aux/<stored> (one file). The SAME path the offline bundle
@@ -235,7 +245,11 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
-	h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+	// connect-src 'self' keeps installed plugin UI (trusted, runs in the main
+	// document) from phoning home — all fetch/XHR/EventSource/WebSocket must be
+	// same-origin (spec §9). Everything the app itself fetches is same-origin
+	// (OSM + NOAA go through server-side proxies), so this is transparent to it.
+	h.Set("Content-Security-Policy", "frame-ancestors 'none'; connect-src 'self'")
 	h.Set("Referrer-Policy", "no-referrer")
 }
 
@@ -327,6 +341,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveConnectionsStream(w, r) // SSE: live connection-status badges
 	case strings.HasPrefix(r.URL.Path, "/api/connections/"):
 		s.serveConnection(w, r) // GET/PUT/DELETE /<id>, or SSE /<id>/raw (sniffer)
+	case r.URL.Path == "/api/plugins":
+		s.servePlugins(w, r) // GET list (manifest + grants + status)
+	case r.URL.Path == "/api/plugins/install":
+		s.servePluginInstall(w, r) // POST multipart zip → verify → unpack
+	case r.URL.Path == "/api/plugins/stream":
+		s.servePluginsStream(w, r) // SSE: plugin status/state changes
+	case strings.HasPrefix(r.URL.Path, "/api/plugins/"):
+		s.servePluginItem(w, r) // enable/disable/grants/config/remove for one plugin
 	case strings.HasPrefix(r.URL.Path, "/api/import"):
 		s.handleImport(w, r) // POST: server-side native bake → register a tile set; status polling
 	case r.URL.Path == "/api/packs":

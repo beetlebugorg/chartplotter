@@ -42,6 +42,7 @@ type AISTarget struct {
 type AISStore struct {
 	mu      sync.Mutex
 	targets map[uint32]*AISTarget
+	sources map[uint32]string // per-MMSI provenance (source/plugin id); not serialized
 	ttl     time.Duration
 	ver     uint64
 	now     func() time.Time
@@ -74,6 +75,11 @@ func (s *AISStore) feeder() func(line string) {
 		s.apply(pkt)
 	}
 }
+
+// Feeder exposes feeder for external decoders that own the transport — e.g. the
+// reference tcp-client plugin, which parses AIS itself and mirrors this store before
+// publishing targets back to the host (spec §12 milestone).
+func (s *AISStore) Feeder() func(line string) { return s.feeder() }
 
 func (s *AISStore) apply(p *aisnmea.VdmPacket) {
 	if p == nil || p.Packet == nil || p.MessageType == "VDO" { // VDO is own-ship, not a target
@@ -172,6 +178,100 @@ func setShipType(t *AISTarget, code uint8) {
 	}
 }
 
+// Upsert merges an externally-decoded target (e.g. from a plugin's ais.publish,
+// spec §4) into the store, attributed to source, and bumps the version. Incoming
+// non-zero/non-nil fields win; unset fields preserve the existing value, so a
+// position-only and a static-only update for the same MMSI compose exactly as the
+// built-in VDM decode path does. A zero MMSI is ignored.
+func (s *AISStore) Upsert(t AISTarget, source string) {
+	if t.MMSI == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sources == nil {
+		s.sources = map[uint32]string{}
+	}
+	now := s.clock()
+	if existing := s.targets[t.MMSI]; existing != nil {
+		mergeTarget(existing, &t, now)
+	} else {
+		cp := t
+		if cp.LastSeen.IsZero() {
+			cp.LastSeen = now
+		}
+		s.targets[t.MMSI] = &cp
+	}
+	s.sources[t.MMSI] = source
+	s.ver++
+}
+
+// EvictSource removes every target last written by source (e.g. when a plugin's
+// ais.write grant is revoked) and returns how many were removed.
+func (s *AISStore) EvictSource(source string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for mmsi, src := range s.sources {
+		if src == source {
+			delete(s.targets, mmsi)
+			delete(s.sources, mmsi)
+			n++
+		}
+	}
+	if n > 0 {
+		s.ver++
+	}
+	return n
+}
+
+// mergeTarget overlays src's set fields onto dst and refreshes LastSeen.
+func mergeTarget(dst, src *AISTarget, now time.Time) {
+	dst.LastSeen = now
+	if src.Lat != 0 || src.Lon != 0 {
+		dst.Lat, dst.Lon = src.Lat, src.Lon
+	}
+	if src.COG != nil {
+		dst.COG = src.COG
+	}
+	if src.SOG != nil {
+		dst.SOG = src.SOG
+	}
+	if src.Heading != nil {
+		dst.Heading = src.Heading
+	}
+	if src.Name != "" {
+		dst.Name = src.Name
+	}
+	if src.CallSign != "" {
+		dst.CallSign = src.CallSign
+	}
+	if src.ShipType != 0 {
+		dst.ShipType = src.ShipType
+	}
+	if src.TypeName != "" {
+		dst.TypeName = src.TypeName
+	}
+	if src.Destination != "" {
+		dst.Destination = src.Destination
+	}
+	if src.Length != 0 {
+		dst.Length = src.Length
+	}
+	if src.Beam != 0 {
+		dst.Beam = src.Beam
+	}
+	if src.Draught != nil {
+		dst.Draught = src.Draught
+	}
+	if src.Status != "" {
+		dst.Status = src.Status
+	}
+	if src.Class != "" {
+		dst.Class = src.Class
+	}
+}
+
 // Snapshot returns the live (non-stale) targets, sorted by MMSI, pruning expired
 // ones as a side effect.
 func (s *AISStore) Snapshot() []AISTarget {
@@ -182,6 +282,7 @@ func (s *AISStore) Snapshot() []AISTarget {
 	for mmsi, t := range s.targets {
 		if t.LastSeen.Before(cutoff) {
 			delete(s.targets, mmsi)
+			delete(s.sources, mmsi)
 			continue
 		}
 		out = append(out, *t)

@@ -89,6 +89,7 @@ type VesselState struct {
 type Store struct {
 	mu    sync.RWMutex
 	state VesselState
+	prov  map[string]string // path → provenance (source/plugin id); set by PublishDeltas
 }
 
 // Snapshot returns a copy of the current state, safe to read without the lock.

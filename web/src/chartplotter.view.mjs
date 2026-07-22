@@ -10,7 +10,7 @@
 // Convention reference: chart-library.mjs / chart-library.view.mjs.
 
 import { NOAA_ENC_URL } from "./plugins/chart-library.mjs"; // NOAA ENC page (static attribution link)
-import { SEARCH_ICON, CHART_ICON, SETTINGS_ICON } from "./lib/openbridge-icons.mjs"; // vendored OpenBridge glyphs
+import { SEARCH_ICON, CHART_ICON, SETTINGS_ICON, LAYERS_ICON } from "./lib/openbridge-icons.mjs"; // vendored OpenBridge glyphs
 
 export const STYLE = `
         :host { display:block; position:relative; width:100%; height:100%; font:13px/1.4 system-ui,sans-serif;
@@ -414,7 +414,12 @@ export const STYLE = `
           transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
         #drawer.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         #drawer.wide { width:min(86vw, 940px); } /* charts: two-pane list + map */
-        #drawer.set-wide { width:min(520px, calc(100vw - 24px)); } /* settings: rail + content */
+        #drawer.set-wide { width:min(760px, calc(100vw - 24px)); } /* settings: rail + content */
+        /* Settings owns its scrolling: <settings-dialog> has a FIXED-height shell whose
+           pane is the single scroll container, so the drawer body must never become a
+           second one around it (scrollbars-inside-scrollbars). Slimmer padding too —
+           the dialog's rail/pane provide their own gutters. */
+        #drawer.set-wide .body { overflow:hidden; padding:10px 16px 14px; }
         #drawer.wide .miller { height:calc(100dvh - var(--botbar-h) - 208px); max-height:none; }
         #drawer .body { border-radius:0 0 13px 13px; }
         /* caret on the TOP edge, pointing up at the button above */
@@ -431,6 +436,17 @@ export const STYLE = `
            Advanced-tab dev tools (rebake + feature inspector) carry their own CSS in
            dev-tools.view.mjs and render into the dialog's shadow. Nothing dev-side
            remains in the shell sheet. */
+        /* Layers popover — layers are FIRST-CLASS (their own button), not a settings
+           page. A slim anchored surface above the bottom-right cluster; the panel
+           inside is its single scroll container. */
+        #layers-pop { position:absolute; right:calc(12px + env(safe-area-inset-right,0px));
+          bottom:calc(var(--botbar-h) + 66px); z-index:9; width:min(320px, calc(100vw - 24px));
+          max-height:min(60dvh, 520px); overflow-y:auto; overscroll-behavior:contain;
+          background:var(--ui-bg); border:1px solid var(--ui-border); border-radius:14px;
+          box-shadow:0 12px 38px rgba(0,0,0,.30); padding:6px 12px 10px;
+          transform-origin:bottom right; transform:translateY(6px) scale(.97); opacity:0; visibility:hidden;
+          transition:opacity .15s ease, transform .15s ease, visibility 0s linear .15s; }
+        #layers-pop.open { opacity:1; transform:none; visibility:visible; transition:opacity .15s ease, transform .15s ease; }
         .dhead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--ui-border); }
         .dhead strong { flex:1; font-size:14px; }
         .body { overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:14px 16px; flex:1; }
@@ -598,12 +614,14 @@ export const CHROME = `
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="M8.3 10.8 15.7 6.4M8.3 13.2l7.4 4.4"/></svg>
         </button>
         <button class="rbtn" id="charts-btn" type="button" title="Get &amp; manage charts" aria-label="Charts">${CHART_ICON}</button>
+        <button class="rbtn" id="layers-btn" type="button" title="Map layers" aria-label="Layers">${LAYERS_ICON}</button>
         <button class="rbtn" id="scheme-toggle" type="button" title="Colour scheme — tap to cycle Day · Dusk · Night" aria-label="Colour scheme">
           <svg id="scheme-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></svg>
         </button>
         <button class="rbtn" id="settings-btn" type="button" title="Settings" aria-label="Settings">${SETTINGS_ICON}</button>
       </div>
       <!-- NotificationCenter banner stack (non-task messages: failures, alerts). -->
+      <div id="layers-pop"></div>
       <div id="toasts"></div>
       <!-- Bottom-centre status card — the SINGLE surface for both the live nav
            readout (band · scale · zoom · position · overscale, always shown) and

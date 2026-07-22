@@ -1,0 +1,51 @@
+{
+  "manifestVersion": 1,
+  "id": "org.beetlebug.nmea0183",
+  "name": "NMEA 0183",
+  "version": "1.0.0",
+  "description": "Connects to a NMEA 0183 server over TCP and reads instrument sentences \u2014 GPS position, heading, speed, depth, wind \u2014 plus AIS targets, feeding them to the plotter as a data source.",
+  "publisher": "beetlebug.org",
+  "license": "MIT",
+  "apiVersion": 1,
+  "entry": {
+    "wasm": "plugin.wasm"
+  },
+  "capabilities": [
+    {
+      "cap": "vessel.write"
+    },
+    {
+      "cap": "ais.write"
+    },
+    {
+      "cap": "net.tcp-client",
+      "hosts": [
+        "${config:host}"
+      ]
+    }
+  ],
+  "ui": {
+    "settings": {
+      "items": [
+        {
+          "key": "host",
+          "type": "text",
+          "label": "Host",
+          "placeholder": "127.0.0.1"
+        },
+        {
+          "key": "port",
+          "type": "number",
+          "label": "Port",
+          "default": 10110
+        }
+      ]
+    }
+  },
+  "provides": [
+    {
+      "service": "nmea.source",
+      "apiVersion": 1
+    }
+  ]
+}
