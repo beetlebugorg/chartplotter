@@ -93,8 +93,9 @@ Filled polygons, such as depth areas and land.
 | --- | --- | --- |
 | `color_token` | string | Fill color name. |
 | `class` | string | S-57 object class. |
-| `draw_prio` | int | Draw priority. |
-| `cat` | — | Category. |
+| `display_priority` | int | S-52 display priority (S-101 DrawingPriority, 0..30). |
+| `display_plane` | int | S-101 DisplayPlane (1 = OverRadar); omitted when 0. Outranks `display_priority` in paint order. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |
 
 ### area_patterns
@@ -105,8 +106,9 @@ Polygons filled with a repeating pattern instead of a flat color.
 | --- | --- | --- |
 | `pattern_name` | string | Name of the fill pattern. |
 | `class` | string | S-57 object class. |
-| `draw_prio` | int | Draw priority. |
-| `cat` | — | Category. |
+| `display_priority` | int | S-52 display priority (S-101 DrawingPriority, 0..30). |
+| `display_plane` | int | S-101 DisplayPlane (1 = OverRadar); omitted when 0. Outranks `display_priority` in paint order. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |
 
 ### lines
@@ -119,7 +121,7 @@ Stroked lines, such as depth contours. Sector-light legs and arcs also go here.
 | `color_token` | string | Stroke color name. |
 | `width_px` | int | Stroke width in pixels. |
 | `dash` | — | Dash pattern. |
-| `cat` | — | Category. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |
 
 ### complex_lines
@@ -130,7 +132,7 @@ Lines drawn with a named, repeating line style.
 | --- | --- | --- |
 | `class` | string | S-57 object class. |
 | `linestyle_name` | string | Name of the line style. |
-| `cat` | — | Category. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |
 
 ### point_symbols
@@ -146,8 +148,9 @@ Single symbols placed at a point, such as buoys and beacons.
 | `offset_x`, `offset_y` | number | Pixel offset from the point. |
 | `halo_color_token` | string | Halo color name. |
 | `halo_width` | number | Halo width. |
-| `draw_prio` | int | Draw priority. |
-| `cat` | — | Category. |
+| `display_priority` | int | S-52 display priority (S-101 DrawingPriority, 0..30). |
+| `display_plane` | int | S-101 DisplayPlane (1 = OverRadar); omitted when 0. Outranks `display_priority` in paint order. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |
 
 When the symbol carries a depth, two more fields appear: `danger_depth` and
@@ -162,8 +165,9 @@ Depth soundings, drawn as digit symbols.
 | `class` | string | S-57 object class. |
 | `symbol_names` | string | The digit symbols that make up the sounding. |
 | `scale` | number | Scale factor. |
-| `draw_prio` | int | Draw priority. |
-| `cat` | — | Category. |
+| `display_priority` | int | S-52 display priority (S-101 DrawingPriority, 0..30). |
+| `display_plane` | int | S-101 DisplayPlane (1 = OverRadar); omitted when 0. Outranks `display_priority` in paint order. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |
 
 When the depth is known, three more fields appear: `depth`, `sym_s`, and
@@ -183,6 +187,7 @@ Text labels.
 | `offset_x`, `offset_y` | number | Pixel offset from the anchor. |
 | `halo_color_token` | string | Halo color name. |
 | `halo_width` | number | Halo width. |
-| `draw_prio` | int | Draw priority. |
-| `cat` | — | Category. |
+| `display_priority` | int | S-52 display priority (S-101 DrawingPriority, 0..30). |
+| `display_plane` | int | S-101 DisplayPlane (1 = OverRadar); omitted when 0. Outranks `display_priority` in paint order. |
+| `display_category` | — | Display category (0 base, 1 standard, 2 other). |
 | `bnd` | — | Boundary-pass marker. |

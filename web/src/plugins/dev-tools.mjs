@@ -540,7 +540,7 @@ export class DevTools {
 
   // Friendlier rendering for a few baked enum/typed attributes.
   _fmtInspectVal(k, v) {
-    if (k === "cat") return ["base", "standard", "other"][v] ?? String(v);
+    if (k === "display_category") return ["base", "standard", "other"][v] ?? String(v);
     if (k === "bnd") return ["plain", "symbolized", "common"][v] ?? String(v);
     if ((k === "depth" || k === "danger_depth" || k === "drval1" || k === "drval2") && v !== "" && v != null && !isNaN(v)) return `${v} m`;
     return String(v);

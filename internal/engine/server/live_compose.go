@@ -47,7 +47,7 @@ func (s *Server) registerLiveCompose() {
 	if name == "" {
 		name = "live"
 	}
-	src, err := tilesource.NewComposer(paths, os.Getenv("TILE57_LIVE_PARTITION"))
+	src, err := tilesource.NewComposer(paths)
 	if err != nil {
 		log.Printf("live-compose: open %s failed: %v", dir, err)
 		return

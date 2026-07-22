@@ -163,14 +163,14 @@ function buildLayers(mariner, palette, atlasPpu, osm, sizeScale) {
   const notLand = ["match", ["get", "color_token"], ["LANDA", "CHBRN"], false, true];
   const base = [
     // Paint area fills in S-52 display-priority order (DrawingPriority, baked as
-    // draw_prio: DEPARE=3, LNDARE=12…) so a higher-priority fill draws ON TOP — e.g.
+    // display_priority: DEPARE=3, LNDARE=12…) so a higher-priority fill draws ON TOP — e.g.
     // land over water. Real ENCs tile their areas (no overlap, so order is moot), but
     // a cell with OVERLAPPING areas (the PresLib "ECDIS Chart 1" inset: one deep-water
     // polygon under the shallow water + land) would otherwise paint last-in-tile on
     // top, hiding land/shallow under deep water. Tiebreak by -drval1 so shallower
     // water draws over deeper within the same priority.
     { id: "areas", type: "fill", source: "chart", "source-layer": "areas", ...(osm ? { filter: notLand } : {}),
-      layout: { "fill-sort-key": ["-", ["*", ["coalesce", ["get", "draw_prio"], 0], 1000], ["coalesce", ["get", "drval1"], 0]] },
+      layout: { "fill-sort-key": ["-", ["*", ["coalesce", ["get", "display_priority"], 0], 1000], ["coalesce", ["get", "drval1"], 0]] },
       paint: { "fill-color": S52.areasFillColor(palette, mariner) } },
     // Exclude OVERSC01: tile57 now bakes the S-52 §10.1.10 overscale hatch (each
     // cell's M_COVR coverage, tagged `oscl`) into area_patterns. The engine style

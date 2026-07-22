@@ -80,8 +80,10 @@ func TestImportPacks(t *testing.T) {
 	}
 
 	// ONE provider set ("noaa") registered, serving from the live-composite structure
-	// under the cache dir (per-cell tiles/<STEM>.pmtiles + partition.tpart), and both
-	// districts' source cells kept under the data dir.
+	// under the cache dir (per-cell tiles/<STEM>.pmtiles), and both districts' source
+	// cells kept under the data dir. The ownership partition is the engine's internal
+	// detail (built/refreshed beside the archives on open), so the host neither writes
+	// nor asserts on it.
 	if _, ok := s.sets.get("noaa"); !ok {
 		t.Errorf("provider set %q not registered", "noaa")
 	}
@@ -98,9 +100,6 @@ func TestImportPacks(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("provider %q: no baked US5MD1MC archive in the mirrored tree", "noaa")
-	}
-	if _, err := os.Stat(filepath.Join(s.setDir("noaa"), "partition.tpart")); err != nil {
-		t.Errorf("provider %q: no partition sidecar (%v)", "noaa", err)
 	}
 	for _, dist := range []string{"d5", "d7"} {
 		if _, err := os.Stat(filepath.Join(s.districtDir("noaa", dist), "US5MD1MC.000")); err != nil {

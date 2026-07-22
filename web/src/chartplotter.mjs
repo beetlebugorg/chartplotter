@@ -203,7 +203,7 @@ function pickGeomRank(layer) {
 function pickCmp(a, b) {
   const ga = pickGeomRank(a.sourceLayer), gb = pickGeomRank(b.sourceLayer);
   if (ga !== gb) return ga - gb; // points, then lines, then areas, labels last
-  const pa = +(a.properties.draw_prio ?? 0), pb = +(b.properties.draw_prio ?? 0);
+  const pa = +(a.properties.display_priority ?? 0), pb = +(b.properties.display_priority ?? 0);
   return pb - pa; // higher drawing priority (more significant) first
 }
 
