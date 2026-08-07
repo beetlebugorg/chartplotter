@@ -5,6 +5,26 @@
   Turn NOAA S-57 ENC cells into offline vector-tile charts and render them in the browser.
 </p>
 
+---
+
+> [!IMPORTANT]
+> ### 👉 Looking for the active project? Go to **[Lookout Marine](https://github.com/beetlebugorg/lookout-marine)**.
+>
+> **[Lookout Marine](https://github.com/beetlebugorg/lookout-marine) is the native
+> version of this project, and the current path forward.** It is a fast, native
+> chartplotter for **macOS, iPadOS, iOS, Windows, Android and Linux** that draws the
+> same official ENC charts with the same IHO S-101 portrayal — but straight to the
+> GPU (Metal / Vulkan / Direct3D 12), with a native UI on every platform instead of
+> a browser and pre-baked tiles. That is where application development happens now.
+>
+> **chartplotter is not dead.** It is the web-based take on the same idea, which is
+> still its own interesting problem, and I may come back to it.
+>
+> **[tile57](https://github.com/beetlebugorg/tile57) — the chart engine underneath
+> both projects — is very much still supported and actively developed.**
+
+---
+
 <p align="center">
   <a href="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml"><img src="https://github.com/beetlebugorg/chartplotter/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://goreportcard.com/report/github.com/beetlebugorg/chartplotter"><img src="https://goreportcard.com/badge/github.com/beetlebugorg/chartplotter" alt="Go Report Card"></a>
